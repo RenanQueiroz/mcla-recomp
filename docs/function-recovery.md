@@ -56,3 +56,16 @@ Five more run-time discoveries, all appended to `config/runtime_discovered.toml`
 | 0x822C9FE8 | About 4.5 minutes into play |
 
 After these the game ran for 7.7 minutes and was closed normally (`play-20261003-151730.log`, exit code 0, no errors logged). One GPU warning appeared once: a texture fetch constant with an "invalid" type; the SDK has a `gpu_allow_invalid_fetch_constants` option for it. What was on screen at each point is not in the logs.
+
+## Update: pointers built in code (2026-10-12)
+
+Report: accepting a delivery mission stopped the game with `Call to invalid or unregistered function at guest address 0x8220DA40`. That address is a four-instruction script binding (it hands the warper's "set destination" routine to the generic native-call invoker) sitting between two recovered functions. Nothing calls it and no data word holds its address: the game builds the address with `lis` + `addi` and registers it. The data scan could not see it.
+
+`--mcla_scan_code_pointers` now also looks for those pairs: an `addi rD,rA,lo` with a `lis rA,hi` up to eight instructions before it, giving an address in the code section. Of 4,699 such addresses, 553 were not recovered functions that follow a function end. 504 of those have a branch crossing them from the function either side, so they are labels inside a function (jump targets whose address is taken) and are left out. The other 49 went to `config/code_referenced.toml`, and then:
+
+- the analyser asked for one more, 0x822C9828, the tail-call target of 0x822C9DC8;
+- four were taken out again (0x8218D524, 0x8218DD14, 0x82246280, 0x82299264): with them the recompiler cut a function short and emitted `Unresolved branch` stops, one of which ended the game during boot. They are labels reached through a jump table, which the crossing-branch test does not see. After any change to the hints, `grep -c "Unresolved branch" generated/default/*.cpp` should give 0 everywhere.
+
+That leaves 46 entries, 30,094 registered functions. Two of them (0x822C9DC8, 0x82554060) and the tail-call target are addresses another MCLA project had found by running into them.
+
+Checked on PC (Direct3D 12, 2026-10-12) with a completed save: boot, title screen, loading the save into the city, the GPS map, its legend and mission log, setting a delivery as the GPS target, and pulling away in the car. Not checked: accepting the delivery itself. That needs a drive across the city to the pick-up, which was not done; the entry for 0x8220DA40 is in the generated code, but whether the delivery then starts and plays is unconfirmed.

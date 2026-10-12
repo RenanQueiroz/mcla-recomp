@@ -24,7 +24,7 @@ To find out, Release builds now keep the SDK's per-frame counters (`patches/rexg
 | # | Symptom | Cause | Status |
 |---|---|---|---|
 | 1 | `Validation failed: N unresolved calls` at codegen | Tail-call targets not inside any discovered function | Fixed with 8 hints in `config/mcla.toml` |
-| 2 | `Call to invalid or unregistered function at guest address ...` at run time | Functions reached only through pointers | Ongoing. 30 found by data scan (`config/data_referenced.toml`), the rest one per run (`config/runtime_discovered.toml`, `scripts/recover_loop.ps1`) |
+| 2 | `Call to invalid or unregistered function at guest address ...` at run time | Functions reached only through pointers | Ongoing. 30 found by data scan (`config/data_referenced.toml`), 46 by a scan for pointers built in code (`config/code_referenced.toml`, 2026-10-12, after a stop on accepting a delivery mission), the rest one per run (`config/runtime_discovered.toml`, `scripts/recover_loop.ps1`) |
 | 3 | `VFS: 't:\mc4\art\city' -> [no device]` | Game probes a `t:` drive for loose city files | Fixed: `t:` is mapped to the game root in `MclaApp::OnPostSetup`. The probes now fail with "not found", which the game tolerates |
 | 4 | Guest null-pointer read at 0x00002EF0 in `sub_821C8FE0` | See below | Fixed with the silent audio driver in `src/audio_fallback.cpp` |
 
