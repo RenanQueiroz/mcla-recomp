@@ -140,11 +140,20 @@ try {
     } else {
         "already patched: $sdk"
     }
+    # The car reflection fix (REFLECTION_FIX.md) came later than the patches
+    # above: an SDK patched before it gets it here, and the marker's new time
+    # has step 3 build the SDK again.
+    if (-not (Select-String -Quiet -SimpleMatch "kSysFlag_MinMaxColor0TimesSrcAlpha" "$sdk\include\rex\graphics\pipeline\shader\spirv_translator.h")) {
+        Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
+        (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+    }
 
     # -----------------------------------------------------------------------
     Step "3/6 build and install the SDK (the long step, once)"
-    $marker = Get-Item "$sdk\.mcla-patched"
-    $recompiler = Get-Item "$install\bin\rexglue.exe" -ErrorAction SilentlyContinue
+    # -Force on both: a hidden file (the marker often is one) is invisible to
+    # Get-Item otherwise, which would end the script under "Stop".
+    $marker = Get-Item "$sdk\.mcla-patched" -Force
+    $recompiler = Get-Item "$install\bin\rexglue.exe" -Force -ErrorAction SilentlyContinue
     if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime) {
         Push-Location $sdk
         try {

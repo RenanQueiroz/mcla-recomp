@@ -109,6 +109,12 @@ if [ ! -f "$rex_src/.mcla-patched" ]; then
 else
     echo "already patched: $rex_src"
 fi
+# The car reflection fix (REFLECTION_FIX.md) came later than the patches above:
+# an SDK patched before it gets it here, and step 6 builds what changed.
+if ! grep -q kSysFlag_MinMaxColor0TimesSrcAlpha "$rex_src/include/rex/graphics/pipeline/shader/spirv_translator.h"; then
+    git -C "$rex_src" apply "$repo/patches/rexglue-minmax-blend-factor.patch" || fail "the reflection fix does not apply (is the checkout clean?)"
+    echo "applied: rexglue-minmax-blend-factor.patch"
+fi
 
 # ---------------------------------------------------------------------------
 step "4/9 the recompiler (rexglue), for this machine"

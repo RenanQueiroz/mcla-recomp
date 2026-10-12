@@ -54,6 +54,7 @@ The SDK must be v0.10.0 (`f5337cdc947ff6d4c4196737e2c807a48f2a1fc2`). Apply this
 
 ```powershell
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-v0.10.0-mcla.patch
+git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-minmax-blend-factor.patch
 git -C third_party\rexglue-sdk\thirdparty\FFmpeg apply ..\..\..\..\patches\rexglue-ffmpeg-ps5-config.patch
 ```
 
@@ -123,7 +124,7 @@ git pull
 .\scripts\make_pc.ps1
 ```
 
-If the update changed `patches\`, the SDK has to be patched and built again: in `third_party\rexglue-sdk` run `git checkout .` and `git clean -fd` (and the same in `thirdparty\FFmpeg`), then repeat the patch commands of step 1 and all of step 2.
+`make_pc.ps1` adds the car reflection fix (`patches\rexglue-minmax-blend-factor.patch`) to an SDK that was patched before it existed and builds the SDK again, so for that update the two commands above are all there is to do. By hand, or if another update changed `patches\`, the SDK has to be patched and built again: in `third_party\rexglue-sdk` run `git checkout .` and `git clean -fd` (and the same in `thirdparty\FFmpeg`), then repeat the patch commands of step 1 and all of step 2.
 
 ## If something goes wrong
 

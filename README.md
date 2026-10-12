@@ -6,16 +6,18 @@ Static recompilation of *Midnight Club: Los Angeles Complete Edition* (Xbox 360,
 
 *Installed on a jailbroken PS5. The tile here is one the user supplied at build time; the background is made from the art on their own disc.*
 
+> **Fixed, 2026-10-12: the car reflection bug.** Cars no longer come out white with a glow around them at night; the paint mirrors the street again. The Xbox 360's GPU and the PC graphics interfaces treat one blend mode differently, which turned every light glow in the cars' reflection map into a solid square. The fix is in the SDK patches for both renderers: Direct3D 12, and Vulkan, which the PS5 version uses. It is confirmed in game on Windows with Direct3D 12; with Vulkan it builds and runs on Windows and has not yet been run on a console. To get it, update and run your build command again. Cause and details: [`REFLECTION_FIX.md`](REFLECTION_FIX.md).
+
 **This repository contains no game code, assets or keys.** You supply your own legally obtained copy; a script extracts what is needed on your machine, and the recompiled code is generated locally and never committed.
 
 ## Status
 
 | Target | State |
 |---|---|
-| Windows, D3D12 | Boots; menus, races, garage and upgrades work with audio and controller. 30 FPS with occasional texture-load hitches. |
-| Windows, Vulkan | Reaches the title screen. Not tested further. |
+| Windows, D3D12 | Boots; menus, races, garage and upgrades work with audio and controller. 30 FPS with occasional texture-load hitches. Car reflections fixed. |
+| Windows, Vulkan | Reaches the title screen. Not tested further. Has the car reflection fix. |
 | Linux | Not built yet. |
-| PS5 (jailbroken) | Plays: career, races, garage, saves, audio and controller, at a steady 30 FPS on a PS5 Pro (firmware 13.42), where the zoomed-out map runs at 20 to 25. Also tested on a PS5 Slim (firmware 12.70), installed from scratch with the one-command build, where it runs well; frame rates were measured on the Pro only. Build and install with one command: `docs/ps5-build-guide.md`. |
+| PS5 (jailbroken) | Plays: career, races, garage, saves, audio and controller, at a steady 30 FPS on a PS5 Pro (firmware 13.42), where the zoomed-out map runs at 20 to 25. Also tested on a PS5 Slim (firmware 12.70), installed from scratch with the one-command build, where it runs well; frame rates were measured on the Pro only. The car reflection fix is in the build, not yet seen on a console. Build and install with one command: `docs/ps5-build-guide.md`. |
 
 Details and open problems: `docs/known-issues.md`.
 
@@ -49,7 +51,7 @@ on Arch Linux as root (a few commands to set up under WSL2 on Windows). It build
 |---|---|
 | `config/` | Function-entry hints, each file documenting how its entries were found |
 | `src/` | Host application: audio fallback, crash tracer, function-pointer scan |
-| `patches/` | Changes to the ReXGlue SDK |
+| `patches/` | Changes to the ReXGlue SDK, among them the car reflection fix |
 | `scripts/` | Extraction, build, run and analysis scripts |
 | `ps5/` | The PS5 host, the one-command build (`make_ps5.sh`), title packaging and console probes |
 | `docs/` | Build guides for PC and PS5, recon report, architecture, function recovery, known issues, PS5 port notes |

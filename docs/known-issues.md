@@ -2,6 +2,10 @@
 
 Updated 2026-10-03. PC (Windows, D3D12 and Vulkan). On PS5 only the memory probe has run; see `ps5-feasibility.md`.
 
+## Fixed: cars white with a glow halo (the car reflection bug)
+
+2026-10-12. The light glows in the cars' environment map are blended with MAX and a SrcAlpha source factor, which the Xbox 360's GPU applies and Direct3D 12 and Vulkan ignore; each glow became a solid square and the paint mirrored it. Fixed in `patches/rexglue-minmax-blend-factor.patch` for both backends. Confirmed in game on Windows/D3D12; on Vulkan it builds and runs on Windows, and it has not been run on a PS5 yet. Full account: `../REFLECTION_FIX.md`.
+
 ## Milestone reached
 
 **Boots to the title screen** on Windows/D3D12 (2026-10-03, run 20261003-103007): the Complete Edition logo over the live 3D city with traffic, "PRESS START" prompt, about 38 s after launch. The process was still running at 75 s with 77 threads and 1.36 GB working set, and the log had no errors other than the missing audio device.

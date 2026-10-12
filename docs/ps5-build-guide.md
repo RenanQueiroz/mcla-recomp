@@ -145,7 +145,7 @@ bash ps5/make_ps5.sh --console 192.168.1.50
 
 Only what changed is rebuilt, and only the title is uploaded again; game data already on the console is left alone.
 
-If an update changes the SDK patch (`patches/`), remove the SDK checkout so that it is cloned and patched afresh: `rm -rf /root/mcla/rexglue-sdk /root/mcla/build-ps5 /root/mcla/build-host`.
+The car reflection fix (`patches/rexglue-minmax-blend-factor.patch`) needs nothing more than that: the script adds it to an SDK checkout that was patched before it existed, rebuilds the runtime and uploads the new title. If an update changes the main SDK patch (`patches/rexglue-v0.10.0-mcla.patch`), remove the SDK checkout so that it is cloned and patched afresh: `rm -rf /root/mcla/rexglue-sdk /root/mcla/build-ps5 /root/mcla/build-host`.
 
 ## If something goes wrong
 

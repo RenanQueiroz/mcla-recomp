@@ -1,0 +1,225 @@
+diff --git a/include/rex/graphics/pipeline/shader/dxbc_translator.h b/include/rex/graphics/pipeline/shader/dxbc_translator.h
+index 3b0fd61..750c3bb 100644
+--- a/include/rex/graphics/pipeline/shader/dxbc_translator.h
++++ b/include/rex/graphics/pipeline/shader/dxbc_translator.h
+@@ -237,6 +237,20 @@ class DxbcShaderTranslator : public ShaderTranslator {
+     // should be safe at least temporarily).
+     kSysFlag_ROVDepthStencilEarlyWrite_Shift,
+ 
++    // MCLA (lighting work): the Xenos applies the source blend factor in the MIN and MAX
++    // blend equations as well; Direct3D 12 and Vulkan ignore the factors there. With these
++    // set (host render target path), the pixel shader multiplies its colour / its alpha for
++    // that render target by its (saturated) alpha itself: the SrcAlpha source factor of a
++    // MIN / MAX blend whose destination factor is One. See REFLECTION_FIX.md in the project root.
++    kSysFlag_MinMaxColor0TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxColor1TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxColor2TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxColor3TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxAlpha1TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxAlpha2TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxAlpha3TimesSrcAlpha_Shift,
++
+     kSysFlag_Count,
+ 
+     kSysFlag_SharedMemoryIsUAV = 1u << kSysFlag_SharedMemoryIsUAV_Shift,
+@@ -260,6 +274,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
+     kSysFlag_ROVDepthWrite = 1u << kSysFlag_ROVDepthWrite_Shift,
+     kSysFlag_ROVStencilTest = 1u << kSysFlag_ROVStencilTest_Shift,
+     kSysFlag_ROVDepthStencilEarlyWrite = 1u << kSysFlag_ROVDepthStencilEarlyWrite_Shift,
++    kSysFlag_MinMaxColor0TimesSrcAlpha = 1u << kSysFlag_MinMaxColor0TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxAlpha0TimesSrcAlpha = 1u << kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift,
+   };
+   static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
+ 
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index dce3dbf..4eb6935 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -154,6 +154,19 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+     kSysFlag_Count,
+ 
++    // MCLA (lighting work): the Xenos applies the source blend factor in the MIN and MAX
++    // blend equations as well; Vulkan ignores the factors there. With these set, the pixel
++    // shader multiplies its colour / its alpha for that render target by its (saturated)
++    // alpha itself: the SrcAlpha source factor of a MIN / MAX blend whose destination factor
++    // is One. Host render target path only, so the eight bits share those of the FSI flags
++    // (which only that other path sets and reads) - there are not eight free ones.
++    // See REFLECTION_FIX.md in the project root.
++    kSysFlag_MinMaxColor0TimesSrcAlpha_Shift = kSysFlag_FSIDepthStencil_Shift,
++    kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift =
++        kSysFlag_MinMaxColor0TimesSrcAlpha_Shift + xenos::kMaxColorRenderTargets,
++    kSysFlag_MinMaxCount =
++        kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift + xenos::kMaxColorRenderTargets,
++
+     // For HostVertexShaderType kVertex, if fullDrawIndexUint32 is not
+     // supported (ignored otherwise), whether to fetch the index manually
+     // (32-bit only - 16-bit indices are always fetched via the Vulkan index
+@@ -199,8 +212,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     kSysFlag_FSIDepthWrite = 1u << kSysFlag_FSIDepthWrite_Shift,
+     kSysFlag_FSIStencilTest = 1u << kSysFlag_FSIStencilTest_Shift,
+     kSysFlag_FSIDepthStencilEarlyWrite = 1u << kSysFlag_FSIDepthStencilEarlyWrite_Shift,
++    kSysFlag_MinMaxColor0TimesSrcAlpha = 1u << kSysFlag_MinMaxColor0TimesSrcAlpha_Shift,
++    kSysFlag_MinMaxAlpha0TimesSrcAlpha = 1u << kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift,
+   };
+   static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
++  static_assert(kSysFlag_MinMaxCount <= 32, "Too many flags in the system constants");
+ 
+   // For Vulkan vertex memexport compute fallback dispatches.
+   static constexpr uint32_t kMemExportComputeDispatchX = 65535;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..eeb5cfa 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -3700,6 +3700,30 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
+       }
+     }
+   }
++  // MCLA (lighting work): MIN / MAX blending with factors. On the Xenos the source factor
++  // still applies in those equations; the host's blender ignores factors there. The game
++  // draws the light glows of the cars' environment map with max(source * SrcAlpha, dest) - a
++  // constant colour with a round alpha falloff - which came out as solid squares that the
++  // car paint then mirrored (white bodies with a bloom halo at night). The shader multiplies
++  // by alpha itself where the destination factor is One (the only case the host can do).
++  if (!edram_rov_used) {
++    for (uint32_t i = 0; i < 4; ++i) {
++      auto blend_control =
++          regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++      if ((blend_control.color_comb_fcn == xenos::BlendOp::kMin ||
++           blend_control.color_comb_fcn == xenos::BlendOp::kMax) &&
++          blend_control.color_srcblend == xenos::BlendFactor::kSrcAlpha &&
++          blend_control.color_destblend == xenos::BlendFactor::kOne) {
++        flags |= DxbcShaderTranslator::kSysFlag_MinMaxColor0TimesSrcAlpha << i;
++      }
++      if ((blend_control.alpha_comb_fcn == xenos::BlendOp::kMin ||
++           blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
++          blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
++          blend_control.alpha_destblend == xenos::BlendFactor::kOne) {
++        flags |= DxbcShaderTranslator::kSysFlag_MinMaxAlpha0TimesSrcAlpha << i;
++      }
++    }
++  }
+   if (edram_rov_used && depth_stencil_enabled) {
+     flags |= DxbcShaderTranslator::kSysFlag_ROVDepthStencil;
+     if (normalized_depth_control.z_enable) {
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_om.cpp b/src/graphics/pipeline/shader/dxbc_translator_om.cpp
+index a7d508a..a3e6886 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator_om.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_om.cpp
+@@ -1542,6 +1542,33 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToRTVs() {
+       continue;
+     }
+     uint32_t system_temp_color = system_temps_color_[i];
++    // MCLA (lighting work): MIN / MAX blending with the SrcAlpha source factor - the host
++    // ignores blend factors in those equations, the Xenos does not (see the flags' note).
++    // gamma_temp.y = the alpha as the blender takes it, saturated.
++    a_.OpAnd(dxbc::Dest::R(gamma_temp, 0b0001), LoadFlagsSystemConstant(),
++             dxbc::Src::LU((kSysFlag_MinMaxColor0TimesSrcAlpha | kSysFlag_MinMaxAlpha0TimesSrcAlpha)
++                           << i));
++    a_.OpIf(true, dxbc::Src::R(gamma_temp, dxbc::Src::kXXXX));
++    {
++      a_.OpMax(dxbc::Dest::R(gamma_temp, 0b0010),
++               dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW), dxbc::Src::LF(0.0f));
++      a_.OpMin(dxbc::Dest::R(gamma_temp, 0b0010), dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY),
++               dxbc::Src::LF(1.0f));
++      a_.OpAnd(dxbc::Dest::R(gamma_temp, 0b0001), LoadFlagsSystemConstant(),
++               dxbc::Src::LU(kSysFlag_MinMaxColor0TimesSrcAlpha << i));
++      a_.OpIf(true, dxbc::Src::R(gamma_temp, dxbc::Src::kXXXX));
++      a_.OpMul(dxbc::Dest::R(system_temp_color, 0b0111), dxbc::Src::R(system_temp_color),
++               dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY));
++      a_.OpEndIf();
++      a_.OpAnd(dxbc::Dest::R(gamma_temp, 0b0001), LoadFlagsSystemConstant(),
++               dxbc::Src::LU(kSysFlag_MinMaxAlpha0TimesSrcAlpha << i));
++      a_.OpIf(true, dxbc::Src::R(gamma_temp, dxbc::Src::kXXXX));
++      a_.OpMul(dxbc::Dest::R(system_temp_color, 0b1000),
++               dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW),
++               dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY));
++      a_.OpEndIf();
++    }
++    a_.OpEndIf();
+     // Apply the exponent bias after alpha to coverage because it needs the
+     // unbiased alpha from the shader.
+     a_.OpMul(dxbc::Dest::R(system_temp_color), dxbc::Src::R(system_temp_color),
+diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+index 765c141..22bb3e9 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+@@ -922,6 +922,42 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+       spv::Id color_variable = output_or_var_fragment_data_[color_target_index];
+       spv::Id color = builder_->createLoad(color_variable, spv::NoPrecision);
+ 
++      if (!edram_fragment_shader_interlock_) {
++        // MCLA (lighting work): MIN / MAX blending with the SrcAlpha source factor - the host
++        // ignores blend factors in those equations, the Xenos does not (see the flags' note).
++        // The alpha as the blender takes it, saturated; 1 where the flag is not set.
++        spv::Id min_max_alpha = builder_->createTriBuiltinCall(
++            type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
++            builder_->createCompositeExtract(color, type_float_, 3), const_float_0_,
++            const_float_1_);
++        spv::Id min_max_color_factor = builder_->createTriOp(
++            spv::OpSelect, type_float_,
++            builder_->createBinOp(
++                spv::OpINotEqual, type_bool_,
++                builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
++                                      builder_->makeUintConstant(kSysFlag_MinMaxColor0TimesSrcAlpha
++                                                                 << color_target_index)),
++                const_uint_0_),
++            min_max_alpha, const_float_1_);
++        spv::Id min_max_alpha_factor = builder_->createTriOp(
++            spv::OpSelect, type_float_,
++            builder_->createBinOp(
++                spv::OpINotEqual, type_bool_,
++                builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
++                                      builder_->makeUintConstant(kSysFlag_MinMaxAlpha0TimesSrcAlpha
++                                                                 << color_target_index)),
++                const_uint_0_),
++            min_max_alpha, const_float_1_);
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(min_max_color_factor);
++        id_vector_temp_.push_back(min_max_color_factor);
++        id_vector_temp_.push_back(min_max_color_factor);
++        id_vector_temp_.push_back(min_max_alpha_factor);
++        color = builder_->createNoContractionBinOp(
++            spv::OpFMul, type_float4_, color,
++            builder_->createCompositeConstruct(type_float4_, id_vector_temp_));
++      }
++
+       // Apply the exponent bias after the alpha test and alpha to coverage
+       // because they need the unbiased alpha from the shader.
+       id_vector_temp_.clear();
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index ff5df82..53dcb7f 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -6058,6 +6058,30 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+       }
+     }
+   }
++  // MCLA (lighting work): MIN / MAX blending with factors. On the Xenos the source factor
++  // still applies in those equations; the host's blender ignores factors there. The game
++  // draws the light glows of the cars' environment map with max(source * SrcAlpha, dest) - a
++  // constant colour with a round alpha falloff - which came out as solid squares that the
++  // car paint then mirrored (white bodies with a bloom halo at night). The shader multiplies
++  // by alpha itself where the destination factor is One (the only case the host can do).
++  if (!edram_fragment_shader_interlock) {
++    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++      auto blend_control =
++          regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++      if ((blend_control.color_comb_fcn == xenos::BlendOp::kMin ||
++           blend_control.color_comb_fcn == xenos::BlendOp::kMax) &&
++          blend_control.color_srcblend == xenos::BlendFactor::kSrcAlpha &&
++          blend_control.color_destblend == xenos::BlendFactor::kOne) {
++        flags |= SpirvShaderTranslator::kSysFlag_MinMaxColor0TimesSrcAlpha << i;
++      }
++      if ((blend_control.alpha_comb_fcn == xenos::BlendOp::kMin ||
++           blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
++          blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
++          blend_control.alpha_destblend == xenos::BlendFactor::kOne) {
++        flags |= SpirvShaderTranslator::kSysFlag_MinMaxAlpha0TimesSrcAlpha << i;
++      }
++    }
++  }
+   if (edram_fragment_shader_interlock && depth_stencil_enabled) {
+     flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencil;
+     if (normalized_depth_control.z_enable) {
