@@ -1,6 +1,6 @@
 # Car reflection fix (white car bodies with a glow halo)
 
-Found and fixed 2026-10-11 on Direct3D 12; carried over to Vulkan (PC and PS5) 2026-10-12. The change to the SDK is `patches/rexglue-minmax-blend-factor.patch`.
+Found and fixed 2026-10-11 on Direct3D 12; carried over to Vulkan (PC and PS5) and confirmed on a PS5 2026-10-12. The change to the SDK is `patches/rexglue-minmax-blend-factor.patch`.
 
 ## The issue
 
@@ -44,7 +44,7 @@ In the GPU plugin, for the host render target path (the default on both backends
 |---|---|
 | Windows, Direct3D 12 | Confirmed in game: same spot at 23:30 and at noon, before and after. The car shows the street again instead of a white body with a halo. |
 | Windows, Vulkan | Builds; the game starts and draws the title-screen city at dusk with round light glows and no shader or pipeline errors. Not compared before and after in a race. |
-| PS5 (Vulkan) | The PS5 build uses the same translator and command processor files as Windows/Vulkan, with no PS5-specific code in the changed places, and `ps5/make_ps5.sh` applies the patch. **Not yet built for or run on a console** with it. |
+| PS5 (Vulkan) | The PS5 build uses the same translator and command processor files as Windows/Vulkan, with no PS5-specific code in the changed places, and `ps5/make_ps5.sh` applies the patch. Confirmed in game on a console, 2026-10-12, with a build made from scratch by that script: the reflection problem is gone. |
 
 ## What it does not cover
 

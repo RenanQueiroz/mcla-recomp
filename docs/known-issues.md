@@ -4,7 +4,7 @@ Updated 2026-10-03. PC (Windows, D3D12 and Vulkan). On PS5 only the memory probe
 
 ## Fixed: cars white with a glow halo (the car reflection bug)
 
-2026-10-12. The light glows in the cars' environment map are blended with MAX and a SrcAlpha source factor, which the Xbox 360's GPU applies and Direct3D 12 and Vulkan ignore; each glow became a solid square and the paint mirrored it. Fixed in `patches/rexglue-minmax-blend-factor.patch` for both backends. Confirmed in game on Windows/D3D12; on Vulkan it builds and runs on Windows, and it has not been run on a PS5 yet. Full account: `../REFLECTION_FIX.md`.
+2026-10-12. The light glows in the cars' environment map are blended with MAX and a SrcAlpha source factor, which the Xbox 360's GPU applies and Direct3D 12 and Vulkan ignore; each glow became a solid square and the paint mirrored it. Fixed in `patches/rexglue-minmax-blend-factor.patch` for both backends. Confirmed in game on Windows/D3D12 and on a PS5 (Vulkan); on Windows/Vulkan it builds and runs. Full account: `../REFLECTION_FIX.md`.
 
 ## Milestone reached
 
