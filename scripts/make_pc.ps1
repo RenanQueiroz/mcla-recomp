@@ -130,9 +130,11 @@ try {
         Patch "sdk-patch-ffmpeg" "$sdk\thirdparty\FFmpeg" "$root\patches\rexglue-ffmpeg-ps5-config.patch"
         # Git on Windows checks out symbolic links as small text files holding
         # the link's target; one of the SDK's libraries has some. Replace them
-        # with copies of what they point to.
+        # with copies of what they point to. With Developer Mode on (or as an
+        # administrator) Git makes real links instead, which need nothing:
+        # they are skipped, as reading one gives the target's contents.
         $links = "$sdk\thirdparty\libmspack\cabextract\mspack"
-        Get-ChildItem $links -File | Where-Object { $_.Length -lt 200 } | ForEach-Object {
+        Get-ChildItem $links -File | Where-Object { $_.Length -lt 200 -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object {
             $target = Join-Path $links (Get-Content $_.FullName -Raw).Trim()
             if (Test-Path $target) { Copy-Item $target $_.FullName -Force }
         }
