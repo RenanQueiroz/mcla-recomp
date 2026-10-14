@@ -56,8 +56,8 @@ The launcher passes every game option explicitly (`--resolution_scale=1` for Nat
 `--vsync=false` has to be on the command line: set from the game, it reaches only
 mcla.exe's copy of the setting, and the GPU plugin keeps vsync on (60 FPS cap).
 
-It also always passes two SDK settings that measured faster (in-run A/B, ideas
-from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
+It also always passes SDK settings that measured faster (in-run A/B; the first
+two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
 
 - `--clear_memory_page_state=false`: guest memory already uploaded to the GPU
   stays valid from one frame to the next instead of being copied again every
@@ -66,10 +66,22 @@ from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagi
 - `--execute_unclipped_draw_vs_on_cpu=true` (Xenia's default): draws with
   clipping off no longer claim the whole EDRAM, which saves render-target round
   trips (about 11% faster at 3×; no change at Native).
+- `--shared_memory_hot_page_faults=4 --shared_memory_hot_page_ms=10000` (hot
+  pages, as mcla-recomp's PS5 port runs): a page the game keeps rewriting is
+  uploaded whenever a draw uses it instead of being write-protected again after
+  every write fault. With the profiling notes' fast-path patch, write faults go
+  from about 12,000 to about 200 a second and protection changes from about
+  190,000 to 1,000-2,000; frames on the title screen at Native, uncapped, were
+  about 9% shorter (6.87 against 7.57 ms, in-run switch every 20 s, both halves
+  agree). Needs `rexglue-hot-pages-watched-ranges.patch`: without it, textures
+  the CPU rewrites (the attract movie's colour planes) stopped updating.
 
-Setting either one under *More mcla.exe options* (e.g.
-`--clear_memory_page_state=true` if geometry or textures ever look stale)
-replaces the default rather than adding to it.
+Setting any of them under *More mcla.exe options* (e.g.
+`--clear_memory_page_state=true` if geometry or textures ever look stale, or
+`--shared_memory_hot_page_faults=0` to turn hot pages off) replaces the default
+rather than adding to it: a boolean given twice adds up, and any other setting
+given twice is an error for mcla.exe's command-line parser (CLI11 rejects a
+repeated option by default).
 
 Known interaction: fully uncapped at about 130 FPS or more with the intro at
 "Normal", a swap can arrive without a pass through the frame timer, and

@@ -80,12 +80,18 @@ static class GameOptions
     // - uploaded guest memory stays valid across frames instead of being copied
     //   to the GPU again every frame (about 21% less GPU command thread time);
     // - vertex shaders of draws with clipping off run on the CPU, as in Xenia,
-    //   so they no longer claim the whole EDRAM (about 11% faster at 3×).
-    // A boolean given twice adds up instead of the last one winning, so a
-    // default is left out when the extra options set the same setting.
+    //   so they no longer claim the whole EDRAM (about 11% faster at 3×);
+    // - hot pages, as on the PS5: guest memory the game rewrites all the time
+    //   is uploaded when drawn from instead of being write-protected again
+    //   after every fault (about 9% shorter frames at native, uncapped).
+    // A boolean given twice adds up instead of the last one winning, and any
+    // other option given twice is a command-line error (CLI11 rejects repeats
+    // by default), so a default is left out when the extra options set it.
     static readonly (string Name, string Argument)[] Tuning = [
         ("clear_memory_page_state", "--clear_memory_page_state=false"),
-        ("execute_unclipped_draw_vs_on_cpu", "--execute_unclipped_draw_vs_on_cpu=true")];
+        ("execute_unclipped_draw_vs_on_cpu", "--execute_unclipped_draw_vs_on_cpu=true"),
+        ("shared_memory_hot_page_faults", "--shared_memory_hot_page_faults=4"),
+        ("shared_memory_hot_page_ms", "--shared_memory_hot_page_ms=10000")];
 
     public static string Labels(Choice[] choices, int index) => choices[Math.Clamp(index, 0, choices.Length - 1)].Label;
 
