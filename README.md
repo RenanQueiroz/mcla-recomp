@@ -20,7 +20,7 @@ Static recompilation of *Midnight Club: Los Angeles Complete Edition* (Xbox 360,
 |---|---|
 | Windows, D3D12 | Boots; menus, races, garage and upgrades work with audio and controller. 30 FPS with occasional texture-load hitches. Car reflections fixed. |
 | Windows, Vulkan | Reaches the title screen. Not tested further. Has the car reflection fix. |
-| Linux | Not built yet. |
+| Linux | Builds and plays natively on Vulkan: free roam holds 30 FPS on an Intel Core Ultra 5 238V laptop (Lunar Lake, Mesa ANV) with two Linux patches to the SDK. Tested by one user; the recovery loop is not ported. Build guide: [`docs/linux-build-guide.md`](docs/linux-build-guide.md). |
 | PS5 (jailbroken) | Plays: career, races, garage, saves, audio and controller, at a steady 30 FPS on a PS5 Pro (firmware 13.42), where the zoomed-out map runs at 20 to 25. Also tested on a PS5 Slim (firmware 12.70), installed from scratch with the one-command build, where it runs well; frame rates were measured on the Pro only. Car reflections fixed, confirmed on a console. Build and install with one command: `docs/ps5-build-guide.md`. |
 
 Details and open problems: `docs/known-issues.md`.
@@ -40,6 +40,14 @@ The game's PowerPC code is translated to C++ ahead of time by the [ReXGlue SDK](
 ```
 
 It clones and patches the ReXGlue SDK, builds it, extracts your game, recompiles its code and builds `mcla.exe`. Then double-click the **Midnight Club Los Angeles** shortcut it leaves in the repository folder (or `mcla.exe` itself); no options are needed. Requirements (Git, CMake, Ninja, Clang 20, Visual Studio Build Tools, Python 3), every step by hand, options and troubleshooting are in [`docs/pc-build-guide.md`](docs/pc-build-guide.md).
+
+## Building and running (Linux)
+
+There is no one-command script yet. [`docs/linux-build-guide.md`](docs/linux-build-guide.md) has the steps (the same as on Windows, by hand, with the `linux-amd64` presets and two extra SDK patches), then:
+
+```bash
+./scripts/play_linux.sh
+```
 
 ## Building and installing (PS5)
 

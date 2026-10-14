@@ -8,6 +8,15 @@ git apply ../../patches/rexglue-minmax-blend-factor.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.patch
 ```
 
+On Linux, two more go on top, from the same folder:
+
+```
+git apply ../../patches/rexglue-linux-procmap-query.patch
+git apply ../../patches/rexglue-linux-wait-sleep.patch
+```
+
+They make page-protection lookups and multi-handle waits cheap on Linux; see `docs/linux-build-guide.md`. The Windows and PS5 builds don't need them.
+
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all three, and add the second to an SDK checkout that was patched before it existed.
 
 ## rexglue-v0.10.0-mcla.patch
