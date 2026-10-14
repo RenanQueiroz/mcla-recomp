@@ -15,7 +15,7 @@ git apply ../../patches/rexglue-linux-procmap-query.patch
 git apply ../../patches/rexglue-linux-wait-sleep.patch
 ```
 
-They make page-protection lookups and multi-handle waits cheap on Linux; see `docs/linux-build-guide.md`. The Windows and PS5 builds don't need them.
+They make page-protection lookups and multi-handle waits cheap on Linux; see `docs/linux-build-guide.md`. The Windows build needs neither. The PS5 build also applies `rexglue-linux-wait-sleep.patch` (`ps5/make_ps5.sh` does it): the PS5 runs the same POSIX threading code, where a wait shorter than 1 ms spun instead of sleeping.
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all three, and add the second to an SDK checkout that was patched before it existed.
 
