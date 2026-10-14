@@ -62,6 +62,7 @@ git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-inline-bit-helpers.pa
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-perf-counters-batched.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-shared-memory-request-fast-path.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-threaded-submission-d3d12.patch
+git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-timer-queue-blocking-wait.patch
 ```
 
 One Windows-specific repair. Git on Windows checks out symbolic links as small text files unless it is allowed to create links, and one of the SDK's libraries has fifteen of them. Replace them with copies of the files they point to:

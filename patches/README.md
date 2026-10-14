@@ -12,6 +12,7 @@ git apply ../../patches/rexglue-inline-bit-helpers.patch
 git apply ../../patches/rexglue-perf-counters-batched.patch
 git apply ../../patches/rexglue-shared-memory-request-fast-path.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12.patch
+git apply ../../patches/rexglue-timer-queue-blocking-wait.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -100,3 +101,12 @@ Before this, replaying the recording took 23 to 41% of the GPU command thread at
 | Submission thread, split submissions | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12 |
 | Recording handed over whole | `include/rex/graphics/d3d12/deferred_command_list.h`, `src/graphics/d3d12/deferred_command_list.cpp` | D3D12 |
 | Wait for the worker before tile mapping updates | `src/graphics/d3d12/shared_memory.cpp`, `src/graphics/d3d12/texture_cache.cpp` | D3D12 |
+
+## rexglue-timer-queue-blocking-wait.patch
+
+The SDK's timer queue thread waited for the next timer by spinning, which kept about half a core busy for the whole session. It now sleeps on a condition variable until the next timer is due or a new one is queued; publishing a timer always signals that side, so the choice can change while the thread waits. This needed a fix in disruptorplus' blocking wait strategy, whose `wait_until` passed its arguments to the condition variable in the wrong order. Cvar `timer_queue_blocking_wait` (default on). No change in frame rate; less CPU time, power and heat. Built and run on Windows only.
+
+| Change | Files | Affects |
+|---|---|---|
+| Blocking wait for new timers | `src/core/timer_queue.cpp` | all platforms |
+| `wait_until` argument order: (lock, time, predicate) | `thirdparty/disruptorplus/include/disruptorplus/blocking_wait_strategy.hpp` | all platforms |
