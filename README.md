@@ -40,6 +40,13 @@ under *Options*.
 - **Our own fixes to mcla-recomp** live in `patches\` and are applied before every
   build, taken off before an update and put back after it (a patch that stops
   applying is skipped with a warning):
+  - `bike-gyro-continuous-time.patch` (cvar `mcla_bike_gyro_fix`, on): the
+    motorcycle's lean filter (`mcBikeGyro::Update`, found by LARecomp) moves a
+    fixed fraction per frame, doubled below 60 FPS, so it matches the console
+    only at 30: at 120 it settles 1.3 to 1.8 times as fast, and a 60 FPS cap
+    whose frames straddle 59.5 FPS flips between two filters frame to frame.
+    Like mcla-recomp's camera fixes, the 30 FPS fraction is now applied by
+    elapsed time. Cars use a different gyro that already steps by time.
   - `keep-timer-resolution.patch`: Windows 11 ignores the game's request for
     1 ms timer resolution while none of its windows can be seen (minimized,
     covered, or the display asleep), and the frame limiter's sleeps then
