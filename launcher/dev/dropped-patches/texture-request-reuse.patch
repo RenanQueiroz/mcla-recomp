@@ -1,0 +1,62 @@
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index d26cd4f..ee20f63 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -557,6 +557,11 @@ class TextureCache {
+     uint32_t start = 0;
+     uint32_t length = 0;
+   };
++  // RequestTextures' queues, kept between calls (gpu_texture_request_reuse) so
++  // draws that load textures reuse their capacity instead of allocating.
++  std::vector<PendingTextureLoad> request_texture_loads_;
++  std::vector<PendingSharedMemoryRange> request_shared_memory_ranges_;
++  std::vector<std::pair<uint32_t, uint32_t>> request_shared_memory_range_pairs_;
+   bool PrepareTextureLoad(Texture& texture, PendingTextureLoad& pending_load_out,
+                           PendingSharedMemoryRange* pending_ranges_out,
+                           size_t& pending_range_count_out);
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..0b82c80 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -26,6 +26,11 @@
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(gpu_texture_request_reuse, true, "GPU",
++                    "Keep the texture request queues between draws instead of allocating them "
++                    "for every draw that loads textures. Off restores per-call vectors.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
+                      "Texture cache memory limit for render-to-texture (MB)")
+     .range(1, 256)
+@@ -462,8 +467,15 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+ 
+   // Update the texture keys and the textures.
+   uint32_t bindings_changed = 0;
+-  std::vector<PendingTextureLoad> pending_texture_loads;
+-  std::vector<PendingSharedMemoryRange> pending_shared_memory_ranges;
++  const bool reuse_queues = REXCVAR_GET(gpu_texture_request_reuse);
++  std::vector<PendingTextureLoad> local_texture_loads;
++  std::vector<PendingSharedMemoryRange> local_shared_memory_ranges;
++  std::vector<PendingTextureLoad>& pending_texture_loads =
++      reuse_queues ? request_texture_loads_ : local_texture_loads;
++  std::vector<PendingSharedMemoryRange>& pending_shared_memory_ranges =
++      reuse_queues ? request_shared_memory_ranges_ : local_shared_memory_ranges;
++  pending_texture_loads.clear();
++  pending_shared_memory_ranges.clear();
+   auto queue_pending_texture_load = [&](Texture* texture) {
+     if (texture == nullptr) {
+       return;
+@@ -567,7 +579,10 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+                     uint32_t(pending_shared_memory_ranges.size()));
+ 
+   bool batched_shared_memory_request_succeeded = true;
+-  std::vector<std::pair<uint32_t, uint32_t>> pending_shared_memory_range_pairs;
++  std::vector<std::pair<uint32_t, uint32_t>> local_shared_memory_range_pairs;
++  std::vector<std::pair<uint32_t, uint32_t>>& pending_shared_memory_range_pairs =
++      reuse_queues ? request_shared_memory_range_pairs_ : local_shared_memory_range_pairs;
++  pending_shared_memory_range_pairs.clear();
+   if (!pending_shared_memory_ranges.empty()) {
+     pending_shared_memory_range_pairs.reserve(pending_shared_memory_ranges.size());
+     for (const PendingSharedMemoryRange& pending_range : pending_shared_memory_ranges) {

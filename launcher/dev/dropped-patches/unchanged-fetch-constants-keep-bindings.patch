@@ -1,0 +1,63 @@
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 6dfb35e..7e33961 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -47,6 +47,12 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+                     "Submit command list when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(gpu_skip_unchanged_fetch_constants, true, "GPU/D3D12",
++                    "Keep the fetch constant buffer, the texture bindings and the vertex buffer "
++                    "residency when a fetch constant is rewritten with the value it already has "
++                    "(approach from ForzaHorizon1-ReImagined). Off invalidates them on every write.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+@@ -1772,6 +1778,11 @@ void D3D12CommandProcessor::ShutdownContext() {
+ }
+ 
+ void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
++  if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
++      index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 && register_file_->values[index] == value &&
++      REXCVAR_GET(gpu_skip_unchanged_fetch_constants)) {
++    return;
++  }
+   CommandProcessor::WriteRegister(index, value);
+ 
+   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+@@ -1927,7 +1938,32 @@ void D3D12CommandProcessor::WriteFloatConstantsFromMem(uint32_t first_index, uin
+ // Fetch constants [first_index, last_index], all within FETCH_00_0..FETCH_31_5.
+ void D3D12CommandProcessor::WriteFetchConstantsFromMem(uint32_t first_index, uint32_t last_index,
+                                                        uint32_t* base) {
+-  memory::copy_and_swap(register_file_->values + first_index, base, last_index - first_index + 1);
++  if (REXCVAR_GET(gpu_skip_unchanged_fetch_constants)) {
++    // Games rewrite many fetch constants with the values they already have.
++    // The fetch constant buffer, the texture bindings and the vertex buffer
++    // residency depend only on the values, so they are invalidated for the
++    // dwords that change only.
++    uint32_t* values = register_file_->values + first_index;
++    const uint32_t count = last_index - first_index + 1;
++    uint32_t first_changed = UINT32_MAX, last_changed = 0;
++    for (uint32_t i = 0; i < count; ++i) {
++      const uint32_t value = memory::load_and_swap<uint32_t>(base + i);
++      if (values[i] != value) {
++        values[i] = value;
++        if (first_changed == UINT32_MAX) {
++          first_changed = i;
++        }
++        last_changed = i;
++      }
++    }
++    if (first_changed == UINT32_MAX) {
++      return;
++    }
++    last_index = first_index + last_changed;
++    first_index += first_changed;
++  } else {
++    memory::copy_and_swap(register_file_->values + first_index, base, last_index - first_index + 1);
++  }
+   cbuffer_binding_fetch_.up_to_date = false;
+   uint32_t first_fetch_dword = first_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+   uint32_t last_fetch_dword = last_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
