@@ -8,6 +8,7 @@ git apply ../../patches/rexglue-minmax-blend-factor.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.patch
 git apply ../../patches/rexglue-gpu-regwrite-bulk.patch
 git apply ../../patches/rexglue-imgui-dialog-repaint-on-demand.patch
+git apply ../../patches/rexglue-inline-bit-helpers.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -57,3 +58,12 @@ An ImGui dialog can say that it needs no repaints of its own (`ImGuiDialog::Repa
 |---|---|---|
 | `RepaintsContinuously()` | `include/rex/ui/imgui_dialog.h` | all platforms |
 | Repaint requests only while a dialog that wants them is shown | `src/ui/imgui_drawer.cpp` | all platforms |
+
+## rexglue-inline-bit-helpers.patch
+
+`lzcnt`, `tzcnt` and `bit_scan_forward` are single instructions that the GPU command thread uses on its hot path, but they were defined out of line in `rexruntime.dll`, so each use was a call across DLLs (`bit_scan_forward` alone was 2.5% of that thread in a profile). They are defined inline in `rex/math.h` now, for MSVC-style and GCC-style compilers. Built and run on Windows (Clang) only.
+
+| Change | Files | Affects |
+|---|---|---|
+| Inline definitions | `include/rex/math.h` | all platforms |
+| Out-of-line definitions removed | `src/core/math_msvc.cpp`, `src/core/math_gcc.cpp` | all platforms |

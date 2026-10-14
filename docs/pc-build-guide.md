@@ -58,6 +58,7 @@ git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-minmax-blend-factor.p
 git -C third_party\rexglue-sdk\thirdparty\FFmpeg apply ..\..\..\..\patches\rexglue-ffmpeg-ps5-config.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-gpu-regwrite-bulk.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-imgui-dialog-repaint-on-demand.patch
+git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-inline-bit-helpers.patch
 ```
 
 One Windows-specific repair. Git on Windows checks out symbolic links as small text files unless it is allowed to create links, and one of the SDK's libraries has fifteen of them. Replace them with copies of the files they point to:
