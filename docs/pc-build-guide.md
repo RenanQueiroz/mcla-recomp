@@ -56,6 +56,7 @@ The SDK must be v0.10.0 (`f5337cdc947ff6d4c4196737e2c807a48f2a1fc2`). Apply this
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-v0.10.0-mcla.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-minmax-blend-factor.patch
 git -C third_party\rexglue-sdk\thirdparty\FFmpeg apply ..\..\..\..\patches\rexglue-ffmpeg-ps5-config.patch
+git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-gpu-regwrite-bulk.patch
 ```
 
 One Windows-specific repair. Git on Windows checks out symbolic links as small text files unless it is allowed to create links, and one of the SDK's libraries has fifteen of them. Replace them with copies of the files they point to:

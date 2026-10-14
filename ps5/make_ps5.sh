@@ -115,6 +115,17 @@ if ! grep -q kSysFlag_MinMaxColor0TimesSrcAlpha "$rex_src/include/rex/graphics/p
     git -C "$rex_src" apply "$repo/patches/rexglue-minmax-blend-factor.patch" || fail "the reflection fix does not apply (is the checkout clean?)"
     echo "applied: rexglue-minmax-blend-factor.patch"
 fi
+# Later patches to the SDK (patches/README.md), applied in the order they were
+# made, as several change neighbouring lines. Each goes onto an SDK patched
+# before it existed, found by a name it adds. Built and run on Windows only so
+# far.
+while read -r patch file adds; do
+    grep -qF "$adds" "$rex_src/$file" && continue
+    git -C "$rex_src" apply "$repo/patches/$patch" || fail "$patch does not apply (is the checkout clean?)"
+    echo "applied: $patch"
+done <<'LATER'
+rexglue-gpu-regwrite-bulk.patch src/graphics/command_processor.cpp gpu_regwrite_bulk
+LATER
 
 # ---------------------------------------------------------------------------
 step "4/9 the recompiler (rexglue), for this machine"

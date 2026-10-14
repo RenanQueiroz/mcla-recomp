@@ -149,6 +149,19 @@ try {
         Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
         (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
     }
+    # Later patches to the SDK (patches\README.md), applied in the order they
+    # were made, as several change neighbouring lines. Each goes onto an SDK
+    # patched before it existed, found by a name it adds, and the marker's new
+    # time has step 3 build the SDK again.
+    $laterPatches = @(
+        @{ Patch = "rexglue-gpu-regwrite-bulk.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_regwrite_bulk" }
+    )
+    foreach ($later in $laterPatches) {
+        if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
+            Patch "sdk-patch-$($later.Patch -replace '^rexglue-|\.patch$')" $sdk "$root\patches\$($later.Patch)"
+            (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+        }
+    }
 
     # -----------------------------------------------------------------------
     Step "3/6 build and install the SDK (the long step, once)"
