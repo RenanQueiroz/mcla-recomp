@@ -198,3 +198,11 @@ The "intro movies" are not Bink video: they are the legal screens and the publis
 `mcla_intro` = `normal` (default), `fast` (no such hold; the title screen keeps its logo) or `skip` (the old `mcla_skip_intro`, which loses the logo); INTRO under CONTROLS in the in-game menu. On PS5 the menu's settings are saved to and read from `/data/mcla/mcla.toml` (the host's own settings are applied after and win); menu, save and load confirmed there by log and by the user.
 
 Not checked: whether the real Bink movies (`intro720.bik`, `attract720.bik`) play at the right speed. The game's player (sub_82468800) asks BinkWait (sub_827BFB58), whose clock is the kernel tick count; no Bink movie plays during start-up.
+
+## Frame pacing: the limiter waits at the swap (2026-10-14)
+
+The open point above, "the limiter waits inside the timer update, not at present", was the cause of uneven frames at a cap. The step was measured before the wait and the frame reached the screen after a variable amount of work, so at a 60 cap frames alternated around 12 and 22 ms and moving objects shook. `mcla_pace_at_swap` (default on) moves the wait to the swap (`mcla_present_interval`): frames are held to the target where they are presented, as vsync does but with a precise clock, and each step measures one presented interval. `--mcla_pace_at_swap=false` restores the old wait.
+
+Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D: on the title screen at 60 the frame-time standard deviation went from 3.1 ms to 0.38 ms. PresentMon at 45, 50 and 60 caps: median exactly on target, about 98% of presents within 1 ms of it, no dropped frames. In play the user reported it smooth at 60 and 120.
+
+Measured with `--vsync=false` on the command line. The other open point above does not hold: `vsync=false` set from the app changes only mcla.exe's copy of the setting, and the GPU plugin, which has its own, keeps vsync on. Its emulated 60 Hz vblank then caps the game at 60 and paces it unevenly at any target.
