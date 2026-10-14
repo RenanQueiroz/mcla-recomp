@@ -19,6 +19,7 @@ set(MCLA_SOURCES
     src/frame_timing.cpp
     src/render_perf.cpp
     src/perf_options.cpp
+    src/warp_fix.cpp
     src/button_prompts.cpp
     src/settings_menu.cpp
     src/sampling_profiler.cpp
