@@ -1,0 +1,33 @@
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index 165cc1f..f1722de 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -286,6 +286,28 @@ SharedMemory::WatchHandle SharedMemory::WatchMemoryRange(uint32_t start, uint32_
+     watch_buckets_[i] = node;
+   }
+ 
++  // A hot page is not write-protected, so a guest write to it never faults and
++  // would never fire this watch: what was loaded from it (a texture the CPU
++  // rewrites every frame, such as a movie's planes) would stay as loaded until
++  // the page cooled down. Watching wins: the watched hot pages are tracked
++  // again (protected, still invalid), so the next write faults and fires the
++  // watch. A page that keeps being written turns hot again after
++  // shared_memory_hot_page_faults faults, and the next load cools it again.
++  const uint32_t now_ms = uint32_t(rex::chrono::Clock::QueryHostUptimeMillis());
++  if (memory_invalidation_callback_handle_ && AnyPageHot(now_ms)) {
++    uint32_t run_first = UINT32_MAX;
++    for (uint32_t page = watch_page_first; page <= watch_page_last + 1; ++page) {
++      if (page <= watch_page_last && IsPageHot(page, now_ms)) {
++        page_hot_until_ms_[page] = now_ms;
++        if (run_first == UINT32_MAX) run_first = page;
++      } else if (run_first != UINT32_MAX) {
++        memory().EnablePhysicalMemoryAccessCallbacks(
++            run_first << page_size_log2_, (page - run_first) << page_size_log2_, true, false);
++        run_first = UINT32_MAX;
++      }
++    }
++  }
++
+   return reinterpret_cast<WatchHandle>(range);
+ }
+ 

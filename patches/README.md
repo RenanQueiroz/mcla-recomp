@@ -14,6 +14,7 @@ git apply ../../patches/rexglue-shared-memory-request-fast-path.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12.patch
 git apply ../../patches/rexglue-timer-queue-blocking-wait.patch
 git apply ../../patches/rexglue-shared-memory-fast-path-hot-pages.patch
+git apply ../../patches/rexglue-hot-pages-watched-ranges.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -123,3 +124,13 @@ On a PC, with this patch, the hot-page settings above (off by default) cut the G
 | Change | Files | Affects |
 |---|---|---|
 | Fast path also with hot pages and widened requests | `src/graphics/shared_memory.cpp` | all platforms, both backends |
+
+## rexglue-hot-pages-watched-ranges.patch
+
+A fix for hot pages (`shared_memory_hot_page_faults`, on for the PS5). A hot page is not write-protected, so a guest write to it never faults; a request that uploads it tells whatever watches it (`FireWatches`), but a texture is only requested again once a watch has said it changed. A texture loaded from a hot page was therefore never reloaded until the page cooled down (`shared_memory_hot_page_ms`, 2 s by default, 10 s in the settings measured above), and the CPU's later writes to it did not show. The attract movie made it plain: Bink writes its luma and chroma planes into textures every frame, and with hot pages the colour planes kept earlier shots' colours (red and blue blobs, pink outlines of other shots' shapes) over the current picture. `SharedMemory::WatchMemoryRange` now takes the watched pages out of the hot set and write-protects them again (they stay invalid, so nothing is skipped), so the next guest write faults and fires the watch. A page that keeps being written turns hot again after `shared_memory_hot_page_faults` faults, and the next texture load cools it again; pages that only hold vertex and constant data stay hot as before.
+
+Evidence (Windows, D3D12, native, uncapped, `--shared_memory_hot_page_faults=4 --shared_memory_hot_page_ms=10000`): window captures of the whole movie every 60 ms compared with the movie decoded by FFmpeg, after normalising each frame's contrast. Without the fix 21 of 589 captures matched no movie frame (mean difference 0.24); with it none did (mean 0.17, the same as with hot pages off). With the fix, hot pages still made frames about 9% shorter on the title screen (6.87 against 7.57 ms, both halves of an in-run switch every 20 seconds agree). Built and run on Windows only; the PS5, which runs with hot pages, should have the same movie fault and the same fix.
+
+| Change | Files | Affects |
+|---|---|---|
+| Watched pages are not hot | `src/graphics/shared_memory.cpp` | all platforms, both backends, only with hot pages on |
