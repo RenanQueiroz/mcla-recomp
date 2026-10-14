@@ -206,3 +206,7 @@ The open point above, "the limiter waits inside the timer update, not at present
 Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D: on the title screen at 60 the frame-time standard deviation went from 3.1 ms to 0.38 ms. PresentMon at 45, 50 and 60 caps: median exactly on target, about 98% of presents within 1 ms of it, no dropped frames. In play the user reported it smooth at 60 and 120.
 
 Measured with `--vsync=false` on the command line. The other open point above does not hold: `vsync=false` set from the app changes only mcla.exe's copy of the setting, and the GPU plugin, which has its own, keeps vsync on. Its emulated 60 Hz vblank then caps the game at 60 and paces it unevenly at any target.
+
+## Timer resolution kept while the window is hidden (2026-10-14)
+
+Windows 11 stops honouring `timeBeginPeriod(1)` for a process none of whose windows can be seen: minimized, fully covered, or with the display asleep. The timer then runs at 15.6 ms, every limiter sleep overshoots, and frames come out at 16 ms or more whatever the target. `MclaApp::ConfigureFrameTiming` now opts out with `SetProcessInformation(ProcessPowerThrottling, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION)` before raising the resolution and logs whether that worked. Checked with `NtQueryTimerResolution` while the display was asleep: 15.625 ms before, 1 ms after.
