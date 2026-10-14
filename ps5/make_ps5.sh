@@ -131,6 +131,7 @@ rexglue-perf-counters-batched.patch src/graphics/command_processor.cpp gpu_batch
 rexglue-shared-memory-request-fast-path.patch src/graphics/shared_memory.cpp shared_memory_request_fast_path
 rexglue-threaded-submission-d3d12.patch src/graphics/d3d12/command_processor.cpp d3d12_threaded_submission
 rexglue-timer-queue-blocking-wait.patch src/core/timer_queue.cpp timer_queue_blocking_wait
+rexglue-shared-memory-fast-path-hot-pages.patch src/graphics/shared_memory.cpp shared_memory_request_fast_path_with_hot_pages
 LATER
 
 # ---------------------------------------------------------------------------

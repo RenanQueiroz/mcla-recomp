@@ -13,6 +13,7 @@ git apply ../../patches/rexglue-perf-counters-batched.patch
 git apply ../../patches/rexglue-shared-memory-request-fast-path.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12.patch
 git apply ../../patches/rexglue-timer-queue-blocking-wait.patch
+git apply ../../patches/rexglue-shared-memory-fast-path-hot-pages.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -84,7 +85,7 @@ The GPU command thread's per-event counters (draws, vertices, texture and pipeli
 
 ## rexglue-shared-memory-request-fast-path.patch
 
-`SharedMemory::RequestRanges` batched, sorted and took the global lock for every request, also when every page it asked for was valid already, which is nearly always. Such a request now returns before any of that. Cvar `shared_memory_request_fast_path` (default on); not taken while the hot-page options (`shared_memory_hot_page_faults`, used on PS5) are on. Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, native, uncapped): about 2.4% less GPU command thread time per draw. Built and run on Windows only.
+`SharedMemory::RequestRanges` batched, sorted and took the global lock for every request, also when every page it asked for was valid already, which is nearly always. Such a request now returns before any of that. Cvar `shared_memory_request_fast_path` (default on); with hot pages or widened requests on (the PS5's settings), see `rexglue-shared-memory-fast-path-hot-pages.patch`. Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, native, uncapped): about 2.4% less GPU command thread time per draw. Built and run on Windows only.
 
 | Change | Files | Affects |
 |---|---|---|
@@ -110,3 +111,15 @@ The SDK's timer queue thread waited for the next timer by spinning, which kept a
 |---|---|---|
 | Blocking wait for new timers | `src/core/timer_queue.cpp` | all platforms |
 | `wait_until` argument order: (lock, time, predicate) | `thirdparty/disruptorplus/include/disruptorplus/blocking_wait_strategy.hpp` | all platforms |
+
+## rexglue-shared-memory-fast-path-hot-pages.patch
+
+The fast path of `rexglue-shared-memory-request-fast-path.patch` was not taken while hot pages (`shared_memory_hot_page_faults`) or widened requests (`shared_memory_request_granularity_log2`) were on, so with the PS5's settings every request (about 1.4 million a second on a heavy view) went through batching, sorting and the global lock. Neither needs that for a request whose pages are all valid: hot pages are left invalid (unless the GPU wrote them, and those are not uploaded on the full path either), so a request that touches one still takes the full path; widening only adds pages around a request that has invalid ones. Cvar `shared_memory_request_fast_path_with_hot_pages` (default on; off restores the old condition). Built and run on Windows only; on the PS5, which runs with hot pages and widened requests, it applies to every frame.
+
+Measured on Windows (D3D12, RTX 5080 and Ryzen 7 9800X3D, native, uncapped, hot pages on with `--shared_memory_hot_page_faults=4 --shared_memory_hot_page_ms=10000`, cvar switched every 20 seconds in one run): full-path requests 1.45 million a second against 110,000, and GPU command thread CPU time per frame 6.1-6.5 ms against 4.9-5.4 ms (about 17% less; 4.4 against 3.8 ms on a lighter view). Without hot pages it changes nothing.
+
+On a PC, with this patch, the hot-page settings above (off by default) cut the GPU command thread's CPU time per frame by about 20% against the defaults (7.0 to 5.6 ms on a heavy view, in-run switch every 20 seconds): write faults went from about 12,000 a second to about 200, page protection changes from about 190,000 a second to about 1,000-2,000, and uploads from 1.2-1.8 GB/s to about 0.1 GB/s. A heavy title view went from 122 to 146 FPS.
+
+| Change | Files | Affects |
+|---|---|---|
+| Fast path also with hot pages and widened requests | `src/graphics/shared_memory.cpp` | all platforms, both backends |
