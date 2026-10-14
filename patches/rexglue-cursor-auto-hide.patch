@@ -1,0 +1,324 @@
+diff --git a/include/rex/ui/window.h b/include/rex/ui/window.h
+index f607be2..025ea50 100644
+--- a/include/rex/ui/window.h
++++ b/include/rex/ui/window.h
+@@ -10,8 +10,10 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
++#include <functional>
+ #include <map>
+ #include <memory>
+ #include <string>
+@@ -337,6 +339,23 @@ class Window {
+   // the auto-hide timer is armed (the next mouse motion).
+   void SetCursorAutoHideDelayMs(uint32_t delay_ms) { cursor_auto_hide_delay_ms_ = delay_ms; }
+ 
++  // kAutoHidden hides the cursor only while the window has focus, and shows it
++  // again on mouse motion, a click, the wheel or a change of focus.
++  // Whether a kAutoHidden cursor is shown at the moment. Any thread.
++  bool IsAutoHiddenCursorShown() const {
++    return auto_hidden_cursor_shown_.load(std::memory_order_relaxed);
++  }
++  // Hides a kAutoHidden cursor without waiting for the delay, as on gamepad
++  // input. Callable from any thread while the window exists; does nothing if
++  // the cursor is already hidden, the window is out of focus or the veto says
++  // no.
++  void RequestAutoHiddenCursorHide();
++  // Returning true keeps a kAutoHidden cursor shown, e.g. while an overlay
++  // driven by the mouse is open. Called on the UI thread.
++  void SetCursorAutoHideVeto(std::function<bool()> veto) {
++    cursor_auto_hide_veto_ = std::move(veto);
++  }
++
+   bool HasFocus() const { return HasActualState() ? has_focus_ : false; }
+   // May be applied in a delayed way or dropped at all, HasFocus will not
+   // necessarily be true immediately.
+@@ -545,6 +564,18 @@ class Window {
+   virtual void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) {
+     (void)old_cursor_visibility;
+   }
++  // UI thread. Hides a kAutoHidden cursor now if the window has focus and the
++  // veto allows it (RequestAutoHiddenCursorHide).
++  virtual void HideAutoHiddenCursorNow() {}
++  bool IsCursorAutoHideVetoed() const {
++    return cursor_auto_hide_veto_ && cursor_auto_hide_veto_();
++  }
++  void SetAutoHiddenCursorShown(bool shown) {
++    auto_hidden_cursor_shown_.store(shown, std::memory_order_relaxed);
++  }
++  // Expires with the window, so work deferred to the UI thread can tell the
++  // window is gone.
++  std::weak_ptr<bool> GetAliveToken() const { return alive_token_; }
+   // If state can be applied, this is called to request bringing the window into
+   // focus (and once that's done by the OS, update the actual focus state). Does
+   // nothing otherwise (focus can't be requested before the window is open, a
+@@ -725,6 +756,11 @@ class Window {
+ 
+   uint32_t cursor_auto_hide_delay_ms_ = kDefaultCursorAutoHideMilliseconds;
+ 
++  std::function<bool()> cursor_auto_hide_veto_;
++  std::atomic<bool> auto_hidden_cursor_shown_{false};
++  std::atomic<bool> auto_hidden_cursor_hide_requested_{false};
++  std::shared_ptr<bool> alive_token_ = std::make_shared<bool>(true);
++
+   bool has_focus_ = false;
+ 
+   Presenter* presenter_ = nullptr;
+diff --git a/include/rex/ui/window_sdl.h b/include/rex/ui/window_sdl.h
+index 71e7473..99e59ad 100644
+--- a/include/rex/ui/window_sdl.h
++++ b/include/rex/ui/window_sdl.h
+@@ -54,6 +54,7 @@ class WindowSDL final : public Window {
+   void ApplyNewMouseCapture() override;
+   void ApplyNewMouseRelease() override;
+   void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) override;
++  void HideAutoHiddenCursorNow() override;
+   void ApplyNewTextInputActive() override;
+   void FocusImpl() override;
+ 
+@@ -74,6 +75,11 @@ class WindowSDL final : public Window {
+   void ApplyCursorVisibilityNow();
+   void ApplyTextInputActiveNow();
+   void RearmCursorAutoHideTimer();
++  // kAutoHidden: shows the cursor and arms the timer that hides it again.
++  void RevealAutoHiddenCursor();
++  // SDL timer thread.
++  static Uint32 SDLCALL CursorAutoHideTimerCallback(void* userdata, SDL_TimerID timer_id,
++                                                    Uint32 interval);
+ 
+   // Ratio between SDL window coordinates and the physical pixels listeners
+   // expect. Never zero.
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..7f41b93 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -23,6 +23,7 @@
+ #include <rex/input/state_merge.h>
+ #include <rex/input/xinput/xinput_input_driver.h>
+ #include <rex/logging.h>
++#include <rex/ui/window.h>
+ 
+ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
+     .allowed({"sdl", "xinput"});
+@@ -234,6 +235,14 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+       continue;
+     }
+     active_devices_.Observe(user_index, id, state.gamepad);
++    // A pad in use hides an auto-hidden mouse cursor. Not the keyboard and
++    // mouse emulation, whose mouse look would hide the cursor it moves.
++    if (window_ && window_->IsAutoHiddenCursorShown() && !IsNeutral(state.gamepad)) {
++      const DeviceInfo* info = DeviceInfoFor(id);
++      if (info && !info->synthetic) {
++        window_->RequestAutoHiddenCursorHide();
++      }
++    }
+     if (!any) {
+       merged = state;
+       any = true;
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..e72e3db 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -346,6 +346,9 @@ bool ReXApp::SetupPresentation() {
+ 
+   window_->AddListener(this);
+   window_->AddInputListener(this, 0);
++  // The overlays driven by the mouse keep an auto-hidden cursor shown.
++  window_->SetCursorAutoHideVeto(
++      [this] { return console_overlay_ || settings_overlay_ || achievements_overlay_; });
+ 
+   if (REXCVAR_GET(fullscreen)) {
+     window_->SetFullscreen(true);
+diff --git a/src/ui/window.cpp b/src/ui/window.cpp
+index b4e045f..297d793 100644
+--- a/src/ui/window.cpp
++++ b/src/ui/window.cpp
+@@ -427,6 +427,26 @@ void Window::SetCursorVisibility(CursorVisibility new_cursor_visibility) {
+   }
+ }
+ 
++void Window::RequestAutoHiddenCursorHide() {
++  // Called on every poll that finds a pad in use, so it does nothing while the
++  // cursor is hidden and keeps at most one request in flight.
++  if (!IsAutoHiddenCursorShown() ||
++      auto_hidden_cursor_hide_requested_.exchange(true, std::memory_order_acq_rel)) {
++    return;
++  }
++  std::weak_ptr<bool> alive = alive_token_;
++  bool queued = app_context().CallInUIThreadDeferred([this, alive] {
++    if (alive.expired()) {
++      return;
++    }
++    auto_hidden_cursor_hide_requested_.store(false, std::memory_order_release);
++    HideAutoHiddenCursorNow();
++  });
++  if (!queued) {
++    auto_hidden_cursor_hide_requested_.store(false, std::memory_order_release);
++  }
++}
++
+ void Window::Focus() {
+   if (!CanApplyState() || has_focus_) {
+     return;
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index b883bf7..540cc94 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -83,22 +83,6 @@ uint32_t ResolveWindowHeight(uint32_t requested_height) {
+   return requested_height;
+ }
+ 
+-// SDL timer callback (runs on SDL's timer thread): defer the actual hide to
+-// the UI thread. The deferred function only touches the global SDL cursor and
+-// the window's nonvirtual cursor-visibility getter; the window owns the timer
+-// and removes it before destroying the SDL window.
+-Uint32 CursorAutoHideTimerCallback(void* userdata, SDL_TimerID timer_id, Uint32 interval) {
+-  (void)timer_id;
+-  (void)interval;
+-  auto* window = static_cast<WindowSDL*>(userdata);
+-  window->app_context().CallInUIThreadDeferred([window] {
+-    if (window->GetCursorVisibility() == Window::CursorVisibility::kAutoHidden) {
+-      SDL_HideCursor();
+-    }
+-  });
+-  return 0;  // One-shot.
+-}
+-
+ MouseEvent::Button TranslateSDLMouseButton(Uint8 button) {
+   switch (button) {
+     case SDL_BUTTON_LEFT:
+@@ -343,6 +327,7 @@ void WindowSDL::ApplyCursorVisibilityNow() {
+         SDL_RemoveTimer(cursor_hide_timer_);
+         cursor_hide_timer_ = 0;
+       }
++      SetAutoHiddenCursorShown(false);
+       SDL_ShowCursor();
+       break;
+     case CursorVisibility::kHidden:
+@@ -350,13 +335,19 @@ void WindowSDL::ApplyCursorVisibilityNow() {
+         SDL_RemoveTimer(cursor_hide_timer_);
+         cursor_hide_timer_ = 0;
+       }
++      SetAutoHiddenCursorShown(false);
+       SDL_HideCursor();
+       break;
+     case CursorVisibility::kAutoHidden:
+       // Hide immediately (see the contract in window.h: switching to
+-      // kAutoHidden hides instantly, e.g. when entering fullscreen); the
+-      // mouse-motion handler reveals the cursor and re-arms the timer.
+-      SDL_HideCursor();
++      // kAutoHidden hides instantly, e.g. when entering fullscreen), unless the
++      // window is out of focus or the veto says no; mouse input reveals the
++      // cursor and re-arms the timer.
++      SetAutoHiddenCursorShown(true);
++      HideAutoHiddenCursorNow();
++      if (IsAutoHiddenCursorShown()) {
++        RevealAutoHiddenCursor();
++      }
+       break;
+   }
+ }
+@@ -368,6 +359,47 @@ void WindowSDL::RearmCursorAutoHideTimer() {
+   cursor_hide_timer_ = SDL_AddTimer(GetCursorAutoHideDelayMs(), CursorAutoHideTimerCallback, this);
+ }
+ 
++void WindowSDL::RevealAutoHiddenCursor() {
++  SetAutoHiddenCursorShown(true);
++  SDL_ShowCursor();
++  RearmCursorAutoHideTimer();
++}
++
++void WindowSDL::HideAutoHiddenCursorNow() {
++  // SDL only blanks the cursor over the client area (WM_SETCURSOR with
++  // HTCLIENT on Windows), so the title bar, the borders and other windows keep
++  // theirs.
++  if (GetCursorVisibility() != CursorVisibility::kAutoHidden || !IsAutoHiddenCursorShown() ||
++      !HasFocus() || IsCursorAutoHideVetoed()) {
++    return;
++  }
++  if (cursor_hide_timer_) {
++    SDL_RemoveTimer(cursor_hide_timer_);
++    cursor_hide_timer_ = 0;
++  }
++  SetAutoHiddenCursorShown(false);
++  SDL_HideCursor();
++}
++
++// SDL timer thread: defers the hide to the UI thread. The window owns the timer
++// and removes it before destroying the SDL window; the alive token covers a
++// call already queued by then.
++Uint32 SDLCALL WindowSDL::CursorAutoHideTimerCallback(void* userdata, SDL_TimerID timer_id,
++                                                      Uint32 interval) {
++  (void)interval;
++  auto* window = static_cast<WindowSDL*>(userdata);
++  std::weak_ptr<bool> alive = window->GetAliveToken();
++  window->app_context().CallInUIThreadDeferred([window, alive, timer_id] {
++    // Mouse input since re-armed the timer; this expiry is stale.
++    if (alive.expired() || window->cursor_hide_timer_ != timer_id) {
++      return;
++    }
++    window->cursor_hide_timer_ = 0;
++    window->HideAutoHiddenCursorNow();
++  });
++  return 0;  // One-shot.
++}
++
+ void WindowSDL::FocusImpl() {
+   if (!sdl_window_) {
+     return;
+@@ -483,10 +515,14 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+       break;
+     }
+     case SDL_EVENT_WINDOW_FOCUS_GAINED:
+-      OnFocusUpdate(true, destruction_receiver);
+-      break;
+     case SDL_EVENT_WINDOW_FOCUS_LOST:
+-      OnFocusUpdate(false, destruction_receiver);
++      OnFocusUpdate(event.type == SDL_EVENT_WINDOW_FOCUS_GAINED, destruction_receiver);
++      // An auto-hidden cursor is shown while the window is out of focus, and
++      // on coming back until the mouse has been still for the delay.
++      if (!destruction_receiver.IsWindowDestroyedOrStateInapplicable() &&
++          GetCursorVisibility() == CursorVisibility::kAutoHidden) {
++        RevealAutoHiddenCursor();
++      }
+       break;
+     case SDL_EVENT_WINDOW_EXPOSED:
+       // The platform cannot retain the previous image; force the paint.
+@@ -563,9 +599,10 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
+   WindowDestructionReceiver destruction_receiver(this);
+   switch (event.type) {
+     case SDL_EVENT_MOUSE_MOTION: {
++      // SDL drops motion events that do not move the mouse, so a cursor change
++      // or a window appearing does not reveal the cursor.
+       if (GetCursorVisibility() == CursorVisibility::kAutoHidden) {
+-        SDL_ShowCursor();
+-        RearmCursorAutoHideTimer();
++        RevealAutoHiddenCursor();
+       }
+       MouseEvent e(this, MouseEvent::Button::kNone, int32_t(event.motion.x * density),
+                    int32_t(event.motion.y * density), 0, 0, event.motion.xrel * density,
+@@ -575,6 +612,10 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
+     }
+     case SDL_EVENT_MOUSE_BUTTON_DOWN:
+     case SDL_EVENT_MOUSE_BUTTON_UP: {
++      if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
++          GetCursorVisibility() == CursorVisibility::kAutoHidden) {
++        RevealAutoHiddenCursor();
++      }
+       MouseEvent e(this, TranslateSDLMouseButton(event.button.button),
+                    int32_t(event.button.x * density), int32_t(event.button.y * density));
+       if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+@@ -585,6 +626,9 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
+       break;
+     }
+     case SDL_EVENT_MOUSE_WHEEL: {
++      if (GetCursorVisibility() == CursorVisibility::kAutoHidden) {
++        RevealAutoHiddenCursor();
++      }
+       MouseEvent e(this, MouseEvent::Button::kNone, int32_t(event.wheel.mouse_x * density),
+                    int32_t(event.wheel.mouse_y * density),
+                    int32_t(event.wheel.x * float(MouseEvent::kScrollPerDetent)),

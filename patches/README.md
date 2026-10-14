@@ -15,6 +15,7 @@ git apply ../../patches/rexglue-threaded-submission-d3d12.patch
 git apply ../../patches/rexglue-timer-queue-blocking-wait.patch
 git apply ../../patches/rexglue-shared-memory-fast-path-hot-pages.patch
 git apply ../../patches/rexglue-hot-pages-watched-ranges.patch
+git apply ../../patches/rexglue-cursor-auto-hide.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -134,3 +135,28 @@ Evidence (Windows, D3D12, native, uncapped, `--shared_memory_hot_page_faults=4 -
 | Change | Files | Affects |
 |---|---|---|
 | Watched pages are not hot | `src/graphics/shared_memory.cpp` | all platforms, both backends, only with hot pages on |
+
+## rexglue-cursor-auto-hide.patch
+
+The SDK's auto-hidden cursor (`Window::CursorVisibility::kAutoHidden`, inherited from Xenia, used by nothing) made usable for hiding the mouse pointer during play. It used to hide the pointer whenever the delay ran out, focused or not, and only mouse motion brought it back. Now it hides only while the window has focus. The pointer comes back when the window loses focus, and on a click or the wheel as well as on motion. When the window gets focus back, the pointer stays until the mouse has been still for the delay (3.3 s, the SDK's default). Input from a physical pad hides it at once. That signal comes from `InputSystem::GetState`, where the SDK already reads the pads, and the keyboard-and-mouse emulation does not count. A request goes to the UI thread only while the pointer is shown, so polls during play cost an atomic load. While the console, settings or achievements overlay (the ImGui ones driven by the mouse) is open, it stays shown. SDL blanks the pointer only over the client area (`WM_SETCURSOR` with `HTCLIENT` on Windows), so the title bar, the borders and other windows keep theirs. SDL already drops motion events that do not move the mouse, so a cursor change or a window appearing does not bring it back. The hide timer's expiry and the pad's request carry a token that expires with the window, and a timer expiry that mouse input has since replaced is ignored.
+
+Nothing changes unless the app selects `kAutoHidden`. mcla does so with `mcla_hide_cursor` (default on, `src/mcla_app.cpp`).
+
+Checked unattended on Windows, windowed and fullscreen, with `GetCursorInfo` and synthetic input (`SendInput`), 41 checks in four runs, all as expected:
+- hidden 4.3 s after a move over the focused game, still shown at 2.4 s;
+- a zero-delta move and a same-position `SetCursorPos` leave it hidden;
+- a move or a click shows it;
+- it shows when focus goes to another window while the pointer stays over the game, and stays shown there;
+- after focus comes back, it is shown at first and hidden after the delay;
+- it stays shown over a window in front of the focused game, and over its title bar and border;
+- it stays shown while the F4 settings overlay is open;
+- with `--mcla_hide_cursor=false` nothing changes.
+
+The pad path was checked by reading the code only, as no virtual pad driver is installed. Built and run on Windows only. On the PS5 the window is SDL's offscreen one and the pointer calls do nothing.
+
+| Change | Files | Affects |
+|---|---|---|
+| Hide only with focus; show on click, wheel and focus changes; ignore stale timer expiries | `include/rex/ui/window_sdl.h`, `src/ui/window_sdl.cpp` | all platforms (SDL windows) |
+| `RequestAutoHiddenCursorHide`, `IsAutoHiddenCursorShown`, hide veto | `include/rex/ui/window.h`, `src/ui/window.cpp` | all platforms |
+| Pad input hides the pointer | `src/input/input_system.cpp` | all platforms |
+| Mouse-driven overlays keep it shown | `src/ui/rex_app.cpp` | all platforms |

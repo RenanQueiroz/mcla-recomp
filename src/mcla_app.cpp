@@ -13,6 +13,10 @@
 
 REXCVAR_DEFINE_STRING(mcla_gpu_backend, "any", "MCLA",
                       "Graphics backend for the Xenos GPU plugin: any, vulkan or d3d12");
+REXCVAR_DEFINE_BOOL(mcla_hide_cursor, true, "MCLA",
+                    "Hide the mouse pointer over the game when a controller is used or the "
+                    "mouse has been still for a few seconds; moving the mouse or clicking "
+                    "shows it again");
 
 
 std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
@@ -59,6 +63,12 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
 void MclaApp::OnPostSetup() {
   ConfigureFrameTiming();
 
+  // As PC games do with a controller: the pointer goes away during play and
+  // comes back with the mouse. Only over the game while it has focus; the
+  // SDK's mouse-driven overlays keep it shown.
+  if (REXCVAR_GET(mcla_hide_cursor) && window()) {
+    window()->SetCursorVisibility(rex::ui::Window::CursorVisibility::kAutoHidden);
+  }
 
   // The game probes for loose city data on a "t:" drive that retail consoles
   // do not have. Give it a device so the probes fail with "not found" rather

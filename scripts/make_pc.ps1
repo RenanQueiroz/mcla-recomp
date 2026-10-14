@@ -163,6 +163,7 @@ try {
         @{ Patch = "rexglue-timer-queue-blocking-wait.patch"; File = "src\core\timer_queue.cpp"; Adds = "timer_queue_blocking_wait" }
         @{ Patch = "rexglue-shared-memory-fast-path-hot-pages.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "shared_memory_request_fast_path_with_hot_pages" }
         @{ Patch = "rexglue-hot-pages-watched-ranges.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "Watching wins" }
+        @{ Patch = "rexglue-cursor-auto-hide.patch"; File = "src\ui\window.cpp"; Adds = "RequestAutoHiddenCursorHide" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
