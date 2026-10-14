@@ -256,6 +256,51 @@ void mcla_chassis_depth_smoothing(PPCRegister& f0) {
   }
 }
 
+// The motorcycle's gyro (mcBikeGyro::Update) eases a smoothed position and
+// velocity toward the bike's by a fixed fraction per frame: its tune values
+// (0.40 and 0.15) from a rounded frame rate of 60 up, doubled below that into
+// the console's 30 FPS fractions. It matches the console only at 30. At 120
+// the position settles about 1.3 and the velocity 1.8 times as fast, at 45
+// both 1.5 times, and a 60 FPS cap whose frames straddle 59.5 FPS switches
+// from frame to frame between a looser filter and one two to three times as
+// stiff.
+REXCVAR_DEFINE_BOOL(mcla_bike_gyro_fix, true, "MCLA",
+                    "Ease the motorcycle's lean by elapsed time, as on the console at 30 FPS, "
+                    "instead of by a fixed fraction per frame");
+
+namespace {
+// The game's multiplier below 60 FPS (2.0).
+constexpr uint32_t kBikeGyroLowRateScale = 0x82040E94;
+}  // namespace
+
+static void RescaleBikeGyroFactor(PPCRegister& reg) {
+  if (OriginalTiming() || !REXCVAR_GET(mcla_bike_gyro_fix)) {
+    return;
+  }
+  const double dt = ReadGuestFloat(kGuestFrameDelta);
+  const double raw = reg.f64;
+  if (raw <= 0.0 || raw >= 1.0 || dt <= 0.0) {
+    return;
+  }
+  // Below 60 the value arriving here has already been doubled (0x82368958,
+  // 0x823689EC), after the same rounded frame-rate test as the camera's.
+  const float fps = ReadGuestFloat(kGuestFrameRate);
+  const bool already_doubled = static_cast<int>(fps + 0.5f) < 60;
+  const double k30 = already_doubled ? raw : raw * ReadGuestFloat(kBikeGyroLowRateScale);
+  if (k30 <= 0.0 || k30 >= 1.0) {
+    return;
+  }
+  reg.f64 = PerFrameToContinuous(k30, dt);
+}
+
+void mcla_bike_gyro_pos_smoothing(PPCRegister& f13) {
+  RescaleBikeGyroFactor(f13);
+}
+
+void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
+  RescaleBikeGyroFactor(f0);
+}
+
 static bool SkipIntro() {
   return REXCVAR_GET(mcla_skip_intro) || REXCVAR_GET(mcla_intro) == "skip";
 }

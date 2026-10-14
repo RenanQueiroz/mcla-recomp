@@ -66,6 +66,23 @@ name = "mcla_chassis_depth_smoothing"
 address = 0x82563720
 registers = ["f0"]
 
+# 0x8236895C: `addi r8,r1,100` in sub_823688B8 (mcBikeGyro::Update, the
+# motorcycle's lean; identified by LARecomp from the game's RTTI), where both
+# ways through its frame-rate test meet. f13 is the smoothed-position factor:
+# 0.40 from 0x827E6740, doubled by the game below 60 FPS.
+[[midasm_hook]]
+name = "mcla_bike_gyro_pos_smoothing"
+address = 0x8236895C
+registers = ["f13"]
+
+# 0x823689F0: `addi r9,r1,100` in the same function, the same meeting point
+# for the smoothed-velocity factor in f0: 0.15 from 0x827E6744, also doubled
+# below 60 FPS.
+[[midasm_hook]]
+name = "mcla_bike_gyro_vel_smoothing"
+address = 0x823689F0
+registers = ["f0"]
+
 # --- Intro movies ------------------------------------------------------------
 # The start-up legal screens and logos are not paced by the engine timer; they
 # are held to 30 per second in mcla_present_interval (see src/frame_timing.cpp).
