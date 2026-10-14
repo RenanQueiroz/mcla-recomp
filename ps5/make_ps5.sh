@@ -127,6 +127,7 @@ done <<'LATER'
 rexglue-gpu-regwrite-bulk.patch src/graphics/command_processor.cpp gpu_regwrite_bulk
 rexglue-imgui-dialog-repaint-on-demand.patch include/rex/ui/imgui_dialog.h RepaintsContinuously
 rexglue-inline-bit-helpers.patch include/rex/math.h Out of line in rexruntime
+rexglue-perf-counters-batched.patch src/graphics/command_processor.cpp gpu_batch_perf_counters
 LATER
 
 # ---------------------------------------------------------------------------

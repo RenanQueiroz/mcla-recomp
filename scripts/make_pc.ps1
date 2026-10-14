@@ -157,6 +157,7 @@ try {
         @{ Patch = "rexglue-gpu-regwrite-bulk.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_regwrite_bulk" }
         @{ Patch = "rexglue-imgui-dialog-repaint-on-demand.patch"; File = "include\rex\ui\imgui_dialog.h"; Adds = "RepaintsContinuously" }
         @{ Patch = "rexglue-inline-bit-helpers.patch"; File = "include\rex\math.h"; Adds = "Out of line in rexruntime" }
+        @{ Patch = "rexglue-perf-counters-batched.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_batch_perf_counters" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
