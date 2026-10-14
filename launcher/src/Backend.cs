@@ -75,6 +75,9 @@ static class GameOptions
         new("2× (1440p)", "--resolution_scale=2"), new("3× (2160p, 4K)", "--resolution_scale=3")];
     public static readonly Choice[] Intro = [new(Unset, null), new("Normal", "--mcla_intro=normal"), new("Fast", "--mcla_intro=fast"), new("Skip (hides the title logo)", "--mcla_intro=skip")];
     public static readonly Choice[] Prompts = [new(Unset, null), new("Follow the controller", "--mcla_button_prompts=auto"), new("Xbox", "--mcla_button_prompts=xbox"), new("PlayStation", "--mcla_button_prompts=playstation")];
+    // The game's 2× MSAA. Off, a 3× frame took 18 to 25% less time (with about
+    // half the draws), for slightly more jagged thin edges.
+    public static readonly Choice[] AntiAliasing = [new(Unset, null), new("On (2× MSAA)", "--mcla_msaa=true"), new("Off (about 20% faster at 3×)", "--mcla_msaa=false")];
 
     // SDK settings that measured faster on MCLA (see README.md), always passed:
     // - uploaded guest memory stays valid across frames instead of being copied
@@ -100,8 +103,10 @@ static class GameOptions
         string? Pick(Choice[] choices, int index) => choices[Math.Clamp(index, 0, choices.Length - 1)].Argument;
         var extra = s.ExtraArguments.Trim();
         var tuning = Tuning.Where(t => !extra.Contains(t.Name)).Select(t => t.Argument);
+        // A boolean, so it too is left out when the extra options set it.
+        var antiAliasing = extra.Contains("mcla_msaa") ? null : Pick(AntiAliasing, s.AntiAliasing);
         var args = new[] { Pick(Display, s.Display), Pick(Resolution, s.Resolution), Pick(Fps, s.Fps),
-                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts) }.Concat(tuning).Append(extra);
+                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing }.Concat(tuning).Append(extra);
         return string.Join(" ", args.Where(a => !string.IsNullOrEmpty(a)));
     }
 }
@@ -116,6 +121,7 @@ sealed record LauncherSettings
     public int FpsList { get; init; }
     public int Intro { get; init; }
     public int Prompts { get; init; }
+    public int AntiAliasing { get; init; }
     public string ExtraArguments { get; init; } = "";
     public bool CheckForUpdates { get; init; } = true;
     public bool CloseOnLaunch { get; init; } = true;

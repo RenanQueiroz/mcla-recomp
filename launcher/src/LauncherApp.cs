@@ -450,15 +450,16 @@ sealed class LauncherApp : Component
                 VStack(16,
                     Grid(
                         columns: [GridSize.Star(), GridSize.Star()],
-                        rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto],
+                        rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Auto],
                         Combo("Display", GameOptions.Display, settings.Display, (s, i) => s with { Display = i }).Margin(0, 0, 8, 12).Grid(row: 0, column: 0),
                         Combo("Resolution", GameOptions.Resolution, settings.Resolution, (s, i) => s with { Resolution = i }).Margin(8, 0, 0, 12).Grid(row: 0, column: 1),
                         Combo("Frame rate", GameOptions.Fps, settings.Fps, (s, i) => s with { Fps = i }).Margin(0, 0, 8, 12).Grid(row: 1, column: 0),
                         Combo("Intro", GameOptions.Intro, settings.Intro, (s, i) => s with { Intro = i }).Margin(8, 0, 0, 12).Grid(row: 1, column: 1),
-                        Combo("Button prompts", GameOptions.Prompts, settings.Prompts, (s, i) => s with { Prompts = i }).Margin(0, 0, 8, 0).Grid(row: 2, column: 0),
+                        Combo("Button prompts", GameOptions.Prompts, settings.Prompts, (s, i) => s with { Prompts = i }).Margin(0, 0, 8, 12).Grid(row: 2, column: 0),
+                        Combo("Anti-aliasing", GameOptions.AntiAliasing, settings.AntiAliasing, (s, i) => s with { AntiAliasing = i }).Margin(8, 0, 0, 12).Grid(row: 2, column: 1),
                         TextBox(settings.ExtraArguments, v => updateSettings(s => s with { ExtraArguments = v }),
                                 placeholderText: "for example --log_file=run.log", header: "More mcla.exe options")
-                            .Margin(8, 0, 0, 0).Grid(row: 2, column: 1)),
+                            .Grid(row: 3, column: 0, columnSpan: 2)),
                     TextBlock("\"Game setting\" keeps what you chose in the game's pause menu. Any other choice here replaces it every time the game starts.")
                         .TextWrapping().Foreground(Theme.SecondaryText),
                     VStack(4,

@@ -56,6 +56,12 @@ The launcher passes every game option explicitly (`--resolution_scale=1` for Nat
 `--vsync=false` has to be on the command line: set from the game, it reaches only
 mcla.exe's copy of the setting, and the GPU plugin keeps vsync on (60 FPS cap).
 
+*Anti-aliasing* sets the game's 2× MSAA (`--mcla_msaa`). Off, a 3× frame took
+18 to 25% less time on the title screen (13.2 → 9.9 ms in the night city view,
+12.6 → 10.2 ms in Hollywood; about half the draws), for slightly more jagged thin
+edges such as pylons and billboard frames; the dithered foliage looks cleaner.
+Like the settings below, it is left out when *More mcla.exe options* sets `mcla_msaa`.
+
 It also always passes SDK settings that measured faster (in-run A/B; the first
 two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
 
