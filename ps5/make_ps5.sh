@@ -125,6 +125,7 @@ while read -r patch file adds; do
     echo "applied: $patch"
 done <<'LATER'
 rexglue-gpu-regwrite-bulk.patch src/graphics/command_processor.cpp gpu_regwrite_bulk
+rexglue-imgui-dialog-repaint-on-demand.patch include/rex/ui/imgui_dialog.h RepaintsContinuously
 LATER
 
 # ---------------------------------------------------------------------------
