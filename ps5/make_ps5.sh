@@ -129,6 +129,7 @@ rexglue-imgui-dialog-repaint-on-demand.patch include/rex/ui/imgui_dialog.h Repai
 rexglue-inline-bit-helpers.patch include/rex/math.h Out of line in rexruntime
 rexglue-perf-counters-batched.patch src/graphics/command_processor.cpp gpu_batch_perf_counters
 rexglue-shared-memory-request-fast-path.patch src/graphics/shared_memory.cpp shared_memory_request_fast_path
+rexglue-threaded-submission-d3d12.patch src/graphics/d3d12/command_processor.cpp d3d12_threaded_submission
 LATER
 
 # ---------------------------------------------------------------------------

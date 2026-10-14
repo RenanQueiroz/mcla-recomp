@@ -159,6 +159,7 @@ try {
         @{ Patch = "rexglue-inline-bit-helpers.patch"; File = "include\rex\math.h"; Adds = "Out of line in rexruntime" }
         @{ Patch = "rexglue-perf-counters-batched.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_batch_perf_counters" }
         @{ Patch = "rexglue-shared-memory-request-fast-path.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "shared_memory_request_fast_path" }
+        @{ Patch = "rexglue-threaded-submission-d3d12.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_threaded_submission" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {

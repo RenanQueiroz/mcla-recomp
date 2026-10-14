@@ -11,6 +11,7 @@ git apply ../../patches/rexglue-imgui-dialog-repaint-on-demand.patch
 git apply ../../patches/rexglue-inline-bit-helpers.patch
 git apply ../../patches/rexglue-perf-counters-batched.patch
 git apply ../../patches/rexglue-shared-memory-request-fast-path.patch
+git apply ../../patches/rexglue-threaded-submission-d3d12.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -87,3 +88,15 @@ The GPU command thread's per-event counters (draws, vertices, texture and pipeli
 | Change | Files | Affects |
 |---|---|---|
 | Early return when all requested pages are valid | `src/graphics/shared_memory.cpp` | all platforms, both backends |
+
+## rexglue-threaded-submission-d3d12.patch
+
+Direct3D 12 command lists are replayed and submitted on a thread of their own ("GPU Submission"). The GPU command thread only records into the deferred command list; at the end of a submission the recording and its command allocator go to the worker, which resets the command list, replays the recording into it, closes it, executes it and signals the submission fence. While threaded, a submission is also ended every 1,000 draws (`d3d12_threaded_submission_split_draws`, 0 for never) so that replay overlaps recording; not while an occlusion query is active or pipelines are being created. Allocators are reused only after their fence, which the worker signals after submitting. Anything that has to see earlier work in the queue first (tile mapping updates, clearing the allocator cache, shutdown) lets the worker finish, and the swap waits until its frame is in the queue, so presentation latency does not grow. Cvar `d3d12_threaded_submission` (default on; can change at run time). The design is from ForzaHorizon1-ReImagined's threaded submission for Vulkan (MIT); the code here is written for this backend.
+
+Before this, replaying the recording took 23 to 41% of the GPU command thread at native resolution. Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D, uncapped): 15.1% less GPU command thread time per draw at native resolution (95 to 111 FPS on a heavy view; the split alone 7.1%), 4.7% at three times the resolution, where the GPU limits. 60 FPS pacing unchanged (99.4% of frames within 1 ms). Stress: three 15-minute runs (cvar switched every 5 seconds; achievement toasts; minimize and restore; about 110 fullscreen switches at 3x) and runs with the D3D12 debug layer, also with GPU-based validation: no errors from this change and no hangs. Built and run on Windows only.
+
+| Change | Files | Affects |
+|---|---|---|
+| Submission thread, split submissions | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12 |
+| Recording handed over whole | `include/rex/graphics/d3d12/deferred_command_list.h`, `src/graphics/d3d12/deferred_command_list.cpp` | D3D12 |
+| Wait for the worker before tile mapping updates | `src/graphics/d3d12/shared_memory.cpp`, `src/graphics/d3d12/texture_cache.cpp` | D3D12 |
