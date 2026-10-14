@@ -1,0 +1,82 @@
+diff --git a/src/perf_options.cpp b/src/perf_options.cpp
+index f1a0ade..8cd9c21 100644
+--- a/src/perf_options.cpp
++++ b/src/perf_options.cpp
+@@ -11,6 +11,8 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cstdint>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <mutex>
+ #include <string>
+@@ -214,6 +216,28 @@ uint64_t NowMicros() {
+ }
+ 
+ void SetReduced(const std::string& what, bool reduced) {
++  // TEMPORARY A/B harness: "cvar:<name>" flips any bool cvar (state 0 = on).
++  if (what.rfind("cvar:", 0) == 0) {
++    rex::cvar::SetFlagByName(what.substr(5), reduced ? "false" : "true");
++    return;
++  }
++  // "set:name=on/off,name2=on/off" sets arbitrary values per state.
++  if (what.rfind("set:", 0) == 0) {
++    std::string list = what.substr(4);
++    size_t pos = 0;
++    while (pos < list.size()) {
++      size_t end = list.find(',', pos);
++      if (end == std::string::npos) end = list.size();
++      std::string item = list.substr(pos, end - pos);
++      size_t eq = item.find('='), slash = item.find('/');
++      if (eq != std::string::npos && slash != std::string::npos && slash > eq) {
++        rex::cvar::SetFlagByName(item.substr(0, eq), reduced ? item.substr(slash + 1)
++                                                             : item.substr(eq + 1, slash - eq - 1));
++      }
++      pos = end + 1;
++    }
++    return;
++  }
+   const bool all = what == "all";
+   if (all || what == "shadows") {
+     rex::cvar::SetFlagByName("mcla_shadows", reduced ? "false" : "true");
+@@ -244,8 +268,15 @@ void TickAbTest() {
+   static bool reduced = false;
+   static uint64_t switched_at = 0, last_frame = 0, last_report = 0;
+   const uint64_t now = NowMicros();
++  // TEMPORARY A/B harness: switch interval from MCLA_AB_SECONDS (default 4).
++  static const uint64_t switch_us = [] {
++    const char* e = std::getenv("MCLA_AB_SECONDS");
++    int seconds = (e && *e) ? std::atoi(e) : 4;
++    return uint64_t(seconds > 0 ? seconds : 4) * 1'000'000;
++  }();
+   if (!switched_at) {
+     switched_at = last_frame = last_report = now;
++    SetReduced(what, false);
+     return;
+   }
+   // The first second after a switch is the change settling, not the state.
+@@ -255,8 +286,22 @@ void TickAbTest() {
+     state.micros += now - last_frame;
+     state.draws += uint64_t(rex::perf::GetSnapshotCounter(rex::perf::CounterId::kDrawCalls));
+   }
++  // TEMPORARY A/B harness: one CSV row per frame for offline analysis.
++  static std::FILE* ab_csv = [] {
++    const char* p = std::getenv("MCLA_AB_CSV");
++    std::FILE* f = (p && *p) ? std::fopen(p, "w") : nullptr;
++    if (f) std::fputs("t_us,state,since_switch_us,frame_us,draws\n", f);
++    return f;
++  }();
++  if (ab_csv) {
++    static uint64_t rows = 0;
++    std::fprintf(ab_csv, "%llu,%d,%llu,%llu,%lld\n", (unsigned long long)now, reduced ? 1 : 0,
++                 (unsigned long long)(now - switched_at), (unsigned long long)(now - last_frame),
++                 (long long)rex::perf::GetSnapshotCounter(rex::perf::CounterId::kDrawCalls));
++    if (++rows % 120 == 0) std::fflush(ab_csv);
++  }
+   last_frame = now;
+-  if (now - switched_at > 4'000'000) {
++  if (now - switched_at > switch_us) {
+     reduced = !reduced;
+     SetReduced(what, reduced);
+     switched_at = now;

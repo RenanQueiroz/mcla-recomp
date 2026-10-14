@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Built and published by ..\build-launcher.ps1 into ..\app\. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RootNamespace>MclaLauncher</RootNamespace>
+    <AssemblyName>MclaLauncher</AssemblyName>
+    <Product>Midnight Club: Los Angeles Launcher</Product>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWinUI>true</UseWinUI>
+    <!-- A plain unpackaged exe: no MSIX, no Developer Mode. The Windows App SDK
+         runtime is bundled so the launcher doesn't depend on which Windows App
+         Runtime version is installed; .NET itself comes from the installed runtime. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>false</SelfContained>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <ApplicationIcon>launcher.ico</ApplicationIcon>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Floating: every build takes the newest Reactor preview and the newest
+         stable Windows App SDK 2.x. Reactor is pre-1.0, so a new preview can
+         change its API and need code changes here. Move the Windows App SDK to
+         a new major only when Reactor does. -->
+    <PackageReference Include="Microsoft.UI.Reactor" Version="*-*" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="launcher.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Publishing an unpackaged WinUI app leaves out the app's own .pri, the
+       index of its XAML resources; without it the window fails to load
+       (0xC000027B / 0x802B000A). Reactor's AOT sample copies it the same way. -->
+  <Target Name="CopyAppPriToPublishDir" AfterTargets="Publish">
+    <Copy SourceFiles="$(OutDir)$(AssemblyName).pri" DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" Condition="Exists('$(OutDir)$(AssemblyName).pri')" />
+  </Target>
+
+</Project>

@@ -1,0 +1,28 @@
+diff --git a/src/frame_timing.cpp b/src/frame_timing.cpp
+index c580630..b3fc637 100644
+--- a/src/frame_timing.cpp
++++ b/src/frame_timing.cpp
+@@ -260,6 +282,23 @@ void MclaApp::ConfigureFrameTiming() {
+   }
+ #ifdef _WIN32
+   // Default Windows timer granularity is 15.6 ms; sleeps need 1 ms.
++  // Windows 11 stops honouring that request while none of the process's
++  // windows can be seen (minimized, covered, or the display asleep), and the
++  // limiter's sleeps then overshoot by up to 15.6 ms; opt out of that.
++#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
++#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
++#endif
++  PROCESS_POWER_THROTTLING_STATE throttling{};
++  throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
++  throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
++  throttling.StateMask = 0;
++  if (SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling,
++                            sizeof(throttling))) {
++    REXLOG_INFO("frame timing: 1 ms timer resolution kept while the window is hidden");
++  } else {
++    REXLOG_WARN("frame timing: could not keep the timer resolution while hidden (error {})",
++                GetLastError());
++  }
+   timeBeginPeriod(1);
+ #endif
+   REXLOG_INFO("frame timing: real frame delta, target {} FPS, vsync {}", REXCVAR_GET(mcla_fps),

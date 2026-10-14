@@ -1,0 +1,29 @@
+diff --git a/src/mcla_app.h b/src/mcla_app.h
+index ce78fed..b638bdc 100644
+--- a/src/mcla_app.h
++++ b/src/mcla_app.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include <rex/rex_app.h>
++#include <rex/ui/overlay/achievement_notification.h>
+ 
+ class MclaApp : public rex::ReXApp {
+  public:
+@@ -22,6 +23,16 @@ class MclaApp : public rex::ReXApp {
+   void OnPostSetup() override;
+   void OnPreLaunchModule() override;
+ 
++  // No achievement toast. The SDK creates it at launch as an ImGui dialog that
++  // lives for the whole session, and while any dialog exists the presenter
++  // repaints at the monitor's refresh rate (ImGuiDrawer::Draw requests another
++  // paint every time), presenting the same game frame over and over: 240 times
++  // a second on a 240 Hz display, whatever the frame cap.
++  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog()
++      override {
++    return nullptr;
++  }
++
+  private:
+   void InstallCrashTrace();
+   void ConfigureFrameTiming();

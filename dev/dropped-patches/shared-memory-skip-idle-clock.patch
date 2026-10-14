@@ -1,0 +1,44 @@
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index 381e1da..c912219 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -48,6 +48,11 @@ REXCVAR_DEFINE_BOOL(shared_memory_request_fast_path, true, "GPU",
+                     "buffers). Off restores the full path for every request.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(shared_memory_skip_idle_clock, true, "GPU",
++                    "Read the clock in shared-memory requests and uploads only while hot pages "
++                    "exist or can be created. Off reads it on every call.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ // Guest memory copied to the GPU buffer so far, for performance diagnosis.
+@@ -360,7 +365,12 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
+   // Data uploaded from guest memory to a hot page is good for this request
+   // only: the page is not marked valid and not watched (data the GPU wrote is
+   // different, it exists nowhere else, so it is tracked as usual).
+-  const uint32_t now_ms = uint32_t(rex::chrono::Clock::QueryHostUptimeMillis());
++  // The clock is only needed while hot pages exist or can be created; it was a
++  // QueryPerformanceCounter call on every request and upload otherwise.
++  const uint32_t now_ms = (!REXCVAR_GET(shared_memory_skip_idle_clock) ||
++                               REXCVAR_GET(shared_memory_hot_page_faults) || page_hot_latest_until_ms_)
++                              ? uint32_t(rex::chrono::Clock::QueryHostUptimeMillis())
++                              : 0;
+   bool skipped_hot_pages = false;
+   {
+     auto global_lock = global_critical_region_.Acquire();
+@@ -587,7 +597,12 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+   };
+   {
+     auto global_lock = global_critical_region_.Acquire();
+-    const uint32_t now_ms = uint32_t(rex::chrono::Clock::QueryHostUptimeMillis());
++    // The clock is only needed while hot pages exist or can be created; it was a
++    // QueryPerformanceCounter call on every request and upload otherwise.
++    const uint32_t now_ms = (!REXCVAR_GET(shared_memory_skip_idle_clock) ||
++                               REXCVAR_GET(shared_memory_hot_page_faults) || page_hot_latest_until_ms_)
++                                ? uint32_t(rex::chrono::Clock::QueryHostUptimeMillis())
++                                : 0;
+     const bool any_hot = AnyPageHot(now_ms);
+     for (const std::pair<uint32_t, uint32_t>& range : merged_ranges) {
+       uint32_t page_first = range.first >> page_size_log2_;

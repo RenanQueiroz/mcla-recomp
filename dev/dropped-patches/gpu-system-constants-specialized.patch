@@ -1,0 +1,95 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index ff40a85..5a4256a 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -367,6 +367,16 @@ class D3D12CommandProcessor : public CommandProcessor {
+                                   uint32_t used_texture_mask,
+                                   reg::RB_DEPTHCONTROL normalized_depth_control,
+                                   uint32_t normalized_color_mask);
++  // With kSpecialized, primitive_polygonal and the ROV path are compile-time
++  // constants, so each draw runs a copy without their branches.
++  template <bool kSpecialized, bool kPrimitivePolygonal, bool kEdramRovUsed>
++  void UpdateSystemConstantValuesImpl(bool shared_memory_is_uav, bool primitive_polygonal,
++                                      uint32_t line_loop_closing_index,
++                                      xenos::Endian index_endian,
++                                      const draw_util::ViewportInfo& viewport_info,
++                                      uint32_t used_texture_mask,
++                                      reg::RB_DEPTHCONTROL normalized_depth_control,
++                                      uint32_t normalized_color_mask);
+   bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
+                       ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
+   bool IssueCopy_ReadbackResolvePath();
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 1d8962a..01939d5 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -49,6 +49,12 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+ 
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ 
++REXCVAR_DEFINE_BOOL(gpu_specialize_system_constants, true, "GPU/D3D12",
++                    "Update the system constants of a draw through a copy specialized for its "
++                    "primitive type and render target path. Off restores the single generic "
++                    "function with runtime branches.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -3717,11 +3723,43 @@ void D3D12CommandProcessor::UpdateFixedFunctionState(
+   }
+ }
+ 
++// Each draw's primitive type and render target path are decided once here,
++// and the update runs as a copy with both as constants, so its many branches
++// on them fold away (the split xenia-canary makes in its
++// UpdateSystemConstantValues).
+ void D3D12CommandProcessor::UpdateSystemConstantValues(
+     bool shared_memory_is_uav, bool primitive_polygonal, uint32_t line_loop_closing_index,
+     xenos::Endian index_endian, const draw_util::ViewportInfo& viewport_info,
+     uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
+     uint32_t normalized_color_mask) {
++#define REX_SYSTEM_CONSTANT_ARGS                                                          \
++  shared_memory_is_uav, primitive_polygonal, line_loop_closing_index, index_endian,       \
++      viewport_info, used_texture_mask, normalized_depth_control, normalized_color_mask
++  if (!REXCVAR_GET(gpu_specialize_system_constants)) {
++    UpdateSystemConstantValuesImpl<false, false, false>(REX_SYSTEM_CONSTANT_ARGS);
++  } else if (render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock) {
++    if (primitive_polygonal) {
++      UpdateSystemConstantValuesImpl<true, true, true>(REX_SYSTEM_CONSTANT_ARGS);
++    } else {
++      UpdateSystemConstantValuesImpl<true, false, true>(REX_SYSTEM_CONSTANT_ARGS);
++    }
++  } else {
++    if (primitive_polygonal) {
++      UpdateSystemConstantValuesImpl<true, true, false>(REX_SYSTEM_CONSTANT_ARGS);
++    } else {
++      UpdateSystemConstantValuesImpl<true, false, false>(REX_SYSTEM_CONSTANT_ARGS);
++    }
++  }
++#undef REX_SYSTEM_CONSTANT_ARGS
++}
++
++template <bool kSpecialized, bool kPrimitivePolygonal, bool kEdramRovUsed>
++void D3D12CommandProcessor::UpdateSystemConstantValuesImpl(
++    bool shared_memory_is_uav, bool primitive_polygonal_arg, uint32_t line_loop_closing_index,
++    xenos::Endian index_endian, const draw_util::ViewportInfo& viewport_info,
++    uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
++    uint32_t normalized_color_mask) {
++  const bool primitive_polygonal = kSpecialized ? kPrimitivePolygonal : primitive_polygonal_arg;
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -3743,8 +3781,10 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
+   uint32_t vgt_max_vtx_indx = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+   uint32_t vgt_min_vtx_indx = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+ 
+-  bool edram_rov_used =
+-      render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
++  const bool edram_rov_used =
++      kSpecialized
++          ? kEdramRovUsed
++          : render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+   uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
+   uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+ 

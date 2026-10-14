@@ -1,0 +1,3 @@
+# Store every file byte for byte: patches must keep their line endings to apply,
+# and build-game.ps1 identifies SDK patches by their hash.
+* -text

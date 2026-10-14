@@ -1,0 +1,7 @@
+# built output and per-machine state
+app/
+logs/
+src/bin/
+src/obj/
+settings.json
+built-commit.txt
