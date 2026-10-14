@@ -10,6 +10,7 @@ git apply ../../patches/rexglue-gpu-regwrite-bulk.patch
 git apply ../../patches/rexglue-imgui-dialog-repaint-on-demand.patch
 git apply ../../patches/rexglue-inline-bit-helpers.patch
 git apply ../../patches/rexglue-perf-counters-batched.patch
+git apply ../../patches/rexglue-shared-memory-request-fast-path.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -78,3 +79,11 @@ The GPU command thread's per-event counters (draws, vertices, texture and pipeli
 | `AddBatched`, `FlushBatchedCounters` | `include/rex/perf/counter.h` | all platforms |
 | Flush before the per-frame snapshot | `src/graphics/command_processor.cpp` | all platforms |
 | Counters batched where they are counted | `src/graphics/d3d12/command_processor.cpp`, `pipeline_cache.cpp`, `texture_cache.cpp` | D3D12 (the Vulkan backend does not count these) |
+
+## rexglue-shared-memory-request-fast-path.patch
+
+`SharedMemory::RequestRanges` batched, sorted and took the global lock for every request, also when every page it asked for was valid already, which is nearly always. Such a request now returns before any of that. Cvar `shared_memory_request_fast_path` (default on); not taken while the hot-page options (`shared_memory_hot_page_faults`, used on PS5) are on. Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, native, uncapped): about 2.4% less GPU command thread time per draw. Built and run on Windows only.
+
+| Change | Files | Affects |
+|---|---|---|
+| Early return when all requested pages are valid | `src/graphics/shared_memory.cpp` | all platforms, both backends |
