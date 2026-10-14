@@ -99,7 +99,7 @@ during a build:
 
 - `ab-harness.patch` (`src\perf_options.cpp`): flips cvars in-run every
   `MCLA_AB_SECONDS` (default 4) seconds, e.g.
-  `MCLA_AB=set:gpu_regwrite_bulk=on/off`, so an A/B compares the same scenes.
+  `--mcla_ab_test=set:gpu_regwrite_bulk=on/off`, so an A/B compares the same scenes.
   Run uncapped with `--mcla_intro=fast` and `REX_PERF_LOG_CSV`, and leave out
   the first 20 s and the attract video (about 120-131 s after launch).
 - `draw-cost.py`: fits frame time = fixed + per draw x draws over a run's
@@ -108,6 +108,11 @@ during a build:
   system constant updates, sampler fetch-constant prefetch, reused texture
   request queues, skipping the clock in shared-memory requests, keeping bindings
   for fetch constants rewritten unchanged (ForzaHorizon1-ReImagined's patch 0032,
-  -0.4%), and the achievement-toast removal the on-demand toast replaced. The PS5
-  hot-page write-watch settings (`--shared_memory_hot_page_faults=4`) also
-  measured slightly worse on PC.
+  -0.4%), the achievement-toast removal the on-demand toast replaced, and
+  byte-exact uploads of hot pages for D3D12 (no change in CPU time). The PS5
+  hot-page write-watch settings (`--shared_memory_hot_page_faults=4`) measured
+  slightly worse on PC before `rexglue-shared-memory-fast-path-hot-pages.patch`;
+  with it they take 20% off the GPU command thread (see the profiling notes).
+- `profiling-2026-10-14.md`: where the time goes on the CPU at native resolution
+  and on the GPU at 3x, with the instrumentation that measured it
+  (`upload-counters.sdk.patch`, `gpu-timestamps.sdk.patch`, `gt-analyze.py`).

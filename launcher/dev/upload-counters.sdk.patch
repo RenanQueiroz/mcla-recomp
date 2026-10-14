@@ -1,0 +1,145 @@
+diff --git a/src/core/memory_win.cpp b/src/core/memory_win.cpp
+--- a/src/core/memory_win.cpp
++++ b/src/core/memory_win.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include "platform_win.h"
++#include <atomic>  // TMPPROF
+ 
+ #include <rex/memory/utils.h>
+ 
+@@ -133,7 +134,22 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
+   return VirtualFree(base_address, length, free_type) ? true : false;
+ }
+ 
++}  // namespace (TMPPROF)
++}  // namespace rex
++std::atomic<uint64_t> g_tmpprof[16];
++extern "C" __declspec(dllexport) uint64_t RexTmpThreadCpuNs() {
++  FILETIME c, e, k, u;
++  GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
++  return ((uint64_t(k.dwHighDateTime) << 32 | k.dwLowDateTime) + (uint64_t(u.dwHighDateTime) << 32 | u.dwLowDateTime)) * 100;
++}
++extern "C" __declspec(dllexport) void RexTmpProfCounters(uint64_t* out) {
++  for (int i = 0; i < 16; ++i) out[i] = g_tmpprof[i].load(std::memory_order_relaxed);
++}
++namespace rex {
++namespace memory {
+ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* out_old_access) {
++  g_tmpprof[0].fetch_add(1, std::memory_order_relaxed);  // TMPPROF
++  g_tmpprof[1].fetch_add((length + 4095) / 4096, std::memory_order_relaxed);  // TMPPROF
+   if (out_old_access) {
+     *out_old_access = PageAccess::kNoAccess;
+   }
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>  // TMPPROF
++extern std::atomic<uint64_t> g_tmpprof[16];  // TMPPROF
+ #include <cstring>
+ #include <utility>
+ 
+@@ -2212,6 +2214,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+       }
+     } else {
+       if (protect_system_page_first != UINT32_MAX) {
++        g_tmpprof[2].fetch_add(1); g_tmpprof[3].fetch_add(i - protect_system_page_first);  // TMPPROF
+         rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
+                              (i - protect_system_page_first) * system_page_size_, protect_access);
+         protect_system_page_first = UINT32_MAX;
+@@ -2219,6 +2222,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+     }
+   }
+   if (protect_system_page_first != UINT32_MAX) {
++    g_tmpprof[2].fetch_add(1); g_tmpprof[3].fetch_add(system_page_last + 1 - protect_system_page_first);  // TMPPROF
+     rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
+                          (system_page_last + 1 - protect_system_page_first) * system_page_size_,
+                          protect_access);
+@@ -2281,6 +2285,7 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+   }
+ 
+   // Trigger callbacks.
++  g_tmpprof[4].fetch_add(1);  // TMPPROF
+   if (!unprotect) {
+     // If not doing anything with protection, no point in unwatching excess
+     // pages.
+@@ -2356,6 +2361,7 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+         }
+       } else {
+         if (unprotect_system_page_first != UINT32_MAX) {
++          g_tmpprof[5].fetch_add(1);  // TMPPROF
+           rex::memory::Protect(protect_base + unprotect_system_page_first * system_page_size_,
+                                (i - unprotect_system_page_first) * system_page_size_,
+                                rex::memory::PageAccess::kReadWrite);
+@@ -2364,6 +2370,7 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+       }
+     }
+     if (unprotect_system_page_first != UINT32_MAX) {
++      g_tmpprof[5].fetch_add(1);  // TMPPROF
+       rex::memory::Protect(protect_base + unprotect_system_page_first * system_page_size_,
+                            (system_page_last + 1 - unprotect_system_page_first) * system_page_size_,
+                            rex::memory::PageAccess::kReadWrite);
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -32,6 +32,8 @@
+ #include <rex/memory.h>
+ #include <rex/memory/ring_buffer.h>
+ #include <rex/stream.h>
++extern "C" __declspec(dllimport) void RexTmpProfCounters(uint64_t* out);  // TMPPROF
++extern "C" __declspec(dllimport) uint64_t RexTmpThreadCpuNs();  // TMPPROF
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/user_module.h>
+ 
+@@ -955,6 +957,8 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader,
+   return true;
+ }
+ 
++uint64_t SharedMemoryUploadedBytes();  // TMPPROF
++void SharedMemoryCounters(uint64_t out[10]);  // TMPPROF
+ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,
+                                                   uint32_t count) {
+   SCOPE_profile_cpu_f("gpu");
+@@ -975,6 +979,37 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   rex::perf::FlushBatchedCounters();
+ #endif
+   rex::perf::Profiler::Flip();
++  {  // TMPPROF
++    static uint64_t tmp_last_ms = 0, tmp_frames = 0, prev_c[16] = {}, prev_sm[10] = {}, prev_up = 0, prev_cpu = 0;
++    ++tmp_frames;
++    const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
++    if (!tmp_last_ms) tmp_last_ms = now_ms;
++    if (now_ms - tmp_last_ms >= 5000) {
++      uint64_t c[16] = {}, sm[10] = {};
++      RexTmpProfCounters(c);
++      SharedMemoryCounters(sm);
++      const uint64_t up = SharedMemoryUploadedBytes();
++      const uint64_t cpu = RexTmpThreadCpuNs();
++      REXGPU_INFO("TMPCPU gpu thread {:.3f} ms/frame, {:.1f}% busy", double(cpu - prev_cpu) / 1e6 / double(tmp_frames), double(cpu - prev_cpu) / 1e7 / (double(now_ms - tmp_last_ms) / 1000.0));
++      prev_cpu = cpu;
++      const double s = double(now_ms - tmp_last_ms) / 1000.0, mib = 1048576.0 * s;
++      auto d = [&](int i) { return double(c[i] - prev_c[i]) / s; };
++      auto m = [&](int i) { return double(sm[i] - prev_sm[i]) / mib; };
++      REXGPU_INFO(
++          "TMPPROF fps {:.1f} | Protect calls/s {:.0f} pages/s {:.0f} | watch protects/s {:.0f} "
++          "pages/s {:.0f} | faults/s {:.0f} unprotects/s {:.0f} | upload {:.1f} MiB/s, requests/s "
++          "{:.0f}, by state never {:.1f} fault {:.1f} explicit {:.1f} again {:.1f} | "
++          "fault-invalidated {:.1f} MiB/s, hot up {:.1f} asked {:.1f}, turned hot {:.0f}",
++          double(tmp_frames) / s, d(0), d(1), d(2), d(3), d(4), d(5),
++          double(up - prev_up) / mib, double(sm[2] - prev_sm[2]) / s, m(3), m(4), m(5), m(6),
++          m(7), m(0), m(1), double(sm[9] - prev_sm[9]));
++      std::memcpy(prev_c, c, sizeof c);
++      std::memcpy(prev_sm, sm, sizeof sm);
++      prev_up = up;
++      tmp_frames = 0;
++      tmp_last_ms = now_ms;
++    }
++  }
+ 
+   // Xenia-specific VdSwap hook.
+   // VdSwap will post this to tell us we need to swap the screen/fire an

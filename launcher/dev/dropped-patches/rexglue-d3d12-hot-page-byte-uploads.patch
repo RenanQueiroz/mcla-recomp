@@ -1,0 +1,53 @@
+diff --git a/include/rex/graphics/d3d12/shared_memory.h b/include/rex/graphics/d3d12/shared_memory.h
+--- a/include/rex/graphics/d3d12/shared_memory.h
++++ b/include/rex/graphics/d3d12/shared_memory.h
+@@ -80,6 +80,8 @@ class D3D12SharedMemory : public SharedMemory {
+                                         uint32_t length_allocations) override;
+ 
+   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
++  bool UploadByteRanges(
++      const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) override;
+ 
+  private:
+   D3D12CommandProcessor& command_processor_;
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -302,6 +302,37 @@ bool D3D12SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocat
+   return true;
+ }
+ 
++bool D3D12SharedMemory::UploadByteRanges(
++    const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
++  if (upload_byte_ranges.empty()) {
++    return true;
++  }
++  CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
++  command_processor_.SubmitBarriers();
++  auto& command_list = command_processor_.GetDeferredCommandList();
++  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
++    uint32_t start = range.first;
++    uint32_t remaining = range.second;
++    while (remaining) {
++      ID3D12Resource* upload_buffer;
++      size_t upload_buffer_offset, upload_buffer_size;
++      uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
++          command_processor_.GetCurrentSubmission(), remaining, 64, &upload_buffer,
++          &upload_buffer_offset, &upload_buffer_size, nullptr);
++      if (upload_buffer_mapping == nullptr) {
++        REXGPU_ERROR("Shared memory: Failed to get an upload buffer");
++        return false;
++      }
++      upload_buffer_size = std::min(upload_buffer_size, size_t(remaining));
++      std::memcpy(upload_buffer_mapping, memory().TranslatePhysical(start), upload_buffer_size);
++      command_list.D3DCopyBufferRegion(buffer_, start, upload_buffer, UINT64(upload_buffer_offset),
++                                       UINT64(upload_buffer_size));
++      start += uint32_t(upload_buffer_size);
++      remaining -= uint32_t(upload_buffer_size);
++    }
++  }
++  return true;
++}
+ bool D3D12SharedMemory::UploadRanges(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
+   if (upload_page_ranges.empty()) {

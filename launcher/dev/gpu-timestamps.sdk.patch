@@ -1,0 +1,296 @@
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -61,6 +61,36 @@ REXCVAR_DEFINE_UINT32(d3d12_threaded_submission_split_draws, 1000, "GPU/D3D12",
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++#include <rex/graphics/flags.h>  // TMPPIX
++#include <cstdio>  // TMPGT
++#include <cstdlib>  // TMPGT
++#include <vector>  // TMPGT
++#include <string>  // TMPPIX
++
++// TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
++// TMPGT: GPU timestamps at the marks, for one frame every MCLA_GT_EVERY seconds.
++bool g_tmpgt_active = false;
++ID3D12QueryHeap* g_tmpgt_heap = nullptr;
++ID3D12Resource* g_tmpgt_readback = nullptr;
++constexpr uint32_t kTmpGtMax = 65536;
++uint32_t g_tmpgt_count = 0;
++std::vector<std::string> g_tmpgt_labels;
++void TmpGtMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
++  if (!g_tmpgt_active || g_tmpgt_count >= kTmpGtMax) return;
++  l.D3DEndQuery(g_tmpgt_heap, D3D12_QUERY_TYPE_TIMESTAMP, g_tmpgt_count);
++  g_tmpgt_labels[g_tmpgt_count] = s;
++  ++g_tmpgt_count;
++}
++static inline void TmpPixMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
++  if (g_tmpgt_active) TmpGtMark(l, s);
++}
++struct TmpPixScope {
++  rex::graphics::d3d12::DeferredCommandList& l; const char* e;
++  TmpPixScope(rex::graphics::d3d12::DeferredCommandList& list, const char* b, const char* end) : l(list), e(end) { TmpPixMark(l, b); }
++  ~TmpPixScope() { TmpPixMark(l, e); }
++};
++extern std::string g_tmppix_last_pass;  // TMPPIX
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -2118,6 +2148,78 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+ 
+ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
++  g_tmppix_last_pass.clear();  // TMPPIX
++  {  // TMPGT
++    static uint64_t tmpgt_last_ms = 0, tmpgt_pending_submission = 0;
++    static uint32_t tmpgt_pending_count = 0, tmpgt_dumped = 0;
++    static std::vector<std::string> tmpgt_pending_labels;
++    const char* every_env = std::getenv("MCLA_GT_EVERY");
++    if (every_env && *every_env) {
++      if (!g_tmpgt_heap) {
++        ID3D12Device* device = GetD3D12Provider().GetDevice();
++        D3D12_QUERY_HEAP_DESC qd = {};
++        qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++        qd.Count = kTmpGtMax;
++        device->CreateQueryHeap(&qd, IID_PPV_ARGS(&g_tmpgt_heap));
++        D3D12_RESOURCE_DESC rd = {};
++        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        rd.Width = uint64_t(kTmpGtMax) * 8;
++        rd.Height = 1;
++        rd.DepthOrArraySize = 1;
++        rd.MipLevels = 1;
++        rd.SampleDesc.Count = 1;
++        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        D3D12_HEAP_PROPERTIES hp = {};
++        hp.Type = D3D12_HEAP_TYPE_READBACK;
++        device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
++                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++                                        IID_PPV_ARGS(&g_tmpgt_readback));
++        g_tmpgt_labels.resize(kTmpGtMax);
++      }
++      if (g_tmpgt_active) {
++        TmpGtMark(deferred_command_list_, "SWAP");
++        deferred_command_list_.D3DResolveQueryData(g_tmpgt_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0,
++                                                   g_tmpgt_count, g_tmpgt_readback, 0);
++        g_tmpgt_active = false;
++        tmpgt_pending_submission = GetCurrentSubmission();
++        tmpgt_pending_count = g_tmpgt_count;
++        tmpgt_pending_labels.assign(g_tmpgt_labels.begin(),
++                                    g_tmpgt_labels.begin() + g_tmpgt_count);
++      } else if (tmpgt_pending_count) {
++        if (GetCompletedSubmission() >= tmpgt_pending_submission) {
++          uint64_t freq = 0;
++          GetD3D12Provider().GetDirectQueue()->GetTimestampFrequency(&freq);
++          void* data = nullptr;
++          D3D12_RANGE range = {0, size_t(tmpgt_pending_count) * 8};
++          if (SUCCEEDED(g_tmpgt_readback->Map(0, &range, &data))) {
++            const char* dir = std::getenv("MCLA_GT_DIR");
++            std::string path = std::string(dir ? dir : ".") + "\\gt_" +
++                               std::to_string(tmpgt_dumped++) + ".csv";
++            if (std::FILE* f = std::fopen(path.c_str(), "w")) {
++              std::fprintf(f, "freq,%llu\n", (unsigned long long)freq);
++              const uint64_t* t = static_cast<const uint64_t*>(data);
++              for (uint32_t i = 0; i < tmpgt_pending_count; ++i) {
++                std::fprintf(f, "%u,%llu,%s\n", i, (unsigned long long)t[i],
++                             tmpgt_pending_labels[i].c_str());
++              }
++              std::fclose(f);
++            }
++            D3D12_RANGE none = {0, 0};
++            g_tmpgt_readback->Unmap(0, &none);
++          }
++          tmpgt_pending_count = 0;
++        }
++      } else {
++        const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
++        if (now_ms - tmpgt_last_ms >= uint64_t(std::atoi(every_env)) * 1000) {
++          tmpgt_last_ms = now_ms;
++          g_tmpgt_active = true;
++          g_tmpgt_count = 0;
++          TmpGtMark(deferred_command_list_, "FRAME");
++        }
++      }
++    }
++  }
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+@@ -3112,6 +3214,7 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
+ }
+ 
+ bool D3D12CommandProcessor::IssueCopy() {
++  TmpPixScope tmppix(deferred_command_list_, "<resolve", ">resolve");
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -47,6 +47,22 @@ REXCVAR_DEFINE_STRING(render_target_path_d3d12, "", "GPU/D3D12",
+ 
+ REXCVAR_DEFINE_BOOL(native_stencil_value_output, true, "GPU", "Enable native stencil value output");
+ 
++#include <rex/graphics/flags.h>  // TMPPIX
++#include <string>  // TMPPIX
++
++// TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
++extern bool g_tmpgt_active;
++void TmpGtMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s);
++static inline void TmpPixMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
++  if (g_tmpgt_active) TmpGtMark(l, s);
++}
++struct TmpPixScope {
++  rex::graphics::d3d12::DeferredCommandList& l; const char* e;
++  TmpPixScope(rex::graphics::d3d12::DeferredCommandList& list, const char* b, const char* end) : l(list), e(end) { TmpPixMark(l, b); }
++  ~TmpPixScope() { TmpPixMark(l, e); }
++};
++std::string g_tmppix_last_pass;  // TMPPIX
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1067,9 +1083,30 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
+     case Path::kHostRenderTargets: {
+       RenderTarget* const* depth_and_color_render_targets =
+           last_update_accumulated_render_targets();
++      bool tmp_any_xfer = false;  // TMPPIX
++      for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) tmp_any_xfer |= !last_update_transfers()[i].empty();
++      if (tmp_any_xfer) TmpPixMark(command_processor_.GetDeferredCommandList(), "<xfer");
+       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                        depth_and_color_render_targets, last_update_transfers());
++      if (tmp_any_xfer) TmpPixMark(command_processor_.GetDeferredCommandList(), ">xfer");
++      static uint32_t tmp_draws_in_pass = 0;  // TMPPIX
++      if (g_tmpgt_active) ++tmp_draws_in_pass;
+       SetCommandListRenderTargets(depth_and_color_render_targets);
++      if (g_tmpgt_active) {  // TMPPIX
++        std::string pass = "PASS";
++        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++          if (depth_and_color_render_targets[i]) {
++            pass += i ? " c" + std::to_string(i - 1) + "=" : " d=";
++            pass += depth_and_color_render_targets[i]->key().GetDebugName();
++          }
++        }
++        if (pass != g_tmppix_last_pass) {
++          g_tmppix_last_pass = pass;
++          pass = "PASS prev_draws=" + std::to_string(tmp_draws_in_pass > 0 ? tmp_draws_in_pass - 1 : 0) + " |" + pass.substr(4);
++          tmp_draws_in_pass = 1;
++          TmpGtMark(command_processor_.GetDeferredCommandList(), pass.c_str());
++        }
++      }
+     } break;
+     case Path::kPixelShaderInterlock: {
+       // For ROV, only the barrier is needed - already scheduled if required.
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -35,6 +35,21 @@
+ 
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++#include <rex/graphics/flags.h>  // TMPPIX
++#include <string>  // TMPPIX
++
++// TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
++extern bool g_tmpgt_active;
++void TmpGtMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s);
++static inline void TmpPixMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
++  if (g_tmpgt_active) TmpGtMark(l, s);
++}
++struct TmpPixScope {
++  rex::graphics::d3d12::DeferredCommandList& l; const char* e;
++  TmpPixScope(rex::graphics::d3d12::DeferredCommandList& list, const char* b, const char* end) : l(list), e(end) { TmpPixMark(l, b); }
++  ~TmpPixScope() { TmpPixMark(l, e); }
++};
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1563,6 +1578,7 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+ 
+ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                               bool load_mips) {
++  TmpPixScope tmppix(command_processor_.GetDeferredCommandList(), "<texload", ">texload");
+   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
+   TextureKey texture_key = d3d12_texture.key();
+ 
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -25,6 +25,21 @@ REXCVAR_DEFINE_BOOL(d3d12_tiled_shared_memory, true, "GPU/D3D12",
+                     "Use tiled shared memory on D3D12")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++#include <rex/graphics/flags.h>  // TMPPIX
++#include <string>  // TMPPIX
++
++// TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
++extern bool g_tmpgt_active;
++void TmpGtMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s);
++static inline void TmpPixMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
++  if (g_tmpgt_active) TmpGtMark(l, s);
++}
++struct TmpPixScope {
++  rex::graphics::d3d12::DeferredCommandList& l; const char* e;
++  TmpPixScope(rex::graphics::d3d12::DeferredCommandList& list, const char* b, const char* end) : l(list), e(end) { TmpPixMark(l, b); }
++  ~TmpPixScope() { TmpPixMark(l, e); }
++};
++
+ namespace rex::graphics::d3d12 {
+ 
+ D3D12SharedMemory::D3D12SharedMemory(D3D12CommandProcessor& command_processor,
+@@ -302,8 +317,41 @@ bool D3D12SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocat
+   return true;
+ }
+ 
++bool D3D12SharedMemory::UploadByteRanges(
++    const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
++  TmpPixScope tmppix(command_processor_.GetDeferredCommandList(), "<upload", ">upload");
++  if (upload_byte_ranges.empty()) {
++    return true;
++  }
++  CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
++  command_processor_.SubmitBarriers();
++  auto& command_list = command_processor_.GetDeferredCommandList();
++  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
++    uint32_t start = range.first;
++    uint32_t remaining = range.second;
++    while (remaining) {
++      ID3D12Resource* upload_buffer;
++      size_t upload_buffer_offset, upload_buffer_size;
++      uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
++          command_processor_.GetCurrentSubmission(), remaining, 64, &upload_buffer,
++          &upload_buffer_offset, &upload_buffer_size, nullptr);
++      if (upload_buffer_mapping == nullptr) {
++        REXGPU_ERROR("Shared memory: Failed to get an upload buffer");
++        return false;
++      }
++      upload_buffer_size = std::min(upload_buffer_size, size_t(remaining));
++      std::memcpy(upload_buffer_mapping, memory().TranslatePhysical(start), upload_buffer_size);
++      command_list.D3DCopyBufferRegion(buffer_, start, upload_buffer, UINT64(upload_buffer_offset),
++                                       UINT64(upload_buffer_size));
++      start += uint32_t(upload_buffer_size);
++      remaining -= uint32_t(upload_buffer_size);
++    }
++  }
++  return true;
++}
+ bool D3D12SharedMemory::UploadRanges(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
++  TmpPixScope tmppix(command_processor_.GetDeferredCommandList(), "<upload", ">upload");
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
+diff --git a/include/rex/graphics/d3d12/shared_memory.h b/include/rex/graphics/d3d12/shared_memory.h
+--- a/include/rex/graphics/d3d12/shared_memory.h
++++ b/include/rex/graphics/d3d12/shared_memory.h
+@@ -80,6 +80,8 @@ class D3D12SharedMemory : public SharedMemory {
+                                         uint32_t length_allocations) override;
+ 
+   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
++  bool UploadByteRanges(
++      const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) override;
+ 
+  private:
+   D3D12CommandProcessor& command_processor_;
