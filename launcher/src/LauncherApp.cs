@@ -148,6 +148,27 @@ sealed class LauncherApp : Component
             Process.Start(psi);
         }
 
+        // An update changed the launcher itself: it can't replace its own files
+        // while running, so update-launcher.ps1 waits for it to quit, rebuilds
+        // it and starts the new one.
+        void RestartToUpdateLauncher()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, WorkingDirectory = Paths.LauncherDir };
+                foreach (var arg in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Paths.UpdateLauncherScript,
+                                            "-WaitFor", Environment.ProcessId.ToString() })
+                    psi.ArgumentList.Add(arg);
+                Process.Start(psi);
+                exitingRef.Current = true;
+                ReactorApp.Exit();
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                setNotice($"Couldn't update the launcher: {ex.Message}");
+            }
+        }
+
         // Once, when the window opens: a title bar that follows dark mode
         // (set on the AppWindow, as Reactor's published previews have no
         // WindowSpec option for it yet), and the update check.
@@ -271,7 +292,8 @@ sealed class LauncherApp : Component
             MenuItemBase[] items = busy
                 ? [MenuItem("Open the game folder", () => Open(Paths.BuildDir)),
                    MenuItem("Open the launcher logs", () => Open(Paths.LogsDir)),
-                   MenuItem("mcla-recomp on GitHub", () => Open(Paths.RepoUrl))]
+                   MenuItem("This fork on GitHub", () => Open(Paths.RepoUrl)),
+                   MenuItem("Upstream mcla-recomp on GitHub", () => Open(Paths.UpstreamUrl))]
                 : [MenuItem("Check for updates", () => _ = CheckAsync(fetch: true)),
                    MenuItem("Rebuild the game", () => StartBuild(BuildKind.Build)),
                    MenuItem("Re-patch and rebuild the SDK", () => StartBuild(BuildKind.ResetSdk)),
@@ -279,7 +301,8 @@ sealed class LauncherApp : Component
                    MenuSeparator(),
                    MenuItem("Open the game folder", () => Open(Paths.BuildDir)),
                    MenuItem("Open the launcher logs", () => Open(Paths.LogsDir)),
-                   MenuItem("mcla-recomp on GitHub", () => Open(Paths.RepoUrl))];
+                   MenuItem("This fork on GitHub", () => Open(Paths.RepoUrl)),
+                   MenuItem("Upstream mcla-recomp on GitHub", () => Open(Paths.UpstreamUrl))];
             return Grid(
                 columns: [GridSize.Star(), GridSize.Auto],
                 rows: [GridSize.Auto],
@@ -311,7 +334,8 @@ sealed class LauncherApp : Component
             if (status.UpdateAvailable)
                 return Info(status.Incoming.Count == 1 ? "An update is available" : $"{status.Incoming.Count} updates are available",
                             "Updating downloads the changes and rebuilds the game, which takes a few minutes."
-                            + (status.PatchesChanged ? " This update changes the SDK patches, so the SDK is rebuilt too." : ""),
+                            + (status.PatchesChanged ? " This update changes the SDK patches, so the SDK is rebuilt too." : "")
+                            + UpstreamNote(status),
                             InfoBarSeverity.Informational);
             if (!status.GameBuilt)
                 return Info("The game hasn't been built yet",
@@ -323,8 +347,28 @@ sealed class LauncherApp : Component
                 return Info("Build finished", $"You're on version {status.Head[..7]}.", InfoBarSeverity.Success);
             if (status.FetchError != null)
                 return Info("Couldn't check for updates", $"{status.FetchError} You can still play the installed version.", InfoBarSeverity.Warning);
-            return Info("You're up to date", "Updates from mcla-recomp show up here when the launcher opens.", InfoBarSeverity.Success);
+            return Info("You're up to date", "Updates from your fork show up here when the launcher opens." + UpstreamNote(status),
+                        InfoBarSeverity.Success);
         }
+
+        // The fork takes upstream's changes only when asked to (FORK.md), so
+        // this is information, not an update.
+        static string UpstreamNote(RepoStatus status) => status.UpstreamAhead switch
+        {
+            0 => "",
+            1 => " Upstream mcla-recomp has 1 commit that isn't in your fork yet.",
+            var n => $" Upstream mcla-recomp has {n} commits that aren't in your fork yet.",
+        };
+
+        Element? LauncherUpdateBar() => status is { LauncherOutdated: true } && !busy
+            ? (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with
+              {
+                  IsOpen = true,
+                  IsClosable = false,
+                  ActionButtonContent = "Restart to update the launcher",
+                  OnActionButtonClick = RestartToUpdateLauncher,
+              }).Severity(InfoBarSeverity.Informational)
+            : null;
 
         Element? CountdownBar() => countdown is int seconds
             ? (InfoBar($"Starting the game in {seconds}…", "You can turn this off in Options.") with
@@ -468,7 +512,7 @@ sealed class LauncherApp : Component
             columns: [GridSize.Star()],
             rows: [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
             Header().Grid(row: 0),
-            VStack(8, StatusBar(), CountdownBar(), NoticeBar()).Margin(0, 16, 0, 0).Grid(row: 1),
+            VStack(8, StatusBar(), LauncherUpdateBar(), CountdownBar(), NoticeBar()).Margin(0, 16, 0, 0).Grid(row: 1),
             MainPane().Grid(row: 2),
             ActivityRow().Grid(row: 3),
             Options().Grid(row: 4),

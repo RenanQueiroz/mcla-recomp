@@ -8,22 +8,26 @@ using System.Text.RegularExpressions;
 
 namespace MclaLauncher;
 
-/// The launcher lives in <base>\launcher\ (published into launcher\app\),
-/// next to the mcla-recomp checkout in <base>\mcla-recomp\.
+/// The launcher lives in launcher\ of the fork's checkout (published into
+/// launcher\app\); the repository is its parent folder.
 static class Paths
 {
     public static readonly string LauncherDir = FindLauncherDir();
-    public static readonly string BaseDir = Path.GetDirectoryName(LauncherDir)!;
-    public static readonly string Repo = Path.Combine(BaseDir, "mcla-recomp");
+    public static readonly string Repo = Path.GetDirectoryName(LauncherDir)!;
     public static readonly string RepoOut = Path.Combine(Repo, "out");
     public static readonly string BuildDir = Path.Combine(RepoOut, @"build\win-amd64-release");
     public static readonly string GameExe = Path.Combine(BuildDir, "mcla.exe");
     public static readonly string BuildScript = Path.Combine(LauncherDir, "build-game.ps1");
+    public static readonly string UpdateLauncherScript = Path.Combine(LauncherDir, "update-launcher.ps1");
     public static readonly string BuiltCommitFile = Path.Combine(LauncherDir, "built-commit.txt");
     public static readonly string SettingsFile = Path.Combine(LauncherDir, "settings.json");
     public static readonly string LogsDir = Path.Combine(LauncherDir, "logs");
     public static readonly string Icon = Path.Combine(AppContext.BaseDirectory, "launcher.ico");
-    public const string RepoUrl = "https://github.com/holdmysocks/mcla-recomp";
+    // Written by build-launcher.ps1: the last commit that changed the launcher
+    // this exe was built from. Absent in a dev build.
+    public static readonly string SourceCommitFile = Path.Combine(AppContext.BaseDirectory, "source-commit.txt");
+    public const string RepoUrl = "https://github.com/RenanQueiroz/mcla-recomp";
+    public const string UpstreamUrl = "https://github.com/holdmysocks/mcla-recomp";
 
     // The first folder up from the exe that holds build-game.ps1, so the same
     // exe works from launcher\app\ and from a dev build under launcher\src\bin\.
@@ -185,10 +189,12 @@ sealed record Commit(string Hash, string Date, string Subject);
 sealed record RepoStatus(
     string Head,
     IReadOnlyList<Commit> Recent,      // newest first, starting at HEAD
-    IReadOnlyList<Commit> Incoming,    // upstream commits not checked out yet
+    IReadOnlyList<Commit> Incoming,    // the fork's commits not checked out yet
     bool PatchesChanged,               // an update would change the SDK patches
     bool GameBuilt,                    // mcla.exe exists
     bool BuildCurrent,                 // the last finished build was of HEAD
+    int UpstreamAhead,                 // holdmysocks/mcla-recomp commits not in the fork
+    bool LauncherOutdated,             // the checkout has a newer launcher than this exe
     string? FetchError)
 {
     public bool UpdateAvailable => Incoming.Count > 0;
@@ -214,6 +220,7 @@ static class Repo
             throw new DirectoryNotFoundException($"There is no mcla-recomp checkout at {Paths.Repo}.");
 
         string? fetchError = null;
+        var hasUpstream = (await Git("remote")).Output.Split('\n').Any(r => r.Trim() == "upstream");
         if (fetch)
         {
             try
@@ -226,6 +233,13 @@ static class Repo
             {
                 fetchError = "GitHub didn't answer in time.";
             }
+            // Only to say how far behind upstream the fork is; the fork is
+            // brought up to date by hand (FORK.md), so a failure here is ignored.
+            if (fetchError == null && hasUpstream)
+            {
+                try { await Proc.RunAsync("git", ["-C", Paths.Repo, "fetch", "--quiet", "upstream"], TimeSpan.FromSeconds(45)); }
+                catch (TimeoutException) { }
+            }
         }
 
         var head = (await Git("rev-parse", "HEAD")).Output.Trim();
@@ -233,11 +247,25 @@ static class Repo
 
         var incoming = new List<Commit>();
         var patchesChanged = false;
+        var upstreamAhead = 0;
         if ((await Git("rev-parse", "--verify", "--quiet", "@{u}")).ExitCode == 0)
         {
             incoming = ParseLog((await Git("log", LogFormat, "HEAD..@{u}")).Output);
             if (incoming.Count > 0)
                 patchesChanged = (await Git("diff", "--name-only", "HEAD...@{u}", "--", "patches/*.patch")).Output.Length > 0;
+            if (hasUpstream && (await Git("rev-list", "--count", "@{u}..upstream/main")) is { ExitCode: 0 } ahead)
+                int.TryParse(ahead.Output.Trim(), out upstreamAhead);
+        }
+
+        // An update that changed the launcher itself: build-launcher.ps1 records
+        // the last commit that changed it, and the checkout now has a later one.
+        var launcherOutdated = false;
+        if (File.Exists(Paths.SourceCommitFile))
+        {
+            var builtFrom = File.ReadAllText(Paths.SourceCommitFile).Trim();
+            var latest = (await Proc.RunAsync("git", ["-C", Paths.LauncherDir, "log", "-1", "--format=%H", "--", "src", "build-launcher.ps1"],
+                                              TimeSpan.FromSeconds(60))).Output.Trim();
+            launcherOutdated = latest.Length > 0 && builtFrom != latest;
         }
 
         // build-game.ps1 writes the commit it built once a build succeeds. No
@@ -246,6 +274,7 @@ static class Repo
         return new RepoStatus(head, recent, incoming, patchesChanged,
             GameBuilt: File.Exists(Paths.GameExe),
             BuildCurrent: builtCommit is null || builtCommit == head,
+            upstreamAhead, launcherOutdated,
             fetchError);
     }
 }

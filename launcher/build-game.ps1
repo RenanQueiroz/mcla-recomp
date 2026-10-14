@@ -1,20 +1,20 @@
-# Updates and builds the Midnight Club: Los Angeles recompilation (mcla-recomp).
-# The launcher runs this, and it works the same by hand from a terminal:
+# Updates and builds the Midnight Club: Los Angeles recompilation from this
+# fork (the repository this folder is in). The launcher runs this, and it works
+# the same by hand from a terminal:
 #
 #   .\build-game.ps1                build (or finish building) what is checked out
-#   .\build-game.ps1 -Update        fast-forward to the latest upstream commit, then build
+#   .\build-game.ps1 -Update        fast-forward to the fork's latest commit, then build
 #   .\build-game.ps1 -ResetSdk      re-patch the ReXGlue SDK and rebuild it, then build
 #   .\build-game.ps1 -InstallTools  let make_pc.ps1 install missing tools without asking
 #   .\build-game.ps1 -Iso PATH      disc image, only needed until game\ is extracted;
-#                                   by default the first *.iso next to mcla-recomp\ is used
+#                                   by default the first *.iso next to the repository
 #
-# The real work is done by mcla-recomp\scripts\make_pc.ps1; this wrapper only
-# covers what that script leaves to the user.
+# The real work is done by scripts\make_pc.ps1; this wrapper only covers what
+# that script leaves to the user.
 param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "")
 
 $ErrorActionPreference = "Stop"
-$base = Split-Path $PSScriptRoot -Parent
-$repo = Join-Path $base "mcla-recomp"
+$repo = Split-Path $PSScriptRoot -Parent
 $sdk = Join-Path $repo "third_party\rexglue-sdk"
 $builtCommitFile = Join-Path $PSScriptRoot "built-commit.txt"
 
@@ -27,69 +27,18 @@ function Invoke-Git {
     if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit code $LASTEXITCODE)" }
 }
 
-# Our own changes to mcla-recomp live as patches in launcher\patches\, so that
-# updates stay plain fast-forwards: they come off before an update and go back
-# on before every build. One that no longer applies is skipped with a warning.
-$localPatches = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "patches") -Filter *.patch -File -ErrorAction SilentlyContinue)
-function Test-GitApply([string[]]$extra, [string]$patch, [string]$target = $repo) {
+# The fork follows holdmysocks/mcla-recomp only when asked to (FORK.md); this
+# just says how far behind it is. Information only: a failure here is not one.
+function Show-UpstreamLag {
     $ErrorActionPreference = "Continue"
-    & git.exe -C $target apply --check @extra $patch 2>$null
-    $LASTEXITCODE -eq 0
-}
-function Remove-LocalPatches {
-    foreach ($p in $localPatches) {
-        if (Test-GitApply @("--reverse") $p.FullName) {
-            Invoke-Git -C $repo apply --reverse $p.FullName
-            "removed local patch $($p.Name) for the update"
-        }
+    $remotes = @(& git.exe -C $repo remote)
+    if ($remotes -notcontains "upstream") { return }
+    & git.exe -C $repo fetch --quiet upstream 2>$null
+    if ($LASTEXITCODE -ne 0) { "could not fetch upstream (holdmysocks/mcla-recomp)"; return }
+    $count = & git.exe -C $repo rev-list --count "@{u}..upstream/main" 2>$null
+    if ($LASTEXITCODE -eq 0 -and [int]$count -gt 0) {
+        "upstream (holdmysocks/mcla-recomp) has $count commit(s) that are not in this fork yet"
     }
-}
-function Add-LocalPatches {
-    foreach ($p in $localPatches) {
-        if (Test-GitApply @("--reverse") $p.FullName) {
-            "local patch already applied: $($p.Name)"
-        } elseif (Test-GitApply @() $p.FullName) {
-            Invoke-Git -C $repo apply $p.FullName
-            "applied local patch: $($p.Name)"
-        } else {
-            Write-Host "WARNING: local patch $($p.Name) no longer applies to mcla-recomp; building without it" -ForegroundColor Yellow
-        }
-    }
-}
-
-# Our changes to the ReXGlue SDK (launcher\patches\sdk\) go on top of the ones
-# make_pc.ps1 applies. make_pc.ps1 rebuilds the SDK when its .mcla-patched
-# marker is newer than the installed SDK, so applying one moves the marker on.
-# Returns whether any patch was newly applied; status goes to the host only.
-# Several SDK patches edit neighbouring lines of the same files, so once a later
-# one is applied an earlier one no longer reverse-applies on its own; which
-# patches are in is recorded in a stamp file in the SDK checkout instead (git
-# clean on an SDK reset removes it along with the patches).
-$sdkPatches = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "patches\sdk") -Filter *.patch -File -ErrorAction SilentlyContinue | Sort-Object Name)
-$sdkPatchStamp = Join-Path $sdk ".launcher-sdk-patches"
-function Add-SdkPatches {
-    $applied = $false
-    $done = @(if (Test-Path -LiteralPath $sdkPatchStamp) { Get-Content -LiteralPath $sdkPatchStamp })
-    foreach ($p in $sdkPatches) {
-        $id = "$($p.Name) $((Get-FileHash -LiteralPath $p.FullName -Algorithm SHA256).Hash)"
-        if ($done -contains $id) {
-            Write-Host "SDK patch already applied: $($p.Name)"
-        } elseif (Test-GitApply @("--reverse") $p.FullName $sdk) {
-            Write-Host "SDK patch already applied: $($p.Name)"
-            Add-Content -LiteralPath $sdkPatchStamp $id
-        } elseif (Test-GitApply @() $p.FullName $sdk) {
-            Invoke-Git -C $sdk apply $p.FullName | Out-Null
-            Add-Content -LiteralPath $sdkPatchStamp $id
-            Write-Host "applied SDK patch: $($p.Name)"
-            $applied = $true
-        } else {
-            Write-Host "WARNING: SDK patch $($p.Name) no longer applies to the ReXGlue SDK; building without it" -ForegroundColor Yellow
-        }
-    }
-    return $applied
-}
-function Request-SdkRebuild {
-    (Get-Item -LiteralPath "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
 }
 
 try {
@@ -97,26 +46,27 @@ try {
 
     # -----------------------------------------------------------------------
     if ($Update) {
-        Step "update mcla-recomp"
+        Step "update from the fork"
         $old = Invoke-Git -C $repo rev-parse HEAD
         Invoke-Git -C $repo fetch --quiet origin
         $upstream = Invoke-Git -C $repo rev-parse "@{u}"
         if ($old -eq $upstream) {
             "already up to date at $($old.Substring(0, 7))"
         } else {
-            # --autostash keeps other local edits (scripts\play_loop.ps1 writes
-            # to config\runtime_discovered.toml) across the update.
-            Remove-LocalPatches
+            # --autostash keeps local edits across the update: codegen rewrites
+            # mcla_manifest.toml and generated\rexglue.cmake with LF line
+            # endings, so they always look modified.
             Invoke-Git -C $repo merge --ff-only --autostash "@{u}"
             Invoke-Git -C $repo log --oneline "$old..HEAD"
-            # make_pc.ps1 patches the SDK only once (the .mcla-patched marker),
-            # so new versions of the patches would otherwise never be applied.
+            # make_pc.ps1 patches the SDK once and adds later patches by name,
+            # so a patch that changed would otherwise never be applied again.
             $changed = @(Invoke-Git -C $repo diff --name-only $old HEAD "--" "patches/*.patch")
             if ($changed) {
                 "the SDK patches changed: $($changed -join ', ')"
                 $ResetSdk = $true
             }
         }
+        Show-UpstreamLag
     }
 
     # -----------------------------------------------------------------------
@@ -158,43 +108,18 @@ try {
         }
     }
 
-    if ($localPatches) {
-        Step "our local patches to mcla-recomp"
-        Add-LocalPatches
-    }
-
     $params = @{}
     if ($InstallTools) { $params.InstallTools = $true }
     if (-not (Test-Path "$repo\game\default.xex")) {
         if (-not $Iso) {
-            $Iso = Get-ChildItem -LiteralPath $base -Filter *.iso -File | Select-Object -First 1 -ExpandProperty FullName
+            $Iso = Get-ChildItem -LiteralPath (Split-Path $repo -Parent) -Filter *.iso -File | Select-Object -First 1 -ExpandProperty FullName
         }
         if ($Iso) { $params.Iso = $Iso; "disc image: $Iso" }
-    }
-
-    # On an SDK make_pc.ps1 has already patched, ours go on now, so one
-    # make_pc.ps1 run rebuilds the SDK with them and then the game.
-    $sdkPatchedBefore = $sdkPatches -and (Test-Path -LiteralPath "$sdk\.mcla-patched")
-    if ($sdkPatchedBefore) {
-        Step "our patches to the ReXGlue SDK"
-        if (Add-SdkPatches) { Request-SdkRebuild }
     }
 
     $global:LASTEXITCODE = 0
     & "$repo\scripts\make_pc.ps1" @params
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    # A fresh or reset SDK only got make_pc.ps1's own patches in the run above;
-    # ours go on now, and the SDK and the game are built once more.
-    if ($sdkPatches -and -not $sdkPatchedBefore) {
-        Step "our patches to the ReXGlue SDK"
-        if (Add-SdkPatches) {
-            Request-SdkRebuild
-            $global:LASTEXITCODE = 0
-            & "$repo\scripts\make_pc.ps1" @params
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        }
-    }
 
     # The launcher compares this with HEAD to tell a finished build from one
     # that failed or was interrupted after an update.

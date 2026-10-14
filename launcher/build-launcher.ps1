@@ -25,6 +25,11 @@ if (Get-Process MclaLauncher -ErrorAction SilentlyContinue | Where-Object { $_.P
 & $dotnet publish "$PSScriptRoot\src\MclaLauncher.csproj" -c Release -r win-x64 -p:Platform=x64 -o $app
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
+# The last commit that changed the launcher, for the launcher to notice when an
+# update brings a newer one (it then offers to rebuild itself).
+$source = & git.exe -C $PSScriptRoot log -1 --format=%H -- src build-launcher.ps1 2>$null
+if ($LASTEXITCODE -eq 0 -and $source) { Set-Content -LiteralPath "$app\source-commit.txt" -Value $source -Encoding ASCII }
+
 if (-not $NoShortcut) {
     $desktop = [Environment]::GetFolderPath("Desktop")
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktop\Midnight Club Los Angeles.lnk")
