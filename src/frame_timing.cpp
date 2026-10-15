@@ -75,6 +75,8 @@ constexpr double kMaxFrameSeconds = 0.125;
 
 // Set when the frame limiter has run; see PaceUnlimitedSwap.
 std::atomic<bool> g_limiter_ran_since_swap{false};
+// Set by the first pass through the engine timer: the start-up logos are over.
+std::atomic<bool> g_engine_timer_started{false};
 
 bool OriginalTiming() {
   return REXCVAR_GET(mcla_fps) < 0;
@@ -162,6 +164,7 @@ void mcla_frame_delta(PPCRegister& r8) {
     WaitForFrameDeadline<kPaceAtTimer>();
   }
   g_limiter_ran_since_swap.store(true, std::memory_order_relaxed);
+  g_engine_timer_started.store(true, std::memory_order_relaxed);
   // r8 was computed before the wait. Whatever the wait added is picked up by
   // the next frame's measurement, so no time is lost, only shifted one frame.
   static const uint64_t max_ticks = static_cast<uint64_t>(
@@ -185,17 +188,33 @@ void mcla_fixed_step_path(PPCRegister& r3, PPCRegister& f11) {
 // Loops that never reach the engine timer (the publisher logos at start-up,
 // loading screens) were paced on the console only by the present interval of
 // two vblanks, which is removed here, so they ran as fast as the host could
-// present: the logo sequence was over in about a second. A swap that follows
-// another with no pass through the frame limiter in between is held to the
-// original 30 per second.
+// present: the logo sequence was over in about a second. Such a loop shows as
+// swaps with no pass through the frame limiter between them; from the second
+// of those in a row, swaps are held to the original 30 per second.
+//
+// A single one is not enough. The game updates and presents on different
+// threads, and when uncapped the two drift against each other: about one swap
+// in forty has no update before it and the next one has two. Holding those to
+// 33 ms each made uncapped play stutter (and, by delaying the presenting
+// thread, made the pattern ten times as frequent: a quarter of all frames).
+//
+// The fast and skip intros leave such loops unpaced only until the engine
+// timer first runs, which is the start-up logos; loading screens after that
+// keep the 30.
 
 static void PaceUnlimitedSwap(bool timed) {
   static std::atomic<uint64_t> last_swap_us{0};
+  static std::atomic<bool> last_untimed{false};
   constexpr uint64_t kPeriodMicros = 1'000'000ull / 30;
-  const bool limited = timed || REXCVAR_GET(mcla_intro) != "normal";
+  const bool untimed_loop = !timed && last_untimed.exchange(true, std::memory_order_relaxed);
+  if (timed) {
+    last_untimed.store(false, std::memory_order_relaxed);
+  }
+  const bool fast_logos = REXCVAR_GET(mcla_intro) != "normal" &&
+                          !g_engine_timer_started.load(std::memory_order_relaxed);
   const uint64_t last = last_swap_us.load(std::memory_order_relaxed);
   uint64_t now = NowMicros();
-  if (!limited && last && now - last < kPeriodMicros) {
+  if (untimed_loop && !fast_logos && last && now - last < kPeriodMicros) {
     std::this_thread::sleep_for(std::chrono::microseconds(kPeriodMicros - (now - last)));
     now = NowMicros();
   }

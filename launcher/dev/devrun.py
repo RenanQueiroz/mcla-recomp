@@ -275,8 +275,8 @@ def main():
         p.add_argument("--res", default="1")
         p.add_argument("--fps", default="0", help="frame cap, 0 = uncapped")
         p.add_argument("--fixed-dt", type=int, default=0, help="timedemo: updates of exactly 1/N s")
-        # "fast" also unpaces untimed loops (src/frame_timing.cpp, PaceUnlimitedSwap),
-        # so benchmarks run the game as the user plays it.
+        # "fast" unpaces the start-up logos (src/frame_timing.cpp, PaceUnlimitedSwap);
+        # benchmarks keep "normal" so start-up runs as the user sees it.
         p.add_argument("--intro", default="normal" if name == "bench" else "fast")
         p.add_argument("--fullscreen", action="store_true")
         p.add_argument("--record", help="record user 0's controller to this CSV")

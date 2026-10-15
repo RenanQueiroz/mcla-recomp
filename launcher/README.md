@@ -96,10 +96,14 @@ rather than adding to it: a boolean given twice adds up, and any other setting
 given twice is an error for mcla.exe's command-line parser (CLI11 rejects a
 repeated option by default).
 
-Known interaction: fully uncapped at about 130 FPS or more with the intro at
-"Normal", a swap can arrive without a pass through the frame timer, and
-mcla-recomp's intro pacing holds it to 30 FPS (a ~28 ms hitch). Capped at 60 or
-120 it does not happen; with the intro at "Fast" never.
+Fixed interaction (2026-10-14): uncapped with the intro at "Normal", about one
+frame in four took 33 ms. mcla-recomp holds loops that never reach the frame
+timer (start-up logos, loading screens) to 30 FPS, and took any single swap
+without a timer pass for one; uncapped, the game's update and presenting threads
+drift against each other and produce such swaps in normal play. The hold now
+needs two in a row (`docs\known-issues.md`, "Loading-screen pacing"). The
+"Fast" and "Skip" intros now speed up only the start-up logos, not loading
+screens later.
 
 ## Rebuilding the launcher
 
