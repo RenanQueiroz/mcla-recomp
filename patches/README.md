@@ -19,6 +19,7 @@ git apply ../../patches/rexglue-cursor-auto-hide.patch
 git apply ../../patches/rexglue-vulkan-memexport-check-order.patch
 git apply ../../patches/rexglue-vulkan-hoist-shared-memory-uploads.patch
 git apply ../../patches/rexglue-threaded-submission-vulkan.patch
+git apply ../../patches/rexglue-d3d12-placed-texture-heaps.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -218,3 +219,21 @@ Standing in free roam the frame rate is held by one of the game's own threads (b
 |---|---|---|
 | Submission thread, fence and queue ordering, draw-count split | `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
 | Taking and executing the recorded streams on another thread | `include/rex/graphics/vulkan/deferred_command_buffer.h` | Vulkan |
+
+## rexglue-d3d12-placed-texture-heaps.patch
+
+On D3D12 every texture was a committed resource, an allocation of its own: about 0.19 ms of the GPU command thread to create one and 0.08 ms to release one (Windows, RTX 5080, from CPU timers around the calls). Streaming in a new area creates hundreds of textures in a frame, and at 3x the texture cache then goes over its memory limit and evicts over a thousand at once, so the map zoom-out after the title screen had single frames of 150 to 330 ms on D3D12, where Vulkan, whose texture cache sub-allocates from 256 MB blocks with VMA, took 30 to 45 ms for the same frames. Textures are now placed resources in shared 256 MB heaps (heaps for textures that are not render targets or depth buffers, as resource heap tier 1 requires), handed out first fit with freed neighbours merged; a texture over 128 MB is still committed, as VMA does for allocations over half its block size. A texture is only destroyed once the GPU is done with it, as before, so its range goes back to the heap at once; an empty heap is released, keeping one spare. Creating a placed texture measured 8 to 11 microseconds and releasing one under 1. Setting `d3d12_texture_heaps` (default on; `false` makes the textures created from then on committed again).
+
+Measured on Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings, in the scripted city run (`launcher/dev/devrun.py`, `drive-spawn.pad`, fullscreen, uncapped), five runs a side alternating after a warm-up, median of the runs' 1% lows (worst frame):
+
+| Map zoom-out | Native, off | Native, on | 3x, off | 3x, on |
+|---|---|---|---|---|
+| Real time | 18.9 FPS (158 ms) | 53.9 FPS (44 ms) | 9.1 FPS (239 ms) | 27.3 FPS (47 ms) |
+| Timedemo (updates of exactly 1/60 s) | 10.9 FPS (223 ms) | 31.1 FPS (42 ms) | 6.9 FPS (331 ms) | 22.1 FPS (57 ms) |
+| Vulkan, for reference (real time) | | 47.9 FPS (45 ms) | | 31.1 FPS (51 ms) |
+
+Free roam and the drive from the spawn point kept their median frame (within 1%), and their 1% lows at 3x rose (the drive's from 56.8 to 63.6 FPS, real time); frame pacing at a 60 FPS cap was unchanged (99.4 to 99.6% of frames within 1 ms). In the race benchmark (`race.pad`, three runs a side) the 1% low went from 50 to 96 FPS at native and from 41 to 61 FPS at 3x, and the worst frame from 102 to 13 ms and from 61 to 20 ms, with the same median. The D3D12 debug layer reports nothing new. Built and run on Windows only; D3D12 only (the PS5 and Linux builds use Vulkan).
+
+| Change | Files | Affects |
+|---|---|---|
+| Texture heaps, placement and release | `include/rex/graphics/d3d12/texture_cache.h`, `src/graphics/d3d12/texture_cache.cpp` | D3D12 |

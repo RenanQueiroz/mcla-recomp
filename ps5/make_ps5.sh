@@ -137,6 +137,7 @@ rexglue-cursor-auto-hide.patch src/ui/window.cpp RequestAutoHiddenCursorHide
 rexglue-vulkan-memexport-check-order.patch src/graphics/vulkan/command_processor.cpp most draws export nothing
 rexglue-vulkan-hoist-shared-memory-uploads.patch src/graphics/vulkan/command_processor.cpp vulkan_hoist_shared_memory_uploads
 rexglue-threaded-submission-vulkan.patch src/graphics/vulkan/command_processor.cpp vulkan_threaded_submission
+rexglue-d3d12-placed-texture-heaps.patch src/graphics/d3d12/texture_cache.cpp d3d12_texture_heaps
 LATER
 
 # ---------------------------------------------------------------------------

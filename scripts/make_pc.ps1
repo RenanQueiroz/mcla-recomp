@@ -167,6 +167,7 @@ try {
         @{ Patch = "rexglue-vulkan-memexport-check-order.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "most draws export nothing" }
         @{ Patch = "rexglue-vulkan-hoist-shared-memory-uploads.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_hoist_shared_memory_uploads" }
         @{ Patch = "rexglue-threaded-submission-vulkan.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_threaded_submission" }
+        @{ Patch = "rexglue-d3d12-placed-texture-heaps.patch"; File = "src\graphics\d3d12\texture_cache.cpp"; Adds = "d3d12_texture_heaps" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
