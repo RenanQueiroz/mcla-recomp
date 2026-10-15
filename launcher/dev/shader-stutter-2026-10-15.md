@@ -130,3 +130,38 @@ Windows 11, RTX 5080, Ryzen 7 9800X3D, the launcher's settings.
 - **D3D12 debug layer**, a cold 3x race run: no errors, only the creation warnings that were there before, and the list of live objects at exit.
 - **Vulkan validation**, a cold 3x race run: only `ShaderOutputNotConsumed` and `vkCmdEndQuery` 01923, both there before.
 - **An early exit:** one of the 48 benchmark runs, D3D12 at 3x with the old behavior, ended 3 s into the map zoom-out with nothing in the log (no crash report, no dump). It had created no pipelines. The same configuration ran three more times without it.
+
+## Review follow-up
+
+The independent review found nothing serious in the default settings. Fixed after it:
+
+- **Vulkan, failed creations:** a pipeline whose creation failed made every later frame incomplete. With `vulkan_async_skip_incomplete_frames` that skipped presents for good, or, past the 100 ms limit, disabled the skip for the rest of the run. Such a draw is now left out without marking the frame.
+- **Occlusion queries:** a draw left out in an occlusion query counts as hidden.
+  - The first fix waited for the pending pipeline at the draw (up to 500 ms). In a cold run that held the title screen's frame for about 400 ms: one draw's pipeline was queued behind about 100 others, and the frame's other pipeline work came to only 60 ms.
+  - Now a new pipeline for such a draw is created right away on the GPU command thread, on both APIs, and the wait is kept only for a pipeline that an earlier draw queued.
+  - In the next cold D3D12 run the title frame did 31 ms of pipeline work (56 pipelines created on the GPU command thread) in a 281 ms frame. That frame is 100 to 185 ms with everything cached.
+- **Order of publication:** Vulkan publishes a pipeline as its layout, then the pipeline, then `is_placeholder` cleared, and reads it in the opposite order.
+  - D3D12 takes the root signature of every asynchronously created pipeline again at the draw.
+  - Its bindful root signatures, which the creation threads create too, are behind a lock.
+- **Submissions:** without the end-of-submission wait, submissions can end in the middle of a frame while pipelines are being created.
+- **Parallel translation:** at most as many threads as logical processors; a thread that can't be created leaves its share to the calling thread.
+- **Pipeline cache file:**
+  - the header is validated against the device, and short reads are rejected;
+  - the file is flushed to the disk before the rename;
+  - it stays marked for saving until a save succeeds;
+  - it isn't written again while its size is unchanged.
+- **The dev salt:** rebuilding the timer patch from the first version left out the SPIR-V constant, and one "cold" Vulkan run had the driver's cache warm (median creation 0.06 ms). Its numbers aren't used.
+
+One cold 3x race run each on the final code:
+
+| | Frames over 50 ms | Over 100 ms | Worst | Time in frames over 50 ms | Zoom-out 1% low | Race 1% low |
+|---|---|---|---|---|---|---|
+| D3D12 | 4 | 1 | 281 ms | 0.51 s | 26.2 FPS | 67.7 FPS |
+| Vulkan | 3 | 1 | 224 ms | 0.38 s | 24.4 FPS | 53.2 FPS |
+
+- **Warm 3x drive,** two runs a side, median frame:
+  - D3D12: 9.73 and 9.81 ms after, 9.64 and 9.60 ms before;
+  - Vulkan: 9.22 and 9.44 ms after, 9.42 and 9.55 ms before.
+  - One warm Vulkan run had a 283 ms frame in the drive with no pipeline activity logged at all.
+- **D3D12 debug layer:** no errors in three cold runs. Each has 3 to 9 `RESOURCE_BARRIER_DUPLICATE_SUBRESOURCE_TRANSITIONS` warnings on render targets: a draw that was then left out queued transitions, and the next draw queued more, in one barrier call. They appear with `async_pipeline_end_of_frame_wait` too, and in the first cold debug run, where the summary had missed them. Earlier warm runs had none.
+- **Vulkan validation,** cold: only `ShaderOutputNotConsumed` and `vkCmdEndQuery` 01923 and 07007.
