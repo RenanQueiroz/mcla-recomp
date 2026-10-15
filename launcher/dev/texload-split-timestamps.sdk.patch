@@ -1,8 +1,8 @@
 diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
-index 9dc26fb..e6bac85 100644
+index 0cb5d74..97fd3fc 100644
 --- a/src/graphics/d3d12/texture_cache.cpp
 +++ b/src/graphics/d3d12/texture_cache.cpp
-@@ -1918,6 +1918,26 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2035,6 +2035,28 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
  
    // Submit the copy buffer population commands.
  
@@ -18,7 +18,9 @@ index 9dc26fb..e6bac85 100644
 +                           " levels=" + std::to_string(level_first) + "-" +
 +                           std::to_string(level_last) +
 +                           " fmt=" + std::to_string(uint32_t(guest_format)) +
-+                           " scaled=" + std::to_string(uint32_t(texture_resolution_scaled));
++                           " scaled=" + std::to_string(uint32_t(texture_resolution_scaled)) +
++                           " direct=" + std::to_string(uint32_t(direct_load)) +
++                           " addr=" + std::to_string(texture_key.base_page << 12);
 +    TmpGtMark(command_list, tmp_info.c_str());
 +  }
 +  TmpPixMark(command_list, "<tlbar1");
@@ -29,7 +31,7 @@ index 9dc26fb..e6bac85 100644
    auto& cbuffer_pool = command_processor_.GetConstantBufferPool();
    LoadConstants load_constants;
    // 3 bits for each.
-@@ -2044,6 +2064,8 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2163,6 +2185,8 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
      }
    }
  
@@ -38,7 +40,7 @@ index 9dc26fb..e6bac85 100644
    // Update LRU caching because the texture will be used by the command list.
    d3d12_texture.MarkAsUsed();
  
-@@ -2055,7 +2077,10 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2178,7 +2202,10 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    command_processor_.PushTransitionBarrier(copy_buffer, copy_buffer_state,
                                             D3D12_RESOURCE_STATE_COPY_SOURCE);
    copy_buffer_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -49,7 +51,7 @@ index 9dc26fb..e6bac85 100644
    uint32_t texture_level_count = texture_key.mip_max_level + 1;
    D3D12_TEXTURE_COPY_LOCATION location_source, location_dest;
    location_source.pResource = copy_buffer;
-@@ -2098,6 +2123,7 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2221,6 +2248,7 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
      }
    }
  
@@ -58,17 +60,18 @@ index 9dc26fb..e6bac85 100644
  
    return true;
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index 659385e..a708498 100644
+index 6ebec6f..f5ebfed 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
-@@ -1661,6 +1661,24 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1718,6 +1718,27 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
  
    DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
  
 +  // TMPGT: what is loaded, and the steps of the load timed separately
 +  // (tlbar1: barriers before the dispatches, tldisp: the load dispatches,
 +  // tlbar2: barriers before the copy, tlcopy: the buffer to image copy, or the
-+  // compute copy of vulkan_texture_load_storage_copy, marked by scopy=1).
++  // compute copy of vulkan_texture_load_storage_copy, marked by scopy=1;
++  // direct=1: texture_load_direct, no copy).
 +  if (g_vkgt_active) {
 +    std::string tmp_info =
 +        "TLINFO bytes=" + std::to_string(host_buffer_size) +
@@ -79,14 +82,16 @@ index 659385e..a708498 100644
 +        " fmt=" + std::to_string(uint32_t(guest_format)) +
 +        " host=" + std::to_string(uint32_t(host_format.format)) +
 +        " scaled=" + std::to_string(uint32_t(texture_key.scaled_resolve)) + " scopy=" +
-+        std::to_string(uint32_t(vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED));
++        std::to_string(uint32_t(vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED)) +
++        " direct=" + std::to_string(uint32_t(direct_load)) +
++        " addr=" + std::to_string(texture_key.base_page << 12);
 +    TmpGtMark(command_buffer, tmp_info.c_str());
 +  }
 +
-   command_processor_.BindExternalComputePipeline(pipeline);
- 
-   command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, load_pipeline_layout_,
-@@ -1679,6 +1697,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   if (direct_load) {
+     // The only level and layer is overwritten: the old contents don't need to
+     // be kept, only the previous accesses completed. Not skipped if the
+@@ -1756,6 +1777,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
        (texture_resolution_scale_y << 7);
  
    uint32_t guest_x_blocks_per_group_log2 = load_shader_info.GetGuestXBlocksPerGroupLog2();
@@ -99,7 +104,7 @@ index 659385e..a708498 100644
    for (uint32_t loop_level = loop_level_first; loop_level <= loop_level_last; ++loop_level) {
      bool is_base = loop_level == 0;
      uint32_t level = (level_packed == 0) ? 0 : loop_level;
-@@ -1870,6 +1894,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1947,6 +1974,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
      }
    }
  
@@ -107,8 +112,8 @@ index 659385e..a708498 100644
 +
    vulkan_texture.MarkAsUsed();
  
-   // vulkan_texture_load_storage_copy: write the image in a compute shader
-@@ -1930,7 +1956,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   if (direct_load) {
+@@ -2011,7 +2040,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
            texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
            texture_dst_access_mask, VK_IMAGE_LAYOUT_UNDEFINED, texture_new_layout,
            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
@@ -121,7 +126,7 @@ index 659385e..a708498 100644
  
        command_processor_.BindExternalComputePipeline(storage_copy_pipeline);
        VkDescriptorSet storage_copy_descriptor_sets[kStorageCopyDescriptorSetCount];
-@@ -1952,6 +1983,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2033,6 +2067,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                          sizeof(storage_copy_constants), &storage_copy_constants);
        command_buffer.CmdVkDispatch((storage_copy_constants.width + 31) / 32,
                                     (storage_copy_constants.height + 7) / 8, array_size);
@@ -129,7 +134,7 @@ index 659385e..a708498 100644
        return true;
      }
    }
-@@ -1978,7 +2010,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2059,7 +2094,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
          texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
          texture_dst_access_mask, texture_old_layout, texture_new_layout);
    }
@@ -142,7 +147,7 @@ index 659385e..a708498 100644
    VkBufferImageCopy* copy_regions = command_buffer.CmdCopyBufferToImageEmplace(
        scratch_buffer, vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
        level_last - level_first + 1);
-@@ -2020,6 +2057,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -2101,6 +2141,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
          std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1));
      copy_region.imageExtent.depth = std::max(depth >> level, UINT32_C(1));
    }

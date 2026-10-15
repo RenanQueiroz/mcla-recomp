@@ -207,6 +207,17 @@ during a build:
   `MCLA_XF_EVERY`-th frame to `MCLA_XF_FILE`; `xf-classify.py <log>` sorts
   the transferred samples by what triggered them. Applies on top of
   `rexglue-clear-rectangle-draws.patch`.
+- `resolves-2026-10-15.md`: what the resolves and the texture reloads at 3x
+  are, the direct texture loads that halved the reloads' cost
+  (`rexglue-texture-load-direct.patch`) and their benchmark, and the options
+  left.
+- `resolve-split-timestamps.sdk.patch` (SDK, D3D12 and Vulkan, `TMPR4`): on top
+  of the two `gpu-timestamps` patches and `texload-split-timestamps.sdk.patch`,
+  labels each resolve (destination, size, formats, EDRAM range, MSAA, sample)
+  and times its steps (the dump into the EDRAM buffer, the resolve shader, the
+  clear); `resolve-split.py <dir>` sums them per frame and per kind, with the
+  texture loads by address. `texload-split-timestamps.sdk.patch` now also
+  marks loads done by `texture_load_direct` (`direct=1`).
 
 ## Scripted controller input (unattended runs)
 
