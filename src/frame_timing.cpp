@@ -338,9 +338,66 @@ void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
 // update still advances once, as before. A movie that falls behind (below 30
 // FPS) is not caught up, as on the console. The start-up logos are left alone:
 // the fast intro is meant to run them as fast as possible.
+//
+// The in-game HUD is two movies: HUDMAPMOVIE and the gauge movie, which the
+// HUD code creates itself, so it is not among the UI manager's screens. The
+// game sets the gauges' values every update and the movies' own scripts draw
+// them as they advance, in the same step that scrolls the song ticker; paced,
+// the tachometer needle moves 30 times a second. So the HUD has its own
+// setting, off by default: smooth gauges, with the ticker and the LOADING
+// badge running at the frame rate as before.
 REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
-                    "Advance the UI's Flash movies (menus, HUD animations) 30 times a second, as "
-                    "on the console, instead of once per rendered frame");
+                    "Advance the UI's menus, pop-ups and map screens 30 times a second, as on the "
+                    "console, instead of once per rendered frame");
+REXCVAR_DEFINE_BOOL(mcla_ui_timing_hud, false, "MCLA",
+                    "Also advance the in-game HUD 30 times a second: the song ticker and the "
+                    "LOADING badge at the console's pace, but the gauges move 30 times a second");
+
+namespace {
+// The UI manager and its movie map (atMap name -> movie**: buckets at +60,
+// count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
+// context). From LARecomp's notes, used with its author's permission.
+constexpr uint32_t kUiManagerPtr = 0x8286D804;
+
+uint32_t ReadGuestU32(uint32_t address) {
+  if (address < 0x10000) {
+    return 0;
+  }
+  const uint8_t* p = rex::Runtime::instance()->virtual_membase() + address;
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+
+bool GuestStringIs(uint32_t address, const char* text) {
+  if (address < 0x10000) {
+    return false;
+  }
+  const char* s = reinterpret_cast<const char*>(rex::Runtime::instance()->virtual_membase() +
+                                                address);
+  return std::strncmp(s, text, std::strlen(text) + 1) == 0;
+}
+
+// Whether a player context belongs to one of the UI manager's screens other
+// than the HUD map.
+bool IsUiScreen(uint32_t context) {
+  const uint32_t manager = ReadGuestU32(kUiManagerPtr);
+  if (!manager) {
+    return false;
+  }
+  const uint32_t buckets = ReadGuestU32(manager + 60);
+  const uint32_t count = ReadGuestU32(manager + 64) >> 16;
+  for (uint32_t i = 0; buckets && i < count && i < 256; i++) {
+    uint32_t node = ReadGuestU32(buckets + 4 * i);
+    for (int guard = 0; node && guard < 256; guard++, node = ReadGuestU32(node + 12)) {
+      const uint32_t holder = ReadGuestU32(node + 8);
+      const uint32_t movie = holder ? ReadGuestU32(holder) : 0;
+      if (movie && ReadGuestU32(movie + 56) == context) {
+        return !GuestStringIs(ReadGuestU32(node), "HUDMAPMOVIE");
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
 
 bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
@@ -352,6 +409,8 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   struct Schedule {
     uint32_t context;
     uint64_t next_us;
+    uint64_t checked_us;  // when IsUiScreen was last asked: movies come and go
+    bool screen;
   };
   static std::mutex mutex;
   static std::array<Schedule, 32> schedules{};
@@ -368,7 +427,14 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   }
   if (!schedule) {
     schedule = &schedules[replace++ % schedules.size()];
-    *schedule = {context, 0};
+    *schedule = {context, 0, 0, false};
+  }
+  if (now - schedule->checked_us > 1'000'000) {
+    schedule->checked_us = now;
+    schedule->screen = IsUiScreen(context);
+  }
+  if (!schedule->screen && !REXCVAR_GET(mcla_ui_timing_hud)) {
+    return false;
   }
   if (schedule->next_us && now + kEarlyMicros < schedule->next_us) {
     return true;
