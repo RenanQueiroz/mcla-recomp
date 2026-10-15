@@ -36,7 +36,11 @@ kinds of changes on top of upstream's `main`:
     while new pipelines compile, with no stand-in pipelines on Vulkan (cold
     sessions: worst frame 1.9 s to 0.25 s on Vulkan, 0.4 s to 0.19 s on
     D3D12), the Vulkan shader storage translated in parallel at start-up,
-    and an optional Vulkan pipeline cache file.
+    and an optional Vulkan pipeline cache file, and resolves that read the
+    render target directly instead of dumping it into the EDRAM buffer first
+    (7 to 12% shorter frames at 3x in the city on both APIs, 5% in a race,
+    and the right samples for 4x MSAA depth, which the old path partly
+    misread).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in

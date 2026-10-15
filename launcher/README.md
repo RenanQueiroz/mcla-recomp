@@ -212,12 +212,14 @@ during a build:
   (`rexglue-texture-load-direct.patch`) and their benchmark, and the options
   left.
 - `resolve-split-timestamps.sdk.patch` (SDK, D3D12 and Vulkan, `TMPR4`): on top
-  of the two `gpu-timestamps` patches and `texload-split-timestamps.sdk.patch`,
-  labels each resolve (destination, size, formats, EDRAM range, MSAA, sample)
-  and times its steps (the dump into the EDRAM buffer, the resolve shader, the
-  clear); `resolve-split.py <dir>` sums them per frame and per kind, with the
-  texture loads by address. `texload-split-timestamps.sdk.patch` now also
-  marks loads done by `texture_load_direct` (`direct=1`).
+  of `rexglue-direct-resolve.patch` and the two `gpu-timestamps` patches (and
+  `texload-split-timestamps.sdk.patch` for the loads), labels each resolve
+  (destination, size, formats, EDRAM range, MSAA, sample) and times its steps
+  (the dump into the EDRAM buffer, the resolve shader, the direct resolve
+  shader `rdirect`, the clear); `resolve-split.py <dir>` sums them per frame
+  and per kind, with the texture loads by address.
+  `texload-split-timestamps.sdk.patch` now also marks loads done by
+  `texture_load_direct` (`direct=1`).
 - `shader-stutter-2026-10-15.md`: the stalls while new pipelines compile
   (first sessions, new places, after driver updates), the patches that
   removed them (`rexglue-async-pipelines-no-frame-wait.patch`,
@@ -230,6 +232,17 @@ during a build:
   every pipeline created and every frame that left draws out, waited or did
   pipeline work on the GPU command thread. Applies on top of the three patches.
   `devrun.py --cache-root <folder>` runs with a shader storage of its own.
+- `direct-resolve-2026-10-15.md`: resolves that read the render target
+  directly instead of dumping it into the EDRAM buffer
+  (`rexglue-direct-resolve.patch`): the byte-for-byte comparison with the
+  EDRAM buffer path, the 4x MSAA depth samples the old path misread, GPU
+  time per resolve, the benchmark and the checks.
+- `direct-resolve-validate.sdk.patch` (SDK, D3D12 and Vulkan, `TMPDV`): on top
+  of `rexglue-direct-resolve.patch`, a `direct_resolve_validate` setting: one
+  direct resolve a frame, each in turn, is also done through the EDRAM buffer
+  into the same destination, and both results are read back and compared byte
+  for byte; differences, and every 50 a summary per kind (copy shader, MSAA,
+  formats, samples, conversion), go to the log.
 
 ## Scripted controller input (unattended runs)
 
