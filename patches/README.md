@@ -17,6 +17,7 @@ git apply ../../patches/rexglue-shared-memory-fast-path-hot-pages.patch
 git apply ../../patches/rexglue-hot-pages-watched-ranges.patch
 git apply ../../patches/rexglue-cursor-auto-hide.patch
 git apply ../../patches/rexglue-vulkan-memexport-check-order.patch
+git apply ../../patches/rexglue-vulkan-hoist-shared-memory-uploads.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -172,3 +173,26 @@ Vulkan's `IssueDraw` asked whether memexport readback is on (`IsReadbackMemexpor
 | Change | Files | Affects |
 |---|---|---|
 | Ranges tested before the setting | `src/graphics/vulkan/command_processor.cpp` | Vulkan (PC, PS5) |
+
+## rexglue-vulkan-hoist-shared-memory-uploads.patch
+
+On Vulkan, copies may not be recorded inside a render pass. Every upload into the shared memory buffer (vertex and index data the CPU rewrote; with hot pages, `--shared_memory_hot_page_faults`, the bytes a draw reads from a hot page) therefore ended the render pass of the draws around it, copied between two barriers and began the render pass again. In MCLA's city that is about 1,650 uploads and 800 render pass begins a frame against about 31 render target changes, measured with GPU timestamps (`launcher/dev/gpu-timestamps-vulkan.sdk.patch`); D3D12 has no render passes and records the same copies in place. An upload of bytes that no draw in the current render pass has read yet is now recorded before the render pass instead, after the barriers that precede it, between one barrier from reads to the copy and one back, which all the uploads hoisted before the same render pass share. Each draw marks the shared memory its vertex fetches, guest indices and memory exports use, a bit per page for the render pass; an upload touching a marked page (or uploaded once already before this render pass) ends the render pass as before. Setting `vulkan_hoist_shared_memory_uploads` (default on).
+
+This is ForzaHorizon1-ReImagined's patch 0036 (Dyotson, MIT licence, <https://github.com/Dyotson/ForzaHorizon1-ReImagined>, `patches/rexglue-sdk/0036-vulkan-hoist-shared-memory-uploads-before-render-pass.patch`), ported to v0.10.0 and extended from page uploads to the byte uploads of hot pages, which are most of MCLA's.
+
+Measured on Windows, Vulkan, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings, in the scripted timedemo (`launcher/dev/devrun.py`, updates of exactly 1/60 s, uncapped, fullscreen), four runs a side alternating after a warm-up, median frame time:
+
+| Segment | Native, off | Native, on | 3x, off | 3x, on |
+|---|---|---|---|---|
+| Free roam, standing at the spawn point | 9.39 ms | 6.83 ms (-27%) | 18.89 ms | 15.36 ms (-19%) |
+| Drive from the spawn point | 8.57 ms | 7.28 ms (-15%) | 18.40 ms | 15.42 ms (-16%) |
+| Map zoom-out (loading) | 7.07 ms | 6.99 ms | 16.15 ms | 14.03 ms |
+
+Free roam at native resolution now matches D3D12 (6.8 ms). Validation (`--vulkan_validation_enabled=true`) shows only the messages it shows without this patch; screenshots at 3x with it on and off show the same picture. Built and run on Windows only; on the PS5 (Vulkan, with hot pages) the same render pass breaks happen.
+
+| Change | Files | Affects |
+|---|---|---|
+| Hoist point at each guest render pass, hoisted command stream | `include/rex/graphics/vulkan/deferred_command_buffer.h`, `src/graphics/vulkan/deferred_command_buffer.cpp` | Vulkan |
+| Pages read in the render pass, hoisting decision | `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
+| Page and byte uploads recorded before the render pass | `include/rex/graphics/vulkan/shared_memory.h`, `src/graphics/vulkan/shared_memory.cpp` | Vulkan |
+| The guest index range of the last draw | `include/rex/graphics/primitive_processor.h`, `src/graphics/primitive_processor.cpp` | all (read by Vulkan only) |

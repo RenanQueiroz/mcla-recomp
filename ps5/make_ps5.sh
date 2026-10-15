@@ -135,6 +135,7 @@ rexglue-shared-memory-fast-path-hot-pages.patch src/graphics/shared_memory.cpp s
 rexglue-hot-pages-watched-ranges.patch src/graphics/shared_memory.cpp Watching wins
 rexglue-cursor-auto-hide.patch src/ui/window.cpp RequestAutoHiddenCursorHide
 rexglue-vulkan-memexport-check-order.patch src/graphics/vulkan/command_processor.cpp most draws export nothing
+rexglue-vulkan-hoist-shared-memory-uploads.patch src/graphics/vulkan/command_processor.cpp vulkan_hoist_shared_memory_uploads
 LATER
 
 # ---------------------------------------------------------------------------

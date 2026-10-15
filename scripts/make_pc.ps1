@@ -165,6 +165,7 @@ try {
         @{ Patch = "rexglue-hot-pages-watched-ranges.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "Watching wins" }
         @{ Patch = "rexglue-cursor-auto-hide.patch"; File = "src\ui\window.cpp"; Adds = "RequestAutoHiddenCursorHide" }
         @{ Patch = "rexglue-vulkan-memexport-check-order.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "most draws export nothing" }
+        @{ Patch = "rexglue-vulkan-hoist-shared-memory-uploads.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_hoist_shared_memory_uploads" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
