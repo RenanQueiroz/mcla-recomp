@@ -16,6 +16,9 @@
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
 //   state   log <text>   include <script>   quit
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
+//   cars (race cars' positions)   watch <every> | watch stop (log them)
+//   screens (the UI manager's movies)
+//   follow <route> [speed=1] | follow stop | follow status (drive a route)
 //
 // Conditions: left_title (Start accepted on the title screen), loading (the
 // map zoom-out), roam (the player is in the city), frames N (engine frames
@@ -635,6 +638,10 @@ constexpr uint32_t kLeftTitle = 0x82836A28;
 constexpr uint32_t kGameState = 0x8288D000;
 // - 4 until the city is ready to play, then 0.
 constexpr uint32_t kCityPending = 0x8286CF54;
+// Seconds of game time since the current mode was loaded (a float): it
+// starts again from 0 when a race loads (found the same way; its start is
+// about 9.3 s on this timer after the race has loaded).
+constexpr uint32_t kModeTimer = 0x827D7510;
 
 uint32_t ReadWord(uint32_t address) {
   uint32_t value = 0xFFFFFFFF;
@@ -659,6 +666,356 @@ bool PlayerPosition(float xyz[3]) {
     std::memcpy(&xyz[i], &raw, 4);
   }
   return true;
+}
+
+bool ReadFloat(uint32_t address, float& value) {
+  uint32_t raw;
+  if (!ReadU32(address, raw)) {
+    return false;
+  }
+  std::memcpy(&value, &raw, 4);
+  return true;
+}
+
+// Where the player's car points, on the ground (x, z), unit length: the
+// matrix's third row (+0x290) points backwards (checked by driving).
+bool PlayerForward(float xz[2]) {
+  uint32_t vehicle = 0;
+  float x, z;
+  if (!ReadU32(kPlayerVehicle, vehicle) || !vehicle ||
+      !ReadFloat(vehicle + kVehiclePositionOffset - 0x10, x) ||
+      !ReadFloat(vehicle + kVehiclePositionOffset - 0x08, z)) {
+    return false;
+  }
+  const float length = std::sqrt(x * x + z * z);
+  if (!(length > 0.1f)) {
+    return false;
+  }
+  xz[0] = -x / length;
+  xz[1] = -z / length;
+  return true;
+}
+
+// --- Race cars ---
+
+// The cars in a race are objects of the player's car's class (the same
+// vtable): the player and the AI opponents; traffic is another class. An
+// opponent's +0x2A0 keeps its place on the starting grid; its live matrix is
+// at +0x440, with the position at +0x470 (found by diffing an opponent's
+// object while it raced). The player's +0x470 is live too.
+constexpr uint32_t kCarLivePositionOffset = 0x470;
+
+std::vector<uint32_t> FindCars() {
+  std::vector<uint32_t> cars;
+  uint32_t player = 0, vtable = 0;
+  if (!ReadU32(kPlayerVehicle, player) || !player || !ReadU32(player, vtable)) {
+    return cars;
+  }
+  auto* runtime = rex::Runtime::instance();
+  if (!runtime) {
+    return cars;
+  }
+#if defined(_WIN32)
+  // The 512 MB heap the player's car is in, region by region.
+  const uint32_t low = player & 0xE0000000u;
+  const uint64_t high = uint64_t(low) + 0x20000000u;
+  uint8_t* const base = runtime->virtual_membase();
+  const uint8_t want[4] = {uint8_t(vtable >> 24), uint8_t(vtable >> 16), uint8_t(vtable >> 8),
+                           uint8_t(vtable)};
+  uint64_t address = low;
+  while (address < high) {
+    MEMORY_BASIC_INFORMATION info;
+    if (!VirtualQuery(base + address, &info, sizeof info)) {
+      break;
+    }
+    const uint64_t region_end = std::min<uint64_t>(
+        high, uint64_t(static_cast<uint8_t*>(info.BaseAddress) - base) + info.RegionSize);
+    if (info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+      for (uint64_t a = (address + 15) & ~uint64_t(15); a + 4 <= region_end; a += 16) {
+        if (std::memcmp(base + a, want, 4) == 0) {
+          cars.push_back(static_cast<uint32_t>(a));
+        }
+      }
+    }
+    address = region_end;
+  }
+#endif
+  // The player first.
+  std::stable_partition(cars.begin(), cars.end(), [&](uint32_t car) { return car == player; });
+  return cars;
+}
+
+// --- Route following ---
+
+// follow <route> drives the player's car along a route, a file of "x,z,speed"
+// lines (metres on the ground, m/s) made by launcher/dev/route.py: the stick
+// steers at a point ahead on the route (pure pursuit), the triggers hold the
+// route's speed, and a car that stops against something backs off for a
+// second. When the whole world stands still once the car has moved (a
+// tutorial pop-up the first time something happens, "CONTINUE (A)"), A is
+// pressed; in a race A is the handbrake, so a stray press does no harm. It
+// runs in the frame hook, on the game's update thread, so with mcla_fixed_dt
+// the same game state gives the same inputs.
+struct Route {
+  std::vector<std::array<float, 2>> points;
+  std::vector<float> speed;
+};
+
+struct Follower {
+  std::shared_ptr<Route> route;
+  double speed_scale = 1.0;
+  size_t index = 0;
+  bool have_prev = false;
+  float prev[2] = {};
+  double prev_dt = 0;
+  double speed = 0;  // m/s over the last update
+  bool moved = false;
+  int slow_frames = 0;
+  int reverse_frames = 0;
+  int stuck = 0;
+  int frozen_frames = 0;
+  int press_a_frames = 0;
+  int popups = 0;
+  double max_offset = 0;
+  uint64_t frames = 0;
+};
+
+std::mutex g_follow_mutex;
+Follower g_follow;
+std::atomic<bool> g_following{false};
+
+std::shared_ptr<Route> LoadRoute(const std::string& path, std::string& error) {
+  std::ifstream in(path);
+  if (!in) {
+    error = "cannot read " + path;
+    return nullptr;
+  }
+  auto route = std::make_shared<Route>();
+  for (std::string line; std::getline(in, line);) {
+    if (line.empty() || line[0] == '#' || !(std::isdigit(uint8_t(line[0])) || line[0] == '-')) {
+      continue;
+    }
+    for (char& c : line) {
+      if (c == ',') {
+        c = ' ';
+      }
+    }
+    std::istringstream fields(line);
+    float x, z, speed;
+    fields >> x >> z >> speed;
+    if (fields.fail()) {
+      error = "bad line: " + line;
+      return nullptr;
+    }
+    route->points.push_back({x, z});
+    route->speed.push_back(speed);
+  }
+  if (route->points.size() < 2) {
+    error = "no route in " + path;
+    return nullptr;
+  }
+  return route;
+}
+
+std::string FollowSummary(const Follower& f) {
+  char text[160];
+  std::snprintf(text, sizeof text,
+                "frames=%llu point=%zu/%zu max_offset=%.1f m stuck=%d popups=%d speed=%.1f m/s",
+                static_cast<unsigned long long>(f.frames), f.index,
+                f.route ? f.route->points.size() : size_t(0), f.max_offset, f.stuck, f.popups,
+                f.speed);
+  return text;
+}
+
+void StopFollowing(const char* why) {
+  std::lock_guard lock(g_follow_mutex);
+  if (g_follow.route) {
+    REXLOG_INFO("dev pad: follow {}: {}", why, FollowSummary(g_follow));
+  }
+  g_follow.route.reset();
+  g_following = false;
+  SetPad({});
+}
+
+void FollowFrame(double dt) {
+  std::unique_lock lock(g_follow_mutex);
+  Follower& f = g_follow;
+  if (!f.route) {
+    return;
+  }
+  const auto& points = f.route->points;
+  float position[3], forward[2];
+  if (!PlayerPosition(position) || !PlayerForward(forward)) {
+    return;
+  }
+  const double px = position[0], pz = position[2];
+  bool frozen = false;
+  if (f.have_prev && f.prev_dt > 0) {
+    const double moved = std::hypot(px - f.prev[0], pz - f.prev[1]);
+    frozen = moved == 0;
+    f.speed = moved / f.prev_dt;
+    if (f.speed > 120) {
+      f.speed = 0;  // put somewhere else: the race (re)starting, a reset
+      f.slow_frames = 0;
+    }
+  }
+  f.prev[0] = float(px);
+  f.prev[1] = float(pz);
+  f.prev_dt = dt;
+  f.have_prev = true;
+  f.frames++;
+  f.moved |= f.speed > 5;
+  f.frozen_frames = frozen && f.moved ? f.frozen_frames + 1 : 0;
+
+  // The nearest point, looking only ahead (100 m), so a route that comes
+  // back past itself is not cut short.
+  auto distance = [&](size_t i) { return std::hypot(points[i][0] - px, points[i][1] - pz); };
+  auto step = [&](size_t i) {
+    return std::hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]);
+  };
+  double nearest = distance(f.index);
+  double along = 0;
+  for (size_t i = f.index; i + 1 < points.size() && along < 100; i++) {
+    along += step(i);
+    if (const double d = distance(i + 1); d < nearest) {
+      nearest = d;
+      f.index = i + 1;
+    }
+  }
+  f.max_offset = std::max(f.max_offset, nearest);
+  if (f.index + 1 >= points.size()) {
+    lock.unlock();
+    StopFollowing("reached the end of the route");
+    return;
+  }
+
+  // Steer at the point a speed-dependent distance ahead.
+  const double look = std::clamp(6.0 + 0.6 * f.speed, 8.0, 40.0);
+  size_t target = f.index;
+  along = 0;
+  while (target + 1 < points.size() && along < look) {
+    along += step(target);
+    target++;
+  }
+  const double tx = points[target][0] - px, tz = points[target][1] - pz;
+  // Positive is to the right (stick right turns this way).
+  const double angle =
+      std::atan2(forward[0] * tz - forward[1] * tx, forward[0] * tx + forward[1] * tz);
+  double steer = std::clamp(2.5 * angle, -1.0, 1.0);
+
+  // The slowest route speed over the next 1.5 s (at least 30 m).
+  double wanted = 1e9;
+  along = 0;
+  for (size_t i = f.index; i + 1 < points.size() && along < std::max(30.0, 1.5 * f.speed); i++) {
+    wanted = std::min<double>(wanted, f.route->speed[i]);
+    along += step(i);
+  }
+  wanted *= f.speed_scale;
+
+  PadValues pad;
+  constexpr uint16_t kButtonA = 0x1000;
+  if (f.frozen_frames >= 15) {
+    f.frozen_frames = 0;
+    f.press_a_frames = 6;
+    f.popups++;
+  }
+  if (f.press_a_frames > 0) {
+    f.press_a_frames--;
+    pad.buttons = kButtonA;
+  } else if (f.reverse_frames > 0) {
+    f.reverse_frames--;
+    pad.lt = 255;
+    steer = -steer;
+  } else if (std::abs(angle) > 0.8 && f.speed > 12) {
+    pad.lt = 200;  // well off line: slow down to turn
+  } else if (f.speed > wanted + 6) {
+    pad.lt = 255;  // slower ahead
+  } else if (f.speed < wanted + 2) {
+    pad.rt = 255;
+  }
+  // Stopped against something with the throttle open: back off.
+  f.slow_frames = pad.rt && f.moved && !frozen && f.speed < 1.5 ? f.slow_frames + 1 : 0;
+  if (f.slow_frames > 60) {
+    f.slow_frames = 0;
+    f.reverse_frames = 60;
+    f.stuck++;
+  }
+  pad.lx = static_cast<int16_t>(steer * 32767.0);
+  SetPad(pad);
+}
+
+// --- Watching the race cars ---
+
+// watch <every> logs every race car's position each <every> updates of the
+// mode timer, on the game's update thread, so runs can be compared at the same
+// game time whatever frame a script's command lands on.
+std::mutex g_watch_mutex;
+std::vector<uint32_t> g_watch_cars;
+int g_watch_every = 0;
+int64_t g_watch_last = -1;
+std::atomic<bool> g_watching{false};
+
+void WatchFrame(uint64_t frame) {
+  std::lock_guard lock(g_watch_mutex);
+  float timer;
+  if (!g_watch_every || !ReadFloat(kModeTimer, timer)) {
+    return;
+  }
+  const int32_t fixed = REXCVAR_GET(mcla_fixed_dt);
+  const int64_t tick = std::llround(double(timer) * (fixed > 0 ? fixed : 60));
+  if (tick == g_watch_last || tick % g_watch_every != 0) {
+    return;
+  }
+  g_watch_last = tick;
+  std::string line = "dev pad: watch tick=" + std::to_string(tick) +
+                     " frame=" + std::to_string(frame);
+  for (const uint32_t car : g_watch_cars) {
+    float xyz[3] = {};
+    for (int i = 0; i < 3; i++) {
+      ReadFloat(car + kCarLivePositionOffset + 4 * i, xyz[i]);
+    }
+    char text[64];
+    std::snprintf(text, sizeof text, " | %.3f %.3f %.3f", xyz[0], xyz[1], xyz[2]);
+    line += text;
+  }
+  REXLOG_INFO("{}", line);
+}
+
+// --- UI screens ---
+
+// The UI manager's movies by name (atMap name -> movie**: buckets at +60,
+// count in the high half of +64; node: +0 name, +8 movie**, +12 next). From
+// LARecomp's notes, used with its author's permission (as in frame_timing.cpp).
+constexpr uint32_t kUiManagerPtr = 0x8286D804;
+
+std::vector<std::string> UiScreens() {
+  std::vector<std::string> names;
+  const uint32_t manager = ReadWord(kUiManagerPtr);
+  if (manager == 0 || manager == 0xFFFFFFFF) {
+    return names;
+  }
+  const uint32_t buckets = ReadWord(manager + 60);
+  const uint32_t count = ReadWord(manager + 64) >> 16;
+  for (uint32_t i = 0; buckets && i < count && i < 256; i++) {
+    uint32_t node = ReadWord(buckets + 4 * i);
+    for (int guard = 0; node && node != 0xFFFFFFFF && guard < 256;
+         guard++, node = ReadWord(node + 12)) {
+      const uint32_t name = ReadWord(node);
+      const uint8_t* text = name ? GuestPointer(name, 1) : nullptr;
+      if (!text) {
+        continue;
+      }
+      std::string s;
+      for (; s.size() < 64; text++) {
+        if (!*text) {
+          break;
+        }
+        s += char(*text);
+      }
+      names.push_back(s);
+    }
+  }
+  return names;
 }
 
 // --- Commands ---
@@ -828,6 +1185,14 @@ void RequestQuit() {
 }
 
 std::string RunScriptFile(const std::string& path);
+
+// Directory of the script being run, for relative includes and routes.
+thread_local std::string g_script_dir;
+
+std::string ScriptRelative(const std::string& name) {
+  const bool absolute = name.size() > 1 && (name[1] == ':' || name[0] == '\\' || name[0] == '/');
+  return !g_script_dir.empty() && !absolute ? g_script_dir + "\\" + name : name;
+}
 
 // Runs one command; returns the reply ("ok ..." or "err ...").
 std::string Execute(const std::string& line) {
@@ -1151,6 +1516,75 @@ std::string Execute(const std::string& line) {
     }
     return "err record start <file> | record stop";
   }
+  if (cmd == "cars") {
+    // Every race car: address and live position; the player first.
+    const auto cars = FindCars();
+    std::string reply = "ok frame=" + std::to_string(g_frame.load()) + " cars=" +
+                        std::to_string(cars.size());
+    for (const uint32_t car : cars) {
+      float xyz[3] = {};
+      for (int i = 0; i < 3; i++) {
+        ReadFloat(car + kCarLivePositionOffset + 4 * i, xyz[i]);
+      }
+      char text[96];
+      std::snprintf(text, sizeof text, " | %08X %.2f %.2f %.2f", car, xyz[0], xyz[1], xyz[2]);
+      reply += text;
+    }
+    return reply;
+  }
+  if (cmd == "watch") {
+    // watch <every updates> | watch stop
+    double every = 0;
+    if (arg(1) != "stop" && (!ParseNumber(arg(1), every) || every < 1)) {
+      return "err watch <every updates> | watch stop";
+    }
+    std::lock_guard lock(g_watch_mutex);
+    g_watch_cars = arg(1) == "stop" ? std::vector<uint32_t>{} : FindCars();
+    g_watch_every = static_cast<int>(every);
+    g_watch_last = -1;
+    g_watching = g_watch_every > 0;
+    return "ok cars=" + std::to_string(g_watch_cars.size());
+  }
+  if (cmd == "screens") {
+    std::string reply = "ok";
+    for (const auto& name : UiScreens()) {
+      reply += " " + name;
+    }
+    return reply;
+  }
+  if (cmd == "follow") {
+    // follow <route> [speed=1] | follow stop | follow status
+    if (arg(1) == "stop" || arg(1) == "status") {
+      std::string summary;
+      {
+        std::lock_guard lock(g_follow_mutex);
+        summary = g_follow.route ? FollowSummary(g_follow) : "not following";
+      }
+      if (arg(1) == "stop") {
+        StopFollowing("stopped");
+      }
+      return "ok " + summary;
+    }
+    double scale = 1.0;
+    size_t last = args.size() - 1;
+    if (args.size() > 2 && args[last].rfind("speed=", 0) == 0) {
+      if (!ParseNumber(args[last].substr(6), scale)) {
+        return "err speed";
+      }
+      last--;
+    }
+    std::string error;
+    auto route = LoadRoute(ScriptRelative(rest(1, last)), error);
+    if (!route) {
+      return "err " + error;
+    }
+    std::lock_guard lock(g_follow_mutex);
+    g_follow = {};
+    g_follow.route = route;
+    g_follow.speed_scale = scale;
+    g_following = true;
+    return "ok " + std::to_string(route->points.size()) + " points";
+  }
   if (cmd == "quit") {
     RequestQuit();
     return "ok";
@@ -1295,15 +1729,8 @@ class ScriptPad final : public rex::input::InputDriver {
 
 // --- Command sources ---
 
-// Directory of the script being run, for relative includes.
-thread_local std::string g_script_dir;
-
 std::string RunScriptFile(const std::string& name) {
-  std::string path = name;
-  const bool absolute = name.size() > 1 && (name[1] == ':' || name[0] == '\\' || name[0] == '/');
-  if (!g_script_dir.empty() && !absolute) {
-    path = g_script_dir + "\\" + name;
-  }
+  const std::string path = ScriptRelative(name);
   std::ifstream in(path);
   if (!in) {
     return "err cannot read " + path;
@@ -1459,6 +1886,13 @@ void MclaDevPadFrame(uint64_t& ticks) {
   g_frame_cv.notify_all();
   if (g_playing.load(std::memory_order_relaxed)) {
     PlayFrame(frame);
+  }
+  if (g_following.load(std::memory_order_relaxed)) {
+    FollowFrame(static_cast<double>(ticks) /
+                static_cast<double>(rex::chrono::Clock::guest_tick_frequency()));
+  }
+  if (g_watching.load(std::memory_order_relaxed)) {
+    WatchFrame(frame);
   }
   RecordFrame(frame);
 }

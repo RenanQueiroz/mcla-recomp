@@ -6,6 +6,7 @@ Every run plays on a scratch copy of the save data, never on the real one:
                                pristine snapshot under %LOCALAPPDATA%\\mcla-dev
   devrun.py run --script scripts\\boot-to-roam.pad [--backend vulkan] [--res 3]
   devrun.py bench --script scripts\\boot-to-roam.pad --configs d3d12:1,vulkan:1 --runs 3
+  devrun.py bench --script scripts\\race.pad --configs d3d12:1,d3d12:3 --runs 5 --fixed-dt 60
   devrun.py analyze <run folder or frames.csv>
   devrun.py record <drive.csv> [--fps 120] [--fullscreen]
                                play on the save copy with your own controller;
@@ -21,6 +22,7 @@ to be byte-identical to before the run.
 import argparse
 import ctypes
 import hashlib
+import math
 import os
 import shutil
 import statistics
@@ -208,19 +210,55 @@ def analyze(path, quiet=False):
     return result
 
 
-def track(out, mark="drive"):
-    """Positions after a mark in a run's pad.csv: {frames since the mark: (x, y, z)}."""
+def track(out, marks=("drive", "race")):
+    """Positions after the first of these marks in a run's pad.csv:
+    {frames since the mark: (x, y, z)}."""
     path = Path(out) / "pad.csv"
     if not path.exists():
         return {}
     start, points = None, {}
     for line in path.read_text(encoding="utf-8").splitlines():
         f = line.split(",")
-        if f[0] == "mark" and f[2] == mark:
+        if f[0] == "mark" and f[2] in marks and start is None:
             start = int(f[1])
         elif f[0] == "pos" and start is not None:
             points[int(f[1]) - start] = tuple(map(float, f[2:5]))
     return points
+
+
+def watch(out):
+    """The "watch" lines in a run's log: {mode timer tick: [(x, y, z) per car]},
+    the player first, then the opponents in the order they were made."""
+    log = Path(out) / "game.log"
+    result = {}
+    if not log.exists():
+        return result
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "dev pad: watch tick=" not in line:
+            continue
+        head, *parts = line.split("|")
+        tick = int(head.split("tick=")[1].split()[0])
+        result[tick] = [tuple(map(float, p.split())) for p in parts]
+    return result
+
+
+def watch_report(run, reference, fps=60):
+    """Where a run's cars first left the reference run's (more than 1 cm; car 0
+    is the player) and the farthest any car was from it at a few points."""
+    common = sorted(t for t in set(run) & set(reference) if len(run[t]) == len(reference[t]))
+    if not common:
+        return "no common watch points"
+    first = None
+    for t in common:
+        devs = [math.dist(p, q) for p, q in zip(run[t], reference[t])]
+        if max(devs) > 0.01 and first is None:
+            car = devs.index(max(devs))
+            first = f"first apart at {t / fps:.0f} s (car {car}, {max(devs):.2f} m)"
+    points = [common[min(len(common) - 1, i * (len(common) - 1) // 4)] for i in range(1, 5)]
+    farthest = ", ".join(
+        f"{t / fps:.0f} s {max(math.dist(p, q) for p, q in zip(run[t], reference[t])):.1f} m"
+        for t in points)
+    return f"{first or 'identical'}; farthest car at {farthest}"
 
 
 def deviation(points, reference):
@@ -234,6 +272,7 @@ def bench(a):
     configs = [c.split(":") for c in a.configs.split(",")]
     results = {}
     reference = None
+    reference_watch = None
     for i in range(a.runs + a.warmup):
         for backend, res in configs:
             a.backend, a.res = backend, res
@@ -250,6 +289,12 @@ def bench(a):
                 dev = deviation(points, reference)
                 shown = "no common positions" if dev is None else f"max {dev:.2f} m"
                 print(f"{tag}: path of {len(points)} positions, {shown} from the first run's")
+            watched = watch(out)
+            if watched:
+                if reference_watch is None:
+                    reference_watch = watched
+                print(f"{tag}: {len(next(iter(watched.values())))} cars against the first run: "
+                      f"{watch_report(watched, reference_watch, a.fixed_dt or 60)}")
     print(f"\n{a.runs} runs per configuration (after {a.warmup} warm-up), alternating:")
     for (backend, res, seg), runs in sorted(results.items(), key=lambda kv: (kv[0][2], kv[0][0], kv[0][1])):
         med = [r["median_ms"] for r in runs]

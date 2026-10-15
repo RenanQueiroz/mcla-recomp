@@ -1,0 +1,17 @@
+# The race benchmark: boot-to-race.pad, then the player's car follows the
+# route the leading opponent drove in this race (sunset-and-vine.route, made
+# with route.py) for 90 s of game time. Segments: as boot-to-race.pad, then
+# race (from the start, 0x827D7510 being the game's timer since the race
+# loaded) and race_end. Under --mcla_fixed_dt=60 every run gives the same
+# inputs for the same game state (devrun.py bench --fixed-dt 60).
+include boot-to-race.pad
+# Throttle held through the countdown; every car's position once a second of
+# game time in the log (devrun.py bench compares runs with them).
+follow sunset-and-vine.route
+watch 60
+wait_until f32 0x827D7510 >= 9.3 60s
+mark race
+wait 5400f
+mark race_end
+follow stop
+watch stop

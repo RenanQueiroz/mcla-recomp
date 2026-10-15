@@ -1,0 +1,73 @@
+# Boot -> the city -> pause menu, Modes, Arcade: the ordered race "Sunset
+# and Vine" (Hollywood) with 7 opponents on the easiest setting, normal
+# traffic, rain, at midnight -> its loading and intro. Segments: title and
+# map_zoom as in boot-to-roam.pad, then menu (from the city to the race being
+# loaded) and race_intro (the race's intro and countdown, until the start).
+#
+# The menus are driven in real time (they take 30 steps a second of real
+# time), so under --mcla_fixed_dt game time runs faster than in a capped run.
+# The pause menu opens right after arriving in the city: some 10 to 20 s of
+# game time later the career's phone shows a message, which put the menu
+# presses out of step in a timedemo run.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark menu
+wait 1s
+press start 4f
+wait 1500ms
+# Pause -> Modes; Arcade; Ordered race; Sunset and Vine (the first of each).
+press rb 4f
+wait 1000ms
+press a 4f
+wait 2500ms
+press a 4f
+wait 1500ms
+press a 4f
+wait 1500ms
+# The race options start at the arcade defaults (the save copy's). A held
+# direction repeats after about 8 game updates, so presses last 4 updates
+# (one step each, capped or not) and the gaps are real time (the menus move
+# 30 times a second of real time).
+# Number of opponents 3 -> 7.
+press right 4f
+wait 300ms
+press right 4f
+wait 300ms
+press right 4f
+wait 300ms
+press right 4f
+wait 300ms
+# Difficulty Medium -> Easy, so the opponents stay in sight for longer.
+press down 4f
+wait 300ms
+press left 4f
+wait 300ms
+# Down to Weather (past Power ups: Off, Traffic: Normal).
+press down 4f
+wait 300ms
+press down 4f
+wait 300ms
+press down 4f
+wait 300ms
+# Weather Dynamic -> Clear, Partly cloudy, Cloudy, Rainy.
+press right 4f
+wait 300ms
+press right 4f
+wait 300ms
+press right 4f
+wait 300ms
+press right 4f
+wait 300ms
+# Time of day Dynamic -> Midnight.
+press down 4f
+wait 300ms
+press right 4f
+wait 800ms
+# Start race. The game state is 3 (loading) from the arcade map until the race
+# is ready, so "roam" holds again when the intro starts.
+press a 4f
+wait_until roam 120s
+mark race_intro
