@@ -1,0 +1,1384 @@
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 1261965..d19b39d 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -55,6 +55,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+   enum class SingleTransientDescriptorLayout {
+     kStorageBufferCompute,
+     kStorageBufferPairCompute,
++    // A storage image (VK_IMAGE_LAYOUT_GENERAL) written by a compute shader.
++    kStorageImageCompute,
+     kCount,
+   };
+ 
+@@ -675,8 +677,14 @@ class VulkanCommandProcessor : public CommandProcessor {
+   static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
+   static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
+   static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
++  // Storage images are only written by the texture loads that copy to the image
++  // in a compute shader (vulkan_texture_load_storage_copy), far fewer than the
++  // other transient descriptors.
++  static constexpr uint32_t kStorageImageDescriptorPoolSetCount = 1024;
++  static const VkDescriptorPoolSize kDescriptorPoolSizeStorageImage;
+   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_uniform_buffer_;
+   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_storage_buffer_;
++  ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_storage_image_;
+   std::deque<UsedSingleTransientDescriptor> single_transient_descriptors_used_;
+   std::array<std::vector<VkDescriptorSet>, size_t(SingleTransientDescriptorLayout::kCount)>
+       single_transient_descriptors_free_;
+diff --git a/include/rex/graphics/vulkan/texture_cache.h b/include/rex/graphics/vulkan/texture_cache.h
+index 04856ee..5175175 100644
+--- a/include/rex/graphics/vulkan/texture_cache.h
++++ b/include/rex/graphics/vulkan/texture_cache.h
+@@ -191,6 +191,9 @@ class VulkanTextureCache final : public TextureCache {
+     enum class Usage {
+       kUndefined,
+       kTransferDestination,
++      // Written by the compute shader copying a loaded texture into the image
++      // (vulkan_texture_load_storage_copy), in VK_IMAGE_LAYOUT_GENERAL.
++      kStorageCopyDestination,
+       kGuestShaderSampled,
+       kSwapSampled,
+     };
+@@ -212,6 +215,14 @@ class VulkanTextureCache final : public TextureCache {
+     VkImageView GetView(bool is_signed, uint32_t host_swizzle, bool is_array = true);
+     VkImageView GetOrCreate3DAs2DImageView(bool is_signed, uint32_t host_swizzle);
+ 
++    // The unsigned integer format of the storage view loads are copied through
++    // (vulkan_texture_load_storage_copy), or VK_FORMAT_UNDEFINED if loads use
++    // vkCmdCopyBufferToImage. The image must have been created for it.
++    VkFormat storage_copy_format() const { return storage_copy_format_; }
++    void set_storage_copy_format(VkFormat format) { storage_copy_format_ = format; }
++    // The 2D array storage view of the base level, created on first use.
++    VkImageView GetStorageCopyView();
++
+    private:
+     union ViewKey {
+       uint32_t key;
+@@ -269,7 +280,27 @@ class VulkanTextureCache final : public TextureCache {
+     std::unique_ptr<VulkanTexture> texture_3d_as_2d_;
+     VkImageView image_view_3d_as_2d_unsigned_ = VK_NULL_HANDLE;
+     VkImageView image_view_3d_as_2d_signed_ = VK_NULL_HANDLE;
++
++    VkFormat storage_copy_format_ = VK_FORMAT_UNDEFINED;
++    VkImageView storage_copy_view_ = VK_NULL_HANDLE;
++  };
++
++  // vulkan_texture_load_storage_copy: push constants of
++  // texture_load_copy_to_image_*bpp_cs, in texels.
++  struct StorageCopyConstants {
++    uint32_t offset;
++    uint32_t row_pitch;
++    uint32_t layer_pitch;
++    uint32_t width;
++    uint32_t height;
++  };
++  enum StorageCopyDescriptorSetIndex {
++    kStorageCopyDescriptorSetIndexSource,
++    kStorageCopyDescriptorSetIndexDestination,
++    kStorageCopyDescriptorSetCount,
+   };
++  // By log2 of the texel size in dwords: 32, 64 and 128 bits per texel.
++  static constexpr uint32_t kStorageCopyTexelSizeCount = 3;
+ 
+   struct VulkanTextureBinding {
+     VkImageView image_view_unsigned;
+@@ -321,6 +352,13 @@ class VulkanTextureCache final : public TextureCache {
+ 
+   void GetTextureUsageMasks(VulkanTexture::Usage usage, VkPipelineStageFlags& stage_mask,
+                             VkAccessFlags& access_mask, VkImageLayout& layout);
++  // vulkan_texture_load_storage_copy: the format of the storage view a new
++  // texture with these view formats (VK_FORMAT_UNDEFINED where unused) will be
++  // copied to through, or VK_FORMAT_UNDEFINED if it will use
++  // vkCmdCopyBufferToImage.
++  VkFormat GetStorageCopyFormat(TextureKey key, const VkFormat* view_formats,
++                                uint32_t view_format_count);
++  bool IsStorageImageFormat(VkFormat format);
+   bool EnsureScaledResolveBufferAllocated(uint64_t start_scaled, uint64_t length_scaled);
+   void GetScaledResolveUsageMasks(VkPipelineStageFlags& stage_mask_out,
+                                   VkAccessFlags& access_mask_out, bool write) const;
+@@ -350,6 +388,11 @@ class VulkanTextureCache final : public TextureCache {
+   std::array<VkPipeline, kLoadShaderCount> load_pipelines_{};
+   std::array<VkPipeline, kLoadShaderCount> load_pipelines_scaled_{};
+ 
++  VkPipelineLayout storage_copy_pipeline_layout_ = VK_NULL_HANDLE;
++  std::array<VkPipeline, kStorageCopyTexelSizeCount> storage_copy_pipelines_{};
++  // Whether a format can be a storage image with optimal tiling.
++  std::unordered_map<VkFormat, bool> storage_image_formats_;
++
+   // If both images can be placed in the same allocation, it's one allocation,
+   // otherwise it's two separate.
+   std::array<VkDeviceMemory, 2> null_images_memory_{};
+diff --git a/src/graphics/shaders/texture_load_copy_to_image.cs.glsl b/src/graphics/shaders/texture_load_copy_to_image.cs.glsl
+new file mode 100644
+index 0000000..7e00ad2
+--- /dev/null
++++ b/src/graphics/shaders/texture_load_copy_to_image.cs.glsl
+@@ -0,0 +1,60 @@
++#version 460
++
++// Vulkan texture loading, last step: copies one mip level of a texture from
++// the linear layout the texture load shaders write to the scratch buffer into
++// the image, through an unsigned integer storage view of the same texel size,
++// instead of vkCmdCopyBufferToImage (which runs at a fraction of the memory
++// bandwidth on some drivers - vulkan_texture_load_storage_copy).
++// XE_COPY_TEXEL_DWORDS: 1 (32bpp, r32ui view), 2 (64bpp, rgba16ui view - a core
++// storage format, unlike rg32ui) or 4 (128bpp, rgba32ui view).
++
++#ifndef XE_COPY_TEXEL_DWORDS
++#define XE_COPY_TEXEL_DWORDS 1
++#endif
++
++layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
++
++layout(push_constant) uniform XeCopyToImageConstants {
++  // In texels, from the start of the bound part of the buffer.
++  uint xe_copy_offset;
++  uint xe_copy_row_pitch;
++  uint xe_copy_layer_pitch;
++  uint xe_copy_width;
++  uint xe_copy_height;
++};
++
++#if XE_COPY_TEXEL_DWORDS == 1
++layout(set = 0, binding = 0, std430) readonly buffer XeCopySource {
++  uint xe_copy_source[];
++};
++layout(set = 1, binding = 0, r32ui) uniform writeonly uimage2DArray xe_copy_dest;
++#elif XE_COPY_TEXEL_DWORDS == 2
++layout(set = 0, binding = 0, std430) readonly buffer XeCopySource {
++  uvec2 xe_copy_source[];
++};
++layout(set = 1, binding = 0, rgba16ui) uniform writeonly uimage2DArray xe_copy_dest;
++#else
++layout(set = 0, binding = 0, std430) readonly buffer XeCopySource {
++  uvec4 xe_copy_source[];
++};
++layout(set = 1, binding = 0, rgba32ui) uniform writeonly uimage2DArray xe_copy_dest;
++#endif
++
++void main() {
++  uvec3 texel = gl_GlobalInvocationID;
++  if (texel.x >= xe_copy_width || texel.y >= xe_copy_height) {
++    return;
++  }
++  uint index = xe_copy_offset + texel.z * xe_copy_layer_pitch + texel.y * xe_copy_row_pitch +
++               texel.x;
++#if XE_COPY_TEXEL_DWORDS == 1
++  uvec4 value = uvec4(xe_copy_source[index], 0u, 0u, 0u);
++#elif XE_COPY_TEXEL_DWORDS == 2
++  // Little-endian: the low half of each dword is the lower-numbered component.
++  uvec2 dwords = xe_copy_source[index];
++  uvec4 value = uvec4(dwords.x & 0xFFFFu, dwords.x >> 16u, dwords.y & 0xFFFFu, dwords.y >> 16u);
++#else
++  uvec4 value = xe_copy_source[index];
++#endif
++  imageStore(xe_copy_dest, ivec3(texel), value);
++}
+diff --git a/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_128bpp_cs.h b/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_128bpp_cs.h
+new file mode 100644
+index 0000000..25b36f2
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_128bpp_cs.h
+@@ -0,0 +1,218 @@
++// Generated with glslangValidator -V --target-env vulkan1.0 from
++// texture_load_copy_to_image.cs.glsl (XE_COPY_TEXEL_DWORDS = 4).
++#if 0
++; SPIR-V
++; Version: 1.0
++; Generator: Khronos Glslang Reference Front End; 11
++; Bound: 85
++; Schema: 0
++               OpCapability Shader
++          %1 = OpExtInstImport "GLSL.std.450"
++               OpMemoryModel Logical GLSL450
++               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
++               OpExecutionMode %main LocalSize 32 8 1
++               OpSource GLSL 460
++               OpName %main "main"
++               OpName %texel "texel"
++               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
++               OpName %XeCopyToImageConstants "XeCopyToImageConstants"
++               OpMemberName %XeCopyToImageConstants 0 "xe_copy_offset"
++               OpMemberName %XeCopyToImageConstants 1 "xe_copy_row_pitch"
++               OpMemberName %XeCopyToImageConstants 2 "xe_copy_layer_pitch"
++               OpMemberName %XeCopyToImageConstants 3 "xe_copy_width"
++               OpMemberName %XeCopyToImageConstants 4 "xe_copy_height"
++               OpName %_ ""
++               OpName %index "index"
++               OpName %value "value"
++               OpName %XeCopySource "XeCopySource"
++               OpMemberName %XeCopySource 0 "xe_copy_source"
++               OpName %__0 ""
++               OpName %xe_copy_dest "xe_copy_dest"
++               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
++               OpDecorate %XeCopyToImageConstants Block
++               OpMemberDecorate %XeCopyToImageConstants 0 Offset 0
++               OpMemberDecorate %XeCopyToImageConstants 1 Offset 4
++               OpMemberDecorate %XeCopyToImageConstants 2 Offset 8
++               OpMemberDecorate %XeCopyToImageConstants 3 Offset 12
++               OpMemberDecorate %XeCopyToImageConstants 4 Offset 16
++               OpDecorate %_runtimearr_v4uint ArrayStride 16
++               OpDecorate %XeCopySource BufferBlock
++               OpMemberDecorate %XeCopySource 0 NonWritable
++               OpMemberDecorate %XeCopySource 0 Offset 0
++               OpDecorate %__0 NonWritable
++               OpDecorate %__0 Binding 0
++               OpDecorate %__0 DescriptorSet 0
++               OpDecorate %xe_copy_dest NonReadable
++               OpDecorate %xe_copy_dest Binding 0
++               OpDecorate %xe_copy_dest DescriptorSet 1
++               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
++       %void = OpTypeVoid
++          %3 = OpTypeFunction %void
++       %uint = OpTypeInt 32 0
++     %v3uint = OpTypeVector %uint 3
++%_ptr_Function_v3uint = OpTypePointer Function %v3uint
++%_ptr_Input_v3uint = OpTypePointer Input %v3uint
++%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
++       %bool = OpTypeBool
++     %uint_0 = OpConstant %uint 0
++%_ptr_Function_uint = OpTypePointer Function %uint
++%XeCopyToImageConstants = OpTypeStruct %uint %uint %uint %uint %uint
++%_ptr_PushConstant_XeCopyToImageConstants = OpTypePointer PushConstant %XeCopyToImageConstants
++          %_ = OpVariable %_ptr_PushConstant_XeCopyToImageConstants PushConstant
++        %int = OpTypeInt 32 1
++      %int_3 = OpConstant %int 3
++%_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
++     %uint_1 = OpConstant %uint 1
++      %int_4 = OpConstant %int 4
++      %int_0 = OpConstant %int 0
++     %uint_2 = OpConstant %uint 2
++      %int_2 = OpConstant %int 2
++      %int_1 = OpConstant %int 1
++     %v4uint = OpTypeVector %uint 4
++%_ptr_Function_v4uint = OpTypePointer Function %v4uint
++%_runtimearr_v4uint = OpTypeRuntimeArray %v4uint
++%XeCopySource = OpTypeStruct %_runtimearr_v4uint
++%_ptr_Uniform_XeCopySource = OpTypePointer Uniform %XeCopySource
++        %__0 = OpVariable %_ptr_Uniform_XeCopySource Uniform
++%_ptr_Uniform_v4uint = OpTypePointer Uniform %v4uint
++         %74 = OpTypeImage %uint 2D 0 1 0 2 Rgba32ui
++%_ptr_UniformConstant_74 = OpTypePointer UniformConstant %74
++%xe_copy_dest = OpVariable %_ptr_UniformConstant_74 UniformConstant
++      %v3int = OpTypeVector %int 3
++    %uint_32 = OpConstant %uint 32
++     %uint_8 = OpConstant %uint 8
++%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_32 %uint_8 %uint_1
++       %main = OpFunction %void None %3
++          %5 = OpLabel
++      %texel = OpVariable %_ptr_Function_v3uint Function
++      %index = OpVariable %_ptr_Function_uint Function
++      %value = OpVariable %_ptr_Function_v4uint Function
++         %12 = OpLoad %v3uint %gl_GlobalInvocationID
++               OpStore %texel %12
++         %16 = OpAccessChain %_ptr_Function_uint %texel %uint_0
++         %17 = OpLoad %uint %16
++         %24 = OpAccessChain %_ptr_PushConstant_uint %_ %int_3
++         %25 = OpLoad %uint %24
++         %26 = OpUGreaterThanEqual %bool %17 %25
++         %27 = OpLogicalNot %bool %26
++               OpSelectionMerge %29 None
++               OpBranchConditional %27 %28 %29
++         %28 = OpLabel
++         %31 = OpAccessChain %_ptr_Function_uint %texel %uint_1
++         %32 = OpLoad %uint %31
++         %34 = OpAccessChain %_ptr_PushConstant_uint %_ %int_4
++         %35 = OpLoad %uint %34
++         %36 = OpUGreaterThanEqual %bool %32 %35
++               OpBranch %29
++         %29 = OpLabel
++         %37 = OpPhi %bool %26 %5 %36 %28
++               OpSelectionMerge %39 None
++               OpBranchConditional %37 %38 %39
++         %38 = OpLabel
++               OpReturn
++         %39 = OpLabel
++         %43 = OpAccessChain %_ptr_PushConstant_uint %_ %int_0
++         %44 = OpLoad %uint %43
++         %46 = OpAccessChain %_ptr_Function_uint %texel %uint_2
++         %47 = OpLoad %uint %46
++         %49 = OpAccessChain %_ptr_PushConstant_uint %_ %int_2
++         %50 = OpLoad %uint %49
++         %51 = OpIMul %uint %47 %50
++         %52 = OpIAdd %uint %44 %51
++         %53 = OpAccessChain %_ptr_Function_uint %texel %uint_1
++         %54 = OpLoad %uint %53
++         %56 = OpAccessChain %_ptr_PushConstant_uint %_ %int_1
++         %57 = OpLoad %uint %56
++         %58 = OpIMul %uint %54 %57
++         %59 = OpIAdd %uint %52 %58
++         %60 = OpAccessChain %_ptr_Function_uint %texel %uint_0
++         %61 = OpLoad %uint %60
++         %62 = OpIAdd %uint %59 %61
++               OpStore %index %62
++         %70 = OpLoad %uint %index
++         %72 = OpAccessChain %_ptr_Uniform_v4uint %__0 %int_0 %70
++         %73 = OpLoad %v4uint %72
++               OpStore %value %73
++         %77 = OpLoad %74 %xe_copy_dest
++         %78 = OpLoad %v3uint %texel
++         %80 = OpBitcast %v3int %78
++         %81 = OpLoad %v4uint %value
++               OpImageWrite %77 %80 %81
++               OpReturn
++               OpFunctionEnd
++#endif
++
++const uint32_t texture_load_copy_to_image_128bpp_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00000055, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0006000F, 0x00000005, 0x00000004, 0x6E69616D, 0x00000000, 0x0000000B, 0x00060010, 0x00000004,
++    0x00000011, 0x00000020, 0x00000008, 0x00000001, 0x00030003, 0x00000002, 0x000001CC, 0x00040005,
++    0x00000004, 0x6E69616D, 0x00000000, 0x00040005, 0x00000009, 0x65786574, 0x0000006C, 0x00080005,
++    0x0000000B, 0x475F6C67, 0x61626F6C, 0x766E496C, 0x7461636F, 0x496E6F69, 0x00000044, 0x00080005,
++    0x00000012, 0x6F436558, 0x6F547970, 0x67616D49, 0x6E6F4365, 0x6E617473, 0x00007374, 0x00070006,
++    0x00000012, 0x00000000, 0x635F6578, 0x5F79706F, 0x7366666F, 0x00007465, 0x00080006, 0x00000012,
++    0x00000001, 0x635F6578, 0x5F79706F, 0x5F776F72, 0x63746970, 0x00000068, 0x00080006, 0x00000012,
++    0x00000002, 0x635F6578, 0x5F79706F, 0x6579616C, 0x69705F72, 0x00686374, 0x00070006, 0x00000012,
++    0x00000003, 0x635F6578, 0x5F79706F, 0x74646977, 0x00000068, 0x00070006, 0x00000012, 0x00000004,
++    0x635F6578, 0x5F79706F, 0x67696568, 0x00007468, 0x00030005, 0x00000014, 0x00000000, 0x00040005,
++    0x00000029, 0x65646E69, 0x00000078, 0x00040005, 0x00000041, 0x756C6176, 0x00000065, 0x00060005,
++    0x00000043, 0x6F436558, 0x6F537970, 0x65637275, 0x00000000, 0x00070006, 0x00000043, 0x00000000,
++    0x635F6578, 0x5F79706F, 0x72756F73, 0x00006563, 0x00030005, 0x00000045, 0x00000000, 0x00060005,
++    0x0000004C, 0x635F6578, 0x5F79706F, 0x74736564, 0x00000000, 0x00040047, 0x0000000B, 0x0000000B,
++    0x0000001C, 0x00030047, 0x00000012, 0x00000002, 0x00050048, 0x00000012, 0x00000000, 0x00000023,
++    0x00000000, 0x00050048, 0x00000012, 0x00000001, 0x00000023, 0x00000004, 0x00050048, 0x00000012,
++    0x00000002, 0x00000023, 0x00000008, 0x00050048, 0x00000012, 0x00000003, 0x00000023, 0x0000000C,
++    0x00050048, 0x00000012, 0x00000004, 0x00000023, 0x00000010, 0x00040047, 0x00000042, 0x00000006,
++    0x00000010, 0x00030047, 0x00000043, 0x00000003, 0x00040048, 0x00000043, 0x00000000, 0x00000018,
++    0x00050048, 0x00000043, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000045, 0x00000018,
++    0x00040047, 0x00000045, 0x00000021, 0x00000000, 0x00040047, 0x00000045, 0x00000022, 0x00000000,
++    0x00030047, 0x0000004C, 0x00000019, 0x00040047, 0x0000004C, 0x00000021, 0x00000000, 0x00040047,
++    0x0000004C, 0x00000022, 0x00000001, 0x00040047, 0x00000054, 0x0000000B, 0x00000019, 0x00020013,
++    0x00000002, 0x00030021, 0x00000003, 0x00000002, 0x00040015, 0x00000006, 0x00000020, 0x00000000,
++    0x00040017, 0x00000007, 0x00000006, 0x00000003, 0x00040020, 0x00000008, 0x00000007, 0x00000007,
++    0x00040020, 0x0000000A, 0x00000001, 0x00000007, 0x0004003B, 0x0000000A, 0x0000000B, 0x00000001,
++    0x00020014, 0x0000000D, 0x0004002B, 0x00000006, 0x0000000E, 0x00000000, 0x00040020, 0x0000000F,
++    0x00000007, 0x00000006, 0x0007001E, 0x00000012, 0x00000006, 0x00000006, 0x00000006, 0x00000006,
++    0x00000006, 0x00040020, 0x00000013, 0x00000009, 0x00000012, 0x0004003B, 0x00000013, 0x00000014,
++    0x00000009, 0x00040015, 0x00000015, 0x00000020, 0x00000001, 0x0004002B, 0x00000015, 0x00000016,
++    0x00000003, 0x00040020, 0x00000017, 0x00000009, 0x00000006, 0x0004002B, 0x00000006, 0x0000001E,
++    0x00000001, 0x0004002B, 0x00000015, 0x00000021, 0x00000004, 0x0004002B, 0x00000015, 0x0000002A,
++    0x00000000, 0x0004002B, 0x00000006, 0x0000002D, 0x00000002, 0x0004002B, 0x00000015, 0x00000030,
++    0x00000002, 0x0004002B, 0x00000015, 0x00000037, 0x00000001, 0x00040017, 0x0000003F, 0x00000006,
++    0x00000004, 0x00040020, 0x00000040, 0x00000007, 0x0000003F, 0x0003001D, 0x00000042, 0x0000003F,
++    0x0003001E, 0x00000043, 0x00000042, 0x00040020, 0x00000044, 0x00000002, 0x00000043, 0x0004003B,
++    0x00000044, 0x00000045, 0x00000002, 0x00040020, 0x00000047, 0x00000002, 0x0000003F, 0x00090019,
++    0x0000004A, 0x00000006, 0x00000001, 0x00000000, 0x00000001, 0x00000000, 0x00000002, 0x0000001E,
++    0x00040020, 0x0000004B, 0x00000000, 0x0000004A, 0x0004003B, 0x0000004B, 0x0000004C, 0x00000000,
++    0x00040017, 0x0000004F, 0x00000015, 0x00000003, 0x0004002B, 0x00000006, 0x00000052, 0x00000020,
++    0x0004002B, 0x00000006, 0x00000053, 0x00000008, 0x0006002C, 0x00000007, 0x00000054, 0x00000052,
++    0x00000053, 0x0000001E, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200F8,
++    0x00000005, 0x0004003B, 0x00000008, 0x00000009, 0x00000007, 0x0004003B, 0x0000000F, 0x00000029,
++    0x00000007, 0x0004003B, 0x00000040, 0x00000041, 0x00000007, 0x0004003D, 0x00000007, 0x0000000C,
++    0x0000000B, 0x0003003E, 0x00000009, 0x0000000C, 0x00050041, 0x0000000F, 0x00000010, 0x00000009,
++    0x0000000E, 0x0004003D, 0x00000006, 0x00000011, 0x00000010, 0x00050041, 0x00000017, 0x00000018,
++    0x00000014, 0x00000016, 0x0004003D, 0x00000006, 0x00000019, 0x00000018, 0x000500AE, 0x0000000D,
++    0x0000001A, 0x00000011, 0x00000019, 0x000400A8, 0x0000000D, 0x0000001B, 0x0000001A, 0x000300F7,
++    0x0000001D, 0x00000000, 0x000400FA, 0x0000001B, 0x0000001C, 0x0000001D, 0x000200F8, 0x0000001C,
++    0x00050041, 0x0000000F, 0x0000001F, 0x00000009, 0x0000001E, 0x0004003D, 0x00000006, 0x00000020,
++    0x0000001F, 0x00050041, 0x00000017, 0x00000022, 0x00000014, 0x00000021, 0x0004003D, 0x00000006,
++    0x00000023, 0x00000022, 0x000500AE, 0x0000000D, 0x00000024, 0x00000020, 0x00000023, 0x000200F9,
++    0x0000001D, 0x000200F8, 0x0000001D, 0x000700F5, 0x0000000D, 0x00000025, 0x0000001A, 0x00000005,
++    0x00000024, 0x0000001C, 0x000300F7, 0x00000027, 0x00000000, 0x000400FA, 0x00000025, 0x00000026,
++    0x00000027, 0x000200F8, 0x00000026, 0x000100FD, 0x000200F8, 0x00000027, 0x00050041, 0x00000017,
++    0x0000002B, 0x00000014, 0x0000002A, 0x0004003D, 0x00000006, 0x0000002C, 0x0000002B, 0x00050041,
++    0x0000000F, 0x0000002E, 0x00000009, 0x0000002D, 0x0004003D, 0x00000006, 0x0000002F, 0x0000002E,
++    0x00050041, 0x00000017, 0x00000031, 0x00000014, 0x00000030, 0x0004003D, 0x00000006, 0x00000032,
++    0x00000031, 0x00050084, 0x00000006, 0x00000033, 0x0000002F, 0x00000032, 0x00050080, 0x00000006,
++    0x00000034, 0x0000002C, 0x00000033, 0x00050041, 0x0000000F, 0x00000035, 0x00000009, 0x0000001E,
++    0x0004003D, 0x00000006, 0x00000036, 0x00000035, 0x00050041, 0x00000017, 0x00000038, 0x00000014,
++    0x00000037, 0x0004003D, 0x00000006, 0x00000039, 0x00000038, 0x00050084, 0x00000006, 0x0000003A,
++    0x00000036, 0x00000039, 0x00050080, 0x00000006, 0x0000003B, 0x00000034, 0x0000003A, 0x00050041,
++    0x0000000F, 0x0000003C, 0x00000009, 0x0000000E, 0x0004003D, 0x00000006, 0x0000003D, 0x0000003C,
++    0x00050080, 0x00000006, 0x0000003E, 0x0000003B, 0x0000003D, 0x0003003E, 0x00000029, 0x0000003E,
++    0x0004003D, 0x00000006, 0x00000046, 0x00000029, 0x00060041, 0x00000047, 0x00000048, 0x00000045,
++    0x0000002A, 0x00000046, 0x0004003D, 0x0000003F, 0x00000049, 0x00000048, 0x0003003E, 0x00000041,
++    0x00000049, 0x0004003D, 0x0000004A, 0x0000004D, 0x0000004C, 0x0004003D, 0x00000007, 0x0000004E,
++    0x00000009, 0x0004007C, 0x0000004F, 0x00000050, 0x0000004E, 0x0004003D, 0x0000003F, 0x00000051,
++    0x00000041, 0x00040063, 0x0000004D, 0x00000050, 0x00000051, 0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_32bpp_cs.h b/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_32bpp_cs.h
+new file mode 100644
+index 0000000..862c27f
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_32bpp_cs.h
+@@ -0,0 +1,220 @@
++// Generated with glslangValidator -V --target-env vulkan1.0 from
++// texture_load_copy_to_image.cs.glsl (XE_COPY_TEXEL_DWORDS = 1).
++#if 0
++; SPIR-V
++; Version: 1.0
++; Generator: Khronos Glslang Reference Front End; 11
++; Bound: 86
++; Schema: 0
++               OpCapability Shader
++          %1 = OpExtInstImport "GLSL.std.450"
++               OpMemoryModel Logical GLSL450
++               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
++               OpExecutionMode %main LocalSize 32 8 1
++               OpSource GLSL 460
++               OpName %main "main"
++               OpName %texel "texel"
++               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
++               OpName %XeCopyToImageConstants "XeCopyToImageConstants"
++               OpMemberName %XeCopyToImageConstants 0 "xe_copy_offset"
++               OpMemberName %XeCopyToImageConstants 1 "xe_copy_row_pitch"
++               OpMemberName %XeCopyToImageConstants 2 "xe_copy_layer_pitch"
++               OpMemberName %XeCopyToImageConstants 3 "xe_copy_width"
++               OpMemberName %XeCopyToImageConstants 4 "xe_copy_height"
++               OpName %_ ""
++               OpName %index "index"
++               OpName %value "value"
++               OpName %XeCopySource "XeCopySource"
++               OpMemberName %XeCopySource 0 "xe_copy_source"
++               OpName %__0 ""
++               OpName %xe_copy_dest "xe_copy_dest"
++               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
++               OpDecorate %XeCopyToImageConstants Block
++               OpMemberDecorate %XeCopyToImageConstants 0 Offset 0
++               OpMemberDecorate %XeCopyToImageConstants 1 Offset 4
++               OpMemberDecorate %XeCopyToImageConstants 2 Offset 8
++               OpMemberDecorate %XeCopyToImageConstants 3 Offset 12
++               OpMemberDecorate %XeCopyToImageConstants 4 Offset 16
++               OpDecorate %_runtimearr_uint ArrayStride 4
++               OpDecorate %XeCopySource BufferBlock
++               OpMemberDecorate %XeCopySource 0 NonWritable
++               OpMemberDecorate %XeCopySource 0 Offset 0
++               OpDecorate %__0 NonWritable
++               OpDecorate %__0 Binding 0
++               OpDecorate %__0 DescriptorSet 0
++               OpDecorate %xe_copy_dest NonReadable
++               OpDecorate %xe_copy_dest Binding 0
++               OpDecorate %xe_copy_dest DescriptorSet 1
++               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
++       %void = OpTypeVoid
++          %3 = OpTypeFunction %void
++       %uint = OpTypeInt 32 0
++     %v3uint = OpTypeVector %uint 3
++%_ptr_Function_v3uint = OpTypePointer Function %v3uint
++%_ptr_Input_v3uint = OpTypePointer Input %v3uint
++%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
++       %bool = OpTypeBool
++     %uint_0 = OpConstant %uint 0
++%_ptr_Function_uint = OpTypePointer Function %uint
++%XeCopyToImageConstants = OpTypeStruct %uint %uint %uint %uint %uint
++%_ptr_PushConstant_XeCopyToImageConstants = OpTypePointer PushConstant %XeCopyToImageConstants
++          %_ = OpVariable %_ptr_PushConstant_XeCopyToImageConstants PushConstant
++        %int = OpTypeInt 32 1
++      %int_3 = OpConstant %int 3
++%_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
++     %uint_1 = OpConstant %uint 1
++      %int_4 = OpConstant %int 4
++      %int_0 = OpConstant %int 0
++     %uint_2 = OpConstant %uint 2
++      %int_2 = OpConstant %int 2
++      %int_1 = OpConstant %int 1
++     %v4uint = OpTypeVector %uint 4
++%_ptr_Function_v4uint = OpTypePointer Function %v4uint
++%_runtimearr_uint = OpTypeRuntimeArray %uint
++%XeCopySource = OpTypeStruct %_runtimearr_uint
++%_ptr_Uniform_XeCopySource = OpTypePointer Uniform %XeCopySource
++        %__0 = OpVariable %_ptr_Uniform_XeCopySource Uniform
++%_ptr_Uniform_uint = OpTypePointer Uniform %uint
++         %75 = OpTypeImage %uint 2D 0 1 0 2 R32ui
++%_ptr_UniformConstant_75 = OpTypePointer UniformConstant %75
++%xe_copy_dest = OpVariable %_ptr_UniformConstant_75 UniformConstant
++      %v3int = OpTypeVector %int 3
++    %uint_32 = OpConstant %uint 32
++     %uint_8 = OpConstant %uint 8
++%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_32 %uint_8 %uint_1
++       %main = OpFunction %void None %3
++          %5 = OpLabel
++      %texel = OpVariable %_ptr_Function_v3uint Function
++      %index = OpVariable %_ptr_Function_uint Function
++      %value = OpVariable %_ptr_Function_v4uint Function
++         %12 = OpLoad %v3uint %gl_GlobalInvocationID
++               OpStore %texel %12
++         %16 = OpAccessChain %_ptr_Function_uint %texel %uint_0
++         %17 = OpLoad %uint %16
++         %24 = OpAccessChain %_ptr_PushConstant_uint %_ %int_3
++         %25 = OpLoad %uint %24
++         %26 = OpUGreaterThanEqual %bool %17 %25
++         %27 = OpLogicalNot %bool %26
++               OpSelectionMerge %29 None
++               OpBranchConditional %27 %28 %29
++         %28 = OpLabel
++         %31 = OpAccessChain %_ptr_Function_uint %texel %uint_1
++         %32 = OpLoad %uint %31
++         %34 = OpAccessChain %_ptr_PushConstant_uint %_ %int_4
++         %35 = OpLoad %uint %34
++         %36 = OpUGreaterThanEqual %bool %32 %35
++               OpBranch %29
++         %29 = OpLabel
++         %37 = OpPhi %bool %26 %5 %36 %28
++               OpSelectionMerge %39 None
++               OpBranchConditional %37 %38 %39
++         %38 = OpLabel
++               OpReturn
++         %39 = OpLabel
++         %43 = OpAccessChain %_ptr_PushConstant_uint %_ %int_0
++         %44 = OpLoad %uint %43
++         %46 = OpAccessChain %_ptr_Function_uint %texel %uint_2
++         %47 = OpLoad %uint %46
++         %49 = OpAccessChain %_ptr_PushConstant_uint %_ %int_2
++         %50 = OpLoad %uint %49
++         %51 = OpIMul %uint %47 %50
++         %52 = OpIAdd %uint %44 %51
++         %53 = OpAccessChain %_ptr_Function_uint %texel %uint_1
++         %54 = OpLoad %uint %53
++         %56 = OpAccessChain %_ptr_PushConstant_uint %_ %int_1
++         %57 = OpLoad %uint %56
++         %58 = OpIMul %uint %54 %57
++         %59 = OpIAdd %uint %52 %58
++         %60 = OpAccessChain %_ptr_Function_uint %texel %uint_0
++         %61 = OpLoad %uint %60
++         %62 = OpIAdd %uint %59 %61
++               OpStore %index %62
++         %70 = OpLoad %uint %index
++         %72 = OpAccessChain %_ptr_Uniform_uint %__0 %int_0 %70
++         %73 = OpLoad %uint %72
++         %74 = OpCompositeConstruct %v4uint %73 %uint_0 %uint_0 %uint_0
++               OpStore %value %74
++         %78 = OpLoad %75 %xe_copy_dest
++         %79 = OpLoad %v3uint %texel
++         %81 = OpBitcast %v3int %79
++         %82 = OpLoad %v4uint %value
++               OpImageWrite %78 %81 %82
++               OpReturn
++               OpFunctionEnd
++#endif
++
++const uint32_t texture_load_copy_to_image_32bpp_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00000056, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0006000F, 0x00000005, 0x00000004, 0x6E69616D, 0x00000000, 0x0000000B, 0x00060010, 0x00000004,
++    0x00000011, 0x00000020, 0x00000008, 0x00000001, 0x00030003, 0x00000002, 0x000001CC, 0x00040005,
++    0x00000004, 0x6E69616D, 0x00000000, 0x00040005, 0x00000009, 0x65786574, 0x0000006C, 0x00080005,
++    0x0000000B, 0x475F6C67, 0x61626F6C, 0x766E496C, 0x7461636F, 0x496E6F69, 0x00000044, 0x00080005,
++    0x00000012, 0x6F436558, 0x6F547970, 0x67616D49, 0x6E6F4365, 0x6E617473, 0x00007374, 0x00070006,
++    0x00000012, 0x00000000, 0x635F6578, 0x5F79706F, 0x7366666F, 0x00007465, 0x00080006, 0x00000012,
++    0x00000001, 0x635F6578, 0x5F79706F, 0x5F776F72, 0x63746970, 0x00000068, 0x00080006, 0x00000012,
++    0x00000002, 0x635F6578, 0x5F79706F, 0x6579616C, 0x69705F72, 0x00686374, 0x00070006, 0x00000012,
++    0x00000003, 0x635F6578, 0x5F79706F, 0x74646977, 0x00000068, 0x00070006, 0x00000012, 0x00000004,
++    0x635F6578, 0x5F79706F, 0x67696568, 0x00007468, 0x00030005, 0x00000014, 0x00000000, 0x00040005,
++    0x00000029, 0x65646E69, 0x00000078, 0x00040005, 0x00000041, 0x756C6176, 0x00000065, 0x00060005,
++    0x00000043, 0x6F436558, 0x6F537970, 0x65637275, 0x00000000, 0x00070006, 0x00000043, 0x00000000,
++    0x635F6578, 0x5F79706F, 0x72756F73, 0x00006563, 0x00030005, 0x00000045, 0x00000000, 0x00060005,
++    0x0000004D, 0x635F6578, 0x5F79706F, 0x74736564, 0x00000000, 0x00040047, 0x0000000B, 0x0000000B,
++    0x0000001C, 0x00030047, 0x00000012, 0x00000002, 0x00050048, 0x00000012, 0x00000000, 0x00000023,
++    0x00000000, 0x00050048, 0x00000012, 0x00000001, 0x00000023, 0x00000004, 0x00050048, 0x00000012,
++    0x00000002, 0x00000023, 0x00000008, 0x00050048, 0x00000012, 0x00000003, 0x00000023, 0x0000000C,
++    0x00050048, 0x00000012, 0x00000004, 0x00000023, 0x00000010, 0x00040047, 0x00000042, 0x00000006,
++    0x00000004, 0x00030047, 0x00000043, 0x00000003, 0x00040048, 0x00000043, 0x00000000, 0x00000018,
++    0x00050048, 0x00000043, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000045, 0x00000018,
++    0x00040047, 0x00000045, 0x00000021, 0x00000000, 0x00040047, 0x00000045, 0x00000022, 0x00000000,
++    0x00030047, 0x0000004D, 0x00000019, 0x00040047, 0x0000004D, 0x00000021, 0x00000000, 0x00040047,
++    0x0000004D, 0x00000022, 0x00000001, 0x00040047, 0x00000055, 0x0000000B, 0x00000019, 0x00020013,
++    0x00000002, 0x00030021, 0x00000003, 0x00000002, 0x00040015, 0x00000006, 0x00000020, 0x00000000,
++    0x00040017, 0x00000007, 0x00000006, 0x00000003, 0x00040020, 0x00000008, 0x00000007, 0x00000007,
++    0x00040020, 0x0000000A, 0x00000001, 0x00000007, 0x0004003B, 0x0000000A, 0x0000000B, 0x00000001,
++    0x00020014, 0x0000000D, 0x0004002B, 0x00000006, 0x0000000E, 0x00000000, 0x00040020, 0x0000000F,
++    0x00000007, 0x00000006, 0x0007001E, 0x00000012, 0x00000006, 0x00000006, 0x00000006, 0x00000006,
++    0x00000006, 0x00040020, 0x00000013, 0x00000009, 0x00000012, 0x0004003B, 0x00000013, 0x00000014,
++    0x00000009, 0x00040015, 0x00000015, 0x00000020, 0x00000001, 0x0004002B, 0x00000015, 0x00000016,
++    0x00000003, 0x00040020, 0x00000017, 0x00000009, 0x00000006, 0x0004002B, 0x00000006, 0x0000001E,
++    0x00000001, 0x0004002B, 0x00000015, 0x00000021, 0x00000004, 0x0004002B, 0x00000015, 0x0000002A,
++    0x00000000, 0x0004002B, 0x00000006, 0x0000002D, 0x00000002, 0x0004002B, 0x00000015, 0x00000030,
++    0x00000002, 0x0004002B, 0x00000015, 0x00000037, 0x00000001, 0x00040017, 0x0000003F, 0x00000006,
++    0x00000004, 0x00040020, 0x00000040, 0x00000007, 0x0000003F, 0x0003001D, 0x00000042, 0x00000006,
++    0x0003001E, 0x00000043, 0x00000042, 0x00040020, 0x00000044, 0x00000002, 0x00000043, 0x0004003B,
++    0x00000044, 0x00000045, 0x00000002, 0x00040020, 0x00000047, 0x00000002, 0x00000006, 0x00090019,
++    0x0000004B, 0x00000006, 0x00000001, 0x00000000, 0x00000001, 0x00000000, 0x00000002, 0x00000021,
++    0x00040020, 0x0000004C, 0x00000000, 0x0000004B, 0x0004003B, 0x0000004C, 0x0000004D, 0x00000000,
++    0x00040017, 0x00000050, 0x00000015, 0x00000003, 0x0004002B, 0x00000006, 0x00000053, 0x00000020,
++    0x0004002B, 0x00000006, 0x00000054, 0x00000008, 0x0006002C, 0x00000007, 0x00000055, 0x00000053,
++    0x00000054, 0x0000001E, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200F8,
++    0x00000005, 0x0004003B, 0x00000008, 0x00000009, 0x00000007, 0x0004003B, 0x0000000F, 0x00000029,
++    0x00000007, 0x0004003B, 0x00000040, 0x00000041, 0x00000007, 0x0004003D, 0x00000007, 0x0000000C,
++    0x0000000B, 0x0003003E, 0x00000009, 0x0000000C, 0x00050041, 0x0000000F, 0x00000010, 0x00000009,
++    0x0000000E, 0x0004003D, 0x00000006, 0x00000011, 0x00000010, 0x00050041, 0x00000017, 0x00000018,
++    0x00000014, 0x00000016, 0x0004003D, 0x00000006, 0x00000019, 0x00000018, 0x000500AE, 0x0000000D,
++    0x0000001A, 0x00000011, 0x00000019, 0x000400A8, 0x0000000D, 0x0000001B, 0x0000001A, 0x000300F7,
++    0x0000001D, 0x00000000, 0x000400FA, 0x0000001B, 0x0000001C, 0x0000001D, 0x000200F8, 0x0000001C,
++    0x00050041, 0x0000000F, 0x0000001F, 0x00000009, 0x0000001E, 0x0004003D, 0x00000006, 0x00000020,
++    0x0000001F, 0x00050041, 0x00000017, 0x00000022, 0x00000014, 0x00000021, 0x0004003D, 0x00000006,
++    0x00000023, 0x00000022, 0x000500AE, 0x0000000D, 0x00000024, 0x00000020, 0x00000023, 0x000200F9,
++    0x0000001D, 0x000200F8, 0x0000001D, 0x000700F5, 0x0000000D, 0x00000025, 0x0000001A, 0x00000005,
++    0x00000024, 0x0000001C, 0x000300F7, 0x00000027, 0x00000000, 0x000400FA, 0x00000025, 0x00000026,
++    0x00000027, 0x000200F8, 0x00000026, 0x000100FD, 0x000200F8, 0x00000027, 0x00050041, 0x00000017,
++    0x0000002B, 0x00000014, 0x0000002A, 0x0004003D, 0x00000006, 0x0000002C, 0x0000002B, 0x00050041,
++    0x0000000F, 0x0000002E, 0x00000009, 0x0000002D, 0x0004003D, 0x00000006, 0x0000002F, 0x0000002E,
++    0x00050041, 0x00000017, 0x00000031, 0x00000014, 0x00000030, 0x0004003D, 0x00000006, 0x00000032,
++    0x00000031, 0x00050084, 0x00000006, 0x00000033, 0x0000002F, 0x00000032, 0x00050080, 0x00000006,
++    0x00000034, 0x0000002C, 0x00000033, 0x00050041, 0x0000000F, 0x00000035, 0x00000009, 0x0000001E,
++    0x0004003D, 0x00000006, 0x00000036, 0x00000035, 0x00050041, 0x00000017, 0x00000038, 0x00000014,
++    0x00000037, 0x0004003D, 0x00000006, 0x00000039, 0x00000038, 0x00050084, 0x00000006, 0x0000003A,
++    0x00000036, 0x00000039, 0x00050080, 0x00000006, 0x0000003B, 0x00000034, 0x0000003A, 0x00050041,
++    0x0000000F, 0x0000003C, 0x00000009, 0x0000000E, 0x0004003D, 0x00000006, 0x0000003D, 0x0000003C,
++    0x00050080, 0x00000006, 0x0000003E, 0x0000003B, 0x0000003D, 0x0003003E, 0x00000029, 0x0000003E,
++    0x0004003D, 0x00000006, 0x00000046, 0x00000029, 0x00060041, 0x00000047, 0x00000048, 0x00000045,
++    0x0000002A, 0x00000046, 0x0004003D, 0x00000006, 0x00000049, 0x00000048, 0x00070050, 0x0000003F,
++    0x0000004A, 0x00000049, 0x0000000E, 0x0000000E, 0x0000000E, 0x0003003E, 0x00000041, 0x0000004A,
++    0x0004003D, 0x0000004B, 0x0000004E, 0x0000004D, 0x0004003D, 0x00000007, 0x0000004F, 0x00000009,
++    0x0004007C, 0x00000050, 0x00000051, 0x0000004F, 0x0004003D, 0x0000003F, 0x00000052, 0x00000041,
++    0x00040063, 0x0000004E, 0x00000051, 0x00000052, 0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_64bpp_cs.h b/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_64bpp_cs.h
+new file mode 100644
+index 0000000..f58e3fc
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_64bpp_cs.h
+@@ -0,0 +1,250 @@
++// Generated with glslangValidator -V --target-env vulkan1.0 from
++// texture_load_copy_to_image.cs.glsl (XE_COPY_TEXEL_DWORDS = 2).
++#if 0
++; SPIR-V
++; Version: 1.0
++; Generator: Khronos Glslang Reference Front End; 11
++; Bound: 103
++; Schema: 0
++               OpCapability Shader
++          %1 = OpExtInstImport "GLSL.std.450"
++               OpMemoryModel Logical GLSL450
++               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
++               OpExecutionMode %main LocalSize 32 8 1
++               OpSource GLSL 460
++               OpName %main "main"
++               OpName %texel "texel"
++               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
++               OpName %XeCopyToImageConstants "XeCopyToImageConstants"
++               OpMemberName %XeCopyToImageConstants 0 "xe_copy_offset"
++               OpMemberName %XeCopyToImageConstants 1 "xe_copy_row_pitch"
++               OpMemberName %XeCopyToImageConstants 2 "xe_copy_layer_pitch"
++               OpMemberName %XeCopyToImageConstants 3 "xe_copy_width"
++               OpMemberName %XeCopyToImageConstants 4 "xe_copy_height"
++               OpName %_ ""
++               OpName %index "index"
++               OpName %dwords "dwords"
++               OpName %XeCopySource "XeCopySource"
++               OpMemberName %XeCopySource 0 "xe_copy_source"
++               OpName %__0 ""
++               OpName %value "value"
++               OpName %xe_copy_dest "xe_copy_dest"
++               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
++               OpDecorate %XeCopyToImageConstants Block
++               OpMemberDecorate %XeCopyToImageConstants 0 Offset 0
++               OpMemberDecorate %XeCopyToImageConstants 1 Offset 4
++               OpMemberDecorate %XeCopyToImageConstants 2 Offset 8
++               OpMemberDecorate %XeCopyToImageConstants 3 Offset 12
++               OpMemberDecorate %XeCopyToImageConstants 4 Offset 16
++               OpDecorate %_runtimearr_v2uint ArrayStride 8
++               OpDecorate %XeCopySource BufferBlock
++               OpMemberDecorate %XeCopySource 0 NonWritable
++               OpMemberDecorate %XeCopySource 0 Offset 0
++               OpDecorate %__0 NonWritable
++               OpDecorate %__0 Binding 0
++               OpDecorate %__0 DescriptorSet 0
++               OpDecorate %xe_copy_dest NonReadable
++               OpDecorate %xe_copy_dest Binding 0
++               OpDecorate %xe_copy_dest DescriptorSet 1
++               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
++       %void = OpTypeVoid
++          %3 = OpTypeFunction %void
++       %uint = OpTypeInt 32 0
++     %v3uint = OpTypeVector %uint 3
++%_ptr_Function_v3uint = OpTypePointer Function %v3uint
++%_ptr_Input_v3uint = OpTypePointer Input %v3uint
++%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
++       %bool = OpTypeBool
++     %uint_0 = OpConstant %uint 0
++%_ptr_Function_uint = OpTypePointer Function %uint
++%XeCopyToImageConstants = OpTypeStruct %uint %uint %uint %uint %uint
++%_ptr_PushConstant_XeCopyToImageConstants = OpTypePointer PushConstant %XeCopyToImageConstants
++          %_ = OpVariable %_ptr_PushConstant_XeCopyToImageConstants PushConstant
++        %int = OpTypeInt 32 1
++      %int_3 = OpConstant %int 3
++%_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
++     %uint_1 = OpConstant %uint 1
++      %int_4 = OpConstant %int 4
++      %int_0 = OpConstant %int 0
++     %uint_2 = OpConstant %uint 2
++      %int_2 = OpConstant %int 2
++      %int_1 = OpConstant %int 1
++     %v2uint = OpTypeVector %uint 2
++%_ptr_Function_v2uint = OpTypePointer Function %v2uint
++%_runtimearr_v2uint = OpTypeRuntimeArray %v2uint
++%XeCopySource = OpTypeStruct %_runtimearr_v2uint
++%_ptr_Uniform_XeCopySource = OpTypePointer Uniform %XeCopySource
++        %__0 = OpVariable %_ptr_Uniform_XeCopySource Uniform
++%_ptr_Uniform_v2uint = OpTypePointer Uniform %v2uint
++     %v4uint = OpTypeVector %uint 4
++%_ptr_Function_v4uint = OpTypePointer Function %v4uint
++ %uint_65535 = OpConstant %uint 65535
++    %uint_16 = OpConstant %uint 16
++         %92 = OpTypeImage %uint 2D 0 1 0 2 Rgba16ui
++%_ptr_UniformConstant_92 = OpTypePointer UniformConstant %92
++%xe_copy_dest = OpVariable %_ptr_UniformConstant_92 UniformConstant
++      %v3int = OpTypeVector %int 3
++    %uint_32 = OpConstant %uint 32
++     %uint_8 = OpConstant %uint 8
++%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_32 %uint_8 %uint_1
++       %main = OpFunction %void None %3
++          %5 = OpLabel
++      %texel = OpVariable %_ptr_Function_v3uint Function
++      %index = OpVariable %_ptr_Function_uint Function
++     %dwords = OpVariable %_ptr_Function_v2uint Function
++      %value = OpVariable %_ptr_Function_v4uint Function
++         %12 = OpLoad %v3uint %gl_GlobalInvocationID
++               OpStore %texel %12
++         %16 = OpAccessChain %_ptr_Function_uint %texel %uint_0
++         %17 = OpLoad %uint %16
++         %24 = OpAccessChain %_ptr_PushConstant_uint %_ %int_3
++         %25 = OpLoad %uint %24
++         %26 = OpUGreaterThanEqual %bool %17 %25
++         %27 = OpLogicalNot %bool %26
++               OpSelectionMerge %29 None
++               OpBranchConditional %27 %28 %29
++         %28 = OpLabel
++         %31 = OpAccessChain %_ptr_Function_uint %texel %uint_1
++         %32 = OpLoad %uint %31
++         %34 = OpAccessChain %_ptr_PushConstant_uint %_ %int_4
++         %35 = OpLoad %uint %34
++         %36 = OpUGreaterThanEqual %bool %32 %35
++               OpBranch %29
++         %29 = OpLabel
++         %37 = OpPhi %bool %26 %5 %36 %28
++               OpSelectionMerge %39 None
++               OpBranchConditional %37 %38 %39
++         %38 = OpLabel
++               OpReturn
++         %39 = OpLabel
++         %43 = OpAccessChain %_ptr_PushConstant_uint %_ %int_0
++         %44 = OpLoad %uint %43
++         %46 = OpAccessChain %_ptr_Function_uint %texel %uint_2
++         %47 = OpLoad %uint %46
++         %49 = OpAccessChain %_ptr_PushConstant_uint %_ %int_2
++         %50 = OpLoad %uint %49
++         %51 = OpIMul %uint %47 %50
++         %52 = OpIAdd %uint %44 %51
++         %53 = OpAccessChain %_ptr_Function_uint %texel %uint_1
++         %54 = OpLoad %uint %53
++         %56 = OpAccessChain %_ptr_PushConstant_uint %_ %int_1
++         %57 = OpLoad %uint %56
++         %58 = OpIMul %uint %54 %57
++         %59 = OpIAdd %uint %52 %58
++         %60 = OpAccessChain %_ptr_Function_uint %texel %uint_0
++         %61 = OpLoad %uint %60
++         %62 = OpIAdd %uint %59 %61
++               OpStore %index %62
++         %70 = OpLoad %uint %index
++         %72 = OpAccessChain %_ptr_Uniform_v2uint %__0 %int_0 %70
++         %73 = OpLoad %v2uint %72
++               OpStore %dwords %73
++         %77 = OpAccessChain %_ptr_Function_uint %dwords %uint_0
++         %78 = OpLoad %uint %77
++         %80 = OpBitwiseAnd %uint %78 %uint_65535
++         %81 = OpAccessChain %_ptr_Function_uint %dwords %uint_0
++         %82 = OpLoad %uint %81
++         %84 = OpShiftRightLogical %uint %82 %uint_16
++         %85 = OpAccessChain %_ptr_Function_uint %dwords %uint_1
++         %86 = OpLoad %uint %85
++         %87 = OpBitwiseAnd %uint %86 %uint_65535
++         %88 = OpAccessChain %_ptr_Function_uint %dwords %uint_1
++         %89 = OpLoad %uint %88
++         %90 = OpShiftRightLogical %uint %89 %uint_16
++         %91 = OpCompositeConstruct %v4uint %80 %84 %87 %90
++               OpStore %value %91
++         %95 = OpLoad %92 %xe_copy_dest
++         %96 = OpLoad %v3uint %texel
++         %98 = OpBitcast %v3int %96
++         %99 = OpLoad %v4uint %value
++               OpImageWrite %95 %98 %99
++               OpReturn
++               OpFunctionEnd
++#endif
++
++const uint32_t texture_load_copy_to_image_64bpp_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00000067, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0006000F, 0x00000005, 0x00000004, 0x6E69616D, 0x00000000, 0x0000000B, 0x00060010, 0x00000004,
++    0x00000011, 0x00000020, 0x00000008, 0x00000001, 0x00030003, 0x00000002, 0x000001CC, 0x00040005,
++    0x00000004, 0x6E69616D, 0x00000000, 0x00040005, 0x00000009, 0x65786574, 0x0000006C, 0x00080005,
++    0x0000000B, 0x475F6C67, 0x61626F6C, 0x766E496C, 0x7461636F, 0x496E6F69, 0x00000044, 0x00080005,
++    0x00000012, 0x6F436558, 0x6F547970, 0x67616D49, 0x6E6F4365, 0x6E617473, 0x00007374, 0x00070006,
++    0x00000012, 0x00000000, 0x635F6578, 0x5F79706F, 0x7366666F, 0x00007465, 0x00080006, 0x00000012,
++    0x00000001, 0x635F6578, 0x5F79706F, 0x5F776F72, 0x63746970, 0x00000068, 0x00080006, 0x00000012,
++    0x00000002, 0x635F6578, 0x5F79706F, 0x6579616C, 0x69705F72, 0x00686374, 0x00070006, 0x00000012,
++    0x00000003, 0x635F6578, 0x5F79706F, 0x74646977, 0x00000068, 0x00070006, 0x00000012, 0x00000004,
++    0x635F6578, 0x5F79706F, 0x67696568, 0x00007468, 0x00030005, 0x00000014, 0x00000000, 0x00040005,
++    0x00000029, 0x65646E69, 0x00000078, 0x00040005, 0x00000041, 0x726F7764, 0x00007364, 0x00060005,
++    0x00000043, 0x6F436558, 0x6F537970, 0x65637275, 0x00000000, 0x00070006, 0x00000043, 0x00000000,
++    0x635F6578, 0x5F79706F, 0x72756F73, 0x00006563, 0x00030005, 0x00000045, 0x00000000, 0x00040005,
++    0x0000004C, 0x756C6176, 0x00000065, 0x00060005, 0x0000005E, 0x635F6578, 0x5F79706F, 0x74736564,
++    0x00000000, 0x00040047, 0x0000000B, 0x0000000B, 0x0000001C, 0x00030047, 0x00000012, 0x00000002,
++    0x00050048, 0x00000012, 0x00000000, 0x00000023, 0x00000000, 0x00050048, 0x00000012, 0x00000001,
++    0x00000023, 0x00000004, 0x00050048, 0x00000012, 0x00000002, 0x00000023, 0x00000008, 0x00050048,
++    0x00000012, 0x00000003, 0x00000023, 0x0000000C, 0x00050048, 0x00000012, 0x00000004, 0x00000023,
++    0x00000010, 0x00040047, 0x00000042, 0x00000006, 0x00000008, 0x00030047, 0x00000043, 0x00000003,
++    0x00040048, 0x00000043, 0x00000000, 0x00000018, 0x00050048, 0x00000043, 0x00000000, 0x00000023,
++    0x00000000, 0x00030047, 0x00000045, 0x00000018, 0x00040047, 0x00000045, 0x00000021, 0x00000000,
++    0x00040047, 0x00000045, 0x00000022, 0x00000000, 0x00030047, 0x0000005E, 0x00000019, 0x00040047,
++    0x0000005E, 0x00000021, 0x00000000, 0x00040047, 0x0000005E, 0x00000022, 0x00000001, 0x00040047,
++    0x00000066, 0x0000000B, 0x00000019, 0x00020013, 0x00000002, 0x00030021, 0x00000003, 0x00000002,
++    0x00040015, 0x00000006, 0x00000020, 0x00000000, 0x00040017, 0x00000007, 0x00000006, 0x00000003,
++    0x00040020, 0x00000008, 0x00000007, 0x00000007, 0x00040020, 0x0000000A, 0x00000001, 0x00000007,
++    0x0004003B, 0x0000000A, 0x0000000B, 0x00000001, 0x00020014, 0x0000000D, 0x0004002B, 0x00000006,
++    0x0000000E, 0x00000000, 0x00040020, 0x0000000F, 0x00000007, 0x00000006, 0x0007001E, 0x00000012,
++    0x00000006, 0x00000006, 0x00000006, 0x00000006, 0x00000006, 0x00040020, 0x00000013, 0x00000009,
++    0x00000012, 0x0004003B, 0x00000013, 0x00000014, 0x00000009, 0x00040015, 0x00000015, 0x00000020,
++    0x00000001, 0x0004002B, 0x00000015, 0x00000016, 0x00000003, 0x00040020, 0x00000017, 0x00000009,
++    0x00000006, 0x0004002B, 0x00000006, 0x0000001E, 0x00000001, 0x0004002B, 0x00000015, 0x00000021,
++    0x00000004, 0x0004002B, 0x00000015, 0x0000002A, 0x00000000, 0x0004002B, 0x00000006, 0x0000002D,
++    0x00000002, 0x0004002B, 0x00000015, 0x00000030, 0x00000002, 0x0004002B, 0x00000015, 0x00000037,
++    0x00000001, 0x00040017, 0x0000003F, 0x00000006, 0x00000002, 0x00040020, 0x00000040, 0x00000007,
++    0x0000003F, 0x0003001D, 0x00000042, 0x0000003F, 0x0003001E, 0x00000043, 0x00000042, 0x00040020,
++    0x00000044, 0x00000002, 0x00000043, 0x0004003B, 0x00000044, 0x00000045, 0x00000002, 0x00040020,
++    0x00000047, 0x00000002, 0x0000003F, 0x00040017, 0x0000004A, 0x00000006, 0x00000004, 0x00040020,
++    0x0000004B, 0x00000007, 0x0000004A, 0x0004002B, 0x00000006, 0x0000004F, 0x0000FFFF, 0x0004002B,
++    0x00000006, 0x00000053, 0x00000010, 0x00090019, 0x0000005C, 0x00000006, 0x00000001, 0x00000000,
++    0x00000001, 0x00000000, 0x00000002, 0x0000001F, 0x00040020, 0x0000005D, 0x00000000, 0x0000005C,
++    0x0004003B, 0x0000005D, 0x0000005E, 0x00000000, 0x00040017, 0x00000061, 0x00000015, 0x00000003,
++    0x0004002B, 0x00000006, 0x00000064, 0x00000020, 0x0004002B, 0x00000006, 0x00000065, 0x00000008,
++    0x0006002C, 0x00000007, 0x00000066, 0x00000064, 0x00000065, 0x0000001E, 0x00050036, 0x00000002,
++    0x00000004, 0x00000000, 0x00000003, 0x000200F8, 0x00000005, 0x0004003B, 0x00000008, 0x00000009,
++    0x00000007, 0x0004003B, 0x0000000F, 0x00000029, 0x00000007, 0x0004003B, 0x00000040, 0x00000041,
++    0x00000007, 0x0004003B, 0x0000004B, 0x0000004C, 0x00000007, 0x0004003D, 0x00000007, 0x0000000C,
++    0x0000000B, 0x0003003E, 0x00000009, 0x0000000C, 0x00050041, 0x0000000F, 0x00000010, 0x00000009,
++    0x0000000E, 0x0004003D, 0x00000006, 0x00000011, 0x00000010, 0x00050041, 0x00000017, 0x00000018,
++    0x00000014, 0x00000016, 0x0004003D, 0x00000006, 0x00000019, 0x00000018, 0x000500AE, 0x0000000D,
++    0x0000001A, 0x00000011, 0x00000019, 0x000400A8, 0x0000000D, 0x0000001B, 0x0000001A, 0x000300F7,
++    0x0000001D, 0x00000000, 0x000400FA, 0x0000001B, 0x0000001C, 0x0000001D, 0x000200F8, 0x0000001C,
++    0x00050041, 0x0000000F, 0x0000001F, 0x00000009, 0x0000001E, 0x0004003D, 0x00000006, 0x00000020,
++    0x0000001F, 0x00050041, 0x00000017, 0x00000022, 0x00000014, 0x00000021, 0x0004003D, 0x00000006,
++    0x00000023, 0x00000022, 0x000500AE, 0x0000000D, 0x00000024, 0x00000020, 0x00000023, 0x000200F9,
++    0x0000001D, 0x000200F8, 0x0000001D, 0x000700F5, 0x0000000D, 0x00000025, 0x0000001A, 0x00000005,
++    0x00000024, 0x0000001C, 0x000300F7, 0x00000027, 0x00000000, 0x000400FA, 0x00000025, 0x00000026,
++    0x00000027, 0x000200F8, 0x00000026, 0x000100FD, 0x000200F8, 0x00000027, 0x00050041, 0x00000017,
++    0x0000002B, 0x00000014, 0x0000002A, 0x0004003D, 0x00000006, 0x0000002C, 0x0000002B, 0x00050041,
++    0x0000000F, 0x0000002E, 0x00000009, 0x0000002D, 0x0004003D, 0x00000006, 0x0000002F, 0x0000002E,
++    0x00050041, 0x00000017, 0x00000031, 0x00000014, 0x00000030, 0x0004003D, 0x00000006, 0x00000032,
++    0x00000031, 0x00050084, 0x00000006, 0x00000033, 0x0000002F, 0x00000032, 0x00050080, 0x00000006,
++    0x00000034, 0x0000002C, 0x00000033, 0x00050041, 0x0000000F, 0x00000035, 0x00000009, 0x0000001E,
++    0x0004003D, 0x00000006, 0x00000036, 0x00000035, 0x00050041, 0x00000017, 0x00000038, 0x00000014,
++    0x00000037, 0x0004003D, 0x00000006, 0x00000039, 0x00000038, 0x00050084, 0x00000006, 0x0000003A,
++    0x00000036, 0x00000039, 0x00050080, 0x00000006, 0x0000003B, 0x00000034, 0x0000003A, 0x00050041,
++    0x0000000F, 0x0000003C, 0x00000009, 0x0000000E, 0x0004003D, 0x00000006, 0x0000003D, 0x0000003C,
++    0x00050080, 0x00000006, 0x0000003E, 0x0000003B, 0x0000003D, 0x0003003E, 0x00000029, 0x0000003E,
++    0x0004003D, 0x00000006, 0x00000046, 0x00000029, 0x00060041, 0x00000047, 0x00000048, 0x00000045,
++    0x0000002A, 0x00000046, 0x0004003D, 0x0000003F, 0x00000049, 0x00000048, 0x0003003E, 0x00000041,
++    0x00000049, 0x00050041, 0x0000000F, 0x0000004D, 0x00000041, 0x0000000E, 0x0004003D, 0x00000006,
++    0x0000004E, 0x0000004D, 0x000500C7, 0x00000006, 0x00000050, 0x0000004E, 0x0000004F, 0x00050041,
++    0x0000000F, 0x00000051, 0x00000041, 0x0000000E, 0x0004003D, 0x00000006, 0x00000052, 0x00000051,
++    0x000500C2, 0x00000006, 0x00000054, 0x00000052, 0x00000053, 0x00050041, 0x0000000F, 0x00000055,
++    0x00000041, 0x0000001E, 0x0004003D, 0x00000006, 0x00000056, 0x00000055, 0x000500C7, 0x00000006,
++    0x00000057, 0x00000056, 0x0000004F, 0x00050041, 0x0000000F, 0x00000058, 0x00000041, 0x0000001E,
++    0x0004003D, 0x00000006, 0x00000059, 0x00000058, 0x000500C2, 0x00000006, 0x0000005A, 0x00000059,
++    0x00000053, 0x00070050, 0x0000004A, 0x0000005B, 0x00000050, 0x00000054, 0x00000057, 0x0000005A,
++    0x0003003E, 0x0000004C, 0x0000005B, 0x0004003D, 0x0000005C, 0x0000005F, 0x0000005E, 0x0004003D,
++    0x00000007, 0x00000060, 0x00000009, 0x0004007C, 0x00000061, 0x00000062, 0x00000060, 0x0004003D,
++    0x0000004A, 0x00000063, 0x0000004C, 0x00040063, 0x0000005F, 0x00000062, 0x00000063, 0x000100FD,
++    0x00010038,
++};
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index cb64a07..e5ce58b 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -616,6 +616,9 @@ const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeUniformBuf
+ const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeStorageBuffer = {
+     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kLinkedTypeDescriptorPoolSetCount};
+ 
++const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeStorageImage = {
++    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kStorageImageDescriptorPoolSetCount};
++
+ // 2x descriptors for texture images because of unsigned and signed bindings.
+ const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeTextures[2] = {
+     {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kLinkedTypeDescriptorPoolSetCount},
+@@ -634,6 +637,10 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
+           static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
+               ->vulkan_device(),
+           &kDescriptorPoolSizeStorageBuffer, 1, kLinkedTypeDescriptorPoolSetCount),
++      transient_descriptor_allocator_storage_image_(
++          static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
++              ->vulkan_device(),
++          &kDescriptorPoolSizeStorageImage, 1, kStorageImageDescriptorPoolSetCount),
+       transient_descriptor_allocator_textures_(
+           static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
+               ->vulkan_device(),
+@@ -937,6 +944,23 @@ bool VulkanCommandProcessor::SetupContext() {
+         "buffers bound to the compute shader");
+     return false;
+   }
++  // Transient: storage image for compute shaders.
++  VkDescriptorSetLayoutBinding descriptor_set_layout_binding_transient_storage_image =
++      descriptor_set_layout_binding_transient;
++  descriptor_set_layout_binding_transient_storage_image.descriptorType =
++      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
++  descriptor_set_layout_create_info.bindingCount = 1;
++  descriptor_set_layout_create_info.pBindings =
++      &descriptor_set_layout_binding_transient_storage_image;
++  if (dfn.vkCreateDescriptorSetLayout(
++          device, &descriptor_set_layout_create_info, nullptr,
++          &descriptor_set_layouts_single_transient_[size_t(
++              SingleTransientDescriptorLayout::kStorageImageCompute)]) != VK_SUCCESS) {
++    REXGPU_ERROR(
++        "Failed to create a Vulkan descriptor set layout for a storage image "
++        "bound to the compute shader");
++    return false;
++  }
+ 
+   shared_memory_ =
+       std::make_unique<VulkanSharedMemory>(*this, *memory_, guest_shader_pipeline_stages_);
+@@ -3544,12 +3568,16 @@ VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
+     bool is_storage_buffer =
+         transient_descriptor_layout == SingleTransientDescriptorLayout::kStorageBufferCompute ||
+         transient_descriptor_layout == SingleTransientDescriptorLayout::kStorageBufferPairCompute;
++    bool is_storage_image =
++        transient_descriptor_layout == SingleTransientDescriptorLayout::kStorageImageCompute;
+     ui::vulkan::LinkedTypeDescriptorSetAllocator& transient_descriptor_allocator =
+-        is_storage_buffer ? transient_descriptor_allocator_storage_buffer_
+-                          : transient_descriptor_allocator_uniform_buffer_;
++        is_storage_image    ? transient_descriptor_allocator_storage_image_
++        : is_storage_buffer ? transient_descriptor_allocator_storage_buffer_
++                            : transient_descriptor_allocator_uniform_buffer_;
+     VkDescriptorPoolSize descriptor_count;
+-    descriptor_count.type =
+-        is_storage_buffer ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
++    descriptor_count.type = is_storage_image    ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
++                            : is_storage_buffer ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
++                                                : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+     descriptor_count.descriptorCount =
+         transient_descriptor_layout == SingleTransientDescriptorLayout::kStorageBufferPairCompute
+             ? 2
+@@ -5875,6 +5903,7 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+     transient_descriptors_free.clear();
+   }
+   single_transient_descriptors_used_.clear();
++  transient_descriptor_allocator_storage_image_.Reset();
+   transient_descriptor_allocator_storage_buffer_.Reset();
+   transient_descriptor_allocator_uniform_buffer_.Reset();
+ }
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index b18cea2..88e4568 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -36,6 +36,14 @@
+ 
+ REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube map sampling");
+ 
++REXCVAR_DEFINE_STRING(vulkan_texture_load_storage_copy, "auto", "GPU/Vulkan",
++                      "Copy loaded single-level textures into their images with a compute shader "
++                      "instead of vkCmdCopyBufferToImage: on, off, or auto (on with NVIDIA, where "
++                      "vkCmdCopyBufferToImage was measured to be slow)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_UINT32(vulkan_texture_load_storage_copy_min_kb, 64, "GPU/Vulkan",
++                      "Smallest texture, in KiB, copied by vulkan_texture_load_storage_copy");
++
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+ namespace rex::graphics::vulkan {
+@@ -98,6 +106,9 @@ namespace shaders {
+ #include "../shaders/vulkan_spirv/texture_load_rgba16_snorm_float_scaled_cs.h"
+ #include "../shaders/vulkan_spirv/texture_load_rgba16_unorm_float_cs.h"
+ #include "../shaders/vulkan_spirv/texture_load_rgba16_unorm_float_scaled_cs.h"
++#include "../shaders/vulkan_spirv/texture_load_copy_to_image_128bpp_cs.h"
++#include "../shaders/vulkan_spirv/texture_load_copy_to_image_32bpp_cs.h"
++#include "../shaders/vulkan_spirv/texture_load_copy_to_image_64bpp_cs.h"
+ }  // namespace shaders
+ 
+ namespace {
+@@ -484,6 +495,14 @@ VulkanTextureCache::~VulkanTextureCache() {
+   if (load_pipeline_layout_ != VK_NULL_HANDLE) {
+     dfn.vkDestroyPipelineLayout(device, load_pipeline_layout_, nullptr);
+   }
++  for (VkPipeline storage_copy_pipeline : storage_copy_pipelines_) {
++    if (storage_copy_pipeline != VK_NULL_HANDLE) {
++      dfn.vkDestroyPipeline(device, storage_copy_pipeline, nullptr);
++    }
++  }
++  if (storage_copy_pipeline_layout_ != VK_NULL_HANDLE) {
++    dfn.vkDestroyPipelineLayout(device, storage_copy_pipeline_layout_, nullptr);
++  }
+ 
+   // Textures memory is allocated using the Vulkan Memory Allocator, destroy all
+   // textures before destroying VMA.
+@@ -1118,7 +1137,8 @@ uint32_t VulkanTextureCache::GetMaxHostTextureDepthOrArraySize(
+ }
+ 
+ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(TextureKey key) {
+-  VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
++  // The third is for the storage view of vulkan_texture_load_storage_copy.
++  VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+   const HostFormatPair& host_format = GetHostFormatPair(key);
+   if (host_format.format_signed.format == VK_FORMAT_UNDEFINED) {
+     // Only the unsigned format may be available, if at all.
+@@ -1152,12 +1172,18 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+   bool is_3d = key.dimension == xenos::DataDimension::k3D;
+   uint32_t depth_or_array_size = key.GetDepthOrArraySize();
+ 
++  uint32_t view_format_count = formats[1] != VK_FORMAT_UNDEFINED ? 2 : 1;
++  VkFormat storage_copy_format = GetStorageCopyFormat(key, formats, view_format_count);
++  if (storage_copy_format != VK_FORMAT_UNDEFINED) {
++    formats[view_format_count++] = storage_copy_format;
++  }
++
+   VkImageCreateInfo image_create_info;
+   VkImageCreateInfo* image_create_info_last = &image_create_info;
+   image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+   image_create_info.pNext = nullptr;
+   image_create_info.flags = 0;
+-  if (formats[1] != VK_FORMAT_UNDEFINED) {
++  if (view_format_count > 1) {
+     image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   }
+   if (key.dimension == xenos::DataDimension::kCube) {
+@@ -1177,18 +1203,20 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+   image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+   image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++  if (storage_copy_format != VK_FORMAT_UNDEFINED) {
++    image_create_info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
++  }
+   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+   image_create_info.queueFamilyIndexCount = 0;
+   image_create_info.pQueueFamilyIndices = nullptr;
+   image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   VkImageFormatListCreateInfo image_format_list_create_info;
+-  if (formats[1] != VK_FORMAT_UNDEFINED &&
+-      vulkan_device->extensions().ext_1_2_KHR_image_format_list) {
++  if (view_format_count > 1 && vulkan_device->extensions().ext_1_2_KHR_image_format_list) {
+     image_create_info_last->pNext = &image_format_list_create_info;
+     image_create_info_last = reinterpret_cast<VkImageCreateInfo*>(&image_format_list_create_info);
+     image_format_list_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+     image_format_list_create_info.pNext = nullptr;
+-    image_format_list_create_info.viewFormatCount = 2;
++    image_format_list_create_info.viewFormatCount = view_format_count;
+     image_format_list_create_info.pViewFormats = formats;
+   }
+ 
+@@ -1202,7 +1230,107 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+     return nullptr;
+   }
+ 
+-  return std::unique_ptr<Texture>(new VulkanTexture(*this, key, image, allocation));
++  std::unique_ptr<VulkanTexture> texture(new VulkanTexture(*this, key, image, allocation));
++  texture->set_storage_copy_format(storage_copy_format);
++  return texture;
++}
++
++bool VulkanTextureCache::IsStorageImageFormat(VkFormat format) {
++  auto it = storage_image_formats_.find(format);
++  if (it != storage_image_formats_.end()) {
++    return it->second;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  VkFormatProperties format_properties;
++  vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(
++      vulkan_device->physical_device(), format, &format_properties);
++  bool is_storage_image =
++      (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
++  storage_image_formats_.emplace(format, is_storage_image);
++  return is_storage_image;
++}
++
++VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat* view_formats,
++                                                  uint32_t view_format_count) {
++  // Only single-level 2D (and stacked and cube) textures: the copy is of one
++  // level, and 3D images would need another shader.
++  if (storage_copy_pipeline_layout_ == VK_NULL_HANDLE || key.mip_max_level != 0 ||
++      key.dimension == xenos::DataDimension::k3D) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  // The format the load writes in (as in LoadTextureDataFromResidentMemoryImpl).
++  const HostFormatPair& host_format_pair = GetHostFormatPair(key);
++  bool host_format_is_signed;
++  if (IsSignedVersionSeparateForFormat(key)) {
++    host_format_is_signed = bool(key.signed_separate);
++  } else {
++    host_format_is_signed = host_format_pair.format_unsigned.load_shader == kLoadShaderIndexUnknown;
++  }
++  const HostFormat& host_format =
++      host_format_is_signed ? host_format_pair.format_signed : host_format_pair.format_unsigned;
++  if (host_format.load_shader == kLoadShaderIndexUnknown || host_format.block_compressed) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  // The unsigned integer view must be in the same compatibility class as the
++  // view formats: only plain 32, 64 and 128 bit color formats.
++  uint32_t texel_size = 0;
++  for (uint32_t i = 0; i < view_format_count; ++i) {
++    uint32_t view_texel_size;
++    switch (view_formats[i]) {
++      case VK_FORMAT_R8G8B8A8_UNORM:
++      case VK_FORMAT_R8G8B8A8_SNORM:
++      case VK_FORMAT_B8G8R8A8_UNORM:
++      case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
++      case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
++      case VK_FORMAT_R16G16_UNORM:
++      case VK_FORMAT_R16G16_SNORM:
++      case VK_FORMAT_R16G16_SFLOAT:
++      case VK_FORMAT_R32_SFLOAT:
++      case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
++        view_texel_size = 4;
++        break;
++      case VK_FORMAT_R16G16B16A16_UNORM:
++      case VK_FORMAT_R16G16B16A16_SNORM:
++      case VK_FORMAT_R16G16B16A16_SFLOAT:
++      case VK_FORMAT_R32G32_SFLOAT:
++        view_texel_size = 8;
++        break;
++      case VK_FORMAT_R32G32B32A32_SFLOAT:
++        view_texel_size = 16;
++        break;
++      default:
++        return VK_FORMAT_UNDEFINED;
++    }
++    if (i && view_texel_size != texel_size) {
++      return VK_FORMAT_UNDEFINED;
++    }
++    texel_size = view_texel_size;
++  }
++  // The load writes texels of this size.
++  if (GetLoadShaderInfo(host_format.load_shader).bytes_per_host_block != texel_size) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  uint64_t size_bytes =
++      uint64_t(key.GetWidth()) * key.GetHeight() * key.GetDepthOrArraySize() * texel_size;
++  if (key.scaled_resolve) {
++    size_bytes *= uint64_t(draw_resolution_scale_x()) * draw_resolution_scale_y();
++  }
++  if (size_bytes < uint64_t(REXCVAR_GET(vulkan_texture_load_storage_copy_min_kb)) * 1024) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  VkFormat storage_copy_format = texel_size == 4   ? VK_FORMAT_R32_UINT
++                                 : texel_size == 8 ? VK_FORMAT_R16G16B16A16_UINT
++                                                   : VK_FORMAT_R32G32B32A32_UINT;
++  // Every view format of an image with the storage usage must support it.
++  if (!IsStorageImageFormat(storage_copy_format)) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  for (uint32_t i = 0; i < view_format_count; ++i) {
++    if (!IsStorageImageFormat(view_formats[i])) {
++      return VK_FORMAT_UNDEFINED;
++    }
++  }
++  return storage_copy_format;
+ }
+ 
+ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unscaled,
+@@ -1720,6 +1848,92 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+     }
+   }
+ 
++  vulkan_texture.MarkAsUsed();
++
++  // vulkan_texture_load_storage_copy: write the image in a compute shader
++  // through an unsigned integer view of the texel size. vkCmdCopyBufferToImage
++  // from the scratch buffer runs at about 60 GB/s on some drivers (NVIDIA,
++  // Windows), a few times slower than the memory bandwidth the dispatches and
++  // the Direct3D 12 copy get.
++  if (vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED && level_first == 0 &&
++      level_last == 0 && level_packed != 0) {
++    uint32_t texel_size = load_shader_info.bytes_per_host_block;
++    uint32_t texel_size_index = texel_size == 4 ? 0 : (texel_size == 8 ? 1 : 2);
++    VkPipeline storage_copy_pipeline = storage_copy_pipelines_[texel_size_index];
++    VkImageView storage_copy_view = vulkan_texture.GetStorageCopyView();
++    VkDescriptorSet descriptor_set_storage_image = VK_NULL_HANDLE;
++    if (storage_copy_pipeline != VK_NULL_HANDLE && storage_copy_view != VK_NULL_HANDLE) {
++      descriptor_set_storage_image = command_processor_.AllocateSingleTransientDescriptor(
++          VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute);
++    }
++    if (descriptor_set_storage_image != VK_NULL_HANDLE) {
++      VkDescriptorImageInfo storage_image_info;
++      storage_image_info.sampler = VK_NULL_HANDLE;
++      storage_image_info.imageView = storage_copy_view;
++      storage_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
++      VkWriteDescriptorSet write_descriptor_set_storage_image;
++      write_descriptor_set_storage_image.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++      write_descriptor_set_storage_image.pNext = nullptr;
++      write_descriptor_set_storage_image.dstSet = descriptor_set_storage_image;
++      write_descriptor_set_storage_image.dstBinding = 0;
++      write_descriptor_set_storage_image.dstArrayElement = 0;
++      write_descriptor_set_storage_image.descriptorCount = 1;
++      write_descriptor_set_storage_image.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
++      write_descriptor_set_storage_image.pImageInfo = &storage_image_info;
++      write_descriptor_set_storage_image.pBufferInfo = nullptr;
++      write_descriptor_set_storage_image.pTexelBufferView = nullptr;
++      dfn.vkUpdateDescriptorSets(device, 1, &write_descriptor_set_storage_image, 0, nullptr);
++
++      command_processor_.PushBufferMemoryBarrier(
++          scratch_buffer, 0, VK_WHOLE_SIZE,
++          scratch_buffer_acquisition.SetStageMask(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
++          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++          scratch_buffer_acquisition.SetAccessMask(VK_ACCESS_SHADER_READ_BIT),
++          VK_ACCESS_SHADER_READ_BIT);
++      // The only level, all the layers, is overwritten: the old contents don't
++      // need to be kept (VK_IMAGE_LAYOUT_UNDEFINED), only the previous accesses
++      // completed. Not skipped if the previous usage is also this copy, to
++      // order the two writes.
++      VulkanTexture::Usage texture_old_usage =
++          vulkan_texture.SetUsage(VulkanTexture::Usage::kStorageCopyDestination);
++      VkPipelineStageFlags texture_src_stage_mask, texture_dst_stage_mask;
++      VkAccessFlags texture_src_access_mask, texture_dst_access_mask;
++      VkImageLayout texture_old_layout, texture_new_layout;
++      GetTextureUsageMasks(texture_old_usage, texture_src_stage_mask, texture_src_access_mask,
++                           texture_old_layout);
++      GetTextureUsageMasks(VulkanTexture::Usage::kStorageCopyDestination, texture_dst_stage_mask,
++                           texture_dst_access_mask, texture_new_layout);
++      command_processor_.PushImageMemoryBarrier(
++          vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
++          texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
++          texture_dst_access_mask, VK_IMAGE_LAYOUT_UNDEFINED, texture_new_layout,
++          VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++      command_processor_.SubmitBarriers(true);
++
++      command_processor_.BindExternalComputePipeline(storage_copy_pipeline);
++      VkDescriptorSet storage_copy_descriptor_sets[kStorageCopyDescriptorSetCount];
++      storage_copy_descriptor_sets[kStorageCopyDescriptorSetIndexSource] = descriptor_set_dest;
++      storage_copy_descriptor_sets[kStorageCopyDescriptorSetIndexDestination] =
++          descriptor_set_storage_image;
++      command_buffer.CmdVkBindDescriptorSets(
++          VK_PIPELINE_BIND_POINT_COMPUTE, storage_copy_pipeline_layout_, 0,
++          kStorageCopyDescriptorSetCount, storage_copy_descriptor_sets, 0, nullptr);
++      StorageCopyConstants storage_copy_constants;
++      storage_copy_constants.offset = uint32_t(host_layout_base.offset_bytes / texel_size);
++      storage_copy_constants.row_pitch = host_layout_base.x_pitch_blocks;
++      storage_copy_constants.layer_pitch =
++          uint32_t(host_layout_base.slice_size_bytes / texel_size);
++      storage_copy_constants.width = width * texture_resolution_scale_x;
++      storage_copy_constants.height = height * texture_resolution_scale_y;
++      command_buffer.CmdVkPushConstants(storage_copy_pipeline_layout_,
++                                        VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                                        sizeof(storage_copy_constants), &storage_copy_constants);
++      command_buffer.CmdVkDispatch((storage_copy_constants.width + 31) / 32,
++                                   (storage_copy_constants.height + 7) / 8, array_size);
++      return true;
++    }
++  }
++
+   // Submit copying from the copy buffer to the host texture.
+   command_processor_.PushBufferMemoryBarrier(
+       scratch_buffer, 0, VK_WHOLE_SIZE,
+@@ -1727,7 +1941,6 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+       VK_PIPELINE_STAGE_TRANSFER_BIT,
+       scratch_buffer_acquisition.SetAccessMask(VK_ACCESS_TRANSFER_READ_BIT),
+       VK_ACCESS_TRANSFER_READ_BIT);
+-  vulkan_texture.MarkAsUsed();
+   VulkanTexture::Usage texture_old_usage =
+       vulkan_texture.SetUsage(VulkanTexture::Usage::kTransferDestination);
+   if (texture_old_usage != VulkanTexture::Usage::kTransferDestination) {
+@@ -1860,9 +2073,44 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
+   if (image_view_3d_as_2d_signed_ != VK_NULL_HANDLE) {
+     dfn.vkDestroyImageView(device, image_view_3d_as_2d_signed_, nullptr);
+   }
++  if (storage_copy_view_ != VK_NULL_HANDLE) {
++    dfn.vkDestroyImageView(device, storage_copy_view_, nullptr);
++  }
+   vmaDestroyImage(vulkan_texture_cache.vma_allocator_, image_, allocation_);
+ }
+ 
++VkImageView VulkanTextureCache::VulkanTexture::GetStorageCopyView() {
++  if (storage_copy_view_ != VK_NULL_HANDLE || storage_copy_format_ == VK_FORMAT_UNDEFINED) {
++    return storage_copy_view_;
++  }
++  const VulkanTextureCache& vulkan_texture_cache =
++      static_cast<const VulkanTextureCache&>(texture_cache());
++  const ui::vulkan::VulkanDevice* const vulkan_device =
++      vulkan_texture_cache.command_processor_.GetVulkanDevice();
++  VkImageViewCreateInfo view_create_info;
++  view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++  view_create_info.pNext = nullptr;
++  view_create_info.flags = 0;
++  view_create_info.image = image_;
++  // 2D textures, stacked ones and cube maps (all six faces) alike.
++  view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++  view_create_info.format = storage_copy_format_;
++  view_create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
++  view_create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
++  view_create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
++  view_create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
++  view_create_info.subresourceRange =
++      ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
++  if (vulkan_device->functions().vkCreateImageView(vulkan_device->device(), &view_create_info,
++                                                   nullptr, &storage_copy_view_) != VK_SUCCESS) {
++    REXGPU_ERROR("VulkanTextureCache: Failed to create a storage view for copying a texture");
++    // Use vkCmdCopyBufferToImage from now on.
++    storage_copy_format_ = VK_FORMAT_UNDEFINED;
++    storage_copy_view_ = VK_NULL_HANDLE;
++  }
++  return storage_copy_view_;
++}
++
+ VkImageView VulkanTextureCache::VulkanTexture::GetView(bool is_signed, uint32_t host_swizzle,
+                                                        bool is_array) {
+   xenos::DataDimension dimension = key().dimension;
+@@ -2960,6 +3208,57 @@ bool VulkanTextureCache::Initialize() {
+     }
+   }
+ 
++  // vulkan_texture_load_storage_copy pipelines. Without them, all textures are
++  // copied with vkCmdCopyBufferToImage.
++  const std::string& storage_copy_mode = REXCVAR_GET(vulkan_texture_load_storage_copy);
++  if (storage_copy_mode == "on" ||
++      (storage_copy_mode == "auto" && device_properties.vendorID == 0x10DE)) {
++    VkDescriptorSetLayout storage_copy_descriptor_set_layouts[kStorageCopyDescriptorSetCount];
++    storage_copy_descriptor_set_layouts[kStorageCopyDescriptorSetIndexSource] =
++        load_descriptor_set_layout_storage_buffer;
++    storage_copy_descriptor_set_layouts[kStorageCopyDescriptorSetIndexDestination] =
++        command_processor_.GetSingleTransientDescriptorLayout(
++            VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute);
++    VkPushConstantRange storage_copy_push_constant_range;
++    storage_copy_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
++    storage_copy_push_constant_range.offset = 0;
++    storage_copy_push_constant_range.size = sizeof(StorageCopyConstants);
++    VkPipelineLayoutCreateInfo storage_copy_pipeline_layout_create_info;
++    storage_copy_pipeline_layout_create_info.sType =
++        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
++    storage_copy_pipeline_layout_create_info.pNext = nullptr;
++    storage_copy_pipeline_layout_create_info.flags = 0;
++    storage_copy_pipeline_layout_create_info.setLayoutCount = kStorageCopyDescriptorSetCount;
++    storage_copy_pipeline_layout_create_info.pSetLayouts = storage_copy_descriptor_set_layouts;
++    storage_copy_pipeline_layout_create_info.pushConstantRangeCount = 1;
++    storage_copy_pipeline_layout_create_info.pPushConstantRanges =
++        &storage_copy_push_constant_range;
++    if (dfn.vkCreatePipelineLayout(device, &storage_copy_pipeline_layout_create_info, nullptr,
++                                   &storage_copy_pipeline_layout_) != VK_SUCCESS) {
++      REXGPU_ERROR("VulkanTextureCache: Failed to create the texture storage copy pipeline layout");
++      storage_copy_pipeline_layout_ = VK_NULL_HANDLE;
++    } else {
++      const std::pair<const uint32_t*, size_t> storage_copy_shader_code[] = {
++          {shaders::texture_load_copy_to_image_32bpp_cs,
++           sizeof(shaders::texture_load_copy_to_image_32bpp_cs)},
++          {shaders::texture_load_copy_to_image_64bpp_cs,
++           sizeof(shaders::texture_load_copy_to_image_64bpp_cs)},
++          {shaders::texture_load_copy_to_image_128bpp_cs,
++           sizeof(shaders::texture_load_copy_to_image_128bpp_cs)},
++      };
++      static_assert(rex::countof(storage_copy_shader_code) == kStorageCopyTexelSizeCount);
++      for (uint32_t i = 0; i < kStorageCopyTexelSizeCount; ++i) {
++        // A failure leaves vkCmdCopyBufferToImage for this texel size.
++        storage_copy_pipelines_[i] = ui::vulkan::util::CreateComputePipeline(
++            vulkan_device, storage_copy_pipeline_layout_, storage_copy_shader_code[i].first,
++            storage_copy_shader_code[i].second);
++        if (storage_copy_pipelines_[i] == VK_NULL_HANDLE) {
++          REXGPU_ERROR("VulkanTextureCache: Failed to create texture storage copy pipeline {}", i);
++        }
++      }
++    }
++  }
++
+   // Use true null descriptors when supported; otherwise, keep compatibility
+   // fallback null images.
+   if (device_properties.nullDescriptor) {
+@@ -3229,6 +3528,11 @@ void VulkanTextureCache::GetTextureUsageMasks(VulkanTexture::Usage usage,
+       access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
+       layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+       break;
++    case VulkanTexture::Usage::kStorageCopyDestination:
++      stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++      access_mask = VK_ACCESS_SHADER_WRITE_BIT;
++      layout = VK_IMAGE_LAYOUT_GENERAL;
++      break;
+     case VulkanTexture::Usage::kGuestShaderSampled:
+       stage_mask = guest_shader_pipeline_stages_;
+       access_mask = VK_ACCESS_SHADER_READ_BIT;

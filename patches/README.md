@@ -20,6 +20,7 @@ git apply ../../patches/rexglue-vulkan-memexport-check-order.patch
 git apply ../../patches/rexglue-vulkan-hoist-shared-memory-uploads.patch
 git apply ../../patches/rexglue-threaded-submission-vulkan.patch
 git apply ../../patches/rexglue-d3d12-placed-texture-heaps.patch
+git apply ../../patches/rexglue-vulkan-texture-load-storage-copy.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -237,3 +238,51 @@ Free roam and the drive from the spawn point kept their median frame (within 1%)
 | Change | Files | Affects |
 |---|---|---|
 | Texture heaps, placement and release | `include/rex/graphics/d3d12/texture_cache.h`, `src/graphics/d3d12/texture_cache.cpp` | D3D12 |
+
+## rexglue-vulkan-texture-load-storage-copy.patch
+
+A texture load decodes the guest's data into a scratch buffer with a compute shader and then copies it into the texture's image. On Vulkan the copy was `vkCmdCopyBufferToImage`. On an RTX 5080 with NVIDIA's Windows driver it moved about 120 GB/s; D3D12's `CopyTextureRegion` moved 400 to 850 GB/s for the same textures. These rates come from GPU timestamps around each step of every load (`launcher/dev/texload-split-timestamps.sdk.patch` in the fork). In free roam at 3x, the copies took 3.5 ms of a 15.3 ms GPU frame (D3D12: 0.8 ms); the decode took about 0.8 ms on both APIs. The textures loaded every frame are render targets the game resolved into textures, up to 3840x2160 at 3x. They were the remaining difference between the two APIs at 3x.
+
+A compute shader now writes these textures from the scratch buffer, through an unsigned integer view of the same texel size (R32_UINT, R16G16B16A16_UINT or R32G32B32A32_UINT). The result is bit for bit the same as the copy. A texture qualifies when it:
+- has one level;
+- is 2D, stacked or cube;
+- is at least 64 KiB (`vulkan_texture_load_storage_copy_min_kb`);
+- has a 32, 64 or 128-bit colour host format that the device can use as a storage image.
+
+Such images are created with the storage usage and the integer format in their format list. The shader writes every texel of the only level, so the barrier before it discards the old contents (from an undefined layout), and it is kept between two loads of the same texture. Textures with mips keep `vkCmdCopyBufferToImage`; in the city that is one 512x256 texture, about 0.1 ms a frame at 3x.
+
+Setting `vulkan_texture_load_storage_copy`: `auto` (default), `on` or `off`.
+- **`auto`** turns it on with NVIDIA's driver only, the only one it was measured with.
+- **Other drivers** may not have the slow copy: AMD's, Intel's and Mesa's (the PS5 build uses RADV) copy with shaders of their own. The storage usage could also cost them sampling speed, as some keep storage images uncompressed. Nothing was measured on them; `on` turns it on to try.
+
+Measured on Windows, Vulkan, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings. GPU timestamps, free roam at 3x, median of nine frames:
+
+| | Off | On | D3D12, for reference |
+|---|---|---|---|
+| GPU frame | 15.29 ms | 12.73 ms (-16.7%) | 13.99 ms |
+| Texture loads | 4.43 ms (copies 3.53) | 1.88 ms (copies 0.96) | 1.59 ms (copies 0.81) |
+| Guest draws | 5.37 ms | 5.14 ms | 5.81 ms |
+
+Scripted timedemo (`launcher/dev/devrun.py`, `drive-spawn.pad`; updates of exactly 1/60 s, uncapped, fullscreen). Five runs per configuration, alternating, after a warm-up; median frame time, with the 1% low in brackets:
+
+| Segment | 3x, off | 3x, on | Native, off | Native, on |
+|---|---|---|---|---|
+| Free roam, standing | 14.91 ms (60 FPS) | 12.04 ms, -19.2% (71 FPS) | 6.84 ms | 6.85 ms |
+| Drive from the spawn point | 15.05 ms (59 FPS) | 12.22 ms, -18.8% (71 FPS) | 6.83 ms | 6.80 ms |
+| Map zoom-out (loading) | 13.10 ms (28 FPS) | 11.38 ms, -13.1% (31 FPS) | 6.92 ms | 6.89 ms |
+
+At native resolution one of the game's own threads holds the frame rate, so the shorter GPU frame does not show there.
+
+Checks:
+- **Validation:** five minutes of Vulkan validation at 3x, driving, with fullscreen switched every 5 s. Only the three kinds of message that this fork's other changes don't cause either: a swapchain destroyed while in use, a pixel shader output with no attachment, and an occlusion query begun outside a render pass.
+- **Synchronization validation:** the same report with the setting on and off, a write after write between load dispatches into the scratch buffer.
+- **Screenshots at 3x** of the map zoom-out, free roam and the drive with it on and off: the same picture, though the time of day and the traffic differ from run to run.
+- **The attract movie:** every capture (about every 150 ms) matches a frame of the movie, as with the setting off.
+
+Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| Copy through a storage view, which textures, the setting | `include/rex/graphics/vulkan/texture_cache.h`, `src/graphics/vulkan/texture_cache.cpp` | Vulkan |
+| The copy shader (GLSL source and its SPIR-V, made with `glslangValidator -V --target-env vulkan1.0`) | `src/graphics/shaders/texture_load_copy_to_image.cs.glsl`, `src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_{32,64,128}bpp_cs.h` | Vulkan |
+| Transient storage image descriptors | `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
