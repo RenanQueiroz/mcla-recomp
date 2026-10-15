@@ -15,11 +15,13 @@
 #include "mcla_app.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #include <rex/chrono/clock.h>
@@ -322,6 +324,58 @@ void mcla_bike_gyro_pos_smoothing(PPCRegister& f13) {
 
 void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
   RescaleBikeGyroFactor(f0);
+}
+
+// The UI's Flash movies (menus, pop-ups, and the HUD with its song ticker and
+// "LOADING" badge) advance exactly one movie frame per game update: the UI
+// manager steps them in the Flash player's one-frame mode, which ignores the
+// elapsed time. The console updated 30 times a second, which is what the
+// movies were made for; at 120 FPS they all ran four times as fast (the song
+// ticker under the speedometer scrolls 2 px per update at 720p: 60 px/s at 30,
+// 240 at 120). Each movie is now advanced on its own 30-per-second schedule,
+// and an update that comes before a movie is due skips that movie's advance.
+// A movie due within a quarter of a frame is advanced early, so at 30 FPS every
+// update still advances once, as before. A movie that falls behind (below 30
+// FPS) is not caught up, as on the console. The start-up logos are left alone:
+// the fast intro is meant to run them as fast as possible.
+REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
+                    "Advance the UI's Flash movies (menus, HUD animations) 30 times a second, as "
+                    "on the console, instead of once per rendered frame");
+
+bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
+  if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
+      !g_engine_timer_started.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  constexpr uint64_t kPeriodMicros = 1'000'000ull / 30;
+  constexpr uint64_t kEarlyMicros = kPeriodMicros / 4;
+  struct Schedule {
+    uint32_t context;
+    uint64_t next_us;
+  };
+  static std::mutex mutex;
+  static std::array<Schedule, 32> schedules{};
+  static size_t replace = 0;
+  const uint32_t context = r31.u32;
+  const uint64_t now = NowMicros();
+  std::lock_guard lock(mutex);
+  Schedule* schedule = nullptr;
+  for (Schedule& s : schedules) {
+    if (s.context == context) {
+      schedule = &s;
+      break;
+    }
+  }
+  if (!schedule) {
+    schedule = &schedules[replace++ % schedules.size()];
+    *schedule = {context, 0};
+  }
+  if (schedule->next_us && now + kEarlyMicros < schedule->next_us) {
+    return true;
+  }
+  const bool behind = !schedule->next_us || now > schedule->next_us + kPeriodMicros;
+  schedule->next_us = behind ? now + kPeriodMicros : schedule->next_us + kPeriodMicros;
+  return false;
 }
 
 static bool SkipIntro() {

@@ -9,8 +9,10 @@ kinds of changes on top of upstream's `main`:
   holdmysocks/mcla-recomp, made from its own branch off upstream's `main`.
   - Game: frame pacing at the swap, the 1 ms timer kept while the window is
     hidden, the achievement toast registered only while it shows, the
-    motorcycle lean filter by elapsed time, and the mouse pointer hidden during
-    play (`docs/known-issues.md`, 2026-10-14 sections).
+    motorcycle lean filter by elapsed time, the mouse pointer hidden during
+    play, loading-screen pacing that no longer stutters uncapped, and menus and
+    HUD animations at the console's pace above 30 FPS (`docs/known-issues.md`,
+    2026-10-14 sections).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,

@@ -249,3 +249,25 @@ Two faults in `PaceUnlimitedSwap` (`src/frame_timing.cpp`), the hold that keeps 
 - `mcla_intro=fast` (and `skip`) turned the hold off for good, so every later loading screen also ran as fast as the PC could present. They now leave it off only until the engine timer first runs, which is the end of the start-up logos.
 
 Unchanged: the start-up sequence at `normal` (334 swaps over 11.3 s at 29.4 per second, against 327 over 11.1 s before), at `fast` (879 swaps in 3.7 s, against 893 in 3.8 s), and capped play, where every swap has exactly one update (120 cap, free roam: 1,200 of 1,200 swaps). In the reachable path (start-up, title, attract movie, map zoom-out, free roam) the start-up sequence is the only untimed loop, so the fast intro's new limit was checked by reading the code, not on a later loading screen.
+
+## Menus and HUD animations ran faster above 30 FPS (fixed 2026-10-14)
+
+Reported by the user at a steady 120 cap: the song title scrolling under the speedometer ran far too fast while the game itself ran at normal speed. Every UI screen is a Flash movie (menus, pop-ups, the HUD with its song ticker and "LOADING" badge), and the UI manager steps each one with the Flash player's one-frame mode, which advances exactly one movie frame per game update and ignores the elapsed time (from LARecomp's notes, used with its author's permission: mcUIManager::Update, sub_821FC588, passes byte_827DC1FC = 1, which nothing writes, to the advance, sub_825EDC08). The console updated 30 times a second, so at 120 FPS every Flash animation ran four times as fast.
+
+`mcla_ui_movie_advance` (a mid-asm hook at 0x825EDC6C in the advance, `src/frame_timing.cpp`) now gives each movie its own 30-per-second schedule; an update that comes before a movie is due skips that movie's advance, through the same exit the player takes when a movie is not due. A movie due within a quarter of a frame is advanced early, so at 30 FPS every update still advances once. A movie that falls behind (below 30 FPS) is not caught up, as on the console. The start-up logos are left out, so the fast intro still runs them as fast as possible. `--mcla_ui_timing_fix=false` restores one movie frame per update.
+
+Measured with the dev pad's frame-by-frame screenshots, timedemo at each cap (`--mcla_fixed_dt` = the cap), native, D3D12:
+
+| | 30 FPS | 120 FPS before | 120 FPS after |
+|---|---|---|---|
+| Song ticker under the speedometer (px/s at 720p) | 59.9 | 239.9 | 60.0 |
+| Pause menu opening (Start in the city) | 933 ms | 183 ms | 883 ms |
+
+The 30 FPS figures are the same with the fix on and off (59.5 to 59.9 px/s). The car's path over the scripted drive from the spawn point differed between runs with the fix on and off no more than between runs with the same setting (up to 13 m apart either way; the closest pair, 0.4 m, was one of each), and the drive's frame time was unchanged. Short presses still reach the menus: the GPS map's legend toggled on each of eight 15 ms presses of X at 120 FPS with the fix on, as with it off.
+
+What else this covers and what it does not:
+
+- Changed with it (the same mechanism, not measured separately): the "LOADING" badge, pop-ups and notifications, the GPS map's panels, the title screen's Flash elements.
+- Not affected: the minimap, which the game moves itself (it changed on every new frame with the fix on, as off), and the GPS map's zoom-out, which is a camera move.
+- Trade-off: HUD elements that the HUD movie positions as it advances now move 30 times a second, as on the console. The tachometer needle at 120 FPS moved on every frame before and on every fourth frame after (in steps of about 2 px instead of 0.7 px at 640x360). LARecomp left its HUD out of the same kind of pacing for this reason; here the HUD is paced, since its ticker was the reported fault.
+- Not verified: the 3D icons (`3DICONSMOVIE0`-`2`, map markers drawn over the world). If they are positioned as their movie advances, they now follow the world 30 times a second.

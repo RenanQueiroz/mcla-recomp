@@ -83,6 +83,22 @@ name = "mcla_bike_gyro_vel_smoothing"
 address = 0x823689F0
 registers = ["f0"]
 
+# --- UI (Flash) movies -------------------------------------------------------
+# From LARecomp's notes (used with its author's permission): mcUIManager::Update
+# (sub_821FC588) steps every enabled UI movie with the Flash player's one-frame
+# mode, which advances exactly one movie frame per call and ignores the elapsed
+# time; the flag it passes (byte_827DC1FC) is 1 in the image and never written.
+
+# 0x825EDC6C: `beq cr6,0x825EDC78` in sub_825EDC08, the movie advance, right
+# after the length of one movie frame is computed and before the branch on the
+# one-frame flag (r25). r31 is the movie's player context. Jumping to
+# 0x825EDD44, the path taken when a movie is not yet due, holds the advance back.
+[[midasm_hook]]
+name = "mcla_ui_movie_advance"
+address = 0x825EDC6C
+registers = ["r25", "r31"]
+jump_address_on_true = 0x825EDD44
+
 # --- Intro movies ------------------------------------------------------------
 # The start-up legal screens and logos are not paced by the engine timer; they
 # are held to 30 per second in mcla_present_interval (see src/frame_timing.cpp).
