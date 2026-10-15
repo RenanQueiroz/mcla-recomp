@@ -4,7 +4,7 @@
 #
 # Needs Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++
 # workload) and Clang 20. Whatever is missing, the script offers to install
-# (winget, and Clang from the LLVM project's releases); docs\pc-build-guide.md
+# (winget, and Clang from the LLVM project's releases); README.md
 # lists them for doing it by hand.
 # Everything is built on your machine from your own copy of the game: nothing
 # of the game is in this repository, and what this builds is not for sharing.
@@ -91,9 +91,9 @@ try {
         "missing: $($missing -join ', ')"
         if (-not $InstallTools) {
             $answer = Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights. [y/N]"
-            if ($answer -notmatch '^[yY]') { Fail "install them (see 'What you need' in docs\pc-build-guide.md) and run this again, or run with -InstallTools" }
+            if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in README.md) and run this again, or run with -InstallTools" }
         }
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install the tools by hand (docs\pc-build-guide.md)" }
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install the tools by hand (README.md, 'Windows')" }
         $ids = @{ "Git" = "Git.Git"; "CMake" = "Kitware.CMake"; "Ninja" = "Ninja-build.Ninja"; "Python" = "Python.Python.3.12" }
         foreach ($name in $missing) {
             if ($ids.ContainsKey($name)) {
@@ -144,7 +144,7 @@ try {
     } else {
         "already patched: $sdk"
     }
-    # The car reflection fix (REFLECTION_FIX.md) came later than the patches
+    # The car reflection fix came later than the patches
     # above: an SDK patched before it gets it here, and the marker's new time
     # has step 3 build the SDK again.
     if (-not (Select-String -Quiet -SimpleMatch "kSysFlag_MinMaxColor0TimesSrcAlpha" "$sdk\include\rex\graphics\pipeline\shader\spirv_translator.h")) {
