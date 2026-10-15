@@ -1,0 +1,12 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Midnight Club: Los Angeles",
+  "wikidata": "Q1514674",
+  "system": "Xbox 360",
+  "type": "recomp",
+  "project": "mcla-recomp",
+  "status": "released",
+  "targets": ["Windows", "PS5"],
+  "toolchain": "ReXGlue",
+  "original": {"region": "USA, Europe", "revision": "Complete Edition"}
+}

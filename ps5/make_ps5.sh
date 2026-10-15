@@ -115,6 +115,13 @@ if ! grep -q kSysFlag_MinMaxColor0TimesSrcAlpha "$rex_src/include/rex/graphics/p
     git -C "$rex_src" apply "$repo/patches/rexglue-minmax-blend-factor.patch" || fail "the reflection fix does not apply (is the checkout clean?)"
     echo "applied: rexglue-minmax-blend-factor.patch"
 fi
+# Short waits that spun instead of sleeping (from the Linux build, PR #4): the
+# PS5 runs the same POSIX threading code. Added later, so applied the same way.
+if ! grep -q "Sleep the real remaining time" "$rex_src/src/core/threading_posix.cpp"; then
+    git -C "$rex_src" apply "$repo/patches/rexglue-linux-wait-sleep.patch" || fail "the wait fix does not apply (is the checkout clean?)"
+    echo "applied: rexglue-linux-wait-sleep.patch"
+fi
+
 # Later patches to the SDK (patches/README.md), applied in the order they were
 # made, as several change neighbouring lines. Each goes onto an SDK patched
 # before it existed, found by a name it adds. Built and run on Windows only so

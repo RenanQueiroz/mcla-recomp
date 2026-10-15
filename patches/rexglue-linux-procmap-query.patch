@@ -1,0 +1,57 @@
+--- a/src/core/memory_posix.cpp	2026-10-13 05:39:07.671741586 +0100
++++ b/src/core/memory_posix.cpp	2026-10-13 05:39:07.675697433 +0100
+@@ -36,6 +36,11 @@
+ #include <rex/platform.h>
+ #include <rex/string.h>
+ 
++#if REX_PLATFORM_LINUX
++#include <linux/fs.h>
++#include <sys/ioctl.h>
++#endif
++
+ // macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
+ // explicit *64 forms for legacy 32-bit off_t distributions.
+ #if defined(__APPLE__) || REX_PLATFORM_PS5
+@@ -211,9 +216,42 @@
+   return out.start < out.end;
+ }
+ 
++#ifdef PROCMAP_QUERY
++// Linux 6.11+ answers "which mapping holds this address" with one ioctl on
++// /proc/self/maps, instead of generating and parsing the whole text file. That
++// matters because the MMIO fault handler asks on every write-watch hit.
++// Returns 1 found, 0 no mapping at the address, -1 query unavailable.
++static int QueryEntryForAddress(uintptr_t addr, LinuxMapEntry& out_entry) {
++  static const int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
++  if (maps_fd < 0) {
++    return -1;
++  }
++  procmap_query query{};
++  query.size = sizeof(query);
++  query.query_addr = addr;
++  if (ioctl(maps_fd, PROCMAP_QUERY, &query) != 0) {
++    return errno == ENOENT ? 0 : -1;
++  }
++  out_entry.start = static_cast<uintptr_t>(query.vma_start);
++  out_entry.end = static_cast<uintptr_t>(query.vma_end);
++  out_entry.perms[0] = (query.vma_flags & PROCMAP_QUERY_VMA_READABLE) ? 'r' : '-';
++  out_entry.perms[1] = (query.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) ? 'w' : '-';
++  out_entry.perms[2] = (query.vma_flags & PROCMAP_QUERY_VMA_EXECUTABLE) ? 'x' : '-';
++  out_entry.perms[3] = (query.vma_flags & PROCMAP_QUERY_VMA_SHARED) ? 's' : 'p';
++  out_entry.perms[4] = '\0';
++  return 1;
++}
++#endif
++
+ // Find the mapping entry in /proc/self/maps that contains the given address
+ static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
+   const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
++#ifdef PROCMAP_QUERY
++  const int queried = QueryEntryForAddress(addr, out_entry);
++  if (queried >= 0) {
++    return queried == 1;
++  }
++#endif
+   std::ifstream maps("/proc/self/maps");
+   if (!maps.is_open())
+     return false;

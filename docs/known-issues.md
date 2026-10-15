@@ -19,6 +19,14 @@ Problems the user reported in that session:
 
 To find out, Release builds now keep the SDK's per-frame counters (`patches/rexglue-perf-csv-env.patch`). Set `REX_PERF_LOG_CSV=<file>` before launching and run `scripts/analyze_perf.py <file>` afterwards.
 
+## Stuck on one shot of the city when an event starts (issue #6)
+
+Reported entering a Red Light race on PC: the camera holds one shot, people walk and music plays, and no input does anything. The likely cause is the game's warper, which moves the player to an event or the garage behind a camera flight. It notices the end of the flight by predicting it one frame early from a duration measured at a fixed 1/30 s; with real frame times it can miss that frame and then wait for good. LARecomp found this with the garage picked from far away and measured it.
+
+`src/warp_fix.cpp` (ported from LARecomp's `warper.cpp`) watches the warper after each update and, when a flight has ended without the game noticing, finishes the warp the way the game would have, logging `warp fix: ... finishing the warp`. On by default (`mcla_warp_fix`). `mcla_warp_test_miss` makes every flight end that way, to check the fix.
+
+Checked on PC (2026-10-14): builds, and a garage trip close to the garage still works (it used no flight). Not checked: the hang itself, which needs a far-away event or garage. Whether it is the cause of issue #6 is not confirmed.
+
 ## Boot blockers found so far
 
 | # | Symptom | Cause | Status |

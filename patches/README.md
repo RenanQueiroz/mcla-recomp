@@ -25,6 +25,15 @@ git apply ../../patches/rexglue-clear-rectangle-draws.patch
 git apply ../../patches/rexglue-texture-load-direct.patch
 ```
 
+On Linux, two more go on top, from the same folder:
+
+```
+git apply ../../patches/rexglue-linux-procmap-query.patch
+git apply ../../patches/rexglue-linux-wait-sleep.patch
+```
+
+They make page-protection lookups and multi-handle waits cheap on Linux; see `docs/linux-build-guide.md`. The Windows build needs neither. The PS5 build also applies `rexglue-linux-wait-sleep.patch` (`ps5/make_ps5.sh` does it): the PS5 runs the same POSIX threading code, where a wait shorter than 1 ms spun instead of sleeping.
+
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
 
 ## rexglue-v0.10.0-mcla.patch
