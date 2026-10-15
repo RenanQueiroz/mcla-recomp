@@ -68,9 +68,10 @@ Like the settings below, it is left out when *More mcla.exe options* sets `mcla_
 
 *Graphics API* picks the GPU plugin's backend (`--mcla_gpu_backend=d3d12` or
 `vulkan`; "Game setting" passes nothing, and the plugin then tries Direct3D 12
-first). Every setting and SDK patch here works on both; at native resolution
-Vulkan is limited by its GPU command thread, which costs about 1.8 times as much
-per draw as on D3D12 on this machine (`dev\vulkan-2026-10-14.md`). Left out when
+first). Every setting and SDK patch here works on both. On this machine, in
+scripted runs in the city, Vulkan matches D3D12 at native resolution and is 7 to
+11% slower at 3x, with fewer hitches in the map zoom-out after the title
+(`dev\vulkan-2026-10-14.md`). Left out when
 *More mcla.exe options* sets `mcla_gpu_backend`.
 
 *HUD updates* (`--mcla_ui_timing_hud`) sets how often the HUD's Flash movies
@@ -172,8 +173,12 @@ during a build:
   and on the GPU at 3x, with the instrumentation that measured it
   (`upload-counters.sdk.patch`, `gpu-timestamps.sdk.patch`, `gt-analyze.py`).
 - `vulkan-2026-10-14.md`: the same settings and patches measured on Vulkan,
-  where its GPU command thread's time goes, the baseline for a Vulkan
-  submission thread, validation, pacing and stress runs.
+  where its GPU command thread's time goes, validation, pacing and stress runs,
+  the render pass breaks that upload hoisting removed, the Vulkan submission
+  thread, and a D3D12 against Vulkan benchmark in the city.
+- `gpu-timestamps-vulkan.sdk.patch` (SDK, Vulkan): the frame timings of
+  `gpu-timestamps.sdk.patch` for Vulkan (`MCLA_GT_EVERY`, `MCLA_GT_DIR`), also
+  bracketing render pass begins and ends; applies together with the D3D12 one.
 
 ## Scripted controller input (unattended runs)
 
