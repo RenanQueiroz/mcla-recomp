@@ -170,6 +170,7 @@ try {
         @{ Patch = "rexglue-d3d12-placed-texture-heaps.patch"; File = "src\graphics\d3d12\texture_cache.cpp"; Adds = "d3d12_texture_heaps" }
         @{ Patch = "rexglue-vulkan-texture-load-storage-copy.patch"; File = "src\graphics\vulkan\texture_cache.cpp"; Adds = "vulkan_texture_load_storage_copy" }
         @{ Patch = "rexglue-clear-rectangle-draws.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "clear_rectangle_draws" }
+        @{ Patch = "rexglue-texture-load-direct.patch"; File = "src\graphics\pipeline\texture\cache.cpp"; Adds = "texture_load_direct" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {

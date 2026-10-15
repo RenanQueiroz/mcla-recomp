@@ -21,6 +21,8 @@ git apply ../../patches/rexglue-vulkan-hoist-shared-memory-uploads.patch
 git apply ../../patches/rexglue-threaded-submission-vulkan.patch
 git apply ../../patches/rexglue-d3d12-placed-texture-heaps.patch
 git apply ../../patches/rexglue-vulkan-texture-load-storage-copy.patch
+git apply ../../patches/rexglue-clear-rectangle-draws.patch
+git apply ../../patches/rexglue-texture-load-direct.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -343,3 +345,52 @@ Built and run on Windows only, with an NVIDIA RTX 5080.
 | Clear rectangle draws: detection, values, MSAA mode, ownership and the clear | `include/rex/graphics/pipeline/render_target/cache.h`, `src/graphics/pipeline/render_target/cache.cpp` | D3D12, Vulkan |
 | The transfers and the clear, as in a resolve | `include/rex/graphics/d3d12/render_target_cache.h`, `include/rex/graphics/vulkan/render_target_cache.h` | D3D12, Vulkan |
 | The call before a draw's primitives are processed | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12, Vulkan |
+
+## rexglue-texture-load-direct.patch
+
+With resolution scaling, render targets the game resolves to memory go to the scaled resolve buffer, and every texture over that memory is decoded from it again at its next use. At 3x the screen-sized ones are reloaded every frame, some several times: this game reuses memory, so the 3840x2160 `8_8_8_8` texture at one address is loaded three times a frame and the scene's depth twice. Each load was two passes over 33 to 66 MB, the load shader decoding into a scratch buffer and then a copy of that into the texture (`CopyTextureRegion` on D3D12, the copy of `rexglue-vulkan-texture-load-storage-copy.patch` or `vkCmdCopyBufferToImage` on Vulkan), and the copy took half the time. Texture loads were 1.62 ms of a GPU frame of about 11 ms on D3D12 and 1.85 ms on Vulkan, standing in the city at 3x.
+
+Such a texture is now decoded straight into itself through an unsigned integer view of the texel size, in one pass. Setting `texture_load_direct` (default on; `false` loads through the buffer again). It applies to textures that are:
+- resolved data with resolution scaling, with one mip level, 2D and one layer;
+- loaded by the 32bpb, 64bpb or either depth load shader (unchanged formats, 20e4 depth and 24-bit unorm depth);
+- on D3D12, in a format with an allowed unsigned view: `R32_UINT` for the typeless 32-bit formats `R8G8B8A8`, `B8G8R8A8`, `R10G10B10A2`, `R16G16` and `R32` (the one cast to a format with other components that D3D12 allows for UAVs), `R16G16B16A16_UINT` for `R16G16B16A16`. Such a texture is created typeless (`R32_FLOAT` and `R16G16B16A16_FLOAT` become `R32_TYPELESS` and `R16G16B16A16_TYPELESS`; the views are unchanged) with unordered access;
+- on Vulkan, those with the storage view of `vulkan_texture_load_storage_copy` (`r32ui` or `rgba16ui`), so on NVIDIA only by default like that.
+
+The new shaders are the load shaders with the stores going to the texture instead of the buffer, the guest addressing, endian swap and conversion included the same way (`src/graphics/shaders/texture_load_direct_scaled.xesli` and four `.cs.xesl` files). The SDK's load shaders are built from xenia-project/xenia's shader sources at 0b2ffa3 (that commit's `texture_load_32bpb_scaled.cs.xesl` compiles to the SDK's bytecode exactly), so these are built against those sources too: with that commit's `src/xenia/gpu/shaders` and `src/xenia/ui/shaders`, fxc (`/T cs_5_1 /O3`, as xenia-canary's `tools/build/compile_shader_dxbc.py`) and glslangValidator with spirv-opt (`compile_shader_spirv.py`).
+
+Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings, at 3x (2x MSAA).
+GPU timestamps (`gpu-timestamps.sdk.patch`, `gpu-timestamps-vulkan.sdk.patch`, `texload-split-timestamps.sdk.patch`), one timedemo run a side, texture loads per frame (median):
+
+| At 3x | D3D12, before | D3D12, after | Vulkan, before | Vulkan, after |
+|---|---|---|---|---|
+| Standing in the city | 1.62 ms | 1.12 ms | 1.85 ms | 1.36 ms |
+| Race | 1.25 ms | 0.94 ms | 1.50 ms | 1.24 ms |
+
+Scripted timedemo (`launcher/dev/devrun.py`; updates of exactly 1/60 s, uncapped). `drive-spawn.pad` is fullscreen with five runs per configuration, `race.pad` windowed with three; runs alternate after a warm-up. Median frame time at 3x, with the 1% low in brackets:
+
+| Segment | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
+|---|---|---|---|---|
+| Free roam, standing | 10.58 ms (73 FPS) | 10.15 ms, -4.1% (77 FPS) | 9.83 ms (87 FPS) | 9.40 ms, -4.4% (88 FPS) |
+| Drive from the spawn point | 10.22 ms (73 FPS) | 9.69 ms, -5.2% (74 FPS) | 10.00 ms (81 FPS) | 9.41 ms, -5.9% (87 FPS) |
+| Map zoom-out (loading) | 9.67 ms (25 FPS) | 8.12 ms, -16% (27 FPS) | 8.75 ms (32 FPS) | 7.86 ms, -10% (32 FPS) |
+| Race | 10.41 ms (69 FPS) | 9.93 ms, -4.6% (72 FPS) | 11.86 ms (62 FPS) | 11.64 ms, -1.9% (62 FPS) |
+
+- **The map zoom-out** varies 14 to 20% between runs, the race about 6% (`race-benchmark-2026-10-15.md`); free roam and the drive 2 to 3.5%.
+- **Native resolution:** nothing changes, as nothing there is resolution-scaled (6.80 to 6.94 ms in every segment, on and off, both APIs).
+- **D3D12 at 3x with a 60 FPS cap:** pacing unchanged, 96.6% of frames within 1 ms of the target on against 96.8% off.
+
+Checks:
+
+- **Screenshots** with the setting switched on and off within one run (the dev pad's `set`), 3 engine frames apart: standing in the city, in its pause menu, driving, in the map zoom-out and in the race (rain, opponents, HUD), on both APIs. Standing and paused, on against off differs no more than two shots with the same setting (mean 0.23 to 0.35 against 0.25 to 0.40 out of 255); the moving scenes show nothing out of place: shadows, reflections, the wet road, smoke, motion blur, the HUD and the minimap.
+- **D3D12 debug layer** in that city run, with the setting switched on and off: no errors, the same few creation warnings as without the change. The `R32_UINT` and `R16G16B16A16_UINT` views of the typeless textures are accepted.
+- **Vulkan validation** in that run: only `vkCmdEndQuery` 07007 and 01923. With synchronization validation, only the write after write between load dispatches into the scratch buffer that was there before; nothing on the images.
+- **The attract movie** at 3x, D3D12 and Vulkan: every capture while it plays (221 and 222, every 150 ms) matches a frame of the decoded movie, with the largest difference 0.14, as in the earlier checks.
+
+Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| The setting, which load shaders and textures | `include/rex/graphics/flags.h`, `include/rex/graphics/pipeline/texture/cache.h`, `src/graphics/pipeline/texture/cache.cpp` | D3D12, Vulkan |
+| Typeless textures with unordered access, the view, the pipelines | `include/rex/graphics/d3d12/texture_cache.h`, `src/graphics/d3d12/texture_cache.cpp` | D3D12 |
+| The pipelines and the storage image descriptor | `include/rex/graphics/vulkan/texture_cache.h`, `src/graphics/vulkan/texture_cache.cpp` | Vulkan |
+| The shaders (XeSL sources, DXBC and SPIR-V) | `src/graphics/shaders/texture_load_*direct_scaled*`, `src/graphics/shaders/bytecode/d3d12_5_1/texture_load_*_direct_scaled_cs.h`, `src/graphics/shaders/vulkan_spirv/texture_load_*_direct_scaled_cs.h` | D3D12, Vulkan |
