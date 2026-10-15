@@ -23,6 +23,9 @@ git apply ../../patches/rexglue-d3d12-placed-texture-heaps.patch
 git apply ../../patches/rexglue-vulkan-texture-load-storage-copy.patch
 git apply ../../patches/rexglue-clear-rectangle-draws.patch
 git apply ../../patches/rexglue-texture-load-direct.patch
+git apply ../../patches/rexglue-async-pipelines-no-frame-wait.patch
+git apply ../../patches/rexglue-vulkan-pipeline-storage-parallel-translation.patch
+git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
 ```
 
 On Linux, two more go on top, from the same folder:
@@ -403,3 +406,117 @@ Built and run on Windows only, with an NVIDIA RTX 5080.
 | Typeless textures with unordered access, the view, the pipelines | `include/rex/graphics/d3d12/texture_cache.h`, `src/graphics/d3d12/texture_cache.cpp` | D3D12 |
 | The pipelines and the storage image descriptor | `include/rex/graphics/vulkan/texture_cache.h`, `src/graphics/vulkan/texture_cache.cpp` | Vulkan |
 | The shaders (XeSL sources, DXBC and SPIR-V) | `src/graphics/shaders/texture_load_*direct_scaled*`, `src/graphics/shaders/bytecode/d3d12_5_1/texture_load_*_direct_scaled_cs.h`, `src/graphics/shaders/vulkan_spirv/texture_load_*_direct_scaled_cs.h` | D3D12, Vulkan |
+
+## rexglue-async-pipelines-no-frame-wait.patch
+
+**What happened before.** With `async_shader_compilation` (on by default), a draw whose pipeline is new is left out while the pipeline is created on the pipeline creation threads. Then, at the end of every submission, `PipelineCache::EndSubmission` on both APIs:
+- created the rest of the queue on the GPU command thread;
+- waited for every creation still in progress.
+
+So the frame was held for as long as the slowest compile, and still went out without those draws. On Vulkan, each new pipeline also got a placeholder first: the real vertex shader with a stand-in pixel shader, created on the GPU command thread. Draws with a placeholder are left out anyway. Creating it compiles the vertex shader, which takes about as long as the real pipeline when the driver hasn't cached it.
+
+**When it matters.** With the shader storage and the driver's own cache warm, nothing is created during play. A first session, new places or races, a driver update or a change to the translated shaders all bring compiles. Measured on NVIDIA with the driver's cache cold:
+- D3D12 pipelines took up to 80 to 100 ms each;
+- Vulkan pipelines took 13 to 18 ms at the median and up to 465 ms.
+
+**The change:**
+- **No wait at the end of a submission.** With async compilation, the end of a submission neither waits for pending pipelines nor creates them. Nothing recorded refers to them: a draw whose pipeline is pending is left out before anything is recorded for it, and on Vulkan a placeholder is never bound. xenia-canary's D3D12 `PipelineCache::EndSubmission` stopped waiting the same way. `async_pipeline_end_of_frame_wait` (default false) brings the wait back.
+- **A short wait at the draw.** A draw whose pipeline is pending waits for it within a budget per frame, `async_pipeline_wait_budget_ms`:
+  - default 4; 0 leaves the draw out at once; -1 waits as long as it takes;
+  - the wait is a condition variable notified by the creation threads;
+  - pipelines the driver has cached (well under a millisecond) are drawn in the same frame;
+  - D3D12 takes the root signature again once the pipeline is there.
+- **Vulkan: no placeholders.** No placeholder pipelines are created (`vulkan_async_placeholder_pipelines`, default false; true creates them as before).
+  - Without them, depth-only pipelines are created asynchronously too, unless the vertex shader exports to memory (memexport), which the guest may read.
+  - A pipeline whose creation fails stays left out and is no longer waited for.
+  - D3D12 still creates depth-only pipelines on the GPU command thread. Its async path translates the shaders on the creation thread and doesn't handle a missing pixel shader. They cost 70 to 200 ms in a whole cold session there.
+- **Vulkan: a limit on skipped presents.** `vulkan_async_skip_incomplete_frames` (on) skips presenting a frame that left a draw out. Without the end-of-submission wait, that could hold the picture for a whole compile. `vulkan_async_skip_incomplete_frames_max_ms` (default 100; 0 for no limit) shows the incomplete frames after that long.
+
+**The calls that end a submission in the middle of a frame:**
+- the primary-buffer end and the threaded-submission split already wait for `CanEndSubmissionImmediately` (no pipelines being created);
+- the readbacks (`CheckSubmissionFence`, memexport and resolve readback, the occlusion queries) need the GPU to have run what was recorded, which never refers to a pending pipeline.
+
+**Measurements.** Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings.
+- **Method:**
+  - `race.pad` under `--mcla_fixed_dt=60`: the title, the map zoom-out, the menus, the race's intro and 90 s of the race.
+  - "Cold" is an empty storage with the driver's cache missed on purpose (the dev-only `tmp_shader_salt` of `launcher/dev/shader-stutter-timers.sdk.patch`).
+  - Two runs each; frames from the title on.
+  - "Before" is `--async_pipeline_end_of_frame_wait=true --async_pipeline_wait_budget_ms=0 --vulkan_async_skip_incomplete_frames_max_ms=0 --vulkan_async_placeholder_pipelines=true`.
+
+| Cold | Frames over 50 ms | Over 100 ms | Worst frame | Time in frames over 50 ms | Map zoom-out 1% low | Race 1% low |
+|---|---|---|---|---|---|---|
+| D3D12, 1x, before | 7.0 | 1.5 | 326 ms | 0.76 s | 18.6 FPS | 73.9 FPS |
+| D3D12, 1x, after | 3.5 | 2.0 | 159 ms | 0.38 s | 26.1 FPS | 79.9 FPS |
+| D3D12, 3x, before | 10.0 | 2.0 | 398 ms | 1.02 s | 13.4 FPS | 56.7 FPS |
+| D3D12, 3x, after | 5.0 | 2.0 | 190 ms | 0.52 s | 23.0 FPS | 64.8 FPS |
+| Vulkan, 1x, before | 83.0 | 57.5 | 1,850 ms | 17.35 s | 2.5 FPS | 13.4 FPS |
+| Vulkan, 1x, after | 3.0 | 2.0 | 173 ms | 0.37 s | 19.4 FPS | 55.1 FPS |
+| Vulkan, 3x, before | 89.0 | 57.5 | 1,919 ms | 17.56 s | 2.4 FPS | 15.2 FPS |
+| Vulkan, 3x, after | 3.5 | 1.5 | 246 ms | 0.43 s | 22.1 FPS | 50.8 FPS |
+
+- **Frames still over 100 ms:** one at the title screen (100 to 185 ms in every run, warm ones included, with nothing created) and the race's loading.
+- **Time the frame end waited per session:**
+  - before: 1.3 to 1.5 s on D3D12; 11.7 to 12.7 s on Vulkan, plus 4.3 to 4.5 s of placeholders;
+  - after: none.
+- **What is left on the GPU command thread:**
+  - D3D12's depth-only pipelines;
+  - Vulkan's shader translations, about 420 ms a session, up to 136 ms in a frame.
+- **With the storage covering the run:** nothing is created during play, so nothing changes. That is the case for a warm run, and for one after a driver update, whose compiles all happen in the preload at start-up.
+
+**What shows.** The draws left out until their pipelines are ready:
+- **D3D12:** 15,000 to 17,500 draws over 130 to 145 frames in a cold session, against 13,000 to 16,000 over 190 to 230 before, when those frames were held as well.
+- **Vulkan:** 220,000 to 490,000 draws over 530 to 620 frames; 205 to 250 presents skipped.
+- **Screenshots:** one shot of a cold Vulkan zoom-out has buildings missing for that moment, where before the zoom-out froze for up to 1.9 s and fell 1 to 2 s behind.
+
+Checks:
+
+- **D3D12 debug layer**, a cold 3x race run: no errors, only the creation warnings that were there before (and the list of live objects at exit).
+- **Vulkan validation**, a cold 3x race run: only `ShaderOutputNotConsumed` and `vkCmdEndQuery` 01923, both there before.
+- **Warm benchmark** (`drive-spawn.pad`, timedemo, fullscreen, five runs a side alternating after a warm-up): the map zoom-out, free roam and the drive within 1.3% of before at native and 3x on both APIs; nothing is created there.
+- **60 FPS cap**, native: 98.3 to 99.3% of frames within 1 ms of the target, against 98.5 to 100% before.
+
+Measurements and method: `launcher/dev/shader-stutter-2026-10-15.md` in the fork. Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| The settings | `include/rex/graphics/flags.h`, `src/graphics/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12, Vulkan |
+| No wait at the end of a submission; the wait for one pipeline | `include/rex/graphics/d3d12/pipeline_cache.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `src/graphics/vulkan/pipeline_cache.cpp` | D3D12, Vulkan |
+| The budget per frame, at the draw | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp`, `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | D3D12, Vulkan |
+| No placeholders; depth-only pipelines asynchronous; the limit on skipped presents | `include/rex/graphics/vulkan/pipeline_cache.h`, `src/graphics/vulkan/pipeline_cache.cpp`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
+
+## rexglue-vulkan-pipeline-storage-parallel-translation.patch
+
+When the shader storage is loaded, Vulkan translated the shaders of the stored pipelines one by one on the GPU command thread before creating any pipeline. That was 740 translations, 300 to 310 ms of every Vulkan start. D3D12's preload is about 50 ms in all.
+
+They are now translated on as many threads as pipeline creation uses (`vulkan_pipeline_storage_translation_threads`, default -1; 1 translates them one by one as before):
+- all of one shader on the same thread, since its first translation also gives it its bindings;
+- the shared binding layouts under the cache's `layouts_mutex_`;
+- each thread with a translator of its own.
+
+Translation: 303 to 311 ms before, 49 to 51 ms after (12 threads), in every run, warm or not. Creating the stored pipelines was already parallel: 21 to 25 ms with the driver's cache warm, 5.0 s once after a change to the translated shaders. Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| The setting, the parallel translation | `src/graphics/vulkan/pipeline_cache.cpp` | Vulkan |
+
+## rexglue-vulkan-pipeline-cache-file.patch
+
+Keeps the driver's pipeline cache (`VkPipelineCache`) between runs, after xenia-canary's `VulkanPipelineCache`. It is in `<cache root>/shaders/local/<title ID>.vk.bin` and:
+- is loaded before the stored pipelines are created (the data is ignored if it is from another driver or device);
+- is passed to every pipeline creation;
+- is saved by the storage writing thread every 10 s while new pipelines are being created, and when the storage is shut down (written next to it and renamed).
+
+`vkCreatePipelineCache`, `vkDestroyPipelineCache` and `vkGetPipelineCacheData` are added to the device's function table.
+
+Off by default (`vulkan_pipeline_cache_file`): on NVIDIA's Windows driver, which keeps a disk cache of its own, it gained nothing.
+- **Cold start:** with the driver's cache cold, the preload of 1,030 pipelines took 5.0 s with the file and without.
+- **Warm start:** with both warm, 21 against 25 ms.
+- **Pipelines missing from the file:** in a run whose pipelines the driver had cached but the file didn't yet, creating them took about ten times as long (median 1.5 against 0.16 ms).
+- **Size:** the file is 19 MB for 1,030 pipelines.
+
+It is meant for drivers without a disk cache of their own, possibly the PS5's, where it is worth trying. Not measured there. Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| The setting, loading, saving | `include/rex/graphics/vulkan/pipeline_cache.h`, `src/graphics/vulkan/pipeline_cache.cpp` | Vulkan |
+| The three functions | `include/rex/ui/vulkan/functions/device_1_0.inc` | Vulkan |

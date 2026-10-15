@@ -1,0 +1,579 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -18,6 +18,8 @@ REXCVAR_DECLARE(bool, vsync);
+ REXCVAR_DECLARE(bool, clear_memory_page_state);
+ REXCVAR_DECLARE(bool, half_pixel_offset);
+ REXCVAR_DECLARE(bool, async_shader_compilation);
++REXCVAR_DECLARE(int32_t, async_pipeline_wait_budget_ms);
++REXCVAR_DECLARE(bool, async_pipeline_end_of_frame_wait);
+ 
+ // GPU Resolution / Readback / Queries
+ REXCVAR_DECLARE(int32_t, resolution_scale);
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -91,6 +91,21 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+                     "pipelines are being prepared.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_INT32(async_pipeline_wait_budget_ms, 4, "GPU",
++                     "With async_shader_compilation, how long a frame may wait in total for "
++                     "pipelines its draws need that are still being created, before those draws "
++                     "are left out until their pipelines are ready. 0 leaves them out at once, "
++                     "-1 waits as long as it takes.")
++    .range(-1, 1000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(async_pipeline_end_of_frame_wait, false, "GPU",
++                    "With async_shader_compilation, finish creating every pending pipeline at "
++                    "the end of each submission, holding the frame (the behavior before "
++                    "async_pipeline_wait_budget_ms). Draws whose pipelines are pending are "
++                    "left out either way.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ using namespace rex::graphics::xenos;
+diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
+--- a/include/rex/graphics/d3d12/pipeline_cache.h
++++ b/include/rex/graphics/d3d12/pipeline_cache.h
+@@ -96,6 +96,14 @@ class PipelineCache {
+   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
+     return reinterpret_cast<const Pipeline*>(handle)->state.load(std::memory_order_acquire);
+   }
++  ID3D12RootSignature* GetRootSignatureByHandle(void* handle) const {
++    return reinterpret_cast<const Pipeline*>(handle)->root_signature.load(
++        std::memory_order_acquire);
++  }
++  // Waits up to timeout_us for a pipeline queued for asynchronous creation.
++  // Returns whether its creation has finished (it may have failed - check the
++  // state).
++  bool AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us);
+ 
+  private:
+   REXPACKEDSTRUCT(ShaderStoredHeader, {
+@@ -350,6 +358,9 @@ class PipelineCache {
+     D3D12Shader::D3D12Translation* pending_vertex_shader = nullptr;
+     D3D12Shader::D3D12Translation* pending_pixel_shader = nullptr;
+     uint8_t priority = 0;
++    // Queued by a draw for asynchronous creation and not created (or failed)
++    // yet.
++    std::atomic<bool> async_creation_pending{false};
+   };
+   struct PipelineCreationPriorityComparator {
+     bool operator()(const Pipeline* a, const Pipeline* b) const {
+@@ -399,6 +410,9 @@ class PipelineCache {
+   void CreateQueuedPipelinesOnProcessorThread();
+   std::mutex creation_request_lock_;
+   std::condition_variable creation_request_cond_;
++  // Notified (with creation_request_lock_ taken and released after clearing
++  // async_creation_pending) when a pipeline queued by a draw is created.
++  std::condition_variable async_creation_done_cond_;
+   // Protected with creation_request_lock_, notify_one creation_request_cond_
+   // when set.
+   std::priority_queue<Pipeline*, std::vector<Pipeline*>, PipelineCreationPriorityComparator>
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
+@@ -765,6 +766,15 @@ void PipelineCache::EndSubmission() {
+     pipeline_storage_file_flush_needed_ = false;
+   }
+   if (!creation_threads_.empty()) {
++    if (REXCVAR_GET(async_shader_compilation) &&
++        !REXCVAR_GET(async_pipeline_end_of_frame_wait)) {
++      // Only draws queue pipelines here (ConfigurePipeline with async creation),
++      // and a draw whose pipeline isn't created yet is left out without
++      // recording anything that refers to the pipeline, so nothing submitted
++      // needs the pending ones: let the creation threads finish them while the
++      // next frames are recorded instead of holding this one.
++      return;
++    }
+     CreateQueuedPipelinesOnProcessorThread();
+     // Await creation of all queued pipelines.
+     bool await_creation_completion_event;
+@@ -1028,6 +1038,7 @@ bool PipelineCache::ConfigurePipeline(
+         bound_rts, shader_writes_color_targets, shader_writes_depth);
+     new_pipeline->pending_vertex_shader = vertex_shader;
+     new_pipeline->pending_pixel_shader = pixel_shader;
++    new_pipeline->async_creation_pending.store(true, std::memory_order_release);
+     // Submit the pipeline for creation to any available thread.
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+@@ -3234,6 +3245,8 @@ void PipelineCache::CreationThread(size_t thread_index) {
+       pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+                                       std::memory_order_release);
+     }
++    bool was_async_pending =
++        pipeline_to_create->async_creation_pending.exchange(false, std::memory_order_acq_rel);
+ 
+     // Pipeline created - the thread is not busy anymore, safe to set the
+     // completion event if needed (at the next iteration, or in some other
+@@ -3242,7 +3255,21 @@ void PipelineCache::CreationThread(size_t thread_index) {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       --creation_threads_busy_;
+     }
++    if (was_async_pending) {
++      async_creation_done_cond_.notify_all();
++    }
++  }
++}
++
++bool PipelineCache::AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us) {
++  Pipeline* pipeline = reinterpret_cast<Pipeline*>(handle);
++  if (!pipeline->async_creation_pending.load(std::memory_order_acquire)) {
++    return true;
+   }
++  std::unique_lock<std::mutex> lock(creation_request_lock_);
++  return async_creation_done_cond_.wait_for(
++      lock, std::chrono::microseconds(timeout_us),
++      [pipeline]() { return !pipeline->async_creation_pending.load(std::memory_order_acquire); });
+ }
+ 
+ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3260,10 +3287,12 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+     PipelineRuntimeDescription runtime_description;
+     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+       pipeline_to_create->state.store(nullptr, std::memory_order_release);
+-      continue;
++    } else {
++      pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
++                                      std::memory_order_release);
+     }
+-    pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+-                                    std::memory_order_release);
++    // The processor thread is the only one waiting for these, and it's here.
++    pipeline_to_create->async_creation_pending.store(false, std::memory_order_release);
+   }
+ }
+ 
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -336,6 +336,10 @@ class D3D12CommandProcessor : public CommandProcessor {
+   // as when there are unfinished graphics pipeline creation requests that would
+   // need to be fulfilled before actually submitting the command list.
+   bool CanEndSubmissionImmediately() const;
++  // For a draw whose pipeline is still being created asynchronously, waits for
++  // it within what is left of the frame's async_pipeline_wait_budget_ms.
++  // Returns whether the creation has finished.
++  bool AwaitAsyncPipeline(void* pipeline_handle);
+   bool AwaitAllQueueOperationsCompletion() {
+     CheckSubmissionFence(submission_current_);
+     return submission_completed_ + 1 >= submission_current_;
+@@ -468,6 +472,9 @@ class D3D12CommandProcessor : public CommandProcessor {
+   bool queue_operations_done_since_submission_signal_ = false;
+ 
+   bool frame_open_ = false;
++  // Time this frame's draws have waited for pipelines being created
++  // asynchronously (async_pipeline_wait_budget_ms).
++  uint64_t frame_async_pipeline_wait_us_ = 0;
+   // Guest frame index, since some transient resources can be reused across
+   // submissions. Values updated in the beginning of a frame.
+   uint64_t frame_current_ = 1;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstdarg>
+ #include <cstring>
+ #include <sstream>
+@@ -2650,7 +2651,14 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   if (REXCVAR_GET(async_shader_compilation) &&
+       pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
+-    return true;
++    // Left out until the pipeline is ready, unless it's ready within the
++    // frame's waiting budget.
++    if (!AwaitAsyncPipeline(pipeline_handle) ||
++        pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
++      return true;
++    }
++    // Set by the creation thread together with the pipeline.
++    root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
+   }
+ 
+   // Update the textures - this may bind pipelines.
+@@ -3584,6 +3592,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+ 
+   if (is_opening_frame) {
+     frame_open_ = true;
++    frame_async_pipeline_wait_us_ = 0;
+ 
+     // Reset bindings that depend on the data stored in the pools.
+     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
+@@ -3776,6 +3785,27 @@ bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
+   return !submission_open_ || !pipeline_cache_->IsCreatingPipelines();
+ }
+ 
++bool D3D12CommandProcessor::AwaitAsyncPipeline(void* pipeline_handle) {
++  int32_t budget_ms = REXCVAR_GET(async_pipeline_wait_budget_ms);
++  if (!budget_ms) {
++    return false;
++  }
++  uint64_t timeout_us = UINT64_C(60000000);
++  if (budget_ms > 0) {
++    uint64_t budget_us = uint64_t(budget_ms) * 1000;
++    if (frame_async_pipeline_wait_us_ >= budget_us) {
++      return false;
++    }
++    timeout_us = budget_us - frame_async_pipeline_wait_us_;
++  }
++  auto wait_start = std::chrono::steady_clock::now();
++  bool created = pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, timeout_us);
++  frame_async_pipeline_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                                std::chrono::steady_clock::now() - wait_start)
++                                                .count());
++  return created;
++}
++
+ void D3D12CommandProcessor::ClearCommandAllocatorCache() {
+   AwaitSubmissionThread();
+   while (command_allocator_submitted_first_) {
+diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -97,6 +97,10 @@ class VulkanPipelineCache {
+   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
+                                     const PipelineLayoutProvider*& pipeline_layout_out,
+                                     bool* is_placeholder_out = nullptr) const;
++  // Waits up to timeout_us for the real pipeline of one that a draw got as a
++  // placeholder (async_shader_compilation). Returns whether its creation has
++  // finished (it may have failed - check whether it's still a placeholder).
++  bool AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us);
+ 
+  private:
+   REXPACKEDSTRUCT(ShaderStoredHeader, {
+@@ -238,13 +242,17 @@ class VulkanPipelineCache {
+     // destroyed by it while the pipeline cache is active.
+     std::atomic<const PipelineLayoutProvider*> pipeline_layout{nullptr};
+     std::atomic<bool> is_placeholder{false};
++    // Queued for asynchronous creation without a placeholder pipeline, and the
++    // creation has failed - draws with it stay left out.
++    std::atomic<bool> async_creation_failed{false};
+     Pipeline() = default;
+     Pipeline(const PipelineLayoutProvider* pipeline_layout_provider)
+         : pipeline_layout(pipeline_layout_provider) {}
+     Pipeline(const Pipeline& other)
+         : pipeline(other.pipeline.load(std::memory_order_acquire)),
+           pipeline_layout(other.pipeline_layout.load(std::memory_order_acquire)),
+-          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)) {}
++          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)),
++          async_creation_failed(other.async_creation_failed.load(std::memory_order_acquire)) {}
+     Pipeline& operator=(const Pipeline& other) {
+       if (this == &other) {
+         return *this;
+@@ -254,6 +262,8 @@ class VulkanPipelineCache {
+                             std::memory_order_release);
+       is_placeholder.store(other.is_placeholder.load(std::memory_order_acquire),
+                            std::memory_order_release);
++      async_creation_failed.store(other.async_creation_failed.load(std::memory_order_acquire),
++                                  std::memory_order_release);
+       return *this;
+     }
+   };
+@@ -459,6 +469,9 @@ class VulkanPipelineCache {
+ 
+   mutable std::mutex creation_request_lock_;
+   std::condition_variable creation_request_cond_;
++  // Notified (after creation_request_lock_ has been taken and released) when a
++  // creation thread has finished a pipeline.
++  std::condition_variable async_creation_done_cond_;
+   std::priority_queue<PipelineCreationArguments, std::vector<PipelineCreationArguments>,
+                       PipelineCreationArgumentsPriorityComparator>
+       creation_queue_;
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <cstdint>
+ #include <cstring>
+ #include <memory>
+@@ -56,6 +57,13 @@ REXCVAR_DEFINE_INT32(
+     .range(-1, 32)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_async_placeholder_pipelines, false, "GPU/Vulkan",
++                    "With async_shader_compilation, create a placeholder pipeline (the real "
++                    "vertex shader with a stand-in pixel shader) on the GPU command thread for "
++                    "each pipeline being created. Draws with a placeholder are left out either "
++                    "way.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
+                     "Render tessellation as wireframe")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -781,6 +789,13 @@ void VulkanPipelineCache::EndSubmission() {
+     }
+     if (startup_loading) {
+       creation_request_cond_.notify_one();
++    } else if (REXCVAR_GET(async_shader_compilation) &&
++               !REXCVAR_GET(async_pipeline_end_of_frame_wait)) {
++      // Pipelines queued by draws only replace placeholders, and draws with a
++      // placeholder are left out without binding it, so nothing submitted needs
++      // the pending ones: let the creation threads finish them while the next
++      // frames are recorded instead of holding this one.
++      creation_request_cond_.notify_one();
+     } else {
+       // Help worker threads on the processor thread to reduce warm-up latency.
+       CreateQueuedPipelinesOnProcessorThread();
+@@ -1125,8 +1140,14 @@ bool VulkanPipelineCache::ConfigurePipeline(
+     }
+   }
+ 
+-  bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
+-                   pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
++  // A placeholder stands in for the pixel shader, so with placeholders only
++  // pipelines with one are created asynchronously. Without, depth-only ones are
++  // too, unless the vertex shader exports to memory, which the guest may read.
++  bool async_placeholders = REXCVAR_GET(vulkan_async_placeholder_pipelines);
++  bool use_async =
++      REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
++      (async_placeholders ? pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE
++                          : pixel_shader || !vertex_shader->shader().memexport_eM_written());
+   uint8_t async_priority = pipeline_util::kPriorityLowest;
+   if (use_async) {
+     uint32_t bound_rts =
+@@ -1143,6 +1164,18 @@ bool VulkanPipelineCache::ConfigurePipeline(
+   if (it != pipelines_.end()) {
+     PERF_counter_add_batched(REXCVAR_GET(gpu_batch_perf_counters), kPipelineCacheHits, 1);
+     VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
++    if (found_pipeline == VK_NULL_HANDLE &&
++        it->second.is_placeholder.load(std::memory_order_acquire)) {
++      // Being created asynchronously without a placeholder pipeline (or failed
++      // to be) - the draw is left out.
++      last_pipeline_ = &*it;
++      pipeline_out = VK_NULL_HANDLE;
++      pipeline_layout_out = nullptr;
++      if (pipeline_handle_out) {
++        *pipeline_handle_out = &it->second;
++      }
++      return true;
++    }
+     if (found_pipeline == VK_NULL_HANDLE) {
+       PipelineCreationArguments creation_arguments;
+       if (!TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments) ||
+@@ -1173,7 +1206,20 @@ bool VulkanPipelineCache::ConfigurePipeline(
+   }
+ 
+   bool queued_async_creation = false;
+-  if (use_async) {
++  if (use_async && !async_placeholders) {
++    // Draws are left out until their pipeline is ready rather than drawn with a
++    // placeholder, so don't create one: that would compile the vertex shader
++    // here, on the GPU command thread, which takes about as long as the real
++    // pipeline when the driver doesn't have it cached.
++    creation_arguments_real.priority = async_priority;
++    pipeline.second.is_placeholder.store(true, std::memory_order_release);
++    {
++      std::lock_guard<std::mutex> lock(creation_request_lock_);
++      creation_queue_.push(creation_arguments_real);
++    }
++    creation_request_cond_.notify_one();
++    queued_async_creation = true;
++  } else if (use_async) {
+     creation_arguments_real.priority = async_priority;
+     PipelineCreationArguments creation_arguments_placeholder;
+     if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
+@@ -1218,7 +1264,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
+   if (pipeline_handle_out) {
+     *pipeline_handle_out = &pipeline.second;
+   }
+-  return pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr;
++  return queued_async_creation ||
++         (pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr);
+ }
+ 
+ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -3566,6 +3613,8 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
+       } else {
+         creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
+                                                            std::memory_order_release);
++        creation_arguments.pipeline->second.async_creation_failed.store(true,
++                                                                        std::memory_order_release);
+       }
+     }
+ 
+@@ -3573,7 +3622,22 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       --creation_threads_busy_;
+     }
++    async_creation_done_cond_.notify_all();
++  }
++}
++
++bool VulkanPipelineCache::AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us) {
++  const Pipeline* pipeline = reinterpret_cast<const Pipeline*>(handle);
++  auto created_or_failed = [pipeline]() {
++    return !pipeline->is_placeholder.load(std::memory_order_acquire) ||
++           pipeline->async_creation_failed.load(std::memory_order_acquire);
++  };
++  if (created_or_failed()) {
++    return true;
+   }
++  std::unique_lock<std::mutex> lock(creation_request_lock_);
++  return async_creation_done_cond_.wait_for(lock, std::chrono::microseconds(timeout_us),
++                                            created_or_failed);
+ }
+ 
+ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3599,6 +3663,8 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+       } else {
+         creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
+                                                            std::memory_order_release);
++        creation_arguments.pipeline->second.async_creation_failed.store(true,
++                                                                        std::memory_order_release);
+       }
+     }
+   }
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -12,6 +12,7 @@
+ 
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <climits>
+ #include <condition_variable>
+ #include <cstdint>
+@@ -19,6 +20,7 @@
+ #include <functional>
+ #include <memory>
+ #include <mutex>
++#include <optional>
+ #include <string>
+ #include <string_view>
+ #include <unordered_map>
+@@ -485,6 +487,10 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Keep primary-buffer-end submit behavior aligned with D3D12: only submit
+   // when immediate submission is safe.
+   bool CanEndSubmissionImmediately() const;
++  // For a draw that got a placeholder pipeline, waits for the real one within
++  // what is left of the frame's async_pipeline_wait_budget_ms. Returns whether
++  // it's no longer a placeholder.
++  bool AwaitAsyncPipeline(void* pipeline_handle);
+ 
+   void ClearTransientDescriptorPools();
+   bool IssueCopy_ReadbackResolvePath();
+@@ -600,6 +606,12 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Tracks whether any draw in the current frame used an async placeholder
+   // graphics pipeline and may have produced incomplete output.
+   bool frame_used_async_placeholder_pipeline_ = false;
++  // Time this frame's draws have waited for pipelines being created
++  // asynchronously (async_pipeline_wait_budget_ms).
++  uint64_t frame_async_pipeline_wait_us_ = 0;
++  // When the presents being skipped for placeholder pipelines started
++  // (vulkan_async_skip_incomplete_frames_max_ms), or none.
++  std::optional<std::chrono::steady_clock::time_point> incomplete_frames_skipped_since_;
+   // Guest frame index, since some transient resources can be reused across
+   // submissions. Values updated in the beginning of a frame.
+   uint64_t frame_current_ = 1;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -63,6 +63,13 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+                     "used placeholder pipelines to avoid visible flashing")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_UINT32(vulkan_async_skip_incomplete_frames_max_ms, 100, "GPU/Vulkan",
++                      "With vulkan_async_skip_incomplete_frames, present frames that used "
++                      "placeholder pipelines anyway once presents have been skipped for this "
++                      "long, so a slow pipeline creation shows as objects missing for a moment "
++                      "rather than a picture held still. 0 skips for as long as it takes.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
+                     "Submit command buffer when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -2505,6 +2512,18 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+                                             frame_used_async_placeholder_pipeline_;
++  if (skip_present_due_async_placeholder) {
++    auto now = std::chrono::steady_clock::now();
++    if (!incomplete_frames_skipped_since_) {
++      incomplete_frames_skipped_since_ = now;
++    } else if (uint32_t skip_max_ms = REXCVAR_GET(vulkan_async_skip_incomplete_frames_max_ms)) {
++      // Skipped for long enough: show what there is until a frame is complete.
++      skip_present_due_async_placeholder =
++          now - *incomplete_frames_skipped_since_ < std::chrono::milliseconds(skip_max_ms);
++    }
++  } else {
++    incomplete_frames_skipped_since_.reset();
++  }
+   if (skip_present_due_async_placeholder) {
+     static bool skipped_incomplete_frame_logged = false;
+     if (!skipped_incomplete_frame_logged) {
+@@ -4174,8 +4193,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
+                                                 &pipeline_is_placeholder);
+   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
+-    frame_used_async_placeholder_pipeline_ = true;
+-    return true;
++    // Left out until the real pipeline is ready, unless it's ready within the
++    // frame's waiting budget.
++    if (AwaitAsyncPipeline(pipeline_handle)) {
++      pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline,
++                                                    pipeline_layout_provider,
++                                                    &pipeline_is_placeholder);
++    }
++    if (pipeline_is_placeholder) {
++      frame_used_async_placeholder_pipeline_ = true;
++      return true;
++    }
+   }
+   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
+     return draw_fail("pipeline_lookup");
+@@ -5466,6 +5494,27 @@ bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
+   return !submission_open_ || (!scratch_buffer_used_ && !pipeline_cache_->IsCreatingPipelines());
+ }
+ 
++bool VulkanCommandProcessor::AwaitAsyncPipeline(void* pipeline_handle) {
++  int32_t budget_ms = REXCVAR_GET(async_pipeline_wait_budget_ms);
++  if (!budget_ms) {
++    return false;
++  }
++  uint64_t timeout_us = UINT64_C(60000000);
++  if (budget_ms > 0) {
++    uint64_t budget_us = uint64_t(budget_ms) * 1000;
++    if (frame_async_pipeline_wait_us_ >= budget_us) {
++      return false;
++    }
++    timeout_us = budget_us - frame_async_pipeline_wait_us_;
++  }
++  auto wait_start = std::chrono::steady_clock::now();
++  bool created = pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, timeout_us);
++  frame_async_pipeline_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                                std::chrono::steady_clock::now() - wait_start)
++                                                .count());
++  return created;
++}
++
+ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+@@ -5542,6 +5591,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   if (is_opening_frame) {
+     frame_open_ = true;
+     frame_used_async_placeholder_pipeline_ = false;
++    frame_async_pipeline_wait_us_ = 0;
+ 
+     // Reset bindings that depend on transient data.
+     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));

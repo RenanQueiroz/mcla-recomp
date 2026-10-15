@@ -148,6 +148,9 @@ rexglue-d3d12-placed-texture-heaps.patch src/graphics/d3d12/texture_cache.cpp d3
 rexglue-vulkan-texture-load-storage-copy.patch src/graphics/vulkan/texture_cache.cpp vulkan_texture_load_storage_copy
 rexglue-clear-rectangle-draws.patch src/graphics/pipeline/render_target/cache.cpp clear_rectangle_draws
 rexglue-texture-load-direct.patch src/graphics/pipeline/texture/cache.cpp texture_load_direct
+rexglue-async-pipelines-no-frame-wait.patch src/graphics/command_processor.cpp async_pipeline_wait_budget_ms
+rexglue-vulkan-pipeline-storage-parallel-translation.patch src/graphics/vulkan/pipeline_cache.cpp vulkan_pipeline_storage_translation_threads
+rexglue-vulkan-pipeline-cache-file.patch src/graphics/vulkan/pipeline_cache.cpp vulkan_pipeline_cache_file
 LATER
 
 # ---------------------------------------------------------------------------
