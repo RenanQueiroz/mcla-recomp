@@ -330,3 +330,24 @@ With resolution scaling, the game's render targets resolved to memory are decode
 Screenshots taken with the setting switched on and off within one run look the same; the D3D12 debug layer and Vulkan validation (with synchronization validation) report nothing new. Measurements, what drives the resolves and the reloads, and the options left: `launcher/dev/resolves-2026-10-15.md` in the fork; details in `patches/README.md`.
 
 **Not verified**: other GPUs.
+
+## Stutter while new shaders compile (fixed 2026-10-15)
+
+On a first run, in new places or races, and after a driver update or a change to the translated shaders, the GPU emulation creates new pipelines, which the driver compiles. Draws whose pipeline was still being created were already left out, but at the end of every frame both APIs then waited for every pending pipeline, holding the frame for the slowest compile. Vulkan also compiled a stand-in pipeline for each one on the GPU command thread first. With the driver's cache cold:
+- D3D12 frames of up to 330 to 400 ms;
+- on Vulkan, up to 1.9 s, with 17 s a session in frames over 50 ms; the map zoom-out fell 1 to 2 s behind.
+
+`patches/rexglue-async-pipelines-no-frame-wait.patch` stops the frame from waiting. A draw waits for its pipeline only within 4 ms a frame (`async_pipeline_wait_budget_ms`), and is otherwise left out until the pipeline is ready. Vulkan no longer creates the stand-in pipelines. A session started with nothing cached:
+- **D3D12:** worst frame 160 to 190 ms instead of 330 to 400, half as much time in frames over 50 ms, map zoom-out 1% low 23 to 26 FPS instead of 13 to 19.
+- **Vulkan:** worst frame 170 to 250 ms instead of 1.9 s, 0.4 s in frames over 50 ms instead of 17 s, race 1% low 51 to 55 FPS instead of 13 to 15.
+- **What shows instead:** objects missing for a moment while their pipelines compile. In one screenshot of a cold Vulkan zoom-out, some buildings were missing.
+- **The remaining slow frames:** the remaining frames over 100 ms are also there with everything cached (one at the title screen and the race's loading).
+- **Warm sessions:** with the shader storage and the driver's cache warm, as in normal play after the first runs, nothing is compiled during play and nothing changes.
+
+`patches/rexglue-vulkan-pipeline-storage-parallel-translation.patch` translates the stored shaders in parallel when Vulkan starts: 0.3 s to 0.05 s of every start.
+
+`patches/rexglue-vulkan-pipeline-cache-file.patch` can keep the driver's pipeline cache between runs (`vulkan_pipeline_cache_file`, off by default). NVIDIA's driver has a cache of its own, so it gained nothing here; it is meant for drivers without one.
+
+Measurements and method: `launcher/dev/shader-stutter-2026-10-15.md` in the fork; details in `patches/README.md`.
+
+**Not verified**: other GPUs and drivers.

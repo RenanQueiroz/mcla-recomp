@@ -32,7 +32,11 @@ kinds of changes on top of upstream's `main`:
     instead of copying the render targets between MSAA modes and back (13 to
     32% shorter frames at 3x on both APIs), and resolved textures decoded
     straight into the texture instead of through a buffer and a copy
-    (4 to 6% shorter frames at 3x on both APIs).
+    (4 to 6% shorter frames at 3x on both APIs), and frames no longer held
+    while new pipelines compile, with no stand-in pipelines on Vulkan (cold
+    sessions: worst frame 1.9 s to 0.25 s on Vulkan, 0.4 s to 0.19 s on
+    D3D12), the Vulkan shader storage translated in parallel at start-up,
+    and an optional Vulkan pipeline cache file.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in

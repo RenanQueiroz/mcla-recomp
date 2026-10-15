@@ -218,6 +218,18 @@ during a build:
   clear); `resolve-split.py <dir>` sums them per frame and per kind, with the
   texture loads by address. `texload-split-timestamps.sdk.patch` now also
   marks loads done by `texture_load_direct` (`direct=1`).
+- `shader-stutter-2026-10-15.md`: the stalls while new pipelines compile
+  (first sessions, new places, after driver updates), the patches that
+  removed them (`rexglue-async-pipelines-no-frame-wait.patch`,
+  `rexglue-vulkan-pipeline-storage-parallel-translation.patch`,
+  `rexglue-vulkan-pipeline-cache-file.patch`) and the cold, post-update and
+  warm sessions they were measured in.
+- `shader-stutter-timers.sdk.patch` (SDK, D3D12 and Vulkan, `TMPSS`): a
+  `tmp_shader_salt` setting that makes the translated shaders differ for the
+  driver's cache (a cold driver cache without emptying it), and log lines for
+  every pipeline created and every frame that left draws out, waited or did
+  pipeline work on the GPU command thread. Applies on top of the three patches.
+  `devrun.py --cache-root <folder>` runs with a shader storage of its own.
 
 ## Scripted controller input (unattended runs)
 
