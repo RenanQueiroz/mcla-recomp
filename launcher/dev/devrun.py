@@ -116,6 +116,9 @@ def game_args(a, out):
         args.append(f"--mcla_fixed_dt={a.fixed_dt}")
     if a.record:
         args.append(f"--mcla_pad_record={Path(a.record).resolve()}")
+    elif getattr(a, "track", False):
+        # The car's position twice a second (at 60), to compare runs' paths.
+        args.append(f"--mcla_pad_record={out / 'pad.csv'}")
     args += a.extra
     return args
 
@@ -203,9 +206,32 @@ def analyze(path, quiet=False):
     return result
 
 
+def track(out, mark="drive"):
+    """Positions after a mark in a run's pad.csv: {frames since the mark: (x, y, z)}."""
+    path = Path(out) / "pad.csv"
+    if not path.exists():
+        return {}
+    start, points = None, {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        f = line.split(",")
+        if f[0] == "mark" and f[2] == mark:
+            start = int(f[1])
+        elif f[0] == "pos" and start is not None:
+            points[int(f[1]) - start] = tuple(map(float, f[2:5]))
+    return points
+
+
+def deviation(points, reference):
+    common = sorted(set(points) & set(reference))
+    if not common:
+        return None
+    return max(sum((p - q) ** 2 for p, q in zip(points[k], reference[k])) ** 0.5 for k in common)
+
+
 def bench(a):
     configs = [c.split(":") for c in a.configs.split(",")]
     results = {}
+    reference = None
     for i in range(a.runs + a.warmup):
         for backend, res in configs:
             a.backend, a.res = backend, res
@@ -215,15 +241,24 @@ def bench(a):
                 continue
             for seg, s in analyze(out, quiet=True).items():
                 results.setdefault((backend, res, seg), []).append(s)
+            points = track(out)
+            if points:
+                if reference is None:
+                    reference = points
+                dev = deviation(points, reference)
+                shown = "no common positions" if dev is None else f"max {dev:.2f} m"
+                print(f"{tag}: path of {len(points)} positions, {shown} from the first run's")
     print(f"\n{a.runs} runs per configuration (after {a.warmup} warm-up), alternating:")
     for (backend, res, seg), runs in sorted(results.items(), key=lambda kv: (kv[0][2], kv[0][0], kv[0][1])):
         med = [r["median_ms"] for r in runs]
         low = [r["low1_fps"] for r in runs]
         fps = [r["mean_fps"] for r in runs]
+        secs = [r["seconds"] for r in runs]
         spread = (max(med) - min(med)) / statistics.median(med) * 100 if len(med) > 1 else 0
         print(f"{seg:>16} {backend:>6} x{res}: median {statistics.median(med):6.2f} ms "
               f"(runs {', '.join(f'{m:.2f}' for m in med)}; spread {spread:4.1f}%)  mean "
-              f"{statistics.median(fps):6.1f} fps  1% low {statistics.median(low):6.1f} fps")
+              f"{statistics.median(fps):6.1f} fps  1% low {statistics.median(low):6.1f} fps  "
+              f"length {statistics.median(secs):5.1f} s ({min(secs):.1f}-{max(secs):.1f})")
 
 
 def main():
@@ -247,6 +282,7 @@ def main():
         p.add_argument("--record", help="record user 0's controller to this CSV")
         p.add_argument("--timeout", type=float, default=600)
         p.add_argument("--keep-open", action="store_true", help="don't quit when the script ends")
+        p.add_argument("--track", action="store_true", help="log the car's path (pad.csv)")
         p.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
         if name == "bench":
             p.add_argument("--configs", default="d3d12:1,vulkan:1")

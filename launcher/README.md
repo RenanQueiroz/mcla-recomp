@@ -186,7 +186,10 @@ in front. A real controller keeps working alongside it.
   median frame time, 1% low and run-to-run spread, `analyze` reads a run.
   `devrun.py prepare --refresh` takes a new snapshot after you have played on.
 - `dev\scripts\`: `boot-to-roam.pad` (title, the map zoom-out loading, the
-  city: the loading benchmark) and `mark-roam.pad` (for recordings).
+  city: the loading benchmark), `drive-spawn.pad` (the same, then about 8 s of
+  driving from the spawn point; with `--fixed-dt 60 --track` three runs' paths
+  stayed within 1.7 m of each other) and `mark-roam.pad` (for recordings).
+  Scripts can `include` others.
 
 The game ignores buttons during its own transitions (the title screen's camera
 cuts, a menu closing), so scripts press until a condition holds rather than

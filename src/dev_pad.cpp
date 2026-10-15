@@ -14,7 +14,7 @@
 //   press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
 //   pos   peek <addr> [bytes]   peeku <addr> [count]   peekf <addr> [count]
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
-//   state   log <text>   quit
+//   state   log <text>   include <script>   quit
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //
 // Conditions: left_title (Start accepted on the title screen), loading (the
@@ -186,6 +186,7 @@ FILE* g_record_file = nullptr;
 uint64_t g_record_start = 0;
 PadValues g_record_last;
 bool g_record_first = true;
+uint64_t g_record_pos_base = 0;  // positions are logged every 30 frames from the last mark
 
 std::mutex g_play_mutex;
 std::shared_ptr<Recording> g_play;
@@ -235,9 +236,9 @@ void StopRecording() {
 void RecordMark(const std::string& name) {
   std::lock_guard lock(g_record_mutex);
   if (g_record_file) {
+    g_record_pos_base = g_frame.load() - g_record_start;
     std::fprintf(g_record_file, "mark,%llu,%s\n",
-                 static_cast<unsigned long long>(g_frame.load() - g_record_start),
-                 name.c_str());
+                 static_cast<unsigned long long>(g_record_pos_base), name.c_str());
   }
 }
 
@@ -274,7 +275,7 @@ void RecordFrame(uint64_t frame) {
   // Where the car is twice a second at 60, so a playback can tell how far it
   // went off the recorded route.
   float xyz[3];
-  if ((frame - g_record_start) % 30 == 0 && PlayerPosition(xyz)) {
+  if ((frame - g_record_start - g_record_pos_base) % 30 == 0 && PlayerPosition(xyz)) {
     std::fprintf(g_record_file, "pos,%llu,%.3f,%.3f,%.3f\n",
                  static_cast<unsigned long long>(frame - g_record_start), xyz[0], xyz[1], xyz[2]);
   }
@@ -805,6 +806,8 @@ void RequestQuit() {
   }
 }
 
+std::string RunScriptFile(const std::string& path);
+
 // Runs one command; returns the reply ("ok ..." or "err ...").
 std::string Execute(const std::string& line) {
   std::istringstream in(line);
@@ -1118,6 +1121,9 @@ std::string Execute(const std::string& line) {
     RequestQuit();
     return "ok";
   }
+  if (cmd == "include") {
+    return RunScriptFile(arg(1));
+  }
   return "err unknown command '" + cmd + "'";
 }
 
@@ -1252,24 +1258,45 @@ class ScriptPad final : public rex::input::InputDriver {
 
 // --- Command sources ---
 
-void RunScript(std::string path) {
+// Directory of the script being run, for relative includes.
+thread_local std::string g_script_dir;
+
+std::string RunScriptFile(const std::string& name) {
+  std::string path = name;
+  const bool absolute = name.size() > 1 && (name[1] == ':' || name[0] == '\\' || name[0] == '/');
+  if (!g_script_dir.empty() && !absolute) {
+    path = g_script_dir + "\\" + name;
+  }
   std::ifstream in(path);
   if (!in) {
-    REXLOG_ERROR("dev pad: cannot read script {}", path);
-    return;
+    return "err cannot read " + path;
   }
-  REXLOG_INFO("dev pad: running script {}", path);
+  const std::string saved_dir = g_script_dir;
+  g_script_dir = path.substr(0, path.find_last_of("\\/"));
   int number = 0;
+  int errors = 0;
   for (std::string line; std::getline(in, line);) {
     number++;
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
     const std::string reply = Execute(line);
     if (reply.rfind("err", 0) == 0) {
+      errors++;
       REXLOG_WARN("dev pad: {}:{}: {} -> {}", path, number, line, reply);
-    } else if (!line.empty() && line[0] != '#') {
+    } else if (line.find_first_not_of(" \t") != std::string::npos &&
+               line[line.find_first_not_of(" \t")] != '#') {
       REXLOG_INFO("dev pad: {} -> {}", line, reply);
     }
   }
-  REXLOG_INFO("dev pad: script {} done", path);
+  g_script_dir = saved_dir;
+  return errors ? "err " + std::to_string(errors) + " failed lines in " + path : "ok";
+}
+
+void RunScript(std::string path) {
+  REXLOG_INFO("dev pad: running script {}", path);
+  const std::string reply = RunScriptFile(path);
+  REXLOG_INFO("dev pad: script {} done: {}", path, reply);
   if (REXCVAR_GET(mcla_pad_exit_on_end)) {
     RequestQuit();
   }

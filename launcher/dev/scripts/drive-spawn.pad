@@ -1,0 +1,13 @@
+# Boot to the city, then a short drive from the spawn point: out of the car
+# park and right along the street, about 8 s of game time. Inputs are counted
+# in engine frames, so with --mcla_fixed_dt=60 every run applies them at the
+# same game time. Segments: as boot-to-roam.pad, then drive.
+include boot-to-roam.pad
+mark drive
+trigger rt 1 50f
+trigger rt 0.6
+stick lx 1 40f
+trigger rt 1
+wait 400f
+release all
+mark drive_end
