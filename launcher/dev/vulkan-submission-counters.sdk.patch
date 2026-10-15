@@ -1,0 +1,139 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -23,6 +23,14 @@
+ #include <utility>
+ #include <vector>
+ 
++#include <cstdio>   // TMPSUB
++#include <cstdlib>  // TMPSUB
++#ifdef _WIN32  // TMPSUB: GetThreadTimes
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#endif
+ #include <SPIRV/GlslangToSpv.h>
+ #include <glslang/Public/ShaderLang.h>
+ #include <rex/assert.h>
+@@ -74,11 +82,18 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+ 
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++// TMPSUB: the A/B state, set by the game's A/B harness.
++REXCVAR_DEFINE_BOOL(tmp_ab_state, true, "GPU/Vulkan", "temporary")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::vulkan {
+ 
+ // Submissions and blocking fence waits so far, with the time spent in each
+ // (microseconds), for performance diagnosis: {submits, submit us, waits, wait us}.
+ std::atomic<uint64_t> g_submission_counters[4];
++// TMPSUB: command buffer recording (pool reset, begin, replay of the deferred
++// command buffer, end): {count, microseconds}.
++std::atomic<uint64_t> g_tmp_record_counters[2];
+ // Draws issued so far.
+ std::atomic<uint64_t> g_draw_counter{0};
+ // Of those, the ones that reached the host as a draw.
+@@ -2301,6 +2316,83 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
++  {
++    // TMPSUB: GPU command thread time per frame, every 5 s.
++    static uint64_t last_us = 0, last_frames = 0, frames = 0, last_cpu_ns = 0, last_draws = 0;
++    static uint64_t last[4] = {}, last_record_us = 0;
++    auto thread_cpu_ns = []() -> uint64_t {
++#ifdef _WIN32
++      FILETIME c, e, k, u;
++      GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
++      return ((uint64_t(k.dwHighDateTime) << 32 | k.dwLowDateTime) +
++              (uint64_t(u.dwHighDateTime) << 32 | u.dwLowDateTime)) *
++             100;
++#else
++      return 0;
++#endif
++    };
++    ++frames;
++    const uint64_t now_us = CounterNowMicros();
++    {
++      // Per frame, for in-run A/B analysis (TMPSUB_CSV): GPU command thread
++      // cycles, host draws and recording time since the previous swap.
++      static std::FILE* csv = [] {
++        const char* path = std::getenv("TMPSUB_CSV");
++        std::FILE* f = (path && *path) ? std::fopen(path, "w") : nullptr;
++        if (f) std::fputs("t_us,state,cycles,draws,record_us\n", f);
++        return f;
++      }();
++      if (csv) {
++        static uint64_t prev_cycles = 0, prev_draws = 0, prev_record_us = 0, rows = 0;
++        uint64_t cycles = 0;
++#ifdef _WIN32
++        QueryThreadCycleTime(GetCurrentThread(), &cycles);
++#endif
++        const uint64_t draws = HostDrawCounter();
++        const uint64_t record_us = g_tmp_record_counters[1].load(std::memory_order_relaxed);
++        if (prev_cycles) {
++          std::fprintf(csv, "%llu,%d,%llu,%llu,%llu\n", (unsigned long long)now_us, int(REXCVAR_GET(tmp_ab_state) ? 1 : 0),
++                       (unsigned long long)(cycles - prev_cycles),
++                       (unsigned long long)(draws - prev_draws),
++                       (unsigned long long)(record_us - prev_record_us));
++          if (++rows % 240 == 0) std::fflush(csv);
++        }
++        prev_cycles = cycles;
++        prev_draws = draws;
++        prev_record_us = record_us;
++      }
++    }
++    if (!last_us) {
++      last_us = now_us;
++      SubmissionCounters(last);
++      last_frames = frames;
++      last_cpu_ns = thread_cpu_ns();
++      last_draws = HostDrawCounter();
++      last_record_us = g_tmp_record_counters[1].load();
++    } else if (now_us - last_us >= 5000000) {
++      uint64_t cur[4];
++      SubmissionCounters(cur);
++      const uint64_t cpu_ns = thread_cpu_ns();
++      const uint64_t record_us = g_tmp_record_counters[1].load();
++      const double span_us = double(now_us - last_us);
++      const double n = double(frames - last_frames);
++      REXGPU_INFO(
++          "TMPSUB {:.1f} s, {:.0f} frames ({:.2f} ms): GPU thread CPU {:.3f} ms/frame ({:.1f}%); "
++          "{:.1f} submits/frame, {:.3f} ms submitting/frame; {:.2f} blocking waits/frame, {:.3f} ms "
++          "waiting/frame; walker {}; {:.0f} draws/frame; recording {:.3f} ms/frame",
++          span_us / 1e6, n, span_us / n / 1000.0, double(cpu_ns - last_cpu_ns) / n / 1e6,
++          100.0 * double(cpu_ns - last_cpu_ns) / 1000.0 / span_us, double(cur[0] - last[0]) / n,
++          double(cur[1] - last[1]) / n / 1000.0, double(cur[2] - last[2]) / n,
++          double(cur[3] - last[3]) / n / 1000.0, REXCVAR_GET(tmp_ab_state) ? 1 : 0,
++          double(HostDrawCounter() - last_draws) / n, double(record_us - last_record_us) / n / 1000.0);
++      for (int i = 0; i < 4; ++i) last[i] = cur[i];
++      last_us = now_us;
++      last_frames = frames;
++      last_cpu_ns = cpu_ns;
++      last_draws = HostDrawCounter();
++      last_record_us = record_us;
++    }
++  }
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+ 
+@@ -5417,6 +5509,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+ 
+     assert_false(command_buffers_writable_.empty());
+     CommandBuffer command_buffer = command_buffers_writable_.back();
++    const uint64_t tmp_record_start_us = CounterNowMicros();  // TMPSUB
+     if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to reset a Vulkan command pool");
+       return false;
+@@ -5435,6 +5528,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       REXGPU_ERROR("Failed to end a Vulkan command buffer");
+       return false;
+     }
++    g_tmp_record_counters[0].fetch_add(1, std::memory_order_relaxed);  // TMPSUB
++    g_tmp_record_counters[1].fetch_add(CounterNowMicros() - tmp_record_start_us,
++                                       std::memory_order_relaxed);
+ 
+     VkSubmitInfo submit_info;
+     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;

@@ -119,7 +119,15 @@ during a build:
   `MCLA_AB_SECONDS` (default 4) seconds, e.g.
   `--mcla_ab_test=set:gpu_regwrite_bulk=on/off`, so an A/B compares the same scenes.
   Run uncapped with `--mcla_intro=fast` and `REX_PERF_LOG_CSV`, and leave out
-  the first 20 s and the attract video (about 120-131 s after launch).
+  the first 20 s and the attract video (about 120-131 s after launch). It also
+  sets `tmp_ab_state` to the current side for SDK-side logs that have that cvar.
+- `vulkan-submission-counters.sdk.patch` (SDK, Vulkan) with `cyc-ab.py`: every
+  5 s a `TMPSUB` log line with the GPU command thread's CPU time, draws,
+  command-buffer recording, `vkQueueSubmit` and fence-wait time per frame;
+  with `TMPSUB_CSV=<file>`, one row per swap with the thread's cycle count and
+  the A/B side, which `cyc-ab.py` compares per draw between neighbouring
+  windows. Thread cycles measure the GPU command thread's own cost even when
+  the frame rate is held by another thread.
 - `draw-cost.py`: fits frame time = fixed + per draw x draws over a run's
   `REX_PERF_LOG_CSV` output.
 - `dropped-patches\`: patches that were measured and not kept: specialized

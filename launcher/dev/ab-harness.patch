@@ -1,5 +1,5 @@
 diff --git a/src/perf_options.cpp b/src/perf_options.cpp
-index f1a0ade..8cd9c21 100644
+index f1a0ade..250627f 100644
 --- a/src/perf_options.cpp
 +++ b/src/perf_options.cpp
 @@ -11,6 +11,8 @@
@@ -11,10 +11,13 @@ index f1a0ade..8cd9c21 100644
  #include <cstring>
  #include <mutex>
  #include <string>
-@@ -214,6 +216,28 @@ uint64_t NowMicros() {
+@@ -214,6 +216,31 @@ uint64_t NowMicros() {
  }
  
  void SetReduced(const std::string& what, bool reduced) {
++  // TEMPORARY A/B harness: the state for SDK-side per-frame logs (no-op if the
++  // SDK has no such cvar).
++  rex::cvar::SetFlagByName("tmp_ab_state", reduced ? "false" : "true");
 +  // TEMPORARY A/B harness: "cvar:<name>" flips any bool cvar (state 0 = on).
 +  if (what.rfind("cvar:", 0) == 0) {
 +    rex::cvar::SetFlagByName(what.substr(5), reduced ? "false" : "true");
@@ -40,7 +43,7 @@ index f1a0ade..8cd9c21 100644
    const bool all = what == "all";
    if (all || what == "shadows") {
      rex::cvar::SetFlagByName("mcla_shadows", reduced ? "false" : "true");
-@@ -244,8 +268,15 @@ void TickAbTest() {
+@@ -244,8 +271,15 @@ void TickAbTest() {
    static bool reduced = false;
    static uint64_t switched_at = 0, last_frame = 0, last_report = 0;
    const uint64_t now = NowMicros();
@@ -56,7 +59,7 @@ index f1a0ade..8cd9c21 100644
      return;
    }
    // The first second after a switch is the change settling, not the state.
-@@ -255,8 +286,22 @@ void TickAbTest() {
+@@ -255,8 +289,22 @@ void TickAbTest() {
      state.micros += now - last_frame;
      state.draws += uint64_t(rex::perf::GetSnapshotCounter(rex::perf::CounterId::kDrawCalls));
    }
