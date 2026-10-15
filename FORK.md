@@ -23,9 +23,11 @@ kinds of changes on top of upstream's `main`:
     and controller input, the per-frame counters on Vulkan, Vulkan draws
     that no longer look a setting up in the cvar registry each, Vulkan uploads
     recorded before the render pass instead of ending it, Vulkan command
-    buffers recorded and submitted on their own thread, and D3D12 textures
+    buffers recorded and submitted on their own thread, D3D12 textures
     placed in shared heaps instead of each being an allocation of its own (the
-    map zoom-out's and races' stutters).
+    map zoom-out's and races' stutters), and Vulkan texture loads copied into
+    their images by a compute shader instead of `vkCmdCopyBufferToImage`
+    (NVIDIA only by default; 19% shorter frames at 3x).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in
@@ -36,10 +38,9 @@ kinds of changes on top of upstream's `main`:
 ## Testing so far
 
 Everything here was built and measured on **Windows only, with an NVIDIA RTX 5080**
-(and a Ryzen 7 9800X3D), mostly on the D3D12 backend. None of it has been
-built or run on AMD or Intel graphics, on Linux, or on the PS5 yet, and the
-Vulkan backend has not been measured with these changes. They need testing
-there before anyone relies on them.
+(and a Ryzen 7 9800X3D), on the D3D12 and Vulkan backends. None of it has been
+built or run on AMD or Intel graphics, on Linux, or on the PS5 yet. It needs
+testing there before anyone relies on it.
 
 ## Building and playing
 
