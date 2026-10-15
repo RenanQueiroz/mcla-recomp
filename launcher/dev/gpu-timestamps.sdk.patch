@@ -183,11 +183,12 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
      case Path::kPixelShaderInterlock: {
        // For ROV, only the barrier is needed - already scheduled if required.
 diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 816ec40..9dc26fb 100644
 --- a/src/graphics/d3d12/texture_cache.cpp
 +++ b/src/graphics/d3d12/texture_cache.cpp
-@@ -35,6 +35,21 @@
- 
- REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+@@ -40,6 +40,21 @@ REXCVAR_DEFINE_BOOL(d3d12_texture_heaps, true, "GPU/D3D12",
+                     "committed resource, which is much slower to create and destroy")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
 +#include <rex/graphics/flags.h>  // TMPPIX
 +#include <string>  // TMPPIX
@@ -207,7 +208,7 @@ diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_c
  namespace rex::graphics::d3d12 {
  
  // Generated with `xb buildshaders`.
-@@ -1563,6 +1578,7 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+@@ -1711,6 +1726,7 @@ void D3D12TextureCache::FreeTextureHeapRange(uint32_t heap_index, uint64_t offse
  
  bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                bool load_mips) {

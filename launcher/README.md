@@ -176,7 +176,8 @@ during a build:
 - `vulkan-2026-10-14.md`: the same settings and patches measured on Vulkan,
   where its GPU command thread's time goes, validation, pacing and stress runs,
   the render pass breaks that upload hoisting removed, the Vulkan submission
-  thread, and a D3D12 against Vulkan benchmark in the city.
+  thread, the texture copy that held Vulkan back at 3x, and a D3D12 against
+  Vulkan benchmark in the city.
 - `race-benchmark-2026-10-15.md`: the race benchmark (`scripts\race.pad`):
   how it gets into the race, how repeatable it is, D3D12 baselines and where
   the GPU time goes in it at 3x.
@@ -190,6 +191,13 @@ during a build:
   D3D12 calls that can stall the GPU command thread (texture creation and
   release, tile heaps, render targets, fence waits and more), one log line per
   slow frame; applies on top of `rexglue-d3d12-placed-texture-heaps.patch`.
+- `texload-split-timestamps.sdk.patch` (SDK, D3D12 and Vulkan): on top of the
+  two `gpu-timestamps` patches, times the steps of every texture load
+  separately (the barriers, the decode dispatches, the copy into the image) and
+  labels each load with its size and format; `texload-split.py <dir>` sums
+  them per frame and per kind of load, with the rate of each step in GB/s. It
+  found Vulkan's `vkCmdCopyBufferToImage` copying at about 120 GB/s
+  (`rexglue-vulkan-texture-load-storage-copy.patch`).
 
 ## Scripted controller input (unattended runs)
 
