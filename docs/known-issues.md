@@ -312,3 +312,13 @@ The game clears its render targets the Direct3D 9 way, by drawing a rectangle ov
 Screenshots taken with the setting switched on and off within one run look the same. The D3D12 debug layer and Vulkan validation report nothing new. Measurements and method: `launcher/dev/edram-transfers-2026-10-15.md` in the fork; details in `patches/README.md`.
 
 **Not verified**: other GPUs.
+
+## Resolved textures loaded in two passes at 3x (fixed 2026-10-15)
+
+With resolution scaling, the game's render targets resolved to memory are decoded into textures again at their next use, and at 3x the screen-sized ones are reloaded every frame, some several times, because the game reuses that memory for other targets. Each load decoded into a scratch buffer and then copied that into the texture: 1.6 ms of the GPU frame on D3D12 and 1.85 ms on Vulkan, standing in the city.
+
+`patches/rexglue-texture-load-direct.patch` decodes these textures straight into themselves through an unsigned integer view, in one pass (setting `texture_load_direct`, default on, both APIs; on Vulkan with the storage views of `vulkan_texture_load_storage_copy`, so NVIDIA only by default). Texture loads went to 1.1 ms on D3D12 and 1.4 ms on Vulkan. Timedemo at 3x, median frame: D3D12 10.6 to 10.2 ms standing in the city (-4%), 10.2 to 9.7 ms driving (-5%), 9.7 to 8.1 ms in the map zoom-out, 10.4 to 9.9 ms in the race; Vulkan 9.8 to 9.4 ms (-4%), 10.0 to 9.4 ms (-6%), 8.8 to 7.9 ms, 11.9 to 11.6 ms. Native resolution and 60 FPS pacing are unchanged.
+
+Screenshots taken with the setting switched on and off within one run look the same; the D3D12 debug layer and Vulkan validation (with synchronization validation) report nothing new. Measurements, what drives the resolves and the reloads, and the options left: `launcher/dev/resolves-2026-10-15.md` in the fork; details in `patches/README.md`.
+
+**Not verified**: other GPUs.
