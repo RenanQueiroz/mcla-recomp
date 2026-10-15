@@ -53,7 +53,8 @@ TUNING = [
 
 
 def real_files():
-    files = [p for p in REAL_USER.rglob("*") if p.is_file() and "cache" not in p.relative_to(REAL_USER).parts]
+    # The shader cache too: runs use their own (--cache_root), so it must not change either.
+    files = [p for p in REAL_USER.rglob("*") if p.is_file()]
     if TOML.exists():
         files.append(TOML)
     return sorted(files)
@@ -97,7 +98,7 @@ def close_windows(pid):
 def game_args(a, out):
     args = [
         f"--user_data_root={WORK}",
-        f"--cache_root={CACHE}",
+        f"--cache_root={Path(a.cache_root).resolve() if a.cache_root else CACHE}",
         f"--log_file={out / 'game.log'}",
         f"--mcla_gpu_backend={a.backend}",
         f"--resolution_scale={a.res}",
@@ -141,6 +142,7 @@ def run(a, tag=None):
     before = fingerprint()
     toml_backup = TOML.read_bytes() if TOML.exists() else None
     env = dict(os.environ, REX_PERF_LOG_CSV=str(out / "perf.csv"))
+    env.update(kv.split("=", 1) for kv in a.env)
     args = game_args(a, out)
     (out / "args.txt").write_text(" ".join(args), encoding="utf-8")
     start = time.monotonic()
@@ -330,6 +332,10 @@ def main():
         p.add_argument("--timeout", type=float, default=600)
         p.add_argument("--keep-open", action="store_true", help="don't quit when the script ends")
         p.add_argument("--track", action="store_true", help="log the car's path (pad.csv)")
+        p.add_argument("--cache-root", help="shader storage folder (default: the shared one under "
+                       r"%%LOCALAPPDATA%%\mcla-dev\cache), e.g. an empty one for a first run")
+        p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                       help="environment variable for the game (repeatable)")
         p.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
         if name == "bench":
             p.add_argument("--configs", default="d3d12:1,vulkan:1")
@@ -356,6 +362,7 @@ def main():
         # the cap it was recorded at.
         a.script, a.pipe, a.fixed_dt, a.intro = str(HERE / "scripts" / "mark-roam.pad"), "", 0, "normal"
         a.record, a.keep_open, a.timeout, a.extra = a.file, True, 3 * 3600, []
+        a.cache_root, a.env = None, []
         analyze(run(a))
     else:
         analyze(a.path)

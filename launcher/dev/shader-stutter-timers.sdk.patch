@@ -1,0 +1,353 @@
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -67,6 +67,11 @@ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+ namespace rex::graphics::d3d12 {
+ 
++std::atomic<uint64_t> tmpss_sync_us{0};  // TMPSS: pipeline work on the GPU command thread
++}  // namespace rex::graphics::d3d12  // TMPSS
++REXCVAR_DEFINE_INT32(tmp_creation_priority, 0, "GPU", "TMPSS");  // TMPSS
++namespace rex::graphics::d3d12 {  // TMPSS
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/adaptive_quad_hs.h"
+@@ -161,8 +166,10 @@ bool PipelineCache::Initialize() {
+           std::min(uint32_t(REXCVAR_GET(d3d12_pipeline_creation_threads)), logical_processor_count);
+     }
+     for (size_t i = 0; i < creation_thread_count; ++i) {
++      rex::thread::Thread::CreationParameters tmpss_params;  // TMPSS
++      tmpss_params.initial_priority = REXCVAR_GET(tmp_creation_priority);  // TMPSS
+       std::unique_ptr<rex::thread::Thread> creation_thread =
+-          rex::thread::Thread::Create({}, [this, i]() { CreationThread(i); });
++          rex::thread::Thread::Create(tmpss_params, [this, i]() { CreationThread(i); });  // TMPSS
+       assert_not_null(creation_thread);
+       creation_thread->set_name("D3D12 Pipelines");
+       creation_threads_.push_back(std::move(creation_thread));
+@@ -937,6 +944,9 @@ bool PipelineCache::ConfigurePipeline(
+   if (!vertex_shader->shader().is_ucode_analyzed()) {
+     vertex_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
+   }
++  auto tmpss_translate_start = std::chrono::steady_clock::now();  // TMPSS
++  bool tmpss_translated = (!vertex_shader->is_translated() && !use_async) ||  // TMPSS
++                          (pixel_shader && !pixel_shader->is_translated() && !use_async);  // TMPSS
+   if (!vertex_shader->is_translated() && !use_async) {
+     std::lock_guard<std::mutex> lock(translation_request_lock_);
+     if (!vertex_shader->is_translated()) {
+@@ -989,6 +999,9 @@ bool PipelineCache::ConfigurePipeline(
+       return false;
+     }
+   }
++  if (tmpss_translated) {  // TMPSS
++    tmpss_sync_us += uint64_t(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_translate_start).count() * 1000);  // TMPSS
++  }  // TMPSS
+ 
+   PipelineRuntimeDescription runtime_description;
+   if (!GetCurrentStateDescription(
+@@ -1046,7 +1059,11 @@ bool PipelineCache::ConfigurePipeline(
+     }
+     creation_request_cond_.notify_one();
+   } else {
++    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
+     new_pipeline->state.store(CreateD3D12Pipeline(runtime_description), std::memory_order_release);
++    double tmpss_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count();  // TMPSS
++    tmpss_sync_us += uint64_t(tmpss_ms * 1000);  // TMPSS
++    REXGPU_INFO("TMPSS d3d12 pipeline sync cr={:.2f}", tmpss_ms);  // TMPSS
+   }
+ 
+   if (pipeline_storage_file_) {
+@@ -3239,12 +3256,19 @@ void PipelineCache::CreationThread(size_t thread_index) {
+     }
+ 
+     PipelineRuntimeDescription runtime_description;
++    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
++    double tmpss_tr = 0, tmpss_cr = 0;  // TMPSS
+     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+       pipeline_to_create->state.store(nullptr, std::memory_order_release);
+     } else {
++      tmpss_tr = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count();  // TMPSS
+       pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+                                       std::memory_order_release);
++      tmpss_cr = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count() - tmpss_tr;  // TMPSS
+     }
++    if (pipeline_to_create->async_creation_pending.load()) {  // TMPSS
++      REXGPU_INFO("TMPSS d3d12 pipeline async tr={:.2f} cr={:.2f}", tmpss_tr, tmpss_cr);  // TMPSS
++    }  // TMPSS
+     bool was_async_pending =
+         pipeline_to_create->async_creation_pending.exchange(false, std::memory_order_acq_rel);
+ 
+@@ -3285,12 +3309,16 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+       creation_queue_.pop();
+     }
+     PipelineRuntimeDescription runtime_description;
++    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
+     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+       pipeline_to_create->state.store(nullptr, std::memory_order_release);
+     } else {
+       pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+                                       std::memory_order_release);
+     }
++    if (pipeline_to_create->async_creation_pending.load()) {  // TMPSS
++      REXGPU_INFO("TMPSS d3d12 pipeline proc trcr={:.2f}", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count());  // TMPSS
++    }  // TMPSS
+     // The processor thread is the only one waiting for these, and it's here.
+     pipeline_to_create->async_creation_pending.store(false, std::memory_order_release);
+   }
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -64,6 +64,10 @@ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+ namespace rex::graphics::d3d12 {
+ 
++extern std::atomic<uint64_t> tmpss_sync_us;  // TMPSS
++static uint32_t tmpss_skipped = 0, tmpss_rescued = 0;  // TMPSS
++static double tmpss_endwait_ms = 0;  // TMPSS
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/apply_gamma_pwl_cs.h"
+@@ -2655,8 +2659,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     // frame's waiting budget.
+     if (!AwaitAsyncPipeline(pipeline_handle) ||
+         pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
++      ++tmpss_skipped;  // TMPSS
+       return true;
+     }
++    ++tmpss_rescued;  // TMPSS
+     // Set by the creation thread together with the pipeline.
+     root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
+   }
+@@ -3670,7 +3676,9 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+       active_occlusion_query_ = {};
+     }
+ 
++    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
+     pipeline_cache_->EndSubmission();
++    tmpss_endwait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count();  // TMPSS
+ 
+     // Submit barriers now because resources with the queued barriers may be
+     // destroyed between frames.
+@@ -3737,6 +3745,14 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+   }
+ 
+   if (is_closing_frame) {
++    uint64_t tmpss_sync = tmpss_sync_us.exchange(0);  // TMPSS
++    if (tmpss_skipped || tmpss_rescued || tmpss_endwait_ms >= 1.0 || tmpss_sync >= 1000) {  // TMPSS
++      REXGPU_INFO("TMPSS d3d12 frame skipped={} rescued={} waited={:.2f} endwait={:.2f} sync={:.2f}",  // TMPSS
++                  tmpss_skipped, tmpss_rescued, frame_async_pipeline_wait_us_ / 1000.0,  // TMPSS
++                  tmpss_endwait_ms, tmpss_sync / 1000.0);  // TMPSS
++    }  // TMPSS
++    tmpss_skipped = tmpss_rescued = 0;  // TMPSS
++    tmpss_endwait_ms = 0;  // TMPSS
+     if (REXCVAR_GET(clear_memory_page_state) && shared_memory_) {
+       shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
+     }
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -86,6 +86,11 @@ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+ namespace rex::graphics::vulkan {
+ 
++std::atomic<uint64_t> tmpss_sync_us{0};  // TMPSS: pipeline work on the GPU command thread
++}  // namespace rex::graphics::vulkan  // TMPSS
++REXCVAR_DECLARE(int32_t, tmp_creation_priority);  // TMPSS
++namespace rex::graphics::vulkan {  // TMPSS
++
+ namespace {
+ 
+ constexpr std::string_view kPlaceholderPixelShaderSource = R"(#version 460
+@@ -402,8 +407,10 @@ bool VulkanPipelineCache::Initialize() {
+                                        logical_processor_count);
+     }
+     for (size_t i = 0; i < creation_thread_count; ++i) {
++      rex::thread::Thread::CreationParameters tmpss_params;  // TMPSS
++      tmpss_params.initial_priority = REXCVAR_GET(tmp_creation_priority);  // TMPSS
+       std::unique_ptr<rex::thread::Thread> creation_thread =
+-          rex::thread::Thread::Create({}, [this, i]() { CreationThread(i); });
++          rex::thread::Thread::Create(tmpss_params, [this, i]() { CreationThread(i); });  // TMPSS
+       assert_not_null(creation_thread);
+       creation_thread->set_name("Vulkan Pipelines");
+       creation_threads_.push_back(std::move(creation_thread));
+@@ -638,6 +645,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+            shader_storage_file_);
+   }
+ 
++  auto tmpss_preload_start = std::chrono::steady_clock::now();  // TMPSS
+   // Translate shader modifications needed for stored pipelines. Analysis and
+   // the shaders' lists of translations are set up here; the translations
+   // themselves can run in parallel, all of one shader on the same thread (its
+@@ -740,6 +748,9 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+     }
+   }
+ 
++  double tmpss_translate_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_preload_start).count();  // TMPSS
++  REXGPU_INFO("TMPSS vk preload translate={:.1f} ms ({} translations, {} threads)", tmpss_translate_ms,  // TMPSS
++              stored_translations.size(), translation_thread_count);  // TMPSS
+   // Create the pipelines.
+   std::vector<PipelineCreationArguments> pipeline_creations;
+   pipeline_creations.reserve(pipeline_stored_descriptions.size());
+@@ -836,6 +847,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+ 
+     REXGPU_INFO("Created {} graphics pipelines from Vulkan storage ({} requested)",
+                 created_pipeline_count.load(), pipeline_creations.size());
++    REXGPU_INFO("TMPSS vk preload create={:.1f} ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_preload_start).count() - tmpss_translate_ms);  // TMPSS
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       startup_loading_ = false;
+@@ -1209,6 +1221,11 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
+ 
+ bool VulkanPipelineCache::EnsureShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,
+                                                   VulkanShader::VulkanTranslation* pixel_shader) {
++  auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
++  struct TmpssAdd {  // TMPSS
++    std::chrono::steady_clock::time_point start; bool on;  // TMPSS
++    ~TmpssAdd() { if (on) tmpss_sync_us += uint64_t(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() * 1000); }  // TMPSS
++  } tmpss_add{tmpss_start, !vertex_shader->is_translated() || (pixel_shader && !pixel_shader->is_translated())};  // TMPSS
+   // Edge flags are not supported yet (because polygon primitives are not).
+   assert_true(register_file_.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode !=
+                   xenos::VertexShaderExportMode::kPosition2VectorsEdge &&
+@@ -1393,7 +1410,10 @@ bool VulkanPipelineCache::ConfigurePipeline(
+     if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
+                                                       creation_arguments_placeholder, true)) {
+       pipeline.second.is_placeholder.store(true, std::memory_order_release);
+-      if (EnsurePipelineCreated(creation_arguments_placeholder, placeholder_pixel_shader_)) {
++      auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
++      bool tmpss_ok = EnsurePipelineCreated(creation_arguments_placeholder, placeholder_pixel_shader_);  // TMPSS
++      tmpss_sync_us += uint64_t(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count() * 1000);  // TMPSS
++      if (tmpss_ok) {  // TMPSS
+         {
+           std::lock_guard<std::mutex> lock(creation_request_lock_);
+           creation_queue_.push(creation_arguments_real);
+@@ -1406,7 +1426,10 @@ bool VulkanPipelineCache::ConfigurePipeline(
+     }
+   }
+ 
+-  if (!queued_async_creation && !EnsurePipelineCreated(creation_arguments_real)) {
++  auto tmpss_sync_start = std::chrono::steady_clock::now();  // TMPSS
++  bool tmpss_sync_ok = queued_async_creation || EnsurePipelineCreated(creation_arguments_real);  // TMPSS
++  if (!queued_async_creation) tmpss_sync_us += uint64_t(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_sync_start).count() * 1000);  // TMPSS
++  if (!tmpss_sync_ok) {  // TMPSS
+     pipelines_.erase(description);
+     return false;
+   }
+@@ -3713,8 +3736,13 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+   VkPipeline pipeline;
++  auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
+   VkResult create_result = dfn.vkCreateGraphicsPipelines(device, vk_pipeline_cache_, 1,
+                                                          &pipeline_create_info, nullptr, &pipeline);
++  if (!startup_loading_) {  // TMPSS
++    REXGPU_INFO("TMPSS vk pipeline {} cr={:.2f}", creating_placeholder ? "placeholder" : "real",  // TMPSS
++                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count());  // TMPSS
++  }  // TMPSS
+   if (create_result != VK_SUCCESS) {
+     uint64_t ps_hash = creation_arguments.pixel_shader
+                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -100,6 +100,10 @@ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+ namespace rex::graphics::vulkan {
+ 
++extern std::atomic<uint64_t> tmpss_sync_us;  // TMPSS
++static uint32_t tmpss_skipped = 0, tmpss_rescued = 0, tmpss_skipped_presents = 0;  // TMPSS
++static double tmpss_endwait_ms = 0;  // TMPSS
++
+ // Submissions and blocking fence waits so far, with the time spent in each
+ // (microseconds), for performance diagnosis: {submits, submit us, waits, wait us}.
+ std::atomic<uint64_t> g_submission_counters[4];
+@@ -2525,6 +2529,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     incomplete_frames_skipped_since_.reset();
+   }
+   if (skip_present_due_async_placeholder) {
++    ++tmpss_skipped_presents;  // TMPSS
+     static bool skipped_incomplete_frame_logged = false;
+     if (!skipped_incomplete_frame_logged) {
+       skipped_incomplete_frame_logged = true;
+@@ -4201,9 +4206,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                                     &pipeline_is_placeholder);
+     }
+     if (pipeline_is_placeholder) {
++      ++tmpss_skipped;  // TMPSS
+       frame_used_async_placeholder_pipeline_ = true;
+       return true;
+     }
++    ++tmpss_rescued;  // TMPSS
+   }
+   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
+     return draw_fail("pipeline_lookup");
+@@ -5737,7 +5744,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+ 
+     EndRenderPass();
+ 
++    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
+     pipeline_cache_->EndSubmission();
++    tmpss_endwait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count();  // TMPSS
+ 
+     render_target_cache_->EndSubmission();
+ 
+@@ -5908,6 +5917,14 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+   }
+ 
+   if (is_closing_frame) {
++    uint64_t tmpss_sync = tmpss_sync_us.exchange(0);  // TMPSS
++    if (tmpss_skipped || tmpss_rescued || tmpss_skipped_presents || tmpss_endwait_ms >= 1.0 || tmpss_sync >= 1000) {  // TMPSS
++      REXGPU_INFO("TMPSS vk frame skipped={} rescued={} waited={:.2f} endwait={:.2f} sync={:.2f} nopresent={}",  // TMPSS
++                  tmpss_skipped, tmpss_rescued, frame_async_pipeline_wait_us_ / 1000.0,  // TMPSS
++                  tmpss_endwait_ms, tmpss_sync / 1000.0, tmpss_skipped_presents);  // TMPSS
++    }  // TMPSS
++    tmpss_skipped = tmpss_rescued = tmpss_skipped_presents = 0;  // TMPSS
++    tmpss_endwait_ms = 0;  // TMPSS
+     if (REXCVAR_GET(clear_memory_page_state) && shared_memory_) {
+       shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
+     }
+diff --git a/src/graphics/pipeline/shader/dxbc_translator.cpp b/src/graphics/pipeline/shader/dxbc_translator.cpp
+--- a/src/graphics/pipeline/shader/dxbc_translator.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator.cpp
+@@ -25,6 +25,7 @@
+ #include <rex/ui/graphics_provider.h>
+ 
+ REXCVAR_DEFINE_BOOL(dxbc_switch, true, "GPU/Shader", "Use switch statements in DXBC");
++REXCVAR_DEFINE_UINT32(tmp_shader_salt, 0, "GPU/Shader", "TMPSS: makes translated shaders differ for the driver's cache");  // TMPSS
+ 
+ REXCVAR_DEFINE_BOOL(dxbc_source_map, false, "GPU/Shader", "Generate source maps for DXBC");
+ 
+@@ -1998,7 +1999,8 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
+   // known.
+   shader_object_.resize(shader_object_.size() + sizeof(dxbc::RdefHeader) / sizeof(uint32_t));
+   // Generator name.
+-  dxbc::AppendAlignedString(shader_object_, "Xenia");
++  std::string tmpss_generator = REXCVAR_GET(tmp_shader_salt) ? "Xenia " + std::to_string(REXCVAR_GET(tmp_shader_salt)) : "Xenia";  // TMPSS
++  dxbc::AppendAlignedString(shader_object_, tmpss_generator.c_str());  // TMPSS
+ 
+   // ***************************************************************************
+   // Constant types
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -19,6 +19,8 @@
+ 
+ #include <SPIRV/GLSL.std.450.h>
+ #include <fmt/format.h>
++#include <rex/cvar.h>  // TMPSS
++REXCVAR_DECLARE(uint32_t, tmp_shader_salt);  // TMPSS
+ 
+ #include <rex/assert.h>
+ #include <rex/graphics/pipeline/shader/spirv.h>
+@@ -186,7 +188,10 @@ void SpirvShaderTranslator::StartTranslation() {
+   }
+   ext_inst_glsl_std_450_ = builder_->import("GLSL.std.450");
+   builder_->setMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+-  builder_->setSource(spv::SourceLanguageUnknown, 0);
++  builder_->setSource(spv::SourceLanguageUnknown, int(REXCVAR_GET(tmp_shader_salt)));  // TMPSS
++  if (REXCVAR_GET(tmp_shader_salt)) {  // TMPSS: an unused constant, not debug info the driver may skip
++    builder_->makeUintConstant(0x5A170000u + REXCVAR_GET(tmp_shader_salt));  // TMPSS
++  }  // TMPSS
+ 
+   type_void_ = builder_->makeVoidType();
+   type_bool_ = builder_->makeBoolType();
