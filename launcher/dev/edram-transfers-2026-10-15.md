@@ -138,3 +138,39 @@ Scratch scripts for this (not in the repository): a `bench`-style series with
 the option on and off for both APIs, `devrun.py run` with `MCLA_GT_EVERY=1` and
 the frames inside a segment kept by file time, and screenshots with `set`
 between them.
+
+## Review follow-up
+
+A review of the patch led to these changes:
+- **`2_10_10_10_FLOAT` alpha:** cleared with the float16 host values drawing
+  leaves (the color times the exponent bias, so alpha 16 with the main scene's
+  bias of 4), instead of the 32-bit guest value with alpha clamped to 2 bits.
+- **`D24FS8` depth:** only z values that are exact in 20e4.
+- **Alignment:** only depth rectangles that are multiples of 8 pixels in the
+  mode cleared in (the host depth store works in 8x8 blocks).
+- **Half-pixel offset:** applied only as `half_pixel_offset` applies it to
+  draws.
+- **Vertex shader:** position w must be written and above 0, and the
+  registers are zeroed for each vertex.
+- **Learned modes:** at most 256.
+
+Counted in a temporary build:
+- 225,000 clear rectangles converted in one race run at 3x, and 54,000 in one
+  city run;
+- none turned back by the new value and alignment checks.
+
+The 3x timedemo again, D3D12 and Vulkan, three runs a side, median frame (1%
+low):
+
+| Segment | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
+|---|---|---|---|---|
+| Free roam, standing | 13.81 ms (62 FPS) | 10.63 ms, -23.0% (77 FPS) | 12.07 ms (72 FPS) | 9.79 ms, -18.9% (88 FPS) |
+| Drive | 13.43 ms (60 FPS) | 10.26 ms, -23.6% (73 FPS) | 12.06 ms (71 FPS) | 9.85 ms, -18.3% (83 FPS) |
+
+Other checks:
+- **Screenshots with `set`** in the city (standing, the pause menu, driving),
+  the map zoom-out and the race, on both APIs, look the same as before. On
+  against off, standing and paused, differs by 0.19 to 0.30, against 0.25 to
+  0.40 between two shots with the same setting.
+- **D3D12 debug layer:** no errors.
+- **Vulkan validation:** only `vkCmdEndQuery` 07007 and 01923.
