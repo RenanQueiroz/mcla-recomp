@@ -8,7 +8,7 @@ ReactorApp.Run<LauncherApp>(new WindowSpec
 {
     Title = "Midnight Club: Los Angeles",
     Width = 920,
-    Height = 720,
+    Height = 800,
     MinWidth = 720,
     MinHeight = 600,
     Backdrop = BackdropChoice.Of(BackdropKind.Mica),

@@ -289,11 +289,27 @@ sealed class LauncherApp : Component
             var subtitle = head is null
                 ? "Static recompilation for PC"
                 : $"Static recompilation for PC  ·  version {head.Hash} from {head.Date}";
+            // Routine states read as a line under the title; the bars below are
+            // for things that need a decision.
+            var state = checking ? "checking for updates…"
+                      : error != null || busy || status == null || failed || build?.StopRequested == true || buildResult == 0 ? null
+                      : status.UpdateAvailable || !status.GameBuilt || !status.BuildCurrent ? null
+                      : status.FetchError != null ? "couldn't check for updates"
+                      : "up to date";
+            if (state != null) subtitle += $"  ·  {state}";
+            // The fork takes upstream's changes only when asked to (FORK.md),
+            // so this is information, not an update.
+            var upstream = status?.UpstreamAhead switch
+            {
+                null or 0 => "Upstream mcla-recomp on GitHub",
+                1 => "Upstream mcla-recomp on GitHub (1 commit not in your fork)",
+                var n => $"Upstream mcla-recomp on GitHub ({n} commits not in your fork)",
+            };
             MenuItemBase[] items = busy
                 ? [MenuItem("Open the game folder", () => Open(Paths.BuildDir)),
                    MenuItem("Open the launcher logs", () => Open(Paths.LogsDir)),
-                   MenuItem("This fork on GitHub", () => Open(Paths.RepoUrl)),
-                   MenuItem("Upstream mcla-recomp on GitHub", () => Open(Paths.UpstreamUrl))]
+                   MenuItem("Recent changes on GitHub", () => Open(Paths.RepoUrl + "/commits/main")),
+                   MenuItem(upstream, () => Open(Paths.UpstreamUrl))]
                 : [MenuItem("Check for updates", () => _ = CheckAsync(fetch: true)),
                    MenuItem("Rebuild the game", () => StartBuild(BuildKind.Build)),
                    MenuItem("Re-patch and rebuild the SDK", () => StartBuild(BuildKind.ResetSdk)),
@@ -301,8 +317,8 @@ sealed class LauncherApp : Component
                    MenuSeparator(),
                    MenuItem("Open the game folder", () => Open(Paths.BuildDir)),
                    MenuItem("Open the launcher logs", () => Open(Paths.LogsDir)),
-                   MenuItem("This fork on GitHub", () => Open(Paths.RepoUrl)),
-                   MenuItem("Upstream mcla-recomp on GitHub", () => Open(Paths.UpstreamUrl))];
+                   MenuItem("Recent changes on GitHub", () => Open(Paths.RepoUrl + "/commits/main")),
+                   MenuItem(upstream, () => Open(Paths.UpstreamUrl))];
             return Grid(
                 columns: [GridSize.Star(), GridSize.Auto],
                 rows: [GridSize.Auto],
@@ -327,15 +343,12 @@ sealed class LauncherApp : Component
                 return Info("Build stopped", "Finished steps are kept, so the next build continues where this one stopped.", InfoBarSeverity.Warning);
             if (failed)
                 return Info("The build failed", "The output below shows where. Play still starts the last version that built.", InfoBarSeverity.Error);
-            if (checking)
-                return Info("Checking for updates…", null, InfoBarSeverity.Informational);
-            if (status == null)
+            if (checking || status == null)
                 return Empty();
             if (status.UpdateAvailable)
                 return Info(status.Incoming.Count == 1 ? "An update is available" : $"{status.Incoming.Count} updates are available",
                             "Updating downloads the changes and rebuilds the game, which takes a few minutes."
-                            + (status.PatchesChanged ? " This update changes the SDK patches, so the SDK is rebuilt too." : "")
-                            + UpstreamNote(status),
+                            + (status.PatchesChanged ? " This update changes the SDK patches, so the SDK is rebuilt too." : ""),
                             InfoBarSeverity.Informational);
             if (!status.GameBuilt)
                 return Info("The game hasn't been built yet",
@@ -345,20 +358,16 @@ sealed class LauncherApp : Component
                 return Info("The last build didn't finish", "Rebuild to finish it. Play starts the last version that built.", InfoBarSeverity.Warning);
             if (buildResult == 0)
                 return Info("Build finished", $"You're on version {status.Head[..7]}.", InfoBarSeverity.Success);
-            if (status.FetchError != null)
-                return Info("Couldn't check for updates", $"{status.FetchError} You can still play the installed version.", InfoBarSeverity.Warning);
-            return Info("You're up to date", "Updates from your fork show up here when the launcher opens." + UpstreamNote(status),
-                        InfoBarSeverity.Success);
+            return Empty();
         }
 
-        // The fork takes upstream's changes only when asked to (FORK.md), so
-        // this is information, not an update.
-        static string UpstreamNote(RepoStatus status) => status.UpstreamAhead switch
-        {
-            0 => "",
-            1 => " Upstream mcla-recomp has 1 commit that isn't in your fork yet.",
-            var n => $" Upstream mcla-recomp has {n} commits that aren't in your fork yet.",
-        };
+        // The update's commits, folded away under its bar.
+        Element? WhatsNew() => status is { UpdateAvailable: true } && !busy
+            ? Expander(status.Incoming.Count == 1 ? "What's new (1 change)" : $"What's new ({status.Incoming.Count} changes)",
+                       ScrollViewer(VStack(10, status.Incoming.Select(c => CommitRow(c).WithKey(c.Hash)).ToArray())).MaxHeight(220),
+                       isExpanded: false)
+                .HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch)
+            : null;
 
         Element? LauncherUpdateBar() => status is { LauncherOutdated: true } && !busy
             ? (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with
@@ -371,7 +380,7 @@ sealed class LauncherApp : Component
             : null;
 
         Element? CountdownBar() => countdown is int seconds
-            ? (InfoBar($"Starting the game in {seconds}…", "You can turn this off in Options.") with
+            ? (InfoBar($"Starting the game in {seconds}…", "You can turn this off under Advanced.") with
               {
                   IsOpen = true,
                   IsClosable = false,
@@ -401,10 +410,6 @@ sealed class LauncherApp : Component
                 body.Grid(row: 1))
             ).Margin(0, 16, 0, 0);
 
-        Element CommitsPane(string heading, IReadOnlyList<Commit> commits) =>
-            Pane(BodyStrong(heading),
-                 ScrollViewer(VStack(10, commits.Select(c => CommitRow(c).WithKey(c.Hash)).ToArray())));
-
         Element LogPane() =>
             Pane(Grid(
                     columns: [GridSize.Star(), GridSize.Auto],
@@ -421,10 +426,8 @@ sealed class LauncherApp : Component
 
         Element MainPane()
         {
-            if (build != null) return LogPane();
-            if (status?.UpdateAvailable == true) return CommitsPane("What's new", status.Incoming);
-            if (status != null) return CommitsPane("Latest changes in your version", status.Recent);
-            return Empty();
+            if (build != null && (busy || failed)) return LogPane();
+            return Settings();
         }
 
         Element ActivityRow()
@@ -445,30 +448,40 @@ sealed class LauncherApp : Component
                 .Header(header)
                 .HAlign(HorizontalAlignment.Stretch);
 
-        Element Options() =>
-            Expander("Options",
-                VStack(16,
-                    Grid(
-                        columns: [GridSize.Star(), GridSize.Star()],
-                        rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Auto],
-                        Combo("Display", GameOptions.Display, settings.Display, (s, i) => s with { Display = i }).Margin(0, 0, 8, 12).Grid(row: 0, column: 0),
-                        Combo("Resolution", GameOptions.Resolution, settings.Resolution, (s, i) => s with { Resolution = i }).Margin(8, 0, 0, 12).Grid(row: 0, column: 1),
-                        Combo("Frame rate", GameOptions.Fps, settings.Fps, (s, i) => s with { Fps = i }).Margin(0, 0, 8, 12).Grid(row: 1, column: 0),
-                        Combo("Intro", GameOptions.Intro, settings.Intro, (s, i) => s with { Intro = i }).Margin(8, 0, 0, 12).Grid(row: 1, column: 1),
-                        Combo("Button prompts", GameOptions.Prompts, settings.Prompts, (s, i) => s with { Prompts = i }).Margin(0, 0, 8, 12).Grid(row: 2, column: 0),
-                        Combo("Anti-aliasing", GameOptions.AntiAliasing, settings.AntiAliasing, (s, i) => s with { AntiAliasing = i }).Margin(8, 0, 0, 12).Grid(row: 2, column: 1),
-                        Combo("Graphics API", GameOptions.GraphicsApi, settings.GraphicsApi, (s, i) => s with { GraphicsApi = i }).Margin(0, 0, 8, 12).Grid(row: 3, column: 0),
-                        Combo("HUD updates", GameOptions.HudUpdates, settings.HudUpdates, (s, i) => s with { HudUpdates = i }).Margin(8, 0, 0, 12).Grid(row: 3, column: 1),
+        // Two to a row, in reading order.
+        static Element Pairs(params Element[] items) =>
+            Grid(
+                columns: [GridSize.Star(), GridSize.Star()],
+                rows: Enumerable.Repeat(GridSize.Auto, (items.Length + 1) / 2).ToArray(),
+                items.Select((item, i) => item.Margin(i % 2 == 0 ? 0 : 8, 0, i % 2 == 0 ? 8 : 0, 12).Grid(row: i / 2, column: i % 2)
+                                              .WithKey(i.ToString())).ToArray());
+
+        Element Settings() =>
+            ScrollViewer(VStack(12,
+                Subtitle("Graphics"),
+                Pairs(
+                    Combo("Resolution", GameOptions.Resolution, settings.Resolution, (s, i) => s with { Resolution = i }),
+                    Combo("Frame rate", GameOptions.Fps, settings.Fps, (s, i) => s with { Fps = i }),
+                    Combo("Display", GameOptions.Display, settings.Display, (s, i) => s with { Display = i }),
+                    Combo("Anti-aliasing", GameOptions.AntiAliasing, settings.AntiAliasing, (s, i) => s with { AntiAliasing = i }),
+                    Combo("HUD updates", GameOptions.HudUpdates, settings.HudUpdates, (s, i) => s with { HudUpdates = i }),
+                    Combo("Graphics API", GameOptions.GraphicsApi, settings.GraphicsApi, (s, i) => s with { GraphicsApi = i })),
+                Subtitle("Game"),
+                Pairs(
+                    Combo("Intro", GameOptions.Intro, settings.Intro, (s, i) => s with { Intro = i }),
+                    Combo("Button prompts", GameOptions.Prompts, settings.Prompts, (s, i) => s with { Prompts = i })),
+                TextBlock("\"Game setting\" keeps what you chose in the game's pause menu. Any other choice here replaces it every time the game starts.")
+                    .TextWrapping().Foreground(Theme.SecondaryText),
+                Expander("Advanced",
+                    VStack(16,
                         TextBox(settings.ExtraArguments, v => updateSettings(s => s with { ExtraArguments = v }),
-                                placeholderText: "for example --log_file=run.log", header: "More mcla.exe options")
-                            .Grid(row: 4, column: 0, columnSpan: 2)),
-                    TextBlock("\"Game setting\" keeps what you chose in the game's pause menu. Any other choice here replaces it every time the game starts.")
-                        .TextWrapping().Foreground(Theme.SecondaryText),
-                    VStack(4,
-                        CheckBox(settings.CheckForUpdates, v => updateSettings(s => s with { CheckForUpdates = v }), "Check for updates when the launcher opens"),
-                        CheckBox(settings.CloseOnLaunch, v => updateSettings(s => s with { CloseOnLaunch = v }), "Close the launcher when the game starts"),
-                        CheckBox(settings.AutoPlay, v => updateSettings(s => s with { AutoPlay = v }), "Start the game right away when there's nothing to update")))
-            ).HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch).Margin(0, 16, 0, 0);
+                                placeholderText: "for example --log_file=run.log", header: "More mcla.exe options"),
+                        VStack(4,
+                            CheckBox(settings.CheckForUpdates, v => updateSettings(s => s with { CheckForUpdates = v }), "Check for updates when the launcher opens"),
+                            CheckBox(settings.CloseOnLaunch, v => updateSettings(s => s with { CloseOnLaunch = v }), "Close the launcher when the game starts"),
+                            CheckBox(settings.AutoPlay, v => updateSettings(s => s with { AutoPlay = v }), "Start the game right away when there's nothing to update")))
+                ).HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch)
+            ).Padding(0, 0, 12, 0)).Margin(0, 16, 0, 0);
 
         Element Actions()
         {
@@ -513,13 +526,12 @@ sealed class LauncherApp : Component
 
         return Grid(
             columns: [GridSize.Star()],
-            rows: [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
+            rows: [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto],
             Header().Grid(row: 0),
-            VStack(8, StatusBar(), LauncherUpdateBar(), CountdownBar(), NoticeBar()).Margin(0, 16, 0, 0).Grid(row: 1),
+            VStack(8, StatusBar(), WhatsNew(), LauncherUpdateBar(), CountdownBar(), NoticeBar()).Margin(0, 16, 0, 0).Grid(row: 1),
             MainPane().Grid(row: 2),
             ActivityRow().Grid(row: 3),
-            Options().Grid(row: 4),
-            Actions().Grid(row: 5),
+            Actions().Grid(row: 4),
             exitDialog
         ).Padding(24);
     }

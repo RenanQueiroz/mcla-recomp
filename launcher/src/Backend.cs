@@ -294,11 +294,16 @@ static class Repo
         }
 
         // build-game.ps1 writes the commit it built once a build succeeds. No
-        // record (a build made by hand with make_pc.ps1) counts as current.
+        // record (a build made by hand with make_pc.ps1) counts as current, and
+        // so does a build whose commit differs from HEAD only in the launcher
+        // or in documentation, which the game build doesn't use.
         var builtCommit = File.Exists(Paths.BuiltCommitFile) ? File.ReadAllText(Paths.BuiltCommitFile).Trim() : null;
+        var buildCurrent = builtCommit is null || builtCommit == head
+            || (await Git("diff", "--name-only", builtCommit, head, "--", ".", ":(exclude)launcher", ":(exclude)*.md"))
+                   is { ExitCode: 0, Output: var changed } && changed.Trim().Length == 0;
         return new RepoStatus(head, recent, incoming, patchesChanged,
             GameBuilt: File.Exists(Paths.GameExe),
-            BuildCurrent: builtCommit is null || builtCommit == head,
+            BuildCurrent: buildCurrent,
             upstreamAhead, launcherOutdated,
             fetchError);
     }
