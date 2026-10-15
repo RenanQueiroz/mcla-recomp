@@ -14,7 +14,7 @@ State: boots, menus, races, garage and upgrades work with audio and a controller
 | Ninja | `winget install Ninja-build.Ninja` |
 | Python 3 | `winget install Python.Python.3.12` |
 | Visual Studio Build Tools 2022 | With the "Desktop development with C++" workload: it supplies the Windows SDK and the Microsoft C++ libraries. The compiler used is Clang, below. |
-| Clang 20 | The portable build `clang+llvm-20.1.8-x86_64-pc-windows-msvc` from the [LLVM releases](https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8), unpacked into `tools\` in this repository. `scripts\env.ps1` puts it on the path; edit that file if your Clang is elsewhere. |
+| Clang 20 | The portable build `clang+llvm-20.1.8-x86_64-pc-windows-msvc` from the [LLVM releases](https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8), unpacked into `tools\` in this repository. `scripts\env.ps1` puts it on the path and the build gives it to CMake by full path, so another Clang you have installed is not used. |
 | Disk | About 20 GB: the disc image, the extracted game, the SDK and the build trees. |
 
 You do not have to install these yourself: the build script checks for each one and offers to install what is missing (the programs with `winget`, which is part of Windows 10 and 11, and Clang from the LLVM project's releases into `tools\`). The Build Tools are several gigabytes and ask for administrator rights. Git is the exception if you clone the repository with it, as below.
@@ -132,6 +132,7 @@ git pull
 |---|---|
 | `cmake` or `ninja` is not found | Run `. .\scripts\env.ps1` in this PowerShell window first (note the leading dot), and check the paths in that file. |
 | The SDK build fails in `libmspack` with errors on a line like `../../libmspack/mspack/cab.h` | The symbolic-link repair in step 1 was skipped. |
+| The SDK build fails at once with `fatal error: 'crtversion.h' file not found` (or other missing Microsoft headers), and the compiler named in `out\logs\sdk-build.log` is not the one in `tools\` | Another Clang on the path (from some other toolchain) was used. The build script now uses only its own Clang and hands it to CMake by full path, which also sets up again a build folder that was configured with the other one: update this repository and run `make_pc.ps1` again (issue #9). |
 | `codegen failed` | `game\default.xex` is missing or is not the supported release. The end of `out\codegen.log` says which. |
 | `build failed` | The first errors are printed; the whole log is `out\build.log`. |
 | The game window closes at once | Start it with `--log_file=run.log --log_level=info` and read the end of that file. |
