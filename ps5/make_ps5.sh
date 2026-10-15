@@ -134,6 +134,7 @@ rexglue-timer-queue-blocking-wait.patch src/core/timer_queue.cpp timer_queue_blo
 rexglue-shared-memory-fast-path-hot-pages.patch src/graphics/shared_memory.cpp shared_memory_request_fast_path_with_hot_pages
 rexglue-hot-pages-watched-ranges.patch src/graphics/shared_memory.cpp Watching wins
 rexglue-cursor-auto-hide.patch src/ui/window.cpp RequestAutoHiddenCursorHide
+rexglue-vulkan-memexport-check-order.patch src/graphics/vulkan/command_processor.cpp most draws export nothing
 LATER
 
 # ---------------------------------------------------------------------------

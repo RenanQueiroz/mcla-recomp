@@ -16,6 +16,7 @@ git apply ../../patches/rexglue-timer-queue-blocking-wait.patch
 git apply ../../patches/rexglue-shared-memory-fast-path-hot-pages.patch
 git apply ../../patches/rexglue-hot-pages-watched-ranges.patch
 git apply ../../patches/rexglue-cursor-auto-hide.patch
+git apply ../../patches/rexglue-vulkan-memexport-check-order.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -163,3 +164,11 @@ The pad path was checked by reading the code only, as no virtual pad driver is i
 | `RequestAutoHiddenCursorHide`, `IsAutoHiddenCursorShown`, hide veto | `include/rex/ui/window.h`, `src/ui/window.cpp` | all platforms |
 | Pad input hides the pointer | `src/input/input_system.cpp` | all platforms |
 | Mouse-driven overlays keep it shown | `src/ui/rex_app.cpp` | all platforms |
+
+## rexglue-vulkan-memexport-check-order.patch
+
+Vulkan's `IssueDraw` asked whether memexport readback is on (`IsReadbackMemexportEnabled`) before it checked whether the draw exported anything, on every draw. The answer comes from `rex::cvar::HasNonDefaultValue("vulkan_readback_memexport")`, a lookup by name in the cvar registry under its lock: 2.5% of the GPU command thread's samples in a profile (Windows, native, uncapped), nearly as much as `IssueDraw`'s own code (2.9%). The ranges are tested first now; a draw that exports nothing (nearly all of them) never reaches the lookup, and one that does gets the same answer as before. D3D12 already asks only for draws that export. Measured in one run with the order switched every 8 seconds (Windows, Vulkan, RTX 5080 and Ryzen 7 9800X3D, native, uncapped, the launcher's settings): 6.1% (plus or minus 0.6%) less GPU command thread time per draw, from the thread's cycle count, and 4.2% (plus or minus 1.5%) less frame time per draw; the Vulkan GPU command thread is busy 97 to 99% of the time at native resolution, so it sets the frame rate there. Built and run on Windows only; on the PS5 (Vulkan) it applies to every draw.
+
+| Change | Files | Affects |
+|---|---|---|
+| Ranges tested before the setting | `src/graphics/vulkan/command_processor.cpp` | Vulkan (PC, PS5) |
