@@ -51,11 +51,11 @@ FFmpeg selects a configuration header per platform. This adds `config_ps5_x86_64
 
 GPU register writes in bulk, the approach of xenia-canary. Every register a command packet wrote was one virtual `WriteRegister` call and a switch, and a range that crossed a shader-constant block fell back to that path for all of it. Ranges are now walked block by block: ordinary registers are copied at once, float and fetch constants are checked against the current shaders' constant usage before anything is invalidated, and only the few registers with side effects (scratch writeback, `COHER_STATUS_HOST`, the gamma ramp) take the slow path. Same registers, same order. Cvar `gpu_regwrite_bulk` (default on; `false` restores the old path, also at run time).
 
-Measured in one run with the cvar switched every 4 seconds, so both sides see the same scenes (Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D, native resolution, uncapped): about 10.5% less time per draw on the GPU command thread, the thread that limits the frame rate. Built and run on Windows only.
+Measured in one run with the cvar switched every 4 seconds, so both sides see the same scenes (Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D, native resolution, uncapped): about 10.5% less time per draw on the GPU command thread, the thread that limits the frame rate. On Vulkan, which gets the common part (the backend's `WriteRegistersFromMem` already took single constant blocks in bulk), 9.1% less frame time per draw (plus or minus 1.0%, cvar switched every 8 seconds, native, uncapped). Most of the gain is the common part: switched on its own, the block walker measured 1.7% (plus or minus 1.0%) less GPU command thread time per draw on D3D12, and a port of it to Vulkan 0.5% (plus or minus 0.6%), so the Vulkan port was left out (`launcher/dev/dropped-patches/rexglue-vulkan-regwrite-walker.patch` in the fork). Built and run on Windows only.
 
 | Change | Files | Affects |
 |---|---|---|
-| Registers with side effects split out of `WriteRegister`; type-0 packets as ranges | `include/rex/graphics/command_processor.h`, `src/graphics/command_processor.cpp` | all platforms |
+| Registers with side effects split out of `WriteRegister`; type-0 packets as ranges | `include/rex/graphics/command_processor.h`, `src/graphics/command_processor.cpp` | all platforms, both backends |
 | Ranges written block by block; float and fetch constants in bulk | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12 |
 
 ## rexglue-imgui-dialog-repaint-on-demand.patch
