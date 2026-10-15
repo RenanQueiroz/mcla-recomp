@@ -14,7 +14,7 @@
 //   press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
 //   pos   peek <addr> [bytes]   peeku <addr> [count]   peekf <addr> [count]
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
-//   state   log <text>   include <script>   quit
+//   state   log <text>   include <script>   quit   set <option> <value>
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //   cars (race cars' positions)   watch <every> | watch stop (log them)
 //   screens (the UI manager's movies)
@@ -1456,6 +1456,16 @@ std::string Execute(const std::string& line) {
            " state_polls=" + std::to_string(g_state_polls.load()) +
            " key_polls=" + std::to_string(g_key_polls.load()) +
            " keys_sent=" + std::to_string(g_keys_sent.load()) + " " + FormatPad(GetPad());
+  }
+  if (cmd == "set") {
+    // An option changed while running, for A/B checks within one run.
+    if (args.size() != 3) {
+      return "err usage: set <option> <value>";
+    }
+    if (!rex::cvar::SetFlagByName(args[1], args[2])) {
+      return "err cannot set " + args[1];
+    }
+    return "ok " + args[1] + "=" + rex::cvar::GetFlagByName(args[1]);
   }
   if (cmd == "log") {
     REXLOG_INFO("dev pad: {}", line.substr(line.find("log") + 3));

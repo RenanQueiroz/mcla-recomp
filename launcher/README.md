@@ -198,6 +198,15 @@ during a build:
   them per frame and per kind of load, with the rate of each step in GB/s. It
   found Vulkan's `vkCmdCopyBufferToImage` copying at about 120 GB/s
   (`rexglue-vulkan-texture-load-storage-copy.patch`).
+- `edram-transfers-2026-10-15.md`: where the EDRAM ownership transfers came
+  from (the game's clear rectangles at 4x MSAA), the change that removed most
+  of them (`rexglue-clear-rectangle-draws.patch`) and its benchmark.
+- `edram-transfer-log.sdk.patch` (SDK, D3D12, `TMPXF`): logs every draw that
+  changes the bound render targets or causes transfers, with the state that
+  decides whether it overwrites everything it covers, every
+  `MCLA_XF_EVERY`-th frame to `MCLA_XF_FILE`; `xf-classify.py <log>` sorts
+  the transferred samples by what triggered them. Applies on top of
+  `rexglue-clear-rectangle-draws.patch`.
 
 ## Scripted controller input (unattended runs)
 
@@ -215,8 +224,11 @@ in front. A real controller keeps working alongside it.
   commands are listed at the top of `src\dev_pad.cpp`: buttons, triggers and
   sticks, waits in time or engine frames, `wait_until` / `press_until` a
   condition (`left_title`, `loading`, `roam`, or a guest memory word),
-  screenshots, recording and playback. `--mcla_fixed_dt=N` makes every game
-  update advance exactly 1/N s: uncapped, a timedemo.
+  screenshots, recording and playback. `set <option> <value>` changes an
+  option while the game runs, for comparing two settings within one run (the
+  time of day and the traffic differ from run to run).
+  `--mcla_fixed_dt=N` makes every game update advance exactly 1/N s:
+  uncapped, a timedemo.
 - `dev\devrun.py` runs the game with a script **on a copy of the save data**:
   `prepare` snapshots `Documents\mcla` (career save, achievements) to
   `%LOCALAPPDATA%\mcla-dev\pristine`; every run restores

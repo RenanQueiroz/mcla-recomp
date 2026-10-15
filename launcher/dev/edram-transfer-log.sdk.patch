@@ -1,0 +1,343 @@
+diff --git a/include/rex/graphics/util/draw_extent_estimator.h b/include/rex/graphics/util/draw_extent_estimator.h
+index e5e4908..d7f9d92 100644
+--- a/include/rex/graphics/util/draw_extent_estimator.h
++++ b/include/rex/graphics/util/draw_extent_estimator.h
+@@ -30,6 +30,10 @@ class DrawExtentEstimator {
+   // The shader must have its ucode analyzed.
+   uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
+   uint32_t EstimateMaxY(bool try_to_estimate_vertex_max_y, const Shader& vertex_shader);
++  // TMPXF: raw exported positions (x y z w) of up to max_vertices vertices.
++  uint32_t TmpxfPositions(const Shader& vertex_shader, float* out, uint32_t max_vertices);
++  // TMPXF: color 0 of a pixel shader with temps 0 (out[0..3]) and 1 (out[4..7]).
++  bool TmpxfPixelColor(const Shader& pixel_shader, float* out);
+ 
+  private:
+   class PositionYExportSink : public ShaderInterpreter::ExportSink {
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index fdbfff6..0c442c7 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -61,6 +61,11 @@ REXCVAR_DEFINE_UINT32(d3d12_threaded_submission_split_draws, 1000, "GPU/D3D12",
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++namespace rex::graphics {  // TMPXF
++void TmpxfBeginFrame();
++extern const Shader* tmpxf_pixel_shader;
++}  // TMPXF
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -2614,6 +2619,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   uint32_t normalized_color_mask =
+       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                    : 0;
++  tmpxf_pixel_shader = pixel_shader;  // TMPXF
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+     return false;
+@@ -3619,6 +3625,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+     primitive_processor_->BeginFrame();
+ 
+     texture_cache_->BeginFrame();
++    TmpxfBeginFrame();  // TMPXF
+   }
+ 
+   return true;
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 72ab00a..690713f 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -12,6 +12,8 @@
+ #include <algorithm>
+ #include <bitset>
+ #include <cmath>
++#include <cstdio>  // TMPXF
++#include <cstdlib>  // TMPXF
+ #include <cstring>
+ #include <iterator>
+ #include <tuple>
+@@ -50,6 +52,43 @@ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+ 
+ namespace rex::graphics {
+ 
++// TMPXF begin
++const Shader* tmpxf_pixel_shader = nullptr;
++extern uint32_t tmpxf_interp_mask;
++extern float tmpxf_interp0[4], tmpxf_interp1[4];
++static FILE* tmpxf_file = nullptr;
++static uint32_t tmpxf_frame = 0;
++static uint32_t tmpxf_every = 0;
++static bool tmpxf_active = false;
++static uint32_t tmpxf_draw = 0;
++static uint32_t tmpxf_prev_keys[5];
++void TmpxfBeginFrame() {
++  if (!tmpxf_every) {
++    const char* e = std::getenv("MCLA_XF_EVERY");
++    tmpxf_every = (e && std::atoi(e) > 0) ? uint32_t(std::atoi(e)) : UINT32_MAX;
++    const char* f = std::getenv("MCLA_XF_FILE");
++    if (tmpxf_every != UINT32_MAX && f) {
++      tmpxf_file = std::fopen(f, "w");
++    }
++  }
++  ++tmpxf_frame;
++  tmpxf_draw = 0;
++  std::memset(tmpxf_prev_keys, 0xFF, sizeof(tmpxf_prev_keys));
++  tmpxf_active = tmpxf_file && (tmpxf_frame % tmpxf_every) == 0;
++  if (tmpxf_active) {
++    std::fprintf(tmpxf_file, "FRAME %u\n", tmpxf_frame);
++    std::fflush(tmpxf_file);
++  }
++}
++static void TmpxfKey(char* buf, size_t size, uint32_t key) {
++  uint32_t base = key & 0x7FF, pitch = (key >> 11) & 0xFF, msaa = (key >> 19) & 3,
++           depth = (key >> 21) & 1, fmt = (key >> 22) & 0xF;
++  std::snprintf(buf, size, "%s@%u/p%u/%ux/%s", depth ? "D" : "C", base, pitch, 1u << msaa,
++                depth ? xenos::GetDepthRenderTargetFormatName(xenos::DepthRenderTargetFormat(fmt))
++                      : xenos::GetColorRenderTargetFormatName(xenos::ColorRenderTargetFormat(fmt)));
++}
++// TMPXF end
++
+ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,
+                                               uint32_t write_mask, float& clamp_rgb_low,
+                                               float& clamp_alpha_low, float& clamp_rgb_high,
+@@ -409,6 +448,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                uint32_t normalized_color_mask, const Shader& vertex_shader) {
+   const RegisterFile& regs = register_file();
+   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
++  ++tmpxf_draw;  // TMPXF
+ 
+   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+   xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
+@@ -720,6 +760,83 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     return true;
+   }
+ 
++  // TMPXF begin
++  if (tmpxf_active) {
++    bool any_transfer = false;
++    bool changed = false;
++    for (uint32_t i = 0; i < 5; ++i) {
++      uint32_t k = (depth_and_color_rts_used_bits & (1u << i)) ? rts[i]->key().key : 0;
++      if (k != tmpxf_prev_keys[i]) changed = true;
++      tmpxf_prev_keys[i] = k;
++      if (!last_update_transfers_[i].empty()) any_transfer = true;
++    }
++    if (changed || any_transfer) {
++      auto di = regs.Get<reg::VGT_DRAW_INITIATOR>();
++      const Shader* ps = tmpxf_pixel_shader;
++      std::fprintf(
++          tmpxf_file,
++          "DRAW %u prim=%u n=%u src=%u h=%u dc=%08X srm=%08X cm=%08X cc=%08X bc=%08X,%08X,%08X,%08X "
++          "aa=%08X sc=%08X clip=%08X vte=%08X vp=%g,%g,%g,%g wtl=%08X wbr=%08X sbr=%08X wo=%08X "
++          "vtx=%08X ps=%016llX kill=%d wdepth=%d\n",
++          tmpxf_draw, uint32_t(di.prim_type), uint32_t(di.num_indices),
++          uint32_t(di.source_select), height_used, normalized_depth_control.value,
++          regs[XE_GPU_REG_RB_STENCILREFMASK], normalized_color_mask,
++          regs[XE_GPU_REG_RB_COLORCONTROL], regs[XE_GPU_REG_RB_BLENDCONTROL0],
++          regs[XE_GPU_REG_RB_BLENDCONTROL1], regs[XE_GPU_REG_RB_BLENDCONTROL2],
++          regs[XE_GPU_REG_RB_BLENDCONTROL3], regs[XE_GPU_REG_PA_SC_AA_MASK],
++          regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_PA_CL_CLIP_CNTL],
++          regs[XE_GPU_REG_PA_CL_VTE_CNTL], regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE),
++          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
++          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
++          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET), regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
++          regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
++          regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], regs[XE_GPU_REG_PA_SU_VTX_CNTL],
++          (unsigned long long)(ps ? ps->ucode_data_hash() : 0), ps ? int(ps->kills_pixels()) : -1,
++          ps ? int(ps->writes_depth()) : -1);
++      for (uint32_t i = 0; i < 5; ++i) {
++        if (!(depth_and_color_rts_used_bits & (1u << i))) continue;
++        char kb[96];
++        TmpxfKey(kb, sizeof(kb), rts[i]->key().key);
++        uint32_t len = 0;
++        for (uint32_t j = 0; j < edram_bases_sorted_count; ++j) {
++          if (edram_bases_sorted[j].second == i) len = rt_lengths_tiles[j];
++        }
++        std::fprintf(tmpxf_file, "  RT%u %s len=%u", i, kb, len);
++        for (const Transfer& t : last_update_transfers_[i]) {
++          char sb[96];
++          TmpxfKey(sb, sizeof(sb), t.source->key().key);
++          std::fprintf(tmpxf_file, " XF[%u-%u from %s%s]", t.start_tiles, t.end_tiles, sb,
++                       t.host_depth_source ? " +hostdepth" : "");
++        }
++        std::fprintf(tmpxf_file, "\n");
++      }
++      if (di.num_indices <= 12) {
++        float pos[12 * 4];
++        uint32_t n = draw_extent_estimator_.TmpxfPositions(vertex_shader, pos, 12);
++        std::fprintf(tmpxf_file, "  POS");
++        for (uint32_t v = 0; v < n; ++v) {
++          std::fprintf(tmpxf_file, " (%g %g %g %g)", pos[v * 4], pos[v * 4 + 1], pos[v * 4 + 2],
++                       pos[v * 4 + 3]);
++        }
++        std::fprintf(tmpxf_file, " I%X i0=(%g %g %g %g) i1=(%g %g %g %g)\n", tmpxf_interp_mask,
++                     tmpxf_interp0[0], tmpxf_interp0[1], tmpxf_interp0[2], tmpxf_interp0[3],
++                     tmpxf_interp1[0], tmpxf_interp1[1], tmpxf_interp1[2], tmpxf_interp1[3]);
++      }
++      if (ps && di.prim_type == xenos::PrimitiveType::kRectangleList) {
++        float c[8];
++        if (draw_extent_estimator_.TmpxfPixelColor(*ps, c)) {
++          std::fprintf(tmpxf_file, "  PSC (%g %g %g %g) (%g %g %g %g)\n", c[0], c[1], c[2], c[3],
++                       c[4], c[5], c[6], c[7]);
++        }
++      }
++      std::fprintf(tmpxf_file, "  MISC zs=%g zo=%g mode=%08X ci0=%08X di=%08X\n",
++                   regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
++                   regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET), regs[XE_GPU_REG_RB_MODECONTROL],
++                   regs[XE_GPU_REG_RB_COLOR_INFO], regs[XE_GPU_REG_RB_DEPTH_INFO]);
++    }
++  }
++  // TMPXF end
++
+   // If everything succeeded, update the used render targets.
+   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+     last_update_used_render_targets_[i] =
+@@ -1616,12 +1733,24 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
+   depth_render_target_out = depth_render_target;
+   depth_transfers_out.clear();
+   if (depth_render_target) {
++    if (tmpxf_active) {  // TMPXF
++      char kb[96];
++      TmpxfKey(kb, sizeof(kb), depth_render_target_key.key);
++      std::fprintf(tmpxf_file, "RCLEAR %u depth %s start=%u len=%u\n", tmpxf_draw, kb,
++                   depth_clear_start_tiles_base_relative, depth_clear_length_tiles);
++    }
+     ChangeOwnership(depth_render_target_key, depth_clear_start_tiles_base_relative,
+                     depth_clear_length_tiles, &depth_transfers_out, &clear_rectangle);
+   }
+   color_render_target_out = color_render_target;
+   color_transfers_out.clear();
+   if (color_render_target) {
++    if (tmpxf_active) {  // TMPXF
++      char kb[96];
++      TmpxfKey(kb, sizeof(kb), color_render_target_key.key);
++      std::fprintf(tmpxf_file, "RCLEAR %u color %s start=%u len=%u\n", tmpxf_draw, kb,
++                   color_clear_start_tiles_base_relative, color_clear_length_tiles);
++    }
+     ChangeOwnership(color_render_target_key, color_clear_start_tiles_base_relative,
+                     color_clear_length_tiles, &color_transfers_out, &clear_rectangle);
+   }
+diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+index 3027dc8..9ae9a54 100644
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cfloat>
+ #include <cstdint>
++#include <cstring>  // TMPXF
+ 
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+@@ -250,6 +251,109 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
+          8;
+ }
+ 
++// TMPXF begin
++uint32_t tmpxf_interp_mask = 0;
++float tmpxf_interp0[4], tmpxf_interp1[4];
++uint32_t DrawExtentEstimator::TmpxfPositions(const Shader& vertex_shader, float* out,
++                                             uint32_t max_vertices) {
++  const RegisterFile& regs = register_file_;
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA &&
++      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
++    return 0;
++  }
++  if (!vertex_shader.is_ucode_analyzed() || !ShaderInterpreter::CanInterpretShader(vertex_shader)) {
++    return 0;
++  }
++  struct Sink : ShaderInterpreter::ExportSink {
++    float pos[4] = {};
++    bool have = false;
++    float interp[16][4] = {};
++    uint32_t interp_mask = 0, last_interp = 0;
++    void Export(ucode::ExportRegister r, const float* v, uint32_t m) override {
++      if (r == ucode::ExportRegister::kVSPosition) {
++        for (int i = 0; i < 4; ++i) {
++          if (m & (1u << i)) pos[i] = v[i];
++        }
++        have = true;
++      } else if (uint32_t(r) < 16) {
++        last_interp = uint32_t(r);
++        for (int i = 0; i < 4; ++i) {
++          if (m & (1u << i)) interp[uint32_t(r)][i] = v[i];
++        }
++        interp_mask |= 1u << uint32_t(r);
++      }
++    }
++  } sink;
++  auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
++  const void* ib = nullptr;
++  xenos::Endian endian = vgt_dma_size.swap_mode;
++  if (vgt_draw_initiator.source_select == xenos::SourceSelect::kDMA) {
++    uint32_t base = regs[XE_GPU_REG_VGT_DMA_BASE];
++    if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16) {
++      if (endian == xenos::Endian::k8in32) endian = xenos::Endian::k8in16;
++      else if (endian == xenos::Endian::k16in32) endian = xenos::Endian::kNone;
++      base &= ~uint32_t(1);
++    } else {
++      base &= ~uint32_t(3);
++    }
++    ib = memory_.TranslatePhysical(base);
++  }
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++  shader_interpreter_.SetShader(vertex_shader);
++  shader_interpreter_.SetExportSink(&sink);
++  uint32_t n = std::min(uint32_t(vgt_draw_initiator.num_indices), max_vertices);
++  for (uint32_t i = 0; i < n; ++i) {
++    uint32_t vi = i;
++    if (ib) {
++      if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16) {
++        vi = static_cast<const uint16_t*>(ib)[i];
++      } else {
++        vi = static_cast<const uint32_t*>(ib)[i];
++      }
++      vi = xenos::GpuSwap(vi, endian) & 0xFFFFFF;
++    }
++    vi = std::min(max_index, std::max(min_index, (vi + index_offset) & 0xFFFFFF));
++    sink.have = false;
++    shader_interpreter_.temp_registers()[0] = float(vi);
++    shader_interpreter_.Execute();
++    for (int k = 0; k < 4; ++k) out[i * 4 + k] = sink.have ? sink.pos[k] : -12345.0f;
++  }
++  tmpxf_interp_mask = sink.interp_mask;
++  std::memcpy(tmpxf_interp0, sink.interp[0], sizeof(tmpxf_interp0));
++  std::memcpy(tmpxf_interp1, sink.interp[1], sizeof(tmpxf_interp1));
++  shader_interpreter_.SetExportSink(nullptr);
++  return n;
++}
++bool DrawExtentEstimator::TmpxfPixelColor(const Shader& pixel_shader, float* out) {
++  if (!pixel_shader.is_ucode_analyzed() || !ShaderInterpreter::CanInterpretShader(pixel_shader)) {
++    return false;
++  }
++  struct Sink : ShaderInterpreter::ExportSink {
++    float c[4] = {-1, -1, -1, -1};
++    void Export(ucode::ExportRegister r, const float* v, uint32_t m) override {
++      if (r == ucode::ExportRegister::kPSColor0) {
++        for (int i = 0; i < 4; ++i) {
++          if (m & (1u << i)) c[i] = v[i];
++        }
++      }
++    }
++  } sink;
++  shader_interpreter_.SetShader(pixel_shader);
++  shader_interpreter_.SetExportSink(&sink);
++  for (int pass = 0; pass < 2; ++pass) {
++    float* temps = shader_interpreter_.temp_registers();
++    for (uint32_t i = 0; i < 4 * 64; ++i) temps[i] = float(pass);
++    shader_interpreter_.Execute();
++    for (int i = 0; i < 4; ++i) out[pass * 4 + i] = sink.c[i];
++  }
++  shader_interpreter_.SetExportSink(nullptr);
++  return true;
++}
++// TMPXF end
++
+ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+                                            const Shader& vertex_shader) {
+   SCOPE_profile_cpu_f("gpu");
