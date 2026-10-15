@@ -104,7 +104,9 @@ def game_args(a, out):
         f"--fullscreen={'true' if a.fullscreen else 'false'}",
         f"--mcla_intro={a.intro}",
         f"--mcla_pad_frames_csv={out / 'frames.csv'}",
-        *TUNING,
+        # As the launcher: a default the extra options set is left out (CLI11
+        # rejects a repeated option, and a boolean given twice adds up).
+        *[t for t in TUNING if not any(t.split("=")[0] == e.split("=")[0] for e in a.extra)],
     ]
     if a.script:
         args.append(f"--mcla_pad_script={Path(a.script).resolve()}")

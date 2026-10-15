@@ -1,0 +1,366 @@
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index b9a9687..4b54a8c 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -305,6 +305,14 @@ class DeferredCommandBuffer {
+   void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
+   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
+ 
++  // TMPGT
++  void CmdVkWriteTimestamp(VkQueryPool query_pool, uint32_t query) {
++    auto& args = *reinterpret_cast<ArgsVkEndQuery*>(
++        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkEndQuery)));
++    args.query_pool = query_pool;
++    args.query = query;
++  }
++
+   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
+     auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
+         WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
+@@ -422,6 +430,7 @@ class DeferredCommandBuffer {
+     kVkSetStencilWriteMask,
+     kVkSetViewport,
+     kHoistedCommands,
++    kVkWriteTimestamp,  // TMPGT
+   };
+ 
+   struct CommandHeader {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index cb64a07..1506391 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -91,6 +91,26 @@ REXCVAR_DEFINE_UINT32(vulkan_threaded_submission_split_draws, 1000, "GPU/Vulkan"
+ 
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++#include <cstdio>   // TMPGT
++#include <cstdlib>  // TMPGT
++
++// TMPGT: GPU timestamps at the marks, for one frame every MCLA_GT_EVERY seconds,
++// written to MCLA_GT_DIR\gt_N.csv (launcher\dev\gt-analyze.py).
++bool g_vkgt_active = false;
++PFN_vkCmdWriteTimestamp g_tmpgt_write_timestamp = nullptr;
++static PFN_vkGetQueryPoolResults g_tmpgt_get_results = nullptr;
++static VkQueryPool g_tmpgt_pool = VK_NULL_HANDLE;
++static constexpr uint32_t kTmpGtMax = 65536;
++static uint32_t g_tmpgt_count = 0;
++static std::vector<std::string> g_tmpgt_labels;
++void TmpGtMark(rex::graphics::vulkan::DeferredCommandBuffer& l, const char* s) {
++  if (!g_vkgt_active || g_tmpgt_count >= kTmpGtMax) return;
++  l.CmdVkWriteTimestamp(g_tmpgt_pool, g_tmpgt_count);
++  g_tmpgt_labels[g_tmpgt_count] = s;
++  ++g_tmpgt_count;
++}
++std::string g_vkgt_last_pass;  // TMPGT
++
+ namespace rex::graphics::vulkan {
+ 
+ // Submissions and blocking fence waits so far, with the time spent in each
+@@ -2477,6 +2497,76 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");
+     return;
+   }
++  {  // TMPGT
++    static uint64_t tmpgt_last_ms = 0, tmpgt_pending_submission = 0;
++    static uint32_t tmpgt_pending_count = 0, tmpgt_dumped = 0;
++    static std::vector<std::string> tmpgt_pending_labels;
++    static double tmpgt_period_ns = 1.0;
++    const char* every_env = std::getenv("MCLA_GT_EVERY");
++    if (every_env && *every_env) {
++      const ui::vulkan::VulkanDevice* const gt_device = GetVulkanDevice();
++      const VkDevice gt_vk_device = gt_device->device();
++      if (g_tmpgt_pool == VK_NULL_HANDLE) {
++        auto* provider = static_cast<const ui::vulkan::VulkanProvider*>(graphics_system_->provider());
++        const auto& ifn = provider->vulkan_instance()->functions();
++        g_tmpgt_write_timestamp = PFN_vkCmdWriteTimestamp(
++            ifn.vkGetDeviceProcAddr(gt_vk_device, "vkCmdWriteTimestamp"));
++        g_tmpgt_get_results = PFN_vkGetQueryPoolResults(
++            ifn.vkGetDeviceProcAddr(gt_vk_device, "vkGetQueryPoolResults"));
++        VkPhysicalDeviceProperties pdp;
++        ifn.vkGetPhysicalDeviceProperties(gt_device->physical_device(), &pdp);
++        tmpgt_period_ns = pdp.limits.timestampPeriod;
++        VkQueryPoolCreateInfo qci = {};
++        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
++        qci.queryCount = kTmpGtMax;
++        gt_device->functions().vkCreateQueryPool(gt_vk_device, &qci, nullptr, &g_tmpgt_pool);
++        g_tmpgt_labels.resize(kTmpGtMax);
++      }
++      if (g_vkgt_active) {
++        TmpGtMark(deferred_command_buffer_, "SWAP");
++        g_vkgt_active = false;
++        tmpgt_pending_submission = GetCurrentSubmission();
++        tmpgt_pending_count = g_tmpgt_count;
++        tmpgt_pending_labels.assign(g_tmpgt_labels.begin(),
++                                    g_tmpgt_labels.begin() + g_tmpgt_count);
++      } else if (tmpgt_pending_count) {
++        if (GetCompletedSubmission() >= tmpgt_pending_submission) {
++          std::vector<uint64_t> t(tmpgt_pending_count);
++          if (g_tmpgt_get_results(gt_vk_device, g_tmpgt_pool, 0, tmpgt_pending_count,
++                                  t.size() * sizeof(uint64_t), t.data(), sizeof(uint64_t),
++                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
++            const char* dir = std::getenv("MCLA_GT_DIR");
++            std::string path = std::string(dir ? dir : ".") + "\\gt_" +
++                               std::to_string(tmpgt_dumped++) + ".csv";
++            if (std::FILE* f = std::fopen(path.c_str(), "w")) {
++              // gt-analyze.py reads ticks at "freq" per second.
++              std::fprintf(f, "freq,%llu\n",
++                           (unsigned long long)(1e9 / tmpgt_period_ns + 0.5));
++              for (uint32_t i = 0; i < tmpgt_pending_count; ++i) {
++                std::fprintf(f, "%u,%llu,%s\n", i, (unsigned long long)t[i],
++                             tmpgt_pending_labels[i].c_str());
++              }
++              std::fclose(f);
++            }
++          }
++          tmpgt_pending_count = 0;
++        }
++      } else {
++        const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
++        if (now_ms - tmpgt_last_ms >= uint64_t(std::atoi(every_env)) * 1000) {
++          tmpgt_last_ms = now_ms;
++          // vkCmdResetQueryPool must be outside a render pass instance.
++          EndRenderPass();
++          deferred_command_buffer_.CmdVkResetQueryPool(g_tmpgt_pool, 0, kTmpGtMax);
++          g_vkgt_active = true;
++          g_tmpgt_count = 0;
++          g_vkgt_last_pass.clear();
++          TmpGtMark(deferred_command_buffer_, "FRAME");
++        }
++      }
++    }
++  }
+ 
+   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+@@ -3342,7 +3432,9 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+     rendering_info.pColorAttachments = color_attachment_count ? color_attachments : nullptr;
+     rendering_info.pDepthAttachment = has_depth ? &depth_attachment : nullptr;
+     rendering_info.pStencilAttachment = has_stencil ? &stencil_attachment : nullptr;
++    TmpGtMark(deferred_command_buffer_, "<rpbegin");  // TMPGT
+     deferred_command_buffer_.CmdVkBeginRendering(&rendering_info);
++    TmpGtMark(deferred_command_buffer_, ">rpbegin");  // TMPGT
+   } else {
+     VkRenderPassBeginInfo render_pass_begin_info;
+     render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+@@ -3356,8 +3448,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+     render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+     render_pass_begin_info.clearValueCount = 0;
+     render_pass_begin_info.pClearValues = nullptr;
++    TmpGtMark(deferred_command_buffer_, "<rpbegin");  // TMPGT
+     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
+                                                   VK_SUBPASS_CONTENTS_INLINE);
++    TmpGtMark(deferred_command_buffer_, ">rpbegin");  // TMPGT
+   }
+   in_render_pass_ = true;
+ }
+@@ -3460,11 +3554,13 @@ void VulkanCommandProcessor::EndRenderPass() {
+   if (!in_render_pass_) {
+     return;
+   }
++  TmpGtMark(deferred_command_buffer_, "<rpend");  // TMPGT
+   if (current_render_pass_ == VK_NULL_HANDLE) {
+     deferred_command_buffer_.CmdVkEndRendering();
+   } else {
+     deferred_command_buffer_.CmdVkEndRenderPass();
+   }
++  TmpGtMark(deferred_command_buffer_, ">rpend");  // TMPGT
+   current_render_pass_ = VK_NULL_HANDLE;
+   current_framebuffer_ = nullptr;
+   in_render_pass_ = false;
+@@ -4702,6 +4798,13 @@ bool VulkanCommandProcessor::IssueCopy() {
+   if (!BeginSubmission(true)) {
+     return false;
+   }
++  if (g_vkgt_active) TmpGtMark(deferred_command_buffer_, "<resolve");  // TMPGT
++  struct TmpGtEnd {  // TMPGT
++    VulkanCommandProcessor* cp;
++    ~TmpGtEnd() {
++      if (g_vkgt_active && cp->submission_open_) TmpGtMark(cp->deferred_command_buffer_, ">resolve");
++    }
++  } tmpgt_end{this};
+ 
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index a180b7c..d13fb08 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -20,6 +20,8 @@
+ #include <rex/graphics/vulkan/deferred_command_buffer.h>
+ #include <rex/math.h>
+ 
++extern PFN_vkCmdWriteTimestamp g_tmpgt_write_timestamp;  // TMPGT
++
+ namespace rex::graphics::vulkan {
+ 
+ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
+@@ -345,6 +347,12 @@ void DeferredCommandBuffer::ExecuteCommands(VkCommandBuffer command_buffer,
+         }
+       } break;
+ 
++      case Command::kVkWriteTimestamp: {  // TMPGT
++        auto& args = *reinterpret_cast<const ArgsVkEndQuery*>(stream);
++        g_tmpgt_write_timestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                                args.query_pool, args.query);
++      } break;
++
+       default:
+         assert_unhandled_case(header.command);
+         break;
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 0298f06..d21d1b4 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -62,6 +62,28 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ //     "always FB because the FSI path is much slower now).",
+ //     "GPU");
+ 
++
++#include <string>  // TMPGT
++
++// TMPGT: GPU timestamps bracketing kinds of GPU work, for one frame every
++// MCLA_GT_EVERY seconds (command_processor.cpp).
++extern bool g_vkgt_active;
++void TmpGtMark(rex::graphics::vulkan::DeferredCommandBuffer& l, const char* s);
++namespace {
++struct TmpPixScope {
++  rex::graphics::vulkan::DeferredCommandBuffer& l;
++  const char* e;
++  TmpPixScope(rex::graphics::vulkan::DeferredCommandBuffer& list, const char* b, const char* end)
++      : l(list), e(end) {
++    if (g_vkgt_active) TmpGtMark(l, b);
++  }
++  ~TmpPixScope() {
++    if (g_vkgt_active) TmpGtMark(l, e);
++  }
++};
++}  // namespace
++extern std::string g_vkgt_last_pass;  // TMPGT
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1397,8 +1419,34 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+       RenderTarget* const* depth_and_color_render_targets =
+           last_update_accumulated_render_targets();
+ 
++      bool tmp_any_xfer = false;  // TMPGT
++      for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i)
++        tmp_any_xfer |= !last_update_transfers()[i].empty();
++      if (tmp_any_xfer && g_vkgt_active)
++        TmpGtMark(command_processor_.deferred_command_buffer(), "<xfer");
+       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                        depth_and_color_render_targets, last_update_transfers());
++      if (tmp_any_xfer && g_vkgt_active)
++        TmpGtMark(command_processor_.deferred_command_buffer(), ">xfer");
++      static uint32_t tmp_draws_in_pass = 0;  // TMPGT
++      if (g_vkgt_active) {
++        ++tmp_draws_in_pass;
++        std::string pass = "PASS";
++        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++          if (depth_and_color_render_targets[i]) {
++            pass += i ? " c" + std::to_string(i - 1) + "=" : " d=";
++            pass += depth_and_color_render_targets[i]->key().GetDebugName();
++          }
++        }
++        if (pass != g_vkgt_last_pass) {
++          g_vkgt_last_pass = pass;
++          pass = "PASS prev_draws=" +
++                 std::to_string(tmp_draws_in_pass > 0 ? tmp_draws_in_pass - 1 : 0) + " |" +
++                 pass.substr(4);
++          tmp_draws_in_pass = 1;
++          TmpGtMark(command_processor_.deferred_command_buffer(), pass.c_str());
++        }
++      }
+ 
+       if (depth_and_color_render_targets[0]) {
+         render_pass_key.depth_and_color_used |= 1 << 0;
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index ebc998e..d8d4b2a 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -27,6 +27,27 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+                     "Use sparse shared memory on Vulkan")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++
++#include <string>  // TMPGT
++
++// TMPGT: GPU timestamps bracketing kinds of GPU work, for one frame every
++// MCLA_GT_EVERY seconds (command_processor.cpp).
++extern bool g_vkgt_active;
++void TmpGtMark(rex::graphics::vulkan::DeferredCommandBuffer& l, const char* s);
++namespace {
++struct TmpPixScope {
++  rex::graphics::vulkan::DeferredCommandBuffer& l;
++  const char* e;
++  TmpPixScope(rex::graphics::vulkan::DeferredCommandBuffer& list, const char* b, const char* end)
++      : l(list), e(end) {
++    if (g_vkgt_active) TmpGtMark(l, b);
++  }
++  ~TmpPixScope() {
++    if (g_vkgt_active) TmpGtMark(l, e);
++  }
++};
++}  // namespace
++
+ namespace rex::graphics::vulkan {
+ 
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+@@ -270,6 +291,7 @@ bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_alloca
+ 
+ bool VulkanSharedMemory::UploadByteRanges(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
++  TmpPixScope tmppix(command_processor_.deferred_command_buffer(), "<upload", ">upload");
+   if (upload_byte_ranges.empty()) {
+     return true;
+   }
+@@ -339,6 +361,7 @@ bool VulkanSharedMemory::UploadByteRanges(
+ 
+ bool VulkanSharedMemory::UploadRanges(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
++  TmpPixScope tmppix(command_processor_.deferred_command_buffer(), "<upload", ">upload");
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index b18cea2..61cddfe 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -38,6 +38,27 @@ REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube
+ 
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++
++#include <string>  // TMPGT
++
++// TMPGT: GPU timestamps bracketing kinds of GPU work, for one frame every
++// MCLA_GT_EVERY seconds (command_processor.cpp).
++extern bool g_vkgt_active;
++void TmpGtMark(rex::graphics::vulkan::DeferredCommandBuffer& l, const char* s);
++namespace {
++struct TmpPixScope {
++  rex::graphics::vulkan::DeferredCommandBuffer& l;
++  const char* e;
++  TmpPixScope(rex::graphics::vulkan::DeferredCommandBuffer& list, const char* b, const char* end)
++      : l(list), e(end) {
++    if (g_vkgt_active) TmpGtMark(l, b);
++  }
++  ~TmpPixScope() {
++    if (g_vkgt_active) TmpGtMark(l, e);
++  }
++};
++}  // namespace
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1218,6 +1239,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+ 
+ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                                bool load_mips) {
++  TmpPixScope tmppix(command_processor_.deferred_command_buffer(), "<texload", ">texload");
+   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
+   TextureKey texture_key = vulkan_texture.key();
+ 

@@ -1,7 +1,8 @@
 """Analyses TMPGT frame timings (gt_*.csv: i,ticks,label; first line freq).
 Categories: work between <x and >x marks is x (xfer = EDRAM ownership
 transfers + resolve clears, resolve = IssueCopy, texload, upload); the rest
-is 'draw' (guest draws and their state). Per frame: total GPU time and the
+is 'draw' (guest draws and their state). On Vulkan, <rpend/>rpend and
+<rpbegin/>rpbegin bracket render pass ends and begins. Per frame: total GPU time and the
 category split; per pass (PASS markers = render target set changes): time,
 draws (one <xfer per draw update) and category split.
 
@@ -54,6 +55,8 @@ for p in files:
     rows.append((p, total, cats, passes))
 print(f"{len(rows)} frames timed in {d}")
 allcats = ["draw", "xfer", "resolve", "texload", "upload"]
+# Vulkan also marks render pass ends and begins (rpend, rpbegin).
+allcats += sorted({c for r in rows for c in r[2]} - set(allcats))
 print("frame  total_ms  " + "  ".join(f"{c:>8s}" for c in allcats) + "  passes  draws")
 for p, total, cats, passes in rows:
     n = re.search(r"gt_(\d+)", p).group(1)
