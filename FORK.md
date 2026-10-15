@@ -20,8 +20,10 @@ kinds of changes on top of upstream's `main`:
     pages), watched pages kept out of the hot set (the attract movie's
     colours), D3D12 command lists submitted on their own thread, a timer queue
     that sleeps instead of spinning, a cursor auto-hide that follows focus
-    and controller input, the per-frame counters on Vulkan, and Vulkan draws
-    that no longer look a setting up in the cvar registry each.
+    and controller input, the per-frame counters on Vulkan, Vulkan draws
+    that no longer look a setting up in the cvar registry each, Vulkan uploads
+    recorded before the render pass instead of ending it, and Vulkan command
+    buffers recorded and submitted on their own thread.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in
