@@ -57,10 +57,10 @@ index 2cf24c4..040ff55 100644
  // GPU Textures
  REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
-index d26cd4f..462fc6a 100644
+index d26cd4f..1e56c4f 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
 +++ b/include/rex/graphics/pipeline/texture/cache.h
-@@ -428,6 +428,25 @@ class TextureCache {
+@@ -428,6 +428,26 @@ class TextureCache {
      kLoadShaderIndexUnknown = kLoadShaderCount,
    };
  
@@ -80,7 +80,8 @@ index d26cd4f..462fc6a 100644
 +  // The direct load shader replacing the regular one, or kDirectLoadShaderUnknown.
 +  static DirectLoadShader GetDirectLoadShader(LoadShaderIndex load_shader);
 +  // Whether a texture with the key may be loaded directly: enabled, scaled, one
-+  // level, 2D, one layer. The host format and the shader are checked separately.
++  // level, 2D, one layer, not in the packed mip tail. The host format and the
++  // shader are checked separately.
 +  static bool IsDirectLoadPossible(const TextureKey& key);
 +
    struct LoadShaderInfo {
@@ -325,22 +326,23 @@ index 816ec40..ffedac3 100644
    ID3D12Resource* texture_resource = d3d12_texture.resource();
    command_processor_.PushTransitionBarrier(
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..aef2f41 100644
+index 76f5600..793f6cc 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
-@@ -125,6 +125,11 @@ REXCVAR_DEFINE_BOOL(pre_mask_resolve_l2_block, true, "GPU",
+@@ -125,6 +125,12 @@ REXCVAR_DEFINE_BOOL(pre_mask_resolve_l2_block, true, "GPU",
  //     "96 MB, and with 3x3, it will be 360 + 216 MB.",
  //     "GPU");
  
 +REXCVAR_DEFINE_BOOL(texture_load_direct, true, "GPU",
 +                    "With resolution scaling, decode single-level 2D textures of resolved data "
 +                    "straight into the host texture in one compute pass, instead of decoding into "
-+                    "a buffer and copying that into the texture");
++                    "a buffer and copying that into the texture. Turning it off takes effect at "
++                    "once; turning it on takes effect on restart");
 +
  namespace rex::graphics {
  
  const TextureCache::LoadShaderInfo TextureCache::load_shader_info_[kLoadShaderCount] = {
-@@ -318,6 +323,26 @@ void TextureCache::BeginFrame() {
+@@ -318,6 +324,29 @@ void TextureCache::BeginFrame() {
    ResetTextureBindings();
  }
  
@@ -360,8 +362,11 @@ index 76f5600..aef2f41 100644
 +}
 +
 +bool TextureCache::IsDirectLoadPossible(const TextureKey& key) {
++  // Not if the base is in the packed mip tail (16 texels or less): that's
++  // loaded as the whole tail through the buffer.
 +  return REXCVAR_GET(texture_load_direct) && key.scaled_resolve && !key.mip_max_level &&
-+         key.dimension != xenos::DataDimension::k3D && key.GetDepthOrArraySize() == 1;
++         key.dimension != xenos::DataDimension::k3D && key.GetDepthOrArraySize() == 1 &&
++         key.GetGuestLayout().packed_level != 0;
 +}
 +
  void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
