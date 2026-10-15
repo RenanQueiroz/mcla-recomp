@@ -78,6 +78,8 @@ static class GameOptions
     // The game's 2× MSAA. Off, a 3× frame took 18 to 25% less time (with about
     // half the draws), for slightly more jagged thin edges.
     public static readonly Choice[] AntiAliasing = [new(Unset, null), new("On (2× MSAA)", "--mcla_msaa=true"), new("Off (about 20% faster at 3×)", "--mcla_msaa=false")];
+    // The GPU plugin's backend. Left unset it tries Direct3D 12 first.
+    public static readonly Choice[] GraphicsApi = [new(Unset, null), new("Direct3D 12", "--mcla_gpu_backend=d3d12"), new("Vulkan", "--mcla_gpu_backend=vulkan")];
 
     // SDK settings that measured faster on MCLA (see README.md), always passed:
     // - uploaded guest memory stays valid across frames instead of being copied
@@ -103,10 +105,11 @@ static class GameOptions
         string? Pick(Choice[] choices, int index) => choices[Math.Clamp(index, 0, choices.Length - 1)].Argument;
         var extra = s.ExtraArguments.Trim();
         var tuning = Tuning.Where(t => !extra.Contains(t.Name)).Select(t => t.Argument);
-        // A boolean, so it too is left out when the extra options set it.
+        // Left out when the extra options set them, like the defaults above.
         var antiAliasing = extra.Contains("mcla_msaa") ? null : Pick(AntiAliasing, s.AntiAliasing);
+        var graphicsApi = extra.Contains("mcla_gpu_backend") ? null : Pick(GraphicsApi, s.GraphicsApi);
         var args = new[] { Pick(Display, s.Display), Pick(Resolution, s.Resolution), Pick(Fps, s.Fps),
-                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing }.Concat(tuning).Append(extra);
+                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing, graphicsApi }.Concat(tuning).Append(extra);
         return string.Join(" ", args.Where(a => !string.IsNullOrEmpty(a)));
     }
 }
@@ -122,6 +125,7 @@ sealed record LauncherSettings
     public int Intro { get; init; }
     public int Prompts { get; init; }
     public int AntiAliasing { get; init; }
+    public int GraphicsApi { get; init; }
     public string ExtraArguments { get; init; } = "";
     public bool CheckForUpdates { get; init; } = true;
     public bool CloseOnLaunch { get; init; } = true;

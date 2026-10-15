@@ -457,9 +457,10 @@ sealed class LauncherApp : Component
                         Combo("Intro", GameOptions.Intro, settings.Intro, (s, i) => s with { Intro = i }).Margin(8, 0, 0, 12).Grid(row: 1, column: 1),
                         Combo("Button prompts", GameOptions.Prompts, settings.Prompts, (s, i) => s with { Prompts = i }).Margin(0, 0, 8, 12).Grid(row: 2, column: 0),
                         Combo("Anti-aliasing", GameOptions.AntiAliasing, settings.AntiAliasing, (s, i) => s with { AntiAliasing = i }).Margin(8, 0, 0, 12).Grid(row: 2, column: 1),
+                        Combo("Graphics API", GameOptions.GraphicsApi, settings.GraphicsApi, (s, i) => s with { GraphicsApi = i }).Margin(0, 0, 8, 0).Grid(row: 3, column: 0),
                         TextBox(settings.ExtraArguments, v => updateSettings(s => s with { ExtraArguments = v }),
                                 placeholderText: "for example --log_file=run.log", header: "More mcla.exe options")
-                            .Grid(row: 3, column: 0, columnSpan: 2)),
+                            .Margin(8, 0, 0, 0).Grid(row: 3, column: 1)),
                     TextBlock("\"Game setting\" keeps what you chose in the game's pause menu. Any other choice here replaces it every time the game starts.")
                         .TextWrapping().Foreground(Theme.SecondaryText),
                     VStack(4,

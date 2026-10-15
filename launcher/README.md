@@ -62,6 +62,13 @@ mcla.exe's copy of the setting, and the GPU plugin keeps vsync on (60 FPS cap).
 edges such as pylons and billboard frames; the dithered foliage looks cleaner.
 Like the settings below, it is left out when *More mcla.exe options* sets `mcla_msaa`.
 
+*Graphics API* picks the GPU plugin's backend (`--mcla_gpu_backend=d3d12` or
+`vulkan`; "Game setting" passes nothing, and the plugin then tries Direct3D 12
+first). Every setting and SDK patch here works on both; at native resolution
+Vulkan is limited by its GPU command thread, which costs about 1.8 times as much
+per draw as on D3D12 on this machine (`dev\vulkan-2026-10-14.md`). Left out when
+*More mcla.exe options* sets `mcla_gpu_backend`.
+
 It also always passes SDK settings that measured faster (in-run A/B; the first
 two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
 
@@ -146,3 +153,6 @@ during a build:
 - `profiling-2026-10-14.md`: where the time goes on the CPU at native resolution
   and on the GPU at 3x, with the instrumentation that measured it
   (`upload-counters.sdk.patch`, `gpu-timestamps.sdk.patch`, `gt-analyze.py`).
+- `vulkan-2026-10-14.md`: the same settings and patches measured on Vulkan,
+  where its GPU command thread's time goes, the baseline for a Vulkan
+  submission thread, validation, pacing and stress runs.
