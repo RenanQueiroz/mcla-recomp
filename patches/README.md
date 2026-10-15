@@ -79,11 +79,14 @@ An ImGui dialog can say that it needs no repaints of its own (`ImGuiDialog::Repa
 
 The GPU command thread's per-event counters (draws, vertices, texture and pipeline cache hits and misses, command-buffer stalls) were an atomic add through a call into `rexruntime.dll` for each event. They now add up in plain variables of the calling module and reach the shared counters once a frame, just before the counters' per-frame snapshot. Cvar `gpu_batch_perf_counters` (default on). Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, native, uncapped): about 0.8% less GPU command thread time per draw. Built and run on Windows only.
 
+The Vulkan backend counted none of these, so `REX_PERF_LOG_CSV` showed 0 draws on Vulkan and nothing could be compared per draw there. It now counts the same events, batched the same way: draws and vertices in `IssueDraw`, blocking fence waits as command-buffer stalls, pipeline lookups, and image view lookups as texture cache hits and misses (the counterpart of the D3D12 descriptor lookups).
+
 | Change | Files | Affects |
 |---|---|---|
 | `AddBatched`, `FlushBatchedCounters` | `include/rex/perf/counter.h` | all platforms |
 | Flush before the per-frame snapshot | `src/graphics/command_processor.cpp` | all platforms |
-| Counters batched where they are counted | `src/graphics/d3d12/command_processor.cpp`, `pipeline_cache.cpp`, `texture_cache.cpp` | D3D12 (the Vulkan backend does not count these) |
+| Counters batched where they are counted | `src/graphics/d3d12/command_processor.cpp`, `pipeline_cache.cpp`, `texture_cache.cpp` | D3D12 |
+| The same counters on Vulkan | `src/graphics/vulkan/command_processor.cpp`, `pipeline_cache.cpp`, `texture_cache.cpp` | Vulkan (PC, PS5) |
 
 ## rexglue-shared-memory-request-fast-path.patch
 
