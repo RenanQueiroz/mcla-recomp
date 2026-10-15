@@ -18,6 +18,7 @@ git apply ../../patches/rexglue-hot-pages-watched-ranges.patch
 git apply ../../patches/rexglue-cursor-auto-hide.patch
 git apply ../../patches/rexglue-vulkan-memexport-check-order.patch
 git apply ../../patches/rexglue-vulkan-hoist-shared-memory-uploads.patch
+git apply ../../patches/rexglue-threaded-submission-vulkan.patch
 ```
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all of them, and add the second and the ones after the FFmpeg patch to an SDK checkout that was patched before they existed. Those later patches go on in the order listed, as several change neighbouring lines.
@@ -196,3 +197,24 @@ Free roam at native resolution now matches D3D12 (6.8 ms). Validation (`--vulkan
 | Pages read in the render pass, hoisting decision | `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
 | Page and byte uploads recorded before the render pass | `include/rex/graphics/vulkan/shared_memory.h`, `src/graphics/vulkan/shared_memory.cpp` | Vulkan |
 | The guest index range of the last draw | `include/rex/graphics/primitive_processor.h`, `src/graphics/primitive_processor.cpp` | all (read by Vulkan only) |
+
+## rexglue-threaded-submission-vulkan.patch
+
+The Vulkan counterpart of `rexglue-threaded-submission-d3d12.patch` (same design, from ForzaHorizon1-ReImagined's patch 0038, Dyotson, MIT licence). `EndSubmission` hands the deferred commands (and those hoisted before render passes) to a "GPU Submission" thread with the submission's command pool and fence; the thread records the Vulkan command buffer from them and submits it, while the GPU command processor goes on with the next packets. Settings `vulkan_threaded_submission` (default on) and `vulkan_threaded_submission_split_draws` (default 1000: a submission is also ended after that many draws when it can be, so less is left to record at a swap; 0 measured the same on Vulkan).
+
+Ordering is kept as without the thread: submissions reach the queue in order, a fence is waited on only once the thread has passed it to `vkQueueSubmit` (and only fences of submissions already in the queue are polled), sparse binds and the presenter's own submissions wait until everything before them is in the queue, and turning the setting off drains the thread first. A failed recording or submission on the thread is handled as a lost device (its fence would never be signaled). Also: the Vulkan device is looked up once instead of through the graphics system's virtual `provider()` on every use (1.2% of the GPU command thread's samples in a profile).
+
+Measured on Windows, Vulkan, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings and `rexglue-vulkan-hoist-shared-memory-uploads.patch`, in the scripted timedemo (updates of exactly 1/60 s, uncapped, fullscreen), four runs a side alternating after a warm-up, median frame time:
+
+| Segment | Native, off | Native, on | 3x, off | 3x, on |
+|---|---|---|---|---|
+| Drive from the spawn point | 7.22 ms (1% low 112 FPS) | 6.84 ms, -5.3% (1% low 123 FPS) | 15.57 ms | 15.54 ms |
+| Free roam, standing | 6.83 ms | 6.85 ms | 15.32 ms | 15.36 ms |
+| Map zoom-out (loading) | 6.90 ms | 6.89 ms | 14.81 ms | 13.70 ms, -7.5% |
+
+Standing in free roam the frame rate is held by one of the game's own threads (busy 96 to 98%), and at 3x by the GPU, so the thread shows only where the GPU command thread limits; there it took the GPU command thread from 86% to 60% busy (the submission thread 36%; measured before upload hoisting). Built and run on Windows only; the PS5 notes measure up to 1.5 ms per blocking submit, which this moves off the GPU command thread.
+
+| Change | Files | Affects |
+|---|---|---|
+| Submission thread, fence and queue ordering, draw-count split | `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
+| Taking and executing the recorded streams on another thread | `include/rex/graphics/vulkan/deferred_command_buffer.h` | Vulkan |
