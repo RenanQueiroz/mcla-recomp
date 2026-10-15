@@ -80,6 +80,13 @@ static class GameOptions
     public static readonly Choice[] AntiAliasing = [new(Unset, null), new("On (2× MSAA)", "--mcla_msaa=true"), new("Off (about 20% faster at 3×)", "--mcla_msaa=false")];
     // The GPU plugin's backend. Left unset it tries Direct3D 12 first.
     public static readonly Choice[] GraphicsApi = [new(Unset, null), new("Direct3D 12", "--mcla_gpu_backend=d3d12"), new("Vulkan", "--mcla_gpu_backend=vulkan")];
+    // The HUD's Flash movies (gauges, minimap, song ticker) take one step per
+    // game update. At the console's 30 a second the ticker scrolls at its
+    // original speed but the needles move in 30 Hz steps; at the frame rate the
+    // gauges are smooth and the ticker runs faster above 30 FPS. Menus keep the
+    // console's pace either way. Not in the game's menu, so no "Game setting".
+    public static readonly Choice[] HudUpdates = [new("Match frame rate (smooth gauges)", "--mcla_ui_timing_hud=false"),
+        new("Match console (30 per second)", "--mcla_ui_timing_hud=true")];
 
     // SDK settings that measured faster on MCLA (see README.md), always passed:
     // - uploaded guest memory stays valid across frames instead of being copied
@@ -108,8 +115,9 @@ static class GameOptions
         // Left out when the extra options set them, like the defaults above.
         var antiAliasing = extra.Contains("mcla_msaa") ? null : Pick(AntiAliasing, s.AntiAliasing);
         var graphicsApi = extra.Contains("mcla_gpu_backend") ? null : Pick(GraphicsApi, s.GraphicsApi);
+        var hudUpdates = extra.Contains("mcla_ui_timing_hud") ? null : Pick(HudUpdates, s.HudUpdates);
         var args = new[] { Pick(Display, s.Display), Pick(Resolution, s.Resolution), Pick(Fps, s.Fps),
-                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing, graphicsApi }.Concat(tuning).Append(extra);
+                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing, graphicsApi, hudUpdates }.Concat(tuning).Append(extra);
         return string.Join(" ", args.Where(a => !string.IsNullOrEmpty(a)));
     }
 }
@@ -126,6 +134,7 @@ sealed record LauncherSettings
     public int Prompts { get; init; }
     public int AntiAliasing { get; init; }
     public int GraphicsApi { get; init; }
+    public int HudUpdates { get; init; }
     public string ExtraArguments { get; init; } = "";
     public bool CheckForUpdates { get; init; } = true;
     public bool CloseOnLaunch { get; init; } = true;

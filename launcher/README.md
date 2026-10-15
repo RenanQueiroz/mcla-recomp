@@ -69,6 +69,16 @@ Vulkan is limited by its GPU command thread, which costs about 1.8 times as much
 per draw as on D3D12 on this machine (`dev\vulkan-2026-10-14.md`). Left out when
 *More mcla.exe options* sets `mcla_gpu_backend`.
 
+*HUD updates* (`--mcla_ui_timing_hud`) sets how often the HUD's Flash movies
+(gauges, minimap, song ticker) take a step. The game steps them once per update,
+which was 30 a second on the console. *Match frame rate* (the default) keeps the
+gauges smooth, but above 30 FPS the song ticker scrolls faster (4× at 120).
+*Match console* steps them 30 times a second: the ticker scrolls at its original
+speed and the needles move in 30 Hz steps. Menus, pop-ups and the GPS panels keep
+the console's pace either way (`mcla_ui_timing_fix`, `docs\known-issues.md`).
+Not in the game's menu, so there is no "Game setting" choice; left out when *More
+mcla.exe options* sets `mcla_ui_timing_hud`.
+
 It also always passes SDK settings that measured faster (in-run A/B; the first
 two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
 
