@@ -23,6 +23,8 @@ set(MCLA_SOURCES
     src/settings_menu.cpp
     src/sampling_profiler.cpp
     src/code_pointer_scan.cpp
+    # Development: scripted controller input, off by default (fork only).
+    src/dev_pad.cpp
 )
 
 if(WIN32)

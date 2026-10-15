@@ -1,0 +1,4 @@
+# For recording a drive: presses nothing, only marks the moment the player is
+# in the city, so a playback can start from the same point (play ... from=free_roam).
+wait_until roam 1800s
+mark free_roam

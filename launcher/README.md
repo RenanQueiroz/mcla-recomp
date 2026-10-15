@@ -156,3 +156,53 @@ during a build:
 - `vulkan-2026-10-14.md`: the same settings and patches measured on Vulkan,
   where its GPU command thread's time goes, the baseline for a Vulkan
   submission thread, validation, pacing and stress runs.
+
+## Scripted controller input (unattended runs)
+
+A development tool of this fork only; it is never part of an upstream pull
+request. `src\dev_pad.cpp` adds a synthetic controller to the game when one of
+its options is set, and does nothing otherwise. It drives the game for
+unattended runs and benchmarks: through the menus, through the map zoom-out
+loading screen, into the city and around it, with or without the game window
+in front. A real controller keeps working alongside it.
+
+- `--mcla_pad_script=<file>` runs a script from start-up,
+  `--mcla_pad_pipe=mcla-pad` takes commands on `\.\pipe\mcla-pad`
+  (`dev\pad.py press start`, `pad.py shot C:\temp\a.png 0.5`, `pad.py -i`), and
+  `--mcla_pad_frames_csv=<file>` logs every swap with the script's `mark`s. The
+  commands are listed at the top of `src\dev_pad.cpp`: buttons, triggers and
+  sticks, waits in time or engine frames, `wait_until` / `press_until` a
+  condition (`left_title`, `loading`, `roam`, or a guest memory word),
+  screenshots, recording and playback. `--mcla_fixed_dt=N` makes every game
+  update advance exactly 1/N s: uncapped, a timedemo.
+- `dev\devrun.py` runs the game with a script **on a copy of the save data**:
+  `prepare` snapshots `Documents\mcla` (career save, achievements) to
+  `%LOCALAPPDATA%\mcla-dev\pristine`; every run restores
+  `%LOCALAPPDATA%\mcla-dev\work` from it and passes `--user_data_root` and
+  `--cache_root` there, backs up `mcla.toml` next to `mcla.exe` and puts it back
+  after the run, and stops if the real save, achievements or `mcla.toml`
+  changed. `run` runs one script, `bench` repeats one per configuration
+  (alternating, e.g. `--configs d3d12:1,vulkan:1`) and reports each segment's
+  median frame time, 1% low and run-to-run spread, `analyze` reads a run.
+  `devrun.py prepare --refresh` takes a new snapshot after you have played on.
+- `dev\scripts\`: `boot-to-roam.pad` (title, the map zoom-out loading, the
+  city: the loading benchmark) and `mark-roam.pad` (for recordings).
+
+The game ignores buttons during its own transitions (the title screen's camera
+cuts, a menu closing), so scripts press until a condition holds rather than
+once. Benchmarks run with `--mcla_intro=normal` (`devrun.py bench`'s default):
+"fast" also lets the loading loops run unpaced.
+
+### Recording a drive for playback
+
+    python launcher\dev\devrun.py record C:\Users\<you>\Desktop\drive.csv
+
+starts the game (Direct3D 12, Native, 120 FPS cap, windowed; `--fullscreen`,
+`--res 3`, `--backend vulkan` as you like) on the save copy, so nothing you do
+in that session reaches your real career. Press Start at the title as usual and
+drive with your controller; the recording starts counting when you are in the
+city. Close the game when you are done. The file holds your controller's state
+frame by frame and the car's position twice a second. A run replays it with
+`play <file> from=free_roam` after `boot-to-roam.pad`'s steps, and reports how
+far the car strayed from the recorded positions (`max_dev`); played back with
+`--mcla_fixed_dt=120` it advances the game exactly as at the recording's cap.

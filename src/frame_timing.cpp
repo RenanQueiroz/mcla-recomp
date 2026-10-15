@@ -148,10 +148,13 @@ float ReadGuestFloat(uint32_t address) {
 
 void MclaTickButtonPrompts();
 void MclaTickPerfOptions();
+void MclaDevPadFrame(uint64_t& ticks);
+void MclaDevPadSwap();
 
 void mcla_frame_delta(PPCRegister& r8) {
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
+  MclaDevPadFrame(r8.u64);
   if (OriginalTiming()) {
     return;
   }
@@ -200,6 +203,7 @@ static void PaceUnlimitedSwap(bool timed) {
 }
 
 bool mcla_present_interval(PPCRegister& r11) {
+  MclaDevPadSwap();
   if (OriginalTiming()) {
     return false;
   }

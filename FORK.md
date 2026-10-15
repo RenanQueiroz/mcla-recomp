@@ -22,8 +22,10 @@ kinds of changes on top of upstream's `main`:
     that no longer look a setting up in the cvar registry each.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
-  starts the game with chosen options, and the measurement tools in
-  `launcher/dev/` (`launcher/README.md`).
+  starts the game with chosen options, the measurement tools in
+  `launcher/dev/` (`launcher/README.md`), and scripted controller input for
+  unattended runs and benchmarks (`src/dev_pad.cpp`, off unless its options
+  are set; `launcher/README.md`, "Scripted controller input").
 
 ## Testing so far
 

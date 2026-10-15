@@ -21,6 +21,8 @@ REXCVAR_DEFINE_BOOL(mcla_hide_cursor, true, "MCLA",
 
 std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
     rex::runtime::FunctionDispatcher* function_dispatcher);
+void MclaDevPadConfigure(rex::RuntimeConfig& config);
+void MclaDevPadStart(rex::ui::Window* window);
 
 // Started with no options (a double-click on mcla.exe), the game should just
 // run: find the extracted game next to the executable or, as the build leaves
@@ -58,6 +60,9 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
       REXLOG_ERROR("could not load the xenos GPU plugin with backend '{}'", backend);
     }
   }
+
+  // Development: scripted controller input (src/dev_pad.cpp), off by default.
+  MclaDevPadConfigure(config);
 }
 
 void MclaApp::OnPostSetup() {
@@ -69,6 +74,8 @@ void MclaApp::OnPostSetup() {
   if (REXCVAR_GET(mcla_hide_cursor) && window()) {
     window()->SetCursorVisibility(rex::ui::Window::CursorVisibility::kAutoHidden);
   }
+
+  MclaDevPadStart(window());
 
   // The game probes for loose city data on a "t:" drive that retail consoles
   // do not have. Give it a device so the probes fail with "not found" rather

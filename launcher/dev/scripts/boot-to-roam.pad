@@ -1,0 +1,12 @@
+# Boot -> title -> map zoom-out loading -> free roam, on the save copy.
+# Segments (marks): title, map_zoom (the zoom-out loading, from the accepted
+# Start until the player is in the city), free_roam (10 s at the spawn point).
+wait 8s
+mark title
+# Start is ignored during the title screen's camera cuts: press until it takes.
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 10s
+mark end

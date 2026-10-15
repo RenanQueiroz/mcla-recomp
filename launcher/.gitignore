@@ -5,3 +5,4 @@ src/bin/
 src/obj/
 settings.json
 built-commit.txt
+__pycache__/
