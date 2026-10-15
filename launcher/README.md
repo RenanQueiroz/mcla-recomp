@@ -70,8 +70,9 @@ Like the settings below, it is left out when *More mcla.exe options* sets `mcla_
 `vulkan`; "Game setting" passes nothing, and the plugin then tries Direct3D 12
 first). Every setting and SDK patch here works on both. On this machine, in
 scripted runs in the city, Vulkan matches D3D12 at native resolution and is 7 to
-11% slower at 3x, with fewer hitches in the map zoom-out after the title
-(`dev\vulkan-2026-10-14.md`). Left out when
+11% slower at 3x (`dev\vulkan-2026-10-14.md`); since D3D12's textures are placed
+in shared heaps, both are about as smooth in the map zoom-out after the title
+(`dev\d3d12-zoomout-2026-10-15.md`). Left out when
 *More mcla.exe options* sets `mcla_gpu_backend`.
 
 *HUD updates* (`--mcla_ui_timing_hud`) sets how often the HUD's Flash movies
@@ -182,6 +183,13 @@ during a build:
 - `gpu-timestamps-vulkan.sdk.patch` (SDK, Vulkan): the frame timings of
   `gpu-timestamps.sdk.patch` for Vulkan (`MCLA_GT_EVERY`, `MCLA_GT_DIR`), also
   bracketing render pass begins and ends; applies together with the D3D12 one.
+- `d3d12-zoomout-2026-10-15.md`: why D3D12 stuttered in the map zoom-out (and
+  in races) and Vulkan did not, the placed texture heaps that fixed it, and
+  their benchmark.
+- `d3d12-hitch-timers.sdk.patch` (SDK, D3D12, `TMPHITCH`): CPU timers around the
+  D3D12 calls that can stall the GPU command thread (texture creation and
+  release, tile heaps, render targets, fence waits and more), one log line per
+  slow frame; applies on top of `rexglue-d3d12-placed-texture-heaps.patch`.
 
 ## Scripted controller input (unattended runs)
 

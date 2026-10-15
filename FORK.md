@@ -22,8 +22,10 @@ kinds of changes on top of upstream's `main`:
     that sleeps instead of spinning, a cursor auto-hide that follows focus
     and controller input, the per-frame counters on Vulkan, Vulkan draws
     that no longer look a setting up in the cvar registry each, Vulkan uploads
-    recorded before the render pass instead of ending it, and Vulkan command
-    buffers recorded and submitted on their own thread.
+    recorded before the render pass instead of ending it, Vulkan command
+    buffers recorded and submitted on their own thread, and D3D12 textures
+    placed in shared heaps instead of each being an allocation of its own (the
+    map zoom-out's and races' stutters).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in

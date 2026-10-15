@@ -93,7 +93,11 @@ For comparison, the solo drive in the same timedemo mode measured:
 - 13.96 ms at 3x (1% low 51 FPS), in `vulkan-2026-10-14.md`.
 
 The race is harder on the CPU: the median is 4% higher at Native and the 1% lows are
-much lower. Its median at 3x is lower than the sunset drive's: midnight is
+much lower. Those low 1% lows and worst frames were D3D12 creating textures as
+they streamed in: with `rexglue-d3d12-placed-texture-heaps.patch` (three runs a
+side) the race's 1% low went from 50 to 96 FPS at Native and from 41 to 61 FPS
+at 3x, and its worst frame from 102 to 13 ms and from 61 to 20 ms, with the same
+median (`d3d12-zoomout-2026-10-15.md`). Its median at 3x is lower than the sunset drive's: midnight is
 cheaper for the GPU than the drive's dusk at the spawn point.
 
 ## Where the GPU time goes at 3x in the race
