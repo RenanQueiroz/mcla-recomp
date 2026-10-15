@@ -1,0 +1,686 @@
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index cd7693a..e40bd73 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -633,6 +633,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   // resolve_clear_rectangle is expected to be provided by
+   // PrepareHostRenderTargetsResolveClear which should do all the needed size
+   // bound checks.
++  void TransferAndClearRenderTargets(uint32_t render_target_count,
++                                     RenderTarget* const* render_targets,
++                                     const std::vector<Transfer>* transfers,
++                                     const uint64_t* clear_values,
++                                     const Transfer::Rectangle& clear_rectangle) override {
++    PerformTransfersAndResolveClears(render_target_count, render_targets, transfers,
++                                     clear_values, &clear_rectangle);
++  }
+   void PerformTransfersAndResolveClears(
+       uint32_t render_target_count, RenderTarget* const* render_targets,
+       const std::vector<Transfer>* render_target_transfers,
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 3bbd52e..d0d14f7 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -174,6 +174,19 @@ class RenderTargetCache {
+   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                       uint32_t normalized_color_mask, const Shader& vertex_shader);
+ 
++  // For host render targets, if the draw only fills a screen-space rectangle
++  // with one depth and stencil value and one color, like the clears of
++  // Direct3D 9 on the Xbox 360 (drawn with 4x MSAA to cover twice as many
++  // samples per pixel as 2x), clears the host render targets instead of
++  // drawing, in the MSAA mode the range was drawn with next after the same
++  // clear before. That skips ownership transfers of the whole range to the
++  // MSAA mode of the clear and back. Returns whether the draw has been done
++  // this way, in which case it must not be drawn. To be called in a
++  // submission, for a draw without memory export or an occlusion query.
++  bool ClearRectangleDraw(bool is_rasterization_done, const Shader& vertex_shader,
++                          const Shader* pixel_shader, reg::RB_DEPTHCONTROL normalized_depth_control,
++                          uint32_t normalized_color_mask);
++
+   // Returns bits where 0 is whether a depth render target is currently bound on
+   // the host and 1... are whether the same applies to color render targets, and
+   // formats (resource formats, but if needed, with gamma taken into account) of
+@@ -185,6 +198,7 @@ class RenderTargetCache {
+                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
+       : register_file_(register_file),
+         draw_extent_estimator_(register_file, memory),
++        clear_rectangle_shader_interpreter_(register_file, memory),
+         draw_resolution_scale_x_(draw_resolution_scale_x),
+         draw_resolution_scale_y_(draw_resolution_scale_y) {
+     assert_not_zero(draw_resolution_scale_x);
+@@ -539,6 +553,14 @@ class RenderTargetCache {
+                                             std::vector<Transfer>& depth_transfers_out,
+                                             RenderTarget*& color_render_target_out,
+                                             std::vector<Transfer>& color_transfers_out);
++  // Performs the ownership transfers to the render targets, and then clears
++  // them in the rectangle, like a clear in a resolve (values in the
++  // RB_DEPTH_CLEAR and RB_COLOR_CLEAR / RB_COLOR_CLEAR_LO layouts).
++  virtual void TransferAndClearRenderTargets(uint32_t render_target_count,
++                                             RenderTarget* const* render_targets,
++                                             const std::vector<Transfer>* transfers,
++                                             const uint64_t* clear_values,
++                                             const Transfer::Rectangle& clear_rectangle) = 0;
+ 
+   // For pixel shader interlock.
+ 
+@@ -555,6 +577,21 @@ class RenderTargetCache {
+ 
+   DrawExtentEstimator draw_extent_estimator_;
+ 
++  // For clear rectangle draws.
++  ShaderInterpreter clear_rectangle_shader_interpreter_;
++  // The MSAA mode each clear rectangle draw (its render target key and
++  // rectangle) was followed by the last time, to clear in that mode.
++  std::map<std::pair<uint64_t, uint64_t>, xenos::MsaaSamples> clear_rectangle_next_msaa_;
++  // Depth and color clear rectangle draws whose render targets haven't been
++  // drawn to since, to learn the MSAA mode that the next draw uses.
++  struct ClearRectangleWaitingForDraw {
++    std::pair<uint64_t, uint64_t> clear;
++    RenderTargetKey render_target_any_msaa;
++    bool waiting = false;
++  };
++  ClearRectangleWaitingForDraw clear_rectangles_waiting_for_draw_[2];
++  std::vector<Transfer> clear_rectangle_transfers_[2];
++
+   // For host render targets.
+ 
+   struct OwnershipRange {
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 34f7033..6b9861a 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -794,6 +794,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // resolve_clear_rectangle is expected to be provided by
+   // PrepareHostRenderTargetsResolveClear which should do all the needed size
+   // bound checks.
++  void TransferAndClearRenderTargets(uint32_t render_target_count,
++                                     RenderTarget* const* render_targets,
++                                     const std::vector<Transfer>* transfers,
++                                     const uint64_t* clear_values,
++                                     const Transfer::Rectangle& clear_rectangle) override {
++    PerformTransfersAndResolveClears(render_target_count, render_targets, transfers,
++                                     clear_values, &clear_rectangle);
++  }
+   void PerformTransfersAndResolveClears(
+       uint32_t render_target_count, RenderTarget* const* render_targets,
+       const std::vector<Transfer>* render_target_transfers,
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index d24e12a..fdbfff6 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -2570,6 +2570,17 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   ++submission_draws_;
+ 
++  // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
++  if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
++      !active_occlusion_query_.valid &&
++      render_target_cache_->ClearRectangleDraw(
++          is_rasterization_done, *vertex_shader, pixel_shader,
++          draw_util::GetNormalizedDepthControl(regs),
++          pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
++                       : 0)) {
++    return true;
++  }
++
+   // Process primitives.
+   PrimitiveProcessor::ProcessingResult primitive_processing_result;
+   if (!primitive_processor_->Process(primitive_processing_result)) {
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 953c5fd..72ab00a 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <bitset>
+ #include <cmath>
+ #include <cstring>
+ #include <iterator>
+@@ -37,6 +38,12 @@ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, tru
+ REXCVAR_DEFINE_BOOL(snorm16_render_target_full_range, true, "GPU",
+                     "Use full range for SNORM16 render targets");
+ 
++REXCVAR_DEFINE_BOOL(clear_rectangle_draws, true, "GPU",
++                    "With host render targets, clear instead of drawing rectangles that only fill "
++                    "with one depth, stencil and color value (the clears of Direct3D 9), in the "
++                    "MSAA mode the range was drawn with next before, instead of transferring "
++                    "render targets between MSAA modes for them");
++
+ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -658,6 +665,24 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                        rt_base);
+   }
+ 
++  // Remember the MSAA mode the range of a clear rectangle draw is drawn with
++  // next, for the same clear to be done in that mode.
++  for (ClearRectangleWaitingForDraw& waiting : clear_rectangles_waiting_for_draw_) {
++    if (!waiting.waiting) {
++      continue;
++    }
++    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
++      RenderTargetKey rt_key = rt_keys[edram_bases_sorted[i].second];
++      RenderTargetKey rt_key_any_msaa = rt_key;
++      rt_key_any_msaa.msaa_samples = xenos::MsaaSamples::k1X;
++      if (rt_key_any_msaa == waiting.render_target_any_msaa) {
++        clear_rectangle_next_msaa_[waiting.clear] = rt_key.msaa_samples;
++        waiting.waiting = false;
++        break;
++      }
++    }
++  }
++
+   if (interlock_barrier_only) {
+     // Because a full pixel shader interlock barrier may clear the ownership map
+     // (since it flushes all previous writes, and there's no need for another
+@@ -761,6 +786,485 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+   return true;
+ }
+ 
++namespace {
++
++class ClearRectangleVertexExportSink : public ShaderInterpreter::ExportSink {
++ public:
++  void Export(ucode::ExportRegister export_register, const float* value,
++              uint32_t value_mask) override {
++    float* dest = nullptr;
++    uint32_t* dest_mask = nullptr;
++    if (export_register == ucode::ExportRegister::kVSPosition) {
++      dest = position;
++      dest_mask = &position_mask;
++    } else if (uint32_t(export_register) < xenos::kMaxInterpolators) {
++      dest = interpolators[uint32_t(export_register)];
++      dest_mask = &interpolator_masks[uint32_t(export_register)];
++    } else if (export_register == ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex &&
++               (value_mask & 0b0100)) {
++      killed = (memory::Reinterpret<uint32_t>(value[2]) & ~(UINT32_C(1) << 31)) != 0;
++      return;
++    } else {
++      return;
++    }
++    for (uint32_t i = 0; i < 4; ++i) {
++      if (value_mask & (UINT32_C(1) << i)) {
++        dest[i] = value[i];
++      }
++    }
++    *dest_mask |= value_mask;
++  }
++
++  float position[4] = {};
++  uint32_t position_mask = 0;
++  float interpolators[xenos::kMaxInterpolators][4] = {};
++  uint32_t interpolator_masks[xenos::kMaxInterpolators] = {};
++  bool killed = false;
++};
++
++class ClearRectangleColorExportSink : public ShaderInterpreter::ExportSink {
++ public:
++  explicit ClearRectangleColorExportSink(ucode::ExportRegister color_register)
++      : color_register_(color_register) {}
++  void Export(ucode::ExportRegister export_register, const float* value,
++              uint32_t value_mask) override {
++    if (export_register != color_register_) {
++      return;
++    }
++    for (uint32_t i = 0; i < 4; ++i) {
++      if (value_mask & (UINT32_C(1) << i)) {
++        color[i] = value[i];
++      }
++    }
++    color_mask |= value_mask;
++  }
++
++  float color[4] = {};
++  uint32_t color_mask = 0;
++
++ private:
++  ucode::ExportRegister color_register_;
++};
++
++// The value of a color drawn into a render target of the format, in the
++// RB_COLOR_CLEAR(_LO) layout for clearing like in a resolve, if the format is
++// handled and the host render target would hold the same as after drawing.
++bool GetClearRectangleColorValue(xenos::ColorRenderTargetFormat format, const float* color,
++                                 float exp_bias_scale, uint64_t& value_out) {
++  float biased[4];
++  for (uint32_t i = 0; i < 4; ++i) {
++    biased[i] = color[i] * exp_bias_scale;
++    if (!std::isfinite(biased[i])) {
++      return false;
++    }
++  }
++  // Rounded to the nearest like the host does when drawing.
++  auto unorm = [&biased](uint32_t i, uint32_t max) -> uint64_t {
++    return uint64_t(std::nearbyint(std::min(std::max(biased[i], 0.0f), 1.0f) * float(max)));
++  };
++  switch (format) {
++    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
++      value_out = unorm(0, 0xFF) | (unorm(1, 0xFF) << 8) | (unorm(2, 0xFF) << 16) |
++                  (unorm(3, 0xFF) << 24);
++      return true;
++    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
++    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
++      value_out = unorm(0, 0x3FF) | (unorm(1, 0x3FF) << 10) | (unorm(2, 0x3FF) << 20) |
++                  (unorm(3, 0x3) << 30);
++      return true;
++    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
++    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16: {
++      // Drawing doesn't round to 7e3 in the float16 host render target, so only
++      // values exact in 7e3.
++      uint64_t value = 0;
++      for (uint32_t i = 0; i < 3; ++i) {
++        float component = biased[i];
++        if (!(component >= 0.0f) || component > 31.875f) {
++          return false;
++        }
++        uint32_t component_bits = memory::Reinterpret<uint32_t>(component);
++        int32_t exponent = int32_t(component_bits >> 23) - 127;
++        uint32_t f10;
++        if (component == 0.0f) {
++          f10 = 0;
++        } else if (exponent >= -2) {
++          if (component_bits & 0xFFFF) {
++            return false;
++          }
++          f10 = (uint32_t(exponent + 3) << 7) | ((component_bits >> 16) & 0x7F);
++        } else {
++          // Denormal, a multiple of 2^-9.
++          float denormal = component * 512.0f;
++          if (denormal != std::floor(denormal)) {
++            return false;
++          }
++          f10 = uint32_t(denormal);
++        }
++        value |= uint64_t(f10) << (10 * i);
++      }
++      // 2-bit alpha: 0, or 1 (what the console stores from 1 up).
++      if (biased[3] >= 1.0f) {
++        value |= uint64_t(0b11) << 30;
++      } else if (biased[3] != 0.0f) {
++        return false;
++      }
++      value_out = value;
++      return true;
++    }
++    default:
++      return false;
++  }
++}
++
++}  // namespace
++
++bool RenderTargetCache::ClearRectangleDraw(bool is_rasterization_done, const Shader& vertex_shader,
++                                           const Shader* pixel_shader,
++                                           reg::RB_DEPTHCONTROL normalized_depth_control,
++                                           uint32_t normalized_color_mask) {
++  if (!REXCVAR_GET(clear_rectangle_draws) || GetPath() != Path::kHostRenderTargets ||
++      !is_rasterization_done) {
++    return false;
++  }
++  const RegisterFile& regs = register_file();
++
++  // One rectangle in screen space, not clipped, culled or offset.
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (vgt_draw_initiator.prim_type != xenos::PrimitiveType::kRectangleList ||
++      vgt_draw_initiator.num_indices != 3 ||
++      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
++    return false;
++  }
++  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
++  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (pa_cl_vte_cntl.vport_x_scale_ena || pa_cl_vte_cntl.vport_x_offset_ena ||
++      pa_cl_vte_cntl.vport_y_scale_ena || pa_cl_vte_cntl.vport_y_offset_ena ||
++      pa_cl_vte_cntl.vport_z_scale_ena || pa_cl_vte_cntl.vport_z_offset_ena ||
++      !pa_cl_vte_cntl.vtx_xy_fmt || !pa_cl_vte_cntl.vtx_z_fmt ||
++      !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable || pa_su_sc_mode_cntl.cull_front ||
++      pa_su_sc_mode_cntl.cull_back ||
++      pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
++      pa_su_sc_mode_cntl.poly_offset_front_enable || pa_su_sc_mode_cntl.poly_offset_back_enable ||
++      pa_su_sc_mode_cntl.poly_offset_para_enable) {
++    return false;
++  }
++
++  // Depth and stencil replaced everywhere, or not used.
++  bool clear_depth = normalized_depth_control.z_enable || normalized_depth_control.stencil_enable;
++  auto rb_stencilrefmask = regs.Get<reg::RB_STENCILREFMASK>();
++  if (clear_depth &&
++      (!normalized_depth_control.z_enable || !normalized_depth_control.z_write_enable ||
++       normalized_depth_control.zfunc != xenos::CompareFunction::kAlways ||
++       !normalized_depth_control.stencil_enable ||
++       normalized_depth_control.stencilfunc != xenos::CompareFunction::kAlways ||
++       normalized_depth_control.stencilzpass != xenos::StencilOp::kReplace ||
++       normalized_depth_control.backface_enable || rb_stencilrefmask.stencilwritemask != 0xFF)) {
++    return false;
++  }
++  // At most one color render target, all of it replaced.
++  uint32_t color_rt_index = UINT32_MAX;
++  if (normalized_color_mask) {
++    rex::bit_scan_forward(normalized_color_mask, &color_rt_index);
++    color_rt_index >>= 2;
++    if (normalized_color_mask != (UINT32_C(0b1111) << (4 * color_rt_index))) {
++      return false;
++    }
++    auto rb_blendcontrol =
++        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[color_rt_index]);
++    if (rb_blendcontrol.color_srcblend != xenos::BlendFactor::kOne ||
++        rb_blendcontrol.color_destblend != xenos::BlendFactor::kZero ||
++        rb_blendcontrol.color_comb_fcn != xenos::BlendOp::kAdd ||
++        rb_blendcontrol.alpha_srcblend != xenos::BlendFactor::kOne ||
++        rb_blendcontrol.alpha_destblend != xenos::BlendFactor::kZero ||
++        rb_blendcontrol.alpha_comb_fcn != xenos::BlendOp::kAdd) {
++      return false;
++    }
++  }
++  if (!clear_depth && color_rt_index == UINT32_MAX) {
++    return false;
++  }
++  // No pixel discarded, the color known on the CPU.
++  if (pixel_shader) {
++    auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
++    if (pixel_shader->kills_pixels() || pixel_shader->writes_depth() ||
++        !ShaderInterpreter::CanInterpretShader(*pixel_shader) ||
++        (rb_colorcontrol.alpha_test_enable &&
++         rb_colorcontrol.alpha_func != xenos::CompareFunction::kAlways) ||
++        rb_colorcontrol.alpha_to_mask_enable) {
++      return false;
++    }
++  } else if (color_rt_index != UINT32_MAX) {
++    return false;
++  }
++  if (!ShaderInterpreter::CanInterpretShader(vertex_shader)) {
++    return false;
++  }
++
++  // The vertices.
++  ShaderInterpreter& interpreter = clear_rectangle_shader_interpreter_;
++  ClearRectangleVertexExportSink vertices[3];
++  interpreter.SetShader(vertex_shader);
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++  for (uint32_t i = 0; i < 3; ++i) {
++    interpreter.SetExportSink(&vertices[i]);
++    interpreter.temp_registers()[0] =
++        float(std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF)));
++    interpreter.Execute();
++  }
++  interpreter.SetExportSink(nullptr);
++  for (uint32_t i = 0; i < 3; ++i) {
++    if (vertices[i].killed || (vertices[i].position_mask & 0b0111) != 0b0111 ||
++        memory::Reinterpret<uint32_t>(vertices[i].position[2]) !=
++            memory::Reinterpret<uint32_t>(vertices[0].position[2])) {
++      return false;
++    }
++  }
++  // Three corners of the rectangle, edges between pixels.
++  float x_offset = 0.0f, y_offset = 0.0f;
++  if (regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero) {
++    x_offset = y_offset = 0.5f;
++  }
++  if (pa_su_sc_mode_cntl.vtx_window_offset_enable) {
++    auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    x_offset += float(pa_sc_window_offset.window_x_offset);
++    y_offset += float(pa_sc_window_offset.window_y_offset);
++  }
++  float edges[2][2];
++  for (uint32_t i = 0; i < 2; ++i) {
++    float offset = i ? y_offset : x_offset;
++    float a = vertices[0].position[i] + offset, b = vertices[1].position[i] + offset,
++          c = vertices[2].position[i] + offset;
++    edges[i][0] = std::min(a, std::min(b, c));
++    edges[i][1] = std::max(a, std::max(b, c));
++    if (!(edges[i][0] < edges[i][1]) || (a != edges[i][0] && a != edges[i][1]) ||
++        (b != edges[i][0] && b != edges[i][1]) || (c != edges[i][0] && c != edges[i][1]) ||
++        edges[i][0] != std::floor(edges[i][0]) || edges[i][1] != std::floor(edges[i][1]) ||
++        !(edges[i][0] > -16384.0f) || !(edges[i][1] < 16384.0f)) {
++      return false;
++    }
++  }
++  for (uint32_t i = 0; i < 3; ++i) {
++    for (uint32_t j = i + 1; j < 3; ++j) {
++      if (vertices[i].position[0] == vertices[j].position[0] &&
++          vertices[i].position[1] == vertices[j].position[1]) {
++        return false;
++      }
++    }
++  }
++  draw_util::Scissor scissor;
++  draw_util::GetScissor(regs, scissor);
++  int32_t rect_left = std::max(int32_t(edges[0][0]), int32_t(scissor.offset[0]));
++  int32_t rect_top = std::max(int32_t(edges[1][0]), int32_t(scissor.offset[1]));
++  int32_t rect_right =
++      std::min(int32_t(edges[0][1]), int32_t(scissor.offset[0] + scissor.extent[0]));
++  int32_t rect_bottom =
++      std::min(int32_t(edges[1][1]), int32_t(scissor.offset[1] + scissor.extent[1]));
++  if (rect_left >= rect_right || rect_top >= rect_bottom) {
++    return false;
++  }
++
++  // The values.
++  uint64_t clear_values[2] = {};
++  if (clear_depth) {
++    float z = vertices[0].position[2];
++    if (!(z <= 1.0f)) {
++      return false;
++    }
++    z = std::max(z, 0.0f);
++    uint32_t depth;
++    if (regs.Get<reg::RB_DEPTH_INFO>().depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
++      depth = xenos::Float32To20e4(z, true);
++    } else {
++      depth = uint32_t(std::nearbyint(double(z) * double(0xFFFFFF)));
++    }
++    clear_values[0] = (depth << 8) | rb_stencilrefmask.stencilref;
++  }
++  auto rb_color_info = color_rt_index != UINT32_MAX
++                           ? regs.Get<reg::RB_COLOR_INFO>(
++                                 reg::RB_COLOR_INFO::rt_register_indices[color_rt_index])
++                           : reg::RB_COLOR_INFO();
++  if (color_rt_index != UINT32_MAX) {
++    // The pixel shader with the interpolators from the vertices, which must be
++    // the same in all of them, and the other registers having any value.
++    uint32_t ps_param_gen_pos = UINT32_MAX;
++    uint32_t interpolator_mask = pixel_shader->GetInterpolatorInputMask(
++        regs.Get<reg::SQ_PROGRAM_CNTL>(), regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
++    if (ps_param_gen_pos != UINT32_MAX ||
++        (interpolator_mask & ~vertex_shader.writes_interpolators())) {
++      return false;
++    }
++    for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
++      if (!(interpolator_mask & (UINT32_C(1) << i))) {
++        continue;
++      }
++      for (uint32_t j = 0; j < 3; ++j) {
++        if (vertices[j].interpolator_masks[i] != 0b1111 ||
++            std::memcmp(vertices[j].interpolators[i], vertices[0].interpolators[i],
++                        sizeof(float) * 4)) {
++          return false;
++        }
++      }
++    }
++    float colors[2][4];
++    interpreter.SetShader(*pixel_shader);
++    for (uint32_t i = 0; i < 2; ++i) {
++      float* temps = interpreter.temp_registers();
++      std::fill(temps, temps + 4 * xenos::kMaxShaderTempRegisters, float(i));
++      for (uint32_t j = 0; j < xenos::kMaxInterpolators; ++j) {
++        if (interpolator_mask & (UINT32_C(1) << j)) {
++          std::memcpy(temps + 4 * j, vertices[0].interpolators[j], sizeof(float) * 4);
++        }
++      }
++      ClearRectangleColorExportSink color(
++          ucode::ExportRegister(uint32_t(ucode::ExportRegister::kPSColor0) + color_rt_index));
++      interpreter.SetExportSink(&color);
++      interpreter.Execute();
++      interpreter.SetExportSink(nullptr);
++      if (color.color_mask != 0b1111) {
++        return false;
++      }
++      std::memcpy(colors[i], color.color, sizeof(float) * 4);
++    }
++    if (std::memcmp(colors[0], colors[1], sizeof(colors[0])) ||
++        !GetClearRectangleColorValue(rb_color_info.color_format, colors[0],
++                                     std::ldexp(1.0f, rb_color_info.color_exp_bias),
++                                     clear_values[1])) {
++      return false;
++    }
++  }
++
++  // The render targets as drawn.
++  auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  xenos::MsaaSamples draw_msaa_samples = rb_surface_info.msaa_samples;
++  if (draw_msaa_samples > xenos::MsaaSamples::k4X || !rb_surface_info.surface_pitch) {
++    return false;
++  }
++  uint32_t draw_msaa_samples_x_log2 = uint32_t(draw_msaa_samples >= xenos::MsaaSamples::k4X);
++  uint32_t draw_msaa_samples_y_log2 = uint32_t(draw_msaa_samples >= xenos::MsaaSamples::k2X);
++  uint32_t pitch_tiles_at_32bpp =
++      ((rb_surface_info.surface_pitch << draw_msaa_samples_x_log2) +
++       (xenos::kEdramTileWidthSamples - 1)) /
++      xenos::kEdramTileWidthSamples;
++  RenderTargetKey draw_keys[2];
++  bool rts_are_64bpp[2] = {};
++  if (clear_depth) {
++    auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
++    draw_keys[0].base_tiles = rb_depth_info.depth_base;
++    draw_keys[0].is_depth = 1;
++    draw_keys[0].resource_format = uint32_t(rb_depth_info.depth_format);
++  }
++  if (color_rt_index != UINT32_MAX) {
++    draw_keys[1].base_tiles = rb_color_info.color_base;
++    draw_keys[1].resource_format = uint32_t(
++        GetColorResourceFormat(xenos::GetStorageColorFormat(rb_color_info.color_format)));
++    rts_are_64bpp[1] = xenos::IsColorRenderTargetFormat64bpp(rb_color_info.color_format);
++    if (clear_depth && draw_keys[1].base_tiles == draw_keys[0].base_tiles) {
++      return false;
++    }
++  }
++  uint64_t rect_packed = uint64_t(uint16_t(rect_left)) | (uint64_t(uint16_t(rect_top)) << 16) |
++                         (uint64_t(uint16_t(rect_right)) << 32) |
++                         (uint64_t(uint16_t(rect_bottom)) << 48);
++
++  // Each in the MSAA mode the range was drawn with next after the same clear,
++  // if the rectangle has whole pixels in it.
++  RenderTargetKey keys[2];
++  RenderTarget* render_targets[2] = {};
++  Transfer::Rectangle rectangles[2];
++  uint32_t starts_tiles[2] = {}, lengths_tiles[2] = {};
++  std::bitset<xenos::kEdramTileCount> tiles_used;
++  for (uint32_t i = 0; i < 2; ++i) {
++    if (i ? color_rt_index == UINT32_MAX : !clear_depth) {
++      continue;
++    }
++    draw_keys[i].pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
++    draw_keys[i].msaa_samples = draw_msaa_samples;
++    RenderTargetKey& key = keys[i];
++    key = draw_keys[i];
++    uint32_t sample_edges[4] = {
++        uint32_t(rect_left) << draw_msaa_samples_x_log2,
++        uint32_t(rect_top) << draw_msaa_samples_y_log2,
++        uint32_t(rect_right) << draw_msaa_samples_x_log2,
++        uint32_t(rect_bottom) << draw_msaa_samples_y_log2,
++    };
++    auto next_msaa_it =
++        clear_rectangle_next_msaa_.find(std::make_pair(uint64_t(draw_keys[i].key), rect_packed));
++    if (next_msaa_it != clear_rectangle_next_msaa_.end()) {
++      uint32_t x_mask = uint32_t(next_msaa_it->second >= xenos::MsaaSamples::k4X);
++      uint32_t y_mask = uint32_t(next_msaa_it->second >= xenos::MsaaSamples::k2X);
++      if (!((sample_edges[0] | sample_edges[2]) & x_mask) &&
++          !((sample_edges[1] | sample_edges[3]) & y_mask)) {
++        key.msaa_samples = next_msaa_it->second;
++      }
++    }
++    uint32_t msaa_samples_x_log2 = uint32_t(key.msaa_samples >= xenos::MsaaSamples::k4X);
++    uint32_t msaa_samples_y_log2 = uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X);
++    Transfer::Rectangle& rectangle = rectangles[i];
++    rectangle.x_pixels = sample_edges[0] >> msaa_samples_x_log2;
++    rectangle.y_pixels = sample_edges[1] >> msaa_samples_y_log2;
++    rectangle.width_pixels = (sample_edges[2] >> msaa_samples_x_log2) - rectangle.x_pixels;
++    rectangle.height_pixels = (sample_edges[3] >> msaa_samples_y_log2) - rectangle.y_pixels;
++    if (sample_edges[2] > pitch_tiles_at_32bpp * xenos::kEdramTileWidthSamples ||
++        rectangle.y_pixels + rectangle.height_pixels >
++            GetRenderTargetHeight(pitch_tiles_at_32bpp, key.msaa_samples)) {
++      return false;
++    }
++    // The tiles containing the rectangle, as in a resolve clear.
++    uint32_t start_tiles_at_32bpp =
++        (sample_edges[1] / xenos::kEdramTileHeightSamples) * pitch_tiles_at_32bpp +
++        sample_edges[0] / xenos::kEdramTileWidthSamples;
++    uint32_t end_tiles_at_32bpp =
++        ((sample_edges[3] - 1) / xenos::kEdramTileHeightSamples) * pitch_tiles_at_32bpp +
++        (sample_edges[2] - 1) / xenos::kEdramTileWidthSamples + 1;
++    starts_tiles[i] =
++        std::min(start_tiles_at_32bpp << uint32_t(rts_are_64bpp[i]), xenos::kEdramTileCount);
++    lengths_tiles[i] =
++        std::min(end_tiles_at_32bpp << uint32_t(rts_are_64bpp[i]), xenos::kEdramTileCount) -
++        starts_tiles[i];
++    for (uint32_t j = 0; j < lengths_tiles[i]; ++j) {
++      uint32_t tile = (key.base_tiles + starts_tiles[i] + j) & (xenos::kEdramTileCount - 1);
++      if (tiles_used[tile]) {
++        // Depth and color overlapping.
++        return false;
++      }
++      tiles_used[tile] = true;
++    }
++    render_targets[i] = GetOrCreateRenderTarget(key);
++    if (!render_targets[i]) {
++      return false;
++    }
++  }
++
++  for (uint32_t i = 0; i < 2; ++i) {
++    clear_rectangle_transfers_[i].clear();
++    if (!render_targets[i]) {
++      continue;
++    }
++    ChangeOwnership(keys[i], starts_tiles[i], lengths_tiles[i], &clear_rectangle_transfers_[i],
++                    &rectangles[i]);
++    ClearRectangleWaitingForDraw& waiting = clear_rectangles_waiting_for_draw_[i];
++    waiting.clear = std::make_pair(uint64_t(draw_keys[i].key), rect_packed);
++    waiting.render_target_any_msaa = keys[i];
++    waiting.render_target_any_msaa.msaa_samples = xenos::MsaaSamples::k1X;
++    waiting.waiting = true;
++  }
++  if (render_targets[0] && render_targets[1] &&
++      keys[0].msaa_samples == keys[1].msaa_samples) {
++    TransferAndClearRenderTargets(2, render_targets, clear_rectangle_transfers_, clear_values,
++                                  rectangles[0]);
++  } else {
++    for (uint32_t i = 0; i < 2; ++i) {
++      if (render_targets[i]) {
++        TransferAndClearRenderTargets(1, &render_targets[i], &clear_rectangle_transfers_[i],
++                                      &clear_values[i], rectangles[i]);
++      }
++    }
++  }
++  return true;
++}
++
+ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
+     uint32_t* depth_and_color_formats_out) const {
+   if (GetPath() != Path::kHostRenderTargets) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index e5ce58b..788ee44 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4007,6 +4007,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     }
+     if (!i) {
+       ++submission_draws_;
++      // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
++      if (prim_type == xenos::PrimitiveType::kRectangleList && !memexport_writes_possible &&
++          !active_occlusion_query_.valid &&
++          render_target_cache_->ClearRectangleDraw(
++              is_rasterization_done, *vertex_shader, pixel_shader, normalized_depth_control,
++              pixel_shader
++                  ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
++                  : 0)) {
++        return true;
++      }
+     }
+ 
+     // Process primitives.

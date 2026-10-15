@@ -286,3 +286,59 @@ Built and run on Windows only, with an NVIDIA RTX 5080.
 | Copy through a storage view, which textures, the setting | `include/rex/graphics/vulkan/texture_cache.h`, `src/graphics/vulkan/texture_cache.cpp` | Vulkan |
 | The copy shader (GLSL source and its SPIR-V, made with `glslangValidator -V --target-env vulkan1.0`) | `src/graphics/shaders/texture_load_copy_to_image.cs.glsl`, `src/graphics/shaders/vulkan_spirv/texture_load_copy_to_image_{32,64,128}bpp_cs.h` | Vulkan |
 | Transient storage image descriptors | `include/rex/graphics/vulkan/command_processor.h`, `src/graphics/vulkan/command_processor.cpp` | Vulkan |
+
+## rexglue-clear-rectangle-draws.patch
+
+With host render targets, an EDRAM range used by one render target and then by another (a different format, MSAA mode or pitch) has its contents copied across, an ownership transfer, before the draw. Most of the transfers in this game come from its clears. Direct3D 9 on the Xbox 360 clears a render target by drawing a rectangle over it, often with 4x MSAA: there a pixel holds four samples, so the rectangle covers twice as many samples a pixel as the 2x MSAA the scene is drawn with. Each such clear made the emulator copy the whole range into a 4x MSAA host render target, draw the rectangle there, and copy it all back for the next 2x draw. At 3x, per frame, that was:
+- in the city, standing at the spawn point, 3.6 ms of a 13.7 ms GPU frame (D3D12);
+- in a race, 3.3 ms of 13.2 ms (D3D12).
+
+The transfer log (`launcher/dev/edram-transfer-log.sdk.patch` and `xf-classify.py` in the fork) put 49% of the transferred samples on the clears' own targets and 28% on the copies back. The main scene is drawn in two tiles of 1280x512 and 1280x208 (2x MSAA, `2_10_10_10_FLOAT` and `D24FS8`), each cleared at 4x MSAA. Small reflection and shadow targets, and the HUD's depth, are cleared the same way.
+
+Such a draw is now done as a clear of the host render targets, the way a resolve's clear is (`RenderTargetCache::ClearRectangleDraw`, called by both backends before processing a draw's primitives). A draw qualifies when:
+- **Shape:** it is one rectangle (a 3-vertex rectangle list, auto-indexed) in screen space: no viewport transform, no clipping, culling or polygon offset, with edges on pixel boundaries.
+- **Depth and stencil,** if used: always passing and replacing everything, so z enabled and written with the "always" test, stencil enabled with "always" and "replace" and a full write mask, and no separate back-face state.
+- **Color:** at most one color target, all of its components written, with blending off (one/zero/add).
+- **Pixel shader:** none, or one that kills nothing, writes no depth, uses no texture fetches and passes no alpha test.
+- **The values:**
+  - The vertex shader and the pixel shader are run on the CPU with the SDK's shader interpreter, as the draw extent estimator already does for vertices.
+  - Depth is the rectangle's z, which must be the same at all three vertices.
+  - Color is the pixel shader's output from interpolators that are the same at all three vertices. It must not depend on any other register: the shader is run twice with those registers at 0 and at 1, and both results must match.
+  - Formats handled are `8_8_8_8`, `2_10_10_10` and `2_10_10_10_FLOAT`. The color must be exact in the host format: 7e3 values for the float one, and alpha 0 or from 1 up in its 2 bits.
+  - Anything else is drawn as before.
+
+The clear goes to the host render target with the MSAA mode the range was next drawn with after the same clear the previous time (learned per render target and rectangle; the draw's own mode until then), with the rectangle converted to that mode's pixels (4x pixels are 2x1 pixels of 2x MSAA and 2x2 of 1x). The tiles it covers change owner with the rectangle cut out of the transfers, as for resolve clears. So the main scene's tiles are cleared straight in their 2x MSAA targets and need no transfer at all, and the HUD's depth in its 1x one. The depth value goes through the same conversion as a resolve clear's: 20e4 rounding for `D24FS8`, 24-bit unorm for `D24S8`. Setting `clear_rectangle_draws` (default on; `false` draws them again).
+
+Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings, at 3x (2x MSAA). GPU timestamps (`gpu-timestamps.sdk.patch`, `gpu-timestamps-vulkan.sdk.patch`), one timedemo run a side, median frame:
+
+| | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
+|---|---|---|---|---|
+| City, standing: GPU frame | 13.73 ms | 10.21 ms (-25.6%) | 12.72 ms | 10.54 ms (-17.1%) |
+| City: transfers and clears | 3.61 ms | 0.31 ms | 2.72 ms | 0.37 ms |
+| Race: GPU frame | 13.15 ms | 10.44 ms (-20.6%) | 14.16 ms | 13.11 ms (-7.4%) |
+| Race: transfers and clears | 3.30 ms | 0.35 ms | 2.61 ms | 0.42 ms |
+
+Scripted timedemo (`launcher/dev/devrun.py`; updates of exactly 1/60 s, uncapped). `drive-spawn.pad` is fullscreen, with five runs per configuration; `race.pad` is windowed, with three. Runs alternate after a warm-up. Median frame time, with the 1% low in brackets:
+
+| Segment | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
+|---|---|---|---|---|
+| Free roam, standing | 13.98 ms (61 FPS) | 10.67 ms, -23.7% (74 FPS) | 12.10 ms (70 FPS) | 9.78 ms, -19.2% (82 FPS) |
+| Drive from the spawn point | 13.81 ms (59 FPS) | 10.27 ms, -25.6% (74 FPS) | 12.27 ms (69 FPS) | 9.83 ms, -19.9% (84 FPS) |
+| Map zoom-out (loading) | 12.69 ms (22 FPS) | 8.73 ms, -31.2% (26 FPS) | 11.33 ms (29 FPS) | 7.73 ms, -31.8% (30 FPS) |
+| Race | 12.92 ms (57 FPS) | 10.54 ms, -18.4% (69 FPS) | 13.62 ms (59 FPS) | 11.86 ms, -12.9% (64 FPS) |
+
+- **Native resolution:** no change on either API (6.82 to 7.01 ms in all three segments, within 1%), as one of the game's own threads holds the frame there.
+- **D3D12 at 3x with a 60 FPS cap:** pacing is unchanged, 97.3% of frames within 1 ms of the target on against 97.1% off.
+
+Checks:
+- **Screenshots** with the setting switched on and off within one run (the dev pad's `set` command), 3 engine frames apart, standing in the city, in its pause menu, driving, in the map zoom-out and in the race (rain, midnight, opponents, HUD), on D3D12 and Vulkan. Standing and paused, on against off differs as little as two shots with the same setting (mean 0.27 against 0.14 to 0.33 out of 255); the moving scenes show nothing out of place.
+- **D3D12 debug layer,** in the city run with the setting on and off and in the race with it on: no errors, and the same few creation warnings either way.
+- **Vulkan validation,** in the city run with the setting on and off and in the race with it on: only `vkCmdEndQuery` 07007 and 01923, the occlusion query that this fork's other changes don't cause either.
+
+Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| Clear rectangle draws: detection, values, MSAA mode, ownership and the clear | `include/rex/graphics/pipeline/render_target/cache.h`, `src/graphics/pipeline/render_target/cache.cpp` | D3D12, Vulkan |
+| The transfers and the clear, as in a resolve | `include/rex/graphics/d3d12/render_target_cache.h`, `include/rex/graphics/vulkan/render_target_cache.h` | D3D12, Vulkan |
+| The call before a draw's primitives are processed | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12, Vulkan |

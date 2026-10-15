@@ -71,6 +71,7 @@ git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-vulkan-hoist-shared-m
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-threaded-submission-vulkan.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-d3d12-placed-texture-heaps.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-vulkan-texture-load-storage-copy.patch
+git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-clear-rectangle-draws.patch
 ```
 
 One Windows-specific repair. Git on Windows checks out symbolic links as small text files unless it is allowed to create links, and one of the SDK's libraries has fifteen of them. Replace them with copies of the files they point to:

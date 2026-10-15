@@ -139,6 +139,7 @@ rexglue-vulkan-hoist-shared-memory-uploads.patch src/graphics/vulkan/command_pro
 rexglue-threaded-submission-vulkan.patch src/graphics/vulkan/command_processor.cpp vulkan_threaded_submission
 rexglue-d3d12-placed-texture-heaps.patch src/graphics/d3d12/texture_cache.cpp d3d12_texture_heaps
 rexglue-vulkan-texture-load-storage-copy.patch src/graphics/vulkan/texture_cache.cpp vulkan_texture_load_storage_copy
+rexglue-clear-rectangle-draws.patch src/graphics/pipeline/render_target/cache.cpp clear_rectangle_draws
 LATER
 
 # ---------------------------------------------------------------------------
