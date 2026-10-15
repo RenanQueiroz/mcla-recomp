@@ -209,3 +209,20 @@ frame by frame and the car's position twice a second. A run replays it with
 `play <file> from=free_roam` after `boot-to-roam.pad`'s steps, and reports how
 far the car strayed from the recorded positions (`max_dev`); played back with
 `--mcla_fixed_dt=120` it advances the game exactly as at the recording's cap.
+
+### How repeatable (2026-10-14, RTX 5080, alternating runs after a warm-up)
+
+- `drive-spawn.pad` as a timedemo (`--fixed-dt 60 --intro fast`, uncapped):
+  the drive segment's median frame time varied 1.3-2.5% between runs (Native
+  and 3x, both APIs) and every run's path stayed within 0.4-4.9 m of the first
+  run's, including across APIs. The map zoom-out's median varied 0.5-0.7%
+  (8% once on Vulkan at 3x).
+- `boot-to-roam.pad` with the normal intro: the zoom-out took 6.4-7.2 s in
+  every run. Uncapped, its frame-time median is not a good measure: about a
+  quarter of uncapped swaps in the city carry no game update, and the normal
+  intro's pacing holds each of those to 30 per second (33 ms), so medians mix
+  two populations (spread up to 21%). At a 120 cap there are none.
+- A recorded drive replayed within 0.06-0.8 m of the recording for its first
+  3.5 s. Traffic is not the same from run to run: in the recording run the car
+  stopped against something after 4.5 s, the replays drove on, and `max_dev`
+  (70 m) flagged it.

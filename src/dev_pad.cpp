@@ -115,6 +115,14 @@ struct PadValues {
 std::mutex g_pad_mutex;
 PadValues g_pad;
 std::atomic<uint64_t> g_state_polls{0};
+// The thread the game polls the pad on (the last XamInputGetState caller).
+std::atomic<size_t> g_poll_thread{0};
+
+size_t ThisThread() {
+  return std::hash<std::thread::id>{}(std::this_thread::get_id());
+}
+// Set while the recorder itself reads the input system.
+thread_local bool g_in_record_poll = false;
 std::atomic<uint64_t> g_key_polls{0};
 std::atomic<uint64_t> g_keys_sent{0};
 
@@ -250,13 +258,26 @@ void RecordFrame(uint64_t frame) {
   if (!g_record_file) {
     return;
   }
+  // The input system has no lock of its own. MCLA polls it on this thread
+  // (checked at every frame here); should a poll ever come from another one,
+  // skip the frame rather than read the device lists while they change.
+  if (const size_t poller = g_poll_thread.load(); poller && poller != ThisThread()) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      REXLOG_WARN("dev pad: the game polls input on another thread; recording skips frames");
+    }
+    return;
+  }
   auto* input = static_cast<rex::input::InputSystem*>(
       rex::Runtime::instance() ? rex::Runtime::instance()->input_system() : nullptr);
   if (!input) {
     return;
   }
   X_INPUT_STATE state = {};
-  if (input->GetState(0, &state) != X_ERROR_SUCCESS) {
+  g_in_record_poll = true;
+  const X_RESULT polled = input->GetState(0, &state);
+  g_in_record_poll = false;
+  if (polled != X_ERROR_SUCCESS) {
     return;
   }
   PadValues v;
@@ -823,6 +844,14 @@ std::string Execute(const std::string& line) {
   }
   std::string cmd = args[0];
   auto arg = [&](size_t i) { return i < args.size() ? args[i] : std::string(); };
+  // Arguments i..last as written, for file names with spaces in them.
+  auto rest = [&](size_t i, size_t last) {
+    std::string joined;
+    for (size_t j = i; j <= last && j < args.size(); j++) {
+      joined += (j > i ? " " : "") + args[j];
+    }
+    return joined;
+  };
   auto duration_arg = [&](size_t i, double fallback_ms, double& amount, bool& frames) {
     if (i >= args.size()) {
       amount = fallback_ms;
@@ -1027,7 +1056,7 @@ std::string Execute(const std::string& line) {
     if (!p) {
       return "err unreadable";
     }
-    FILE* f = std::fopen(arg(3).c_str(), "wb");
+    FILE* f = std::fopen(rest(3, args.size() - 1).c_str(), "wb");
     if (!f) {
       return "err cannot write " + arg(3);
     }
@@ -1045,11 +1074,12 @@ std::string Execute(const std::string& line) {
   }
   if (cmd == "shot") {
     double scale = 1.0;
-    if (args.size() > 2 && !ParseNumber(arg(2), scale)) {
-      return "err scale";
+    size_t last = args.size() - 1;
+    if (args.size() > 2 && ParseNumber(args[last], scale)) {
+      last--;
     }
     std::string result;
-    return Shot(arg(1), scale, result) ? "ok " + result : "err " + result;
+    return Shot(rest(1, last), scale, result) ? "ok " + result : "err " + result;
   }
   if (cmd == "state") {
     const uint64_t elapsed = static_cast<uint64_t>(
@@ -1068,24 +1098,28 @@ std::string Execute(const std::string& line) {
   }
   if (cmd == "play") {
     std::string error;
-    auto rec = LoadRecording(arg(1), error);
+    const bool has_from = args.size() > 2 && args.back().rfind("from=", 0) == 0;
+    const std::string file = rest(1, args.size() - (has_from ? 2 : 1));
+    auto rec = LoadRecording(file, error);
     if (!rec) {
       return "err " + error;
     }
     uint64_t base = 0;
-    if (arg(2).rfind("from=", 0) == 0) {
-      const std::string mark = arg(2).substr(5);
+    if (has_from) {
+      const std::string mark = args.back().substr(5);
       auto it = std::find_if(rec->marks.begin(), rec->marks.end(),
                              [&](const auto& m) { return m.second == mark; });
       if (it == rec->marks.end()) {
-        return "err no mark '" + mark + "' in " + arg(1);
+        return "err no mark '" + mark + "' in " + file;
       }
       base = it->first;
     }
     {
       std::lock_guard lock(g_play_mutex);
       g_play = rec;
-      g_play_start = g_frame.load() + 1;
+      // The recording's frame N (counted from the mark) is applied on the
+      // N-th engine frame from now, as the recorder saw it when recording.
+      g_play_start = g_frame.load();
       g_play_base = base;
       g_play_index = 0;
       g_play_pos_index = 0;
@@ -1109,7 +1143,7 @@ std::string Execute(const std::string& line) {
   if (cmd == "record") {
     if (arg(1) == "start") {
       std::string error;
-      return StartRecording(arg(2), error) ? "ok" : "err " + error;
+      return StartRecording(rest(2, args.size() - 1), error) ? "ok" : "err " + error;
     }
     if (arg(1) == "stop") {
       StopRecording();
@@ -1122,7 +1156,7 @@ std::string Execute(const std::string& line) {
     return "ok";
   }
   if (cmd == "include") {
-    return RunScriptFile(arg(1));
+    return RunScriptFile(rest(1, args.size() - 1));
   }
   return "err unknown command '" + cmd + "'";
 }
@@ -1148,6 +1182,9 @@ class ScriptPad final : public rex::input::InputDriver {
   X_RESULT GetDeviceState(rex::input::DeviceId id, X_INPUT_STATE* out_state) override {
     if (id != kScriptPadId) {
       return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
+    if (!g_in_record_poll) {
+      g_poll_thread = ThisThread();
     }
     if (out_state) {
       std::lock_guard lock(g_pad_mutex);
