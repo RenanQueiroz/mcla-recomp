@@ -9,7 +9,7 @@ diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics
  #include <condition_variable>
  #include <cstddef>
  #include <cstdio>
-@@ -454,6 +455,21 @@ class VulkanPipelineCache {
+@@ -460,6 +461,24 @@ class VulkanPipelineCache {
    FILE* pipeline_storage_file_ = nullptr;
    bool pipeline_storage_file_flush_needed_ = false;
  
@@ -22,6 +22,9 @@ diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics
 +  // Pipelines have been created through vk_pipeline_cache_ since it was last
 +  // saved.
 +  std::atomic<bool> vk_pipeline_cache_dirty_{false};
++  // Size of the data in vk_pipeline_cache_path_ when it was loaded or last
++  // saved; the cache isn't written again while its size stays the same.
++  size_t vk_pipeline_cache_saved_size_ = 0;
 +  // When the last save was requested, on the command processor thread.
 +  std::chrono::steady_clock::time_point vk_pipeline_cache_save_requested_;
 +  // Writes vk_pipeline_cache_ to vk_pipeline_cache_path_. Called by the storage
@@ -31,7 +34,7 @@ diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics
    // Thread for asynchronous writing to the storage streams.
    void StorageWriteThread();
    std::mutex storage_write_request_lock_;
-@@ -464,6 +480,7 @@ class VulkanPipelineCache {
+@@ -470,6 +489,7 @@ class VulkanPipelineCache {
    std::deque<PipelineStoredDescription> storage_write_pipeline_queue_;
    bool storage_write_flush_shaders_ = false;
    bool storage_write_flush_pipelines_ = false;
@@ -42,7 +45,19 @@ diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
-@@ -64,6 +64,13 @@ REXCVAR_DEFINE_INT32(vulkan_pipeline_storage_translation_threads, -1, "GPU/Vulka
+@@ -14,6 +14,11 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cstdint>
++#ifdef _WIN32
++#include <io.h>
++#else
++#include <unistd.h>
++#endif
+ #include <cstring>
+ #include <memory>
+ #include <set>
+@@ -64,6 +69,13 @@ REXCVAR_DEFINE_INT32(vulkan_pipeline_storage_translation_threads, -1, "GPU/Vulka
      .range(-1, 32)
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
@@ -56,7 +71,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
  REXCVAR_DEFINE_BOOL(vulkan_async_placeholder_pipelines, false, "GPU/Vulkan",
                      "With async_shader_compilation, create a placeholder pipeline (the real "
                      "vertex shader with a stand-in pixel shader) on the GPU command thread for "
-@@ -429,6 +436,55 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -429,6 +441,84 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
    bool edram_fragment_shader_interlock =
        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
  
@@ -77,13 +92,41 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +        if (pipeline_cache_file_size > 0) {
 +          pipeline_cache_data.resize(size_t(pipeline_cache_file_size));
 +          rex::filesystem::Seek(pipeline_cache_file, 0, SEEK_SET);
-+          pipeline_cache_data.resize(fread(pipeline_cache_data.data(), 1,
-+                                           pipeline_cache_data.size(), pipeline_cache_file));
++          if (fread(pipeline_cache_data.data(), 1, pipeline_cache_data.size(),
++                    pipeline_cache_file) != pipeline_cache_data.size()) {
++            pipeline_cache_data.clear();
++          }
 +        }
 +        fclose(pipeline_cache_file);
 +      }
 +      const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
 +      const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++      // Only data this device and driver wrote is passed on.
++      if (!pipeline_cache_data.empty()) {
++        VkPhysicalDeviceProperties physical_device_properties;
++        vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(
++            vulkan_device->physical_device(), &physical_device_properties);
++        VkPipelineCacheHeaderVersionOne pipeline_cache_header;
++        bool pipeline_cache_data_usable =
++            pipeline_cache_data.size() >= sizeof(pipeline_cache_header);
++        if (pipeline_cache_data_usable) {
++          std::memcpy(&pipeline_cache_header, pipeline_cache_data.data(),
++                      sizeof(pipeline_cache_header));
++          pipeline_cache_data_usable =
++              pipeline_cache_header.headerSize >= sizeof(pipeline_cache_header) &&
++              pipeline_cache_header.headerSize <= pipeline_cache_data.size() &&
++              pipeline_cache_header.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
++              pipeline_cache_header.vendorID == physical_device_properties.vendorID &&
++              pipeline_cache_header.deviceID == physical_device_properties.deviceID &&
++              !std::memcmp(pipeline_cache_header.pipelineCacheUUID,
++                           physical_device_properties.pipelineCacheUUID, VK_UUID_SIZE);
++        }
++        if (!pipeline_cache_data_usable) {
++          REXGPU_INFO("VulkanPipelineCache: The pipeline cache file is from another device or "
++                      "driver, or damaged - starting with an empty one");
++          pipeline_cache_data.clear();
++        }
++      }
 +      VkPipelineCacheCreateInfo pipeline_cache_create_info = {};
 +      pipeline_cache_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 +      pipeline_cache_create_info.initialDataSize = pipeline_cache_data.size();
@@ -104,6 +147,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +      }
 +      if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
 +        REXGPU_INFO("Loaded {} bytes of VkPipelineCache data", pipeline_cache_data.size());
++        vk_pipeline_cache_saved_size_ = pipeline_cache_data.size();
 +      }
 +    }
 +    vk_pipeline_cache_save_requested_ = std::chrono::steady_clock::now();
@@ -112,7 +156,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
    // Initialize the pipeline storage stream - read pipeline descriptions and
    // collect used shader modifications to translate.
    std::vector<PipelineStoredDescription> pipeline_stored_descriptions;
-@@ -836,6 +892,12 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
+@@ -843,6 +933,12 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
    }
    storage_write_shader_queue_.clear();
    storage_write_pipeline_queue_.clear();
@@ -125,7 +169,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
  
    if (pipeline_storage_file_) {
      fclose(pipeline_storage_file_);
-@@ -868,6 +930,19 @@ void VulkanPipelineCache::EndSubmission() {
+@@ -875,6 +971,19 @@ void VulkanPipelineCache::EndSubmission() {
      shader_storage_file_flush_needed_ = false;
      pipeline_storage_file_flush_needed_ = false;
    }
@@ -145,7 +189,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
  
    if (!creation_threads_.empty()) {
      bool startup_loading = false;
-@@ -939,6 +1014,11 @@ void VulkanPipelineCache::Shutdown() {
+@@ -946,6 +1055,11 @@ void VulkanPipelineCache::Shutdown() {
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
  
@@ -157,7 +201,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
    ProcessDeferredPipelineDestructions(true);
  
    // Destroy all pipelines.
-@@ -3633,7 +3713,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3646,7 +3760,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
    VkPipeline pipeline;
@@ -166,7 +210,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
                                                           &pipeline_create_info, nullptr, &pipeline);
    if (create_result != VK_SUCCESS) {
      uint64_t ps_hash = creation_arguments.pixel_shader
-@@ -3650,6 +3730,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3663,6 +3777,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
          uint32_t(use_dynamic_rendering));
      return false;
    }
@@ -175,8 +219,8 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +  }
    bool was_placeholder =
        creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
-   VkPipeline old_pipeline =
-@@ -3794,6 +3877,55 @@ void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
+   // The layout, then the pipeline, then whether it's a placeholder: other
+@@ -3810,6 +3927,73 @@ void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
    }
  }
  
@@ -184,8 +228,10 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +  if (vk_pipeline_cache_ == VK_NULL_HANDLE || vk_pipeline_cache_path_.empty()) {
 +    return;
 +  }
-+  // Cleared before reading, so pipelines created meanwhile request another save.
++  // Cleared before reading, so pipelines created meanwhile request another
++  // save, and set again if this one fails.
 +  vk_pipeline_cache_dirty_.store(false, std::memory_order_relaxed);
++  auto save_failed = [this]() { vk_pipeline_cache_dirty_.store(true, std::memory_order_relaxed); };
 +  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
 +  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
 +  const VkDevice device = vulkan_device->device();
@@ -197,6 +243,12 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +    if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &pipeline_cache_size, nullptr) !=
 +            VK_SUCCESS ||
 +        !pipeline_cache_size) {
++      save_failed();
++      return;
++    }
++    // Pipelines created with the data already in the cache (as in a run with
++    // everything cached) don't make it grow; nothing to write then.
++    if (attempt == 0 && pipeline_cache_size == vk_pipeline_cache_saved_size_) {
 +      return;
 +    }
 +    pipeline_cache_data.resize(pipeline_cache_size);
@@ -205,18 +257,26 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +    pipeline_cache_data.resize(pipeline_cache_size);
 +  }
 +  if (result != VK_SUCCESS) {
++    save_failed();
 +    return;
 +  }
-+  // Written next to it and renamed, so a run ending during the write doesn't
-+  // leave a partial file.
++  // Written next to it, flushed to the disk and renamed, so a run ending
++  // during the write doesn't leave a partial file.
 +  std::filesystem::path temporary_path = vk_pipeline_cache_path_;
 +  temporary_path += ".tmp";
 +  FILE* pipeline_cache_file = rex::filesystem::OpenFile(temporary_path, "wb");
 +  if (!pipeline_cache_file) {
++    save_failed();
 +    return;
 +  }
 +  bool written = fwrite(pipeline_cache_data.data(), 1, pipeline_cache_data.size(),
 +                        pipeline_cache_file) == pipeline_cache_data.size();
++  written = fflush(pipeline_cache_file) == 0 && written;
++#ifdef _WIN32
++  written = _commit(_fileno(pipeline_cache_file)) == 0 && written;
++#else
++  written = fsync(fileno(pipeline_cache_file)) == 0 && written;
++#endif
 +  written = fclose(pipeline_cache_file) == 0 && written;
 +  std::error_code rename_error;
 +  if (written) {
@@ -224,15 +284,17 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +  }
 +  if (!written || rename_error) {
 +    std::filesystem::remove(temporary_path, rename_error);
++    save_failed();
 +    return;
 +  }
++  vk_pipeline_cache_saved_size_ = pipeline_cache_data.size();
 +  REXGPU_DEBUG("Saved {} bytes of VkPipelineCache data", pipeline_cache_data.size());
 +}
 +
  void VulkanPipelineCache::StorageWriteThread() {
    ShaderStoredHeader shader_header;
    // Don't leak anything in unused bits.
-@@ -3820,11 +3952,16 @@ void VulkanPipelineCache::StorageWriteThread() {
+@@ -3836,11 +4020,16 @@ void VulkanPipelineCache::StorageWriteThread() {
      const Shader* shader = nullptr;
      PipelineStoredDescription pipeline_description;
      bool write_pipeline = false;
@@ -249,7 +311,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
        if (!storage_write_shader_queue_.empty()) {
          shader = storage_write_shader_queue_.front();
          storage_write_shader_queue_.pop_front();
-@@ -3841,12 +3978,16 @@ void VulkanPipelineCache::StorageWriteThread() {
+@@ -3857,12 +4046,16 @@ void VulkanPipelineCache::StorageWriteThread() {
          storage_write_flush_pipelines_ = false;
          flush_pipelines = true;
        }

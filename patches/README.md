@@ -425,15 +425,17 @@ So the frame was held for as long as the slowest compile, and still went out wit
   - default 4; 0 leaves the draw out at once; -1 waits as long as it takes;
   - the wait is a condition variable notified by the creation threads;
   - pipelines the driver has cached (well under a millisecond) are drawn in the same frame;
-  - D3D12 takes the root signature again once the pipeline is there.
+  - D3D12 takes the root signature of a pipeline created asynchronously again at every draw, as the creation thread stores it with the pipeline, possibly after `ConfigurePipeline` returned. The bindful root signatures, which the creation threads create too, are behind a lock;
+  - a draw inside an occlusion query isn't left out, which the query would count as hidden: a new pipeline for it is created right away, on the GPU command thread, and one that an earlier draw queued is waited for (up to half a second, outside the budget). Waiting for a new one instead held a cold title screen's frame for 400 ms, as its pipeline waited behind the others in the queue.
 - **Vulkan: no placeholders.** No placeholder pipelines are created (`vulkan_async_placeholder_pipelines`, default false; true creates them as before).
   - Without them, depth-only pipelines are created asynchronously too, unless the vertex shader exports to memory (memexport), which the guest may read.
-  - A pipeline whose creation fails stays left out and is no longer waited for.
+  - A pipeline whose creation fails stays left out and is no longer waited for. It doesn't make the frame incomplete either, which would otherwise hold every later frame back from being presented.
+  - A pipeline is published as its layout, then the pipeline, then `is_placeholder` cleared (release), and read in the opposite order (acquire). D3D12 already stores a pipeline's root signature before the pipeline.
   - D3D12 still creates depth-only pipelines on the GPU command thread. Its async path translates the shaders on the creation thread and doesn't handle a missing pixel shader. They cost 70 to 200 ms in a whole cold session there.
 - **Vulkan: a limit on skipped presents.** `vulkan_async_skip_incomplete_frames` (on) skips presenting a frame that left a draw out. Without the end-of-submission wait, that could hold the picture for a whole compile. `vulkan_async_skip_incomplete_frames_max_ms` (default 100; 0 for no limit) shows the incomplete frames after that long.
 
 **The calls that end a submission in the middle of a frame:**
-- the primary-buffer end and the threaded-submission split already wait for `CanEndSubmissionImmediately` (no pipelines being created);
+- the primary-buffer end and the threaded-submission split asked `CanEndSubmissionImmediately` for no pipelines being created. Without the end-of-submission wait, pending pipelines no longer hold them back;
 - the readbacks (`CheckSubmissionFence`, memexport and resolve readback, the occlusion queries) need the GPU to have run what was recorded, which never refers to a pending pipeline.
 
 **Measurements.** Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings.
@@ -470,8 +472,12 @@ So the frame was held for as long as the slowest compile, and still went out wit
 
 Checks:
 
-- **D3D12 debug layer**, a cold 3x race run: no errors, only the creation warnings that were there before (and the list of live objects at exit).
-- **Vulkan validation**, a cold 3x race run: only `ShaderOutputNotConsumed` and `vkCmdEndQuery` 01923, both there before.
+- **D3D12 debug layer**, cold 3x race runs: no errors. Besides the creation warnings that were there before (and the list of live objects at exit), each cold run has 3 to 9 `RESOURCE_BARRIER_DUPLICATE_SUBRESOURCE_TRANSITIONS` warnings on render targets. Those are a render target's transitions queued for a draw that was then left out, followed by the next draw's, in one barrier call. Draws were left out the same way before, and the warning is the same with `async_pipeline_end_of_frame_wait`; warm runs, which leave nothing out, have none.
+- **Vulkan validation**, cold 3x race runs: only `ShaderOutputNotConsumed` and `vkCmdEndQuery` 01923 and 07007, all there before.
+- **After the review fixes** (occlusion queries, failed creations, the order of a pipeline's publication, submissions ending while pipelines are created), one cold 3x race run each:
+  - D3D12: 4 frames over 50 ms, 1 over 100 ms (the title screen's, 281 ms), 0.51 s in frames over 50 ms, map zoom-out 1% low 26.2 FPS, race 67.7 FPS;
+  - Vulkan: 3, 1 (224 ms), 0.38 s, 24.4 FPS, 53.2 FPS.
+  - Warm 3x drive, two runs a side: D3D12 9.73 and 9.81 ms against 9.64 and 9.60 ms before; Vulkan 9.22 and 9.44 against 9.42 and 9.55 ms. One warm Vulkan run had a 283 ms frame in the drive with no pipeline work at all.
 - **Warm benchmark** (`drive-spawn.pad`, timedemo, fullscreen, five runs a side alternating after a warm-up): the map zoom-out, free roam and the drive within 1.3% of before at native and 3x on both APIs; nothing is created there.
 - **60 FPS cap**, native: 98.3 to 99.3% of frames within 1 ms of the target, against 98.5 to 100% before.
 
@@ -491,7 +497,9 @@ When the shader storage is loaded, Vulkan translated the shaders of the stored p
 They are now translated on as many threads as pipeline creation uses (`vulkan_pipeline_storage_translation_threads`, default -1; 1 translates them one by one as before):
 - all of one shader on the same thread, since its first translation also gives it its bindings;
 - the shared binding layouts under the cache's `layouts_mutex_`;
-- each thread with a translator of its own.
+- each thread with a translator of its own;
+- no more threads than logical processors;
+- if a thread can't be created, the calling thread translates what the others don't take.
 
 Translation: 303 to 311 ms before, 49 to 51 ms after (12 threads), in every run, warm or not. Creating the stored pipelines was already parallel: 21 to 25 ms with the driver's cache warm, 5.0 s once after a change to the translated shaders. Built and run on Windows only, with an NVIDIA RTX 5080.
 
@@ -502,9 +510,11 @@ Translation: 303 to 311 ms before, 49 to 51 ms after (12 threads), in every run,
 ## rexglue-vulkan-pipeline-cache-file.patch
 
 Keeps the driver's pipeline cache (`VkPipelineCache`) between runs, after xenia-canary's `VulkanPipelineCache`. It is in `<cache root>/shaders/local/<title ID>.vk.bin` and:
-- is loaded before the stored pipelines are created (the data is ignored if it is from another driver or device);
+- is loaded before the stored pipelines are created. The whole file must be read, and its header (`VkPipelineCacheHeaderVersionOne`: length, version, vendor and device ID, `pipelineCacheUUID`) must match the device, or the cache starts empty;
 - is passed to every pipeline creation;
-- is saved by the storage writing thread every 10 s while new pipelines are being created, and when the storage is shut down (written next to it and renamed).
+- is saved by the storage writing thread every 10 s while new pipelines are being created, and when the storage is shut down. It is written next to the file, flushed to the disk and renamed;
+- is not written again while the cache's size is what was loaded or last saved, as in a run that only creates pipelines already in it;
+- stays marked for saving until a save succeeds.
 
 `vkCreatePipelineCache`, `vkDestroyPipelineCache` and `vkGetPipelineCacheData` are added to the device's function table.
 

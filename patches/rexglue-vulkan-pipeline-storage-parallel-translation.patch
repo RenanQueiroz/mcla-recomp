@@ -39,7 +39,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
    for (const std::pair<uint64_t, uint64_t>& translation_needed : shader_translations_needed) {
      auto shader_it = shaders_.find(translation_needed.first);
      if (shader_it == shaders_.end()) {
-@@ -588,11 +610,77 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -588,11 +610,84 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
      bool translation_is_new = false;
      auto* translation = static_cast<VulkanShader::VulkanTranslation*>(
          shader->GetOrCreateTranslation(translation_needed.second, &translation_is_new));
@@ -66,11 +66,11 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +          TranslateAnalyzedShader(translator, *stored_translations[i].translation);
 +    }
 +  };
++  uint32_t translation_processor_count = std::max(rex::thread::logical_processor_count(), 1u);
 +  size_t translation_thread_count = 1;
 +  if (REXCVAR_GET(vulkan_pipeline_storage_translation_threads) < 0) {
 +    if (REXCVAR_GET(vulkan_pipeline_creation_threads) < 0) {
-+      translation_thread_count =
-+          std::max(rex::thread::logical_processor_count() * 3 / 4, uint32_t(1));
++      translation_thread_count = std::max(translation_processor_count * 3 / 4, uint32_t(1));
 +    } else {
 +      translation_thread_count =
 +          std::max(uint32_t(REXCVAR_GET(vulkan_pipeline_creation_threads)), uint32_t(1));
@@ -78,7 +78,9 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +  } else if (REXCVAR_GET(vulkan_pipeline_storage_translation_threads) > 0) {
 +    translation_thread_count = size_t(REXCVAR_GET(vulkan_pipeline_storage_translation_threads));
 +  }
-+  translation_thread_count = std::min(translation_thread_count, stored_translation_shader_count);
++  translation_thread_count =
++      std::min({translation_thread_count, size_t(translation_processor_count),
++                stored_translation_shader_count});
 +  if (translation_thread_count <= 1) {
 +    for (size_t i = 0; i < stored_translation_shader_count; ++i) {
 +      translate_stored_shader(*shader_translator_, i);
@@ -107,7 +109,12 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
 +    for (size_t i = 0; i < translation_thread_count; ++i) {
 +      std::unique_ptr<rex::thread::Thread> translation_thread =
 +          rex::thread::Thread::Create({}, translation_worker);
-+      assert_not_null(translation_thread);
++      if (!translation_thread) {
++        // Whatever the threads that exist don't take is translated here.
++        REXGPU_WARN("VulkanPipelineCache: Failed to create a shader translation thread");
++        translation_worker();
++        break;
++      }
 +      translation_thread->set_name("Vulkan Translation");
 +      translation_threads.push_back(std::move(translation_thread));
 +    }
@@ -121,7 +128,7 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
      }
    }
  
-@@ -1314,6 +1402,8 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
+@@ -1320,6 +1415,8 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
  
    // Set up the texture binding layout.
    if (shader.EnterBindingLayoutUserUIDSetup()) {
