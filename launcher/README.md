@@ -176,6 +176,9 @@ during a build:
   where its GPU command thread's time goes, validation, pacing and stress runs,
   the render pass breaks that upload hoisting removed, the Vulkan submission
   thread, and a D3D12 against Vulkan benchmark in the city.
+- `race-benchmark-2026-10-15.md`: the race benchmark (`scripts\race.pad`):
+  how it gets into the race, how repeatable it is, D3D12 baselines and where
+  the GPU time goes in it at 3x.
 - `gpu-timestamps-vulkan.sdk.patch` (SDK, Vulkan): the frame timings of
   `gpu-timestamps.sdk.patch` for Vulkan (`MCLA_GT_EVERY`, `MCLA_GT_DIR`), also
   bracketing render pass begins and ends; applies together with the D3D12 one.
@@ -211,8 +214,13 @@ in front. A real controller keeps working alongside it.
 - `dev\scripts\`: `boot-to-roam.pad` (title, the map zoom-out loading, the
   city: the loading benchmark), `drive-spawn.pad` (the same, then about 8 s of
   driving from the spawn point; with `--fixed-dt 60 --track` three runs' paths
-  stayed within 1.7 m of each other) and `mark-roam.pad` (for recordings).
-  Scripts can `include` others.
+  stayed within 1.7 m of each other), `mark-roam.pad` (for recordings) and
+  `race.pad` (an arcade race, "Sunset and Vine" with 7 opponents, traffic,
+  rain and midnight, through `boot-to-race.pad`; the car follows
+  `sunset-and-vine.route` with the `follow` command; see
+  `dev\race-benchmark-2026-10-15.md`). Scripts can `include` others.
+- `dev\route.py record <file>` writes the path the leading opponent drives in
+  a race (from the pipe's `cars` command) as a route for `follow`.
 
 The game ignores buttons during its own transitions (the title screen's camera
 cuts, a menu closing), so scripts press until a condition holds rather than
