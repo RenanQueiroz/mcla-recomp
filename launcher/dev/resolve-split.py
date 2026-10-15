@@ -1,7 +1,8 @@
 """Resolves and texture loads per frame, from GPU timestamp frames recorded with
 gpu-timestamps(-vulkan).sdk.patch, texload-split-timestamps.sdk.patch and
 resolve-split-timestamps.sdk.patch: per frame the resolves (the dump into the
-EDRAM buffer, the resolve shader, the clear) and the texture loads; per kind
+EDRAM buffer, the resolve shader, or the direct resolve shader with
+direct_host_resolve, the clear) and the texture loads; per kind
 of resolve (size, formats, EDRAM range, destination) and of load (size,
 format, address) the time a frame; with --detail N, frame gt_N.csv in order.
 
@@ -60,7 +61,8 @@ for p, total, items in frames:
     ld = [i for i in items if i["kind"] == "load"]
     print(f"{os.path.basename(p):10s} frame {total/1000:6.2f} ms  resolves {len(rs):3d} "
           f"{sum(sum(i['t'].values()) for i in rs)/1000:5.2f} ms (dump {sum(i['t']['rdump'] for i in rs)/1000:4.2f} "
-          f"copy {sum(i['t']['rcopy'] for i in rs)/1000:4.2f} bar {sum(i['t']['rbar'] for i in rs)/1000:4.2f} "
+          f"copy {sum(i['t']['rcopy'] for i in rs)/1000:4.2f} direct {sum(i['t']['rdirect'] for i in rs)/1000:4.2f} "
+          f"bar {sum(i['t']['rbar'] for i in rs)/1000:4.2f} "
           f"clear {sum(i['t']['rclear'] for i in rs)/1000:4.2f})  loads {len(ld):3d} "
           f"{sum(sum(i['t'].values()) for i in ld)/1000:5.2f} ms")
 

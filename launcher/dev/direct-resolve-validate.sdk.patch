@@ -1,0 +1,587 @@
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index ab0f55b..b67b3a0 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -643,6 +643,17 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   bool GetDirectResolveSourceConversion(RenderTargetKey key,
+                                         DirectResolveSourceConversion& conversion_out) const;
+ 
++  // TMPDV: after a direct resolve, reads the destination back, resolves through
++  // the EDRAM buffer and reads it back again, to compare when the submission
++  // completes (CheckDirectResolveValidation).
++  void ValidateDirectResolve(const draw_util::ResolveInfo& resolve_info,  // TMPDV
++                             draw_util::ResolveCopyShaderIndex copy_shader,
++                             const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
++                             uint32_t copy_group_count_x, uint32_t copy_group_count_y,
++                             const ui::d3d12::util::DescriptorCpuGpuHandlePair& descriptor_dest,
++                             D3D12TextureCache& texture_cache, std::string key);
++  void CheckDirectResolveValidation();  // TMPDV
++
+   // Writes contents of host render targets within rectangles from
+   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
+   bool DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+@@ -726,6 +737,13 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+                                                 [2] = {};
+   // Null SRVs for the unused source binding - [uint][multisampled].
+   ui::d3d12::D3D12CpuDescriptorPool::Descriptor direct_resolve_null_srvs_[2][2];
++  // TMPDV: readback of the destination after the direct and the EDRAM buffer
++  // resolve.
++  Microsoft::WRL::ComPtr<ID3D12Resource> direct_resolve_validation_readback_[2];  // TMPDV
++  uint64_t direct_resolve_validation_readback_size_ = 0;                          // TMPDV
++  uint64_t direct_resolve_validation_submission_ = UINT64_MAX;                    // TMPDV
++  uint64_t direct_resolve_validation_length_ = 0;                                 // TMPDV
++  std::string direct_resolve_validation_key_;                                     // TMPDV
+ 
+   // Parameter 0 - 2 root constants (red, green).
+   ID3D12RootSignature* uint32_rtv_clear_root_signature_ = nullptr;
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 3e0ef55..30350a5 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -576,6 +576,17 @@ class RenderTargetCache {
+   RenderTarget* GetDirectResolveSource(const draw_util::ResolveInfo& resolve_info,
+                                        DirectResolveSourceConstants& source_constants_out) const;
+ 
++  // TMPDV: validation of direct resolves against the EDRAM buffer path
++  // (direct_resolve_validate), development only. One resolve at a time is
++  // validated: the k-th eligible one of a frame, k advancing each time.
++  bool ShouldValidateDirectResolve(uint64_t frame, bool validation_pending);             // TMPDV
++  std::string GetDirectResolveValidationKey(const draw_util::ResolveInfo& resolve_info,  // TMPDV
++                                            draw_util::ResolveCopyShaderIndex copy_shader,
++                                            RenderTargetKey source_key,
++                                            uint32_t source_constants_info) const;
++  void CompareDirectResolveValidation(const std::string& key, const uint8_t* direct,  // TMPDV
++                                      const uint8_t* reference, size_t length);
++
+   // Sets up the needed render targets and transfers to perform a clear in a
+   // resolve operation via a host render target clear. resolve_info is expected
+   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
+@@ -632,6 +643,14 @@ class RenderTargetCache {
+   // Temporary storage for GetDirectResolveSource.
+   mutable std::vector<ResolveCopyDumpRectangle> direct_resolve_rectangles_;
+ 
++  // TMPDV: [validated, with differences, differing bytes] per kind of resolve.
++  std::map<std::string, std::array<uint64_t, 3>> direct_resolve_validation_stats_;  // TMPDV
++  uint64_t direct_resolve_validation_count_ = 0;                                    // TMPDV
++  uint64_t direct_resolve_validation_frame_ = UINT64_MAX;                           // TMPDV
++  uint32_t direct_resolve_validation_frame_resolves_ = 0;                           // TMPDV
++  uint32_t direct_resolve_validation_last_frame_resolves_ = 0;                      // TMPDV
++  uint32_t direct_resolve_validation_target_ = 0;                                   // TMPDV
++
+   // For host render targets.
+ 
+   struct OwnershipRange {
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 49a0b6a..6040ca3 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -817,6 +817,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   VkDescriptorSet GetDirectResolveSourceDescriptorSet(VulkanRenderTarget& render_target,
+                                                       bool source_is_uint);
+ 
++  // TMPDV: after a direct resolve, reads the destination back, resolves through
++  // the EDRAM buffer and reads it back again, to compare when the submission
++  // completes (CheckDirectResolveValidation).
++  void ValidateDirectResolve(const draw_util::ResolveInfo& resolve_info,  // TMPDV
++                             draw_util::ResolveCopyShaderIndex copy_shader,
++                             const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
++                             uint32_t copy_group_count_x, uint32_t copy_group_count_y,
++                             VkDescriptorSet descriptor_set_dest, VkBuffer dest_buffer,
++                             uint64_t dest_offset, uint64_t dest_length, std::string key);
++  void CheckDirectResolveValidation();  // TMPDV
++
+   // Writes contents of host render targets within rectangles from
+   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
+   bool DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+@@ -876,6 +887,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   VkDeviceMemory direct_resolve_dummy_image_memory_[2][2] = {};
+   VkImageView direct_resolve_dummy_image_views_[2][2] = {};
+   bool direct_resolve_dummy_images_initialized_ = false;
++  // TMPDV: readback of the destination after the direct and the EDRAM buffer
++  // resolve.
++  VkBuffer direct_resolve_validation_readback_[2] = {};               // TMPDV
++  VkDeviceMemory direct_resolve_validation_readback_memory_[2] = {};  // TMPDV
++  uint64_t direct_resolve_validation_readback_size_ = 0;              // TMPDV
++  uint64_t direct_resolve_validation_submission_ = UINT64_MAX;        // TMPDV
++  uint64_t direct_resolve_validation_length_ = 0;                     // TMPDV
++  std::string direct_resolve_validation_key_;                         // TMPDV
+ 
+   // Temporary storage for Resolve.
+   std::vector<Transfer> clear_transfers_[2];
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index d449974..20f2e38 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -47,6 +47,8 @@ REXCVAR_DEFINE_STRING(render_target_path_d3d12, "", "GPU/D3D12",
+ 
+ REXCVAR_DEFINE_BOOL(native_stencil_value_output, true, "GPU", "Enable native stencil value output");
+ 
++REXCVAR_DECLARE(bool, direct_resolve_validate);  // TMPDV
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1508,6 +1510,19 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+             shared_memory.MarkUAVWritesCommitNeeded();
+           }
+ 
++          // TMPDV
++          if (direct_source && draw_resolution_scaled && REXCVAR_GET(direct_resolve_validate)) {
++            CheckDirectResolveValidation();
++            if (ShouldValidateDirectResolve(command_processor_.GetCurrentFrame(),
++                                            direct_resolve_validation_submission_ != UINT64_MAX)) {
++              ValidateDirectResolve(
++                  resolve_info, copy_shader, copy_shader_constants, copy_group_count_x,
++                  copy_group_count_y, descriptor_dest, texture_cache,
++                  GetDirectResolveValidationKey(resolve_info, copy_shader, direct_source->key(),
++                                                direct_source_constants.info));
++            }
++          }
++
+           // Invalidate textures and mark the range as scaled if needed.
+           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                             resolve_info.copy_dest_extent_length);
+@@ -5721,6 +5736,135 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
+   return pipeline;
+ }
+ 
++// TMPDV: validation of direct resolves, development only.
++void D3D12RenderTargetCache::ValidateDirectResolve(
++    const draw_util::ResolveInfo& resolve_info, draw_util::ResolveCopyShaderIndex copy_shader,
++    const draw_util::ResolveCopyShaderConstants& copy_shader_constants, uint32_t copy_group_count_x,
++    uint32_t copy_group_count_y, const ui::d3d12::util::DescriptorCpuGpuHandlePair& descriptor_dest,
++    D3D12TextureCache& texture_cache, std::string key) {
++  (void)descriptor_dest;
++  // The written extent in the buffer of the current scaled resolve range.
++  uint64_t scale = uint64_t(draw_resolution_scale_x()) * draw_resolution_scale_y();
++  uint64_t offset =
++      texture_cache.GetCurrentScaledResolveRangeStartScaled() -
++      (uint64_t(texture_cache.GetCurrentScaledResolveBufferIndexPublic()) << 30) +
++      uint64_t(resolve_info.copy_dest_extent_start - resolve_info.copy_dest_base) * scale;
++  uint64_t length = uint64_t(resolve_info.copy_dest_extent_length) * scale;
++  if (!length) {
++    return;
++  }
++  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
++  if (direct_resolve_validation_readback_size_ < length) {
++    direct_resolve_validation_readback_size_ = 0;
++    D3D12_RESOURCE_DESC readback_desc;
++    ui::d3d12::util::FillBufferResourceDesc(readback_desc, length, D3D12_RESOURCE_FLAG_NONE);
++    for (uint32_t i = 0; i < 2; ++i) {
++      direct_resolve_validation_readback_[i].Reset();
++      if (FAILED(device->CreateCommittedResource(
++              &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &readback_desc,
++              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++              IID_PPV_ARGS(&direct_resolve_validation_readback_[i])))) {
++        REXGPU_ERROR("TMPDV failed to create a {}-byte readback buffer", length);
++        return;
++      }
++    }
++    direct_resolve_validation_readback_size_ = length;
++  }
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  ID3D12Resource* scaled_resolve_buffer = texture_cache.GetCurrentScaledResolveBufferResource();
++
++  // The direct resolve's result.
++  texture_cache.TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE_COPY_SOURCE);
++  command_processor_.SubmitBarriers();
++  command_list.D3DCopyBufferRegion(direct_resolve_validation_readback_[0].Get(), 0,
++                                   scaled_resolve_buffer, offset, length);
++
++  // The EDRAM buffer path into the same destination, with new descriptors as
++  // bindful ones may be in a new heap.
++  uint32_t dump_base, dump_row_length_used, dump_rows, dump_pitch;
++  resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
++  if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
++    REXGPU_ERROR("TMPDV failed to dump the render targets");
++    return;
++  }
++  const draw_util::ResolveCopyShaderInfo& copy_shader_info =
++      draw_util::resolve_copy_shader_info[size_t(copy_shader)];
++  ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[2];
++  if (!command_processor_.RequestOneUseSingleViewDescriptors(bindless_resources_used_ ? 1 : 2,
++                                                             descriptors)) {
++    REXGPU_ERROR("TMPDV failed to get descriptors");
++    return;
++  }
++  ui::d3d12::util::DescriptorCpuGpuHandlePair reference_dest = descriptors[0];
++  ui::d3d12::util::DescriptorCpuGpuHandlePair reference_source;
++  if (bindless_resources_used_) {
++    reference_source = copy_shader_info.source_is_raw
++                           ? command_processor_.GetSystemBindlessViewHandlePair(
++                                 D3D12CommandProcessor::SystemBindlessView::kEdramRawSRV)
++                           : command_processor_.GetEdramUintPow2BindlessSRVHandlePair(
++                                 copy_shader_info.source_bpe_log2);
++  } else {
++    reference_source = descriptors[1];
++    if (copy_shader_info.source_is_raw) {
++      WriteEdramRawSRVDescriptor(reference_source.first);
++    } else {
++      WriteEdramUintPow2SRVDescriptor(reference_source.first, copy_shader_info.source_bpe_log2);
++    }
++  }
++  texture_cache.CreateCurrentScaledResolveRangeUintPow2UAV(reference_dest.first,
++                                                           copy_shader_info.dest_bpe_log2);
++  texture_cache.TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++  TransitionEdramBuffer(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++  command_list.D3DSetComputeRootSignature(resolve_copy_root_signature_);
++  command_list.D3DSetComputeRootDescriptorTable(2, reference_source.second);
++  command_list.D3DSetComputeRootDescriptorTable(1, reference_dest.second);
++  command_list.D3DSetComputeRoot32BitConstants(
++      0, sizeof(copy_shader_constants.dest_relative) / sizeof(uint32_t),
++      &copy_shader_constants.dest_relative, 0);
++  command_processor_.SetExternalPipeline(resolve_copy_pipelines_[size_t(copy_shader)]);
++  command_processor_.SubmitBarriers();
++  command_list.D3DDispatch(copy_group_count_x, copy_group_count_y, 1);
++  texture_cache.MarkCurrentScaledResolveRangeUAVWritesCommitNeeded();
++
++  // The reference result, left in the destination.
++  texture_cache.TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE_COPY_SOURCE);
++  command_processor_.SubmitBarriers();
++  command_list.D3DCopyBufferRegion(direct_resolve_validation_readback_[1].Get(), 0,
++                                   scaled_resolve_buffer, offset, length);
++
++  direct_resolve_validation_submission_ = command_processor_.GetCurrentSubmission();
++  direct_resolve_validation_length_ = length;
++  direct_resolve_validation_key_ = std::move(key);
++}
++
++// TMPDV
++void D3D12RenderTargetCache::CheckDirectResolveValidation() {
++  if (direct_resolve_validation_submission_ == UINT64_MAX ||
++      command_processor_.GetCompletedSubmission() < direct_resolve_validation_submission_) {
++    return;
++  }
++  void* mappings[2] = {};
++  D3D12_RANGE read_range = {0, SIZE_T(direct_resolve_validation_length_)};
++  bool mapped = true;
++  for (uint32_t i = 0; i < 2; ++i) {
++    mapped &= SUCCEEDED(direct_resolve_validation_readback_[i]->Map(0, &read_range, &mappings[i]));
++  }
++  if (mapped) {
++    CompareDirectResolveValidation(
++        direct_resolve_validation_key_, static_cast<const uint8_t*>(mappings[0]),
++        static_cast<const uint8_t*>(mappings[1]), size_t(direct_resolve_validation_length_));
++  } else {
++    REXGPU_ERROR("TMPDV failed to map the readback buffers");
++  }
++  D3D12_RANGE written_range = {0, 0};
++  for (uint32_t i = 0; i < 2; ++i) {
++    if (mappings[i]) {
++      direct_resolve_validation_readback_[i]->Unmap(0, &written_range);
++    }
++  }
++  direct_resolve_validation_submission_ = UINT64_MAX;
++}
++
+ bool D3D12RenderTargetCache::GetDirectResolveSourceConversion(
+     RenderTargetKey key, DirectResolveSourceConversion& conversion_out) const {
+   // The same conversions as in GetOrCreateDumpPipeline.
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 96359b4..67da6f6 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -22,6 +22,7 @@
+ #include <rex/cvar.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/render_target/cache.h>
++#include <rex/graphics/pipeline/texture/info.h>  // TMPDV
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+@@ -46,6 +47,10 @@ REXCVAR_DEFINE_BOOL(clear_rectangle_draws, true, "GPU",
+                     "MSAA mode the range was drawn with next before, instead of transferring "
+                     "render targets between MSAA modes for them");
+ 
++REXCVAR_DEFINE_BOOL(direct_resolve_validate, false, "GPU",  // TMPDV
++                    "Development: also resolve through the EDRAM buffer after each direct "
++                    "resolve, one at a time, and log differences in the destination");
++
+ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -1538,6 +1543,90 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetDirectResolveSource(
+   return render_target;
+ }
+ 
++// TMPDV: validation of direct resolves, development only.
++bool RenderTargetCache::ShouldValidateDirectResolve(uint64_t frame, bool validation_pending) {
++  if (frame != direct_resolve_validation_frame_) {
++    direct_resolve_validation_frame_ = frame;
++    direct_resolve_validation_last_frame_resolves_ = direct_resolve_validation_frame_resolves_;
++    direct_resolve_validation_frame_resolves_ = 0;
++    if (direct_resolve_validation_target_ >= direct_resolve_validation_last_frame_resolves_) {
++      direct_resolve_validation_target_ = 0;
++    }
++  }
++  uint32_t index = direct_resolve_validation_frame_resolves_++;
++  if (validation_pending || index != direct_resolve_validation_target_) {
++    return false;
++  }
++  ++direct_resolve_validation_target_;
++  return true;
++}
++
++// TMPDV
++std::string RenderTargetCache::GetDirectResolveValidationKey(
++    const draw_util::ResolveInfo& resolve_info, draw_util::ResolveCopyShaderIndex copy_shader,
++    RenderTargetKey source_key, uint32_t source_constants_info) const {
++  bool is_depth = resolve_info.IsCopyingDepth();
++  const draw_util::ResolveEdramInfo& edram_info =
++      is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
++  const FormatInfo* dest_format_info =
++      FormatInfo::Get(xenos::TextureFormat(resolve_info.copy_dest_info.copy_dest_format));
++  return fmt::format(
++      "{} | {}x {} {} read as {} | to {} | samples {} | conversion {} | exp bias {} swap {} "
++      "endian {}",
++      draw_util::resolve_copy_shader_info[size_t(copy_shader)].debug_name,
++      uint32_t(1) << uint32_t(source_key.msaa_samples), is_depth ? "depth" : "color",
++      is_depth ? xenos::GetDepthRenderTargetFormatName(source_key.GetDepthFormat())
++               : xenos::GetColorRenderTargetFormatName(source_key.GetColorFormat()),
++      is_depth
++          ? xenos::GetDepthRenderTargetFormatName(xenos::DepthRenderTargetFormat(edram_info.format))
++          : xenos::GetColorRenderTargetFormatName(
++                xenos::ColorRenderTargetFormat(edram_info.format)),
++      dest_format_info ? dest_format_info->name : "?",
++      uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
++      source_constants_info & 0xF, int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
++      uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
++      uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
++}
++
++// TMPDV
++void RenderTargetCache::CompareDirectResolveValidation(const std::string& key,
++                                                       const uint8_t* direct,
++                                                       const uint8_t* reference, size_t length) {
++  std::array<uint64_t, 3>& stats = direct_resolve_validation_stats_[key];
++  ++stats[0];
++  ++direct_resolve_validation_count_;
++  if (std::memcmp(direct, reference, length)) {
++    size_t differing = 0, first = SIZE_MAX;
++    for (size_t i = 0; i < length; ++i) {
++      if (direct[i] != reference[i]) {
++        if (first == SIZE_MAX) {
++          first = i;
++        }
++        ++differing;
++      }
++    }
++    ++stats[1];
++    stats[2] += differing;
++    size_t row = first & ~size_t(15);
++    std::string direct_hex, reference_hex;
++    for (size_t i = row; i < std::min(row + 16, length); ++i) {
++      direct_hex += fmt::format("{:02X}", direct[i]);
++      reference_hex += fmt::format("{:02X}", reference[i]);
++    }
++    REXGPU_WARN(
++        "TMPDV direct resolve differs: {} - {} of {} bytes, first at {}, at {}: direct {} "
++        "reference {}",
++        key, differing, length, first, row, direct_hex, reference_hex);
++  }
++  if (direct_resolve_validation_count_ % 50 == 0) {
++    REXGPU_INFO("TMPDV direct resolve validation: {} resolves", direct_resolve_validation_count_);
++    for (const auto& stats_pair : direct_resolve_validation_stats_) {
++      REXGPU_INFO("TMPDV   {}: {} validated, {} differing, {} bytes", stats_pair.first,
++                  stats_pair.second[0], stats_pair.second[1], stats_pair.second[2]);
++    }
++  }
++}
++
+ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
+     const draw_util::ResolveInfo& resolve_info, Transfer::Rectangle& clear_rectangle_out,
+     RenderTarget*& depth_render_target_out, std::vector<Transfer>& depth_transfers_out,
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index eb093a5..c7e838a 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -62,6 +62,8 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ //     "always FB because the FSI path is much slower now).",
+ //     "GPU");
+ 
++REXCVAR_DECLARE(bool, direct_resolve_validate);  // TMPDV
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1168,6 +1170,15 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+   direct_resolve_dummy_images_initialized_ = false;
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          direct_resolve_pipeline_layout_);
++  // TMPDV
++  for (size_t i = 0; i < 2; ++i) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
++                                           direct_resolve_validation_readback_[i]);
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
++                                           direct_resolve_validation_readback_memory_[i]);
++  }
++  direct_resolve_validation_readback_size_ = 0;
++  direct_resolve_validation_submission_ = UINT64_MAX;
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          dump_pipeline_layout_depth_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+@@ -1503,6 +1514,20 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+           command_processor_.SubmitBarriers(true);
+           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
+ 
++          // TMPDV
++          if (direct_source && draw_resolution_scaled && REXCVAR_GET(direct_resolve_validate)) {
++            CheckDirectResolveValidation();
++            if (ShouldValidateDirectResolve(command_processor_.GetCurrentFrame(),
++                                            direct_resolve_validation_submission_ != UINT64_MAX)) {
++              ValidateDirectResolve(
++                  resolve_info, copy_shader, copy_shader_constants, copy_group_count_x,
++                  copy_group_count_y, descriptor_set_dest, texture_cache.scaled_resolve_buffer(),
++                  copy_dest_use_start, copy_dest_use_length,
++                  GetDirectResolveValidationKey(resolve_info, copy_shader, direct_source->key(),
++                                                direct_source_constants.info));
++            }
++          }
++
+           // Invalidate textures and mark the range as scaled if needed.
+           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                             resolve_info.copy_dest_extent_length);
+@@ -6182,6 +6207,143 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+   return pipeline;
+ }
+ 
++// TMPDV: validation of direct resolves, development only.
++void VulkanRenderTargetCache::ValidateDirectResolve(
++    const draw_util::ResolveInfo& resolve_info, draw_util::ResolveCopyShaderIndex copy_shader,
++    const draw_util::ResolveCopyShaderConstants& copy_shader_constants, uint32_t copy_group_count_x,
++    uint32_t copy_group_count_y, VkDescriptorSet descriptor_set_dest, VkBuffer dest_buffer,
++    uint64_t dest_offset, uint64_t dest_length, std::string key) {
++  if (!dest_length) {
++    return;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  if (direct_resolve_validation_readback_size_ < dest_length) {
++    direct_resolve_validation_readback_size_ = 0;
++    for (uint32_t i = 0; i < 2; ++i) {
++      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
++                                             direct_resolve_validation_readback_[i]);
++      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
++                                             direct_resolve_validation_readback_memory_[i]);
++      if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
++              vulkan_device, dest_length, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++              ui::vulkan::util::MemoryPurpose::kReadback, direct_resolve_validation_readback_[i],
++              direct_resolve_validation_readback_memory_[i])) {
++        REXGPU_ERROR("TMPDV failed to create a {}-byte readback buffer", dest_length);
++        return;
++      }
++    }
++    direct_resolve_validation_readback_size_ = dest_length;
++  }
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  VkBufferCopy copy_region;
++  copy_region.srcOffset = dest_offset;
++  copy_region.dstOffset = 0;
++  copy_region.size = dest_length;
++
++  // The direct resolve's result.
++  command_processor_.PushBufferMemoryBarrier(
++      dest_buffer, dest_offset, dest_length, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++      VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++  command_processor_.SubmitBarriers(true);
++  command_buffer.CmdVkCopyBuffer(dest_buffer, direct_resolve_validation_readback_[0], 1,
++                                 &copy_region);
++
++  // The EDRAM buffer path into the same destination.
++  uint32_t dump_base, dump_row_length_used, dump_rows, dump_pitch;
++  resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
++  if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
++    REXGPU_ERROR("TMPDV failed to dump the render targets");
++    return;
++  }
++  command_processor_.PushBufferMemoryBarrier(
++      dest_buffer, dest_offset, dest_length, VK_PIPELINE_STAGE_TRANSFER_BIT,
++      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
++      VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++  UseEdramBuffer(EdramBufferUsage::kComputeRead);
++  command_processor_.BindExternalComputePipeline(resolve_copy_pipelines_[size_t(copy_shader)]);
++  VkDescriptorSet descriptor_sets[kResolveCopyDescriptorSetCount] = {};
++  descriptor_sets[kResolveCopyDescriptorSetEdram] = edram_storage_buffer_descriptor_set_;
++  descriptor_sets[kResolveCopyDescriptorSetDest] = descriptor_set_dest;
++  command_buffer.CmdVkBindDescriptorSets(
++      VK_PIPELINE_BIND_POINT_COMPUTE, resolve_copy_pipeline_layout_, 0,
++      uint32_t(rex::countof(descriptor_sets)), descriptor_sets, 0, nullptr);
++  command_buffer.CmdVkPushConstants(resolve_copy_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                                    sizeof(copy_shader_constants.dest_relative),
++                                    &copy_shader_constants.dest_relative);
++  command_processor_.SubmitBarriers(true);
++  command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
++
++  // The reference result, left in the destination.
++  command_processor_.PushBufferMemoryBarrier(
++      dest_buffer, dest_offset, dest_length, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++      VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++  command_processor_.SubmitBarriers(true);
++  command_buffer.CmdVkCopyBuffer(dest_buffer, direct_resolve_validation_readback_[1], 1,
++                                 &copy_region);
++  // Before the next uses of the destination, and the host reading the copies.
++  command_processor_.PushBufferMemoryBarrier(
++      dest_buffer, dest_offset, dest_length, VK_PIPELINE_STAGE_TRANSFER_BIT,
++      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_QUEUE_FAMILY_IGNORED,
++      VK_QUEUE_FAMILY_IGNORED, false);
++  for (uint32_t i = 0; i < 2; ++i) {
++    command_processor_.PushBufferMemoryBarrier(
++        direct_resolve_validation_readback_[i], 0, dest_length, VK_PIPELINE_STAGE_TRANSFER_BIT,
++        VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
++        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++  }
++  command_processor_.SubmitBarriers(true);
++
++  direct_resolve_validation_submission_ = command_processor_.GetCurrentSubmission();
++  direct_resolve_validation_length_ = dest_length;
++  direct_resolve_validation_key_ = std::move(key);
++}
++
++// TMPDV
++void VulkanRenderTargetCache::CheckDirectResolveValidation() {
++  if (direct_resolve_validation_submission_ == UINT64_MAX ||
++      command_processor_.GetCompletedSubmission() < direct_resolve_validation_submission_) {
++    return;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  void* mappings[2] = {};
++  bool mapped = true;
++  for (uint32_t i = 0; i < 2; ++i) {
++    if (dfn.vkMapMemory(device, direct_resolve_validation_readback_memory_[i], 0, VK_WHOLE_SIZE, 0,
++                        &mappings[i]) != VK_SUCCESS) {
++      mappings[i] = nullptr;
++      mapped = false;
++      continue;
++    }
++    VkMappedMemoryRange mapped_range;
++    mapped_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++    mapped_range.pNext = nullptr;
++    mapped_range.memory = direct_resolve_validation_readback_memory_[i];
++    mapped_range.offset = 0;
++    mapped_range.size = VK_WHOLE_SIZE;
++    dfn.vkInvalidateMappedMemoryRanges(device, 1, &mapped_range);
++  }
++  if (mapped) {
++    CompareDirectResolveValidation(
++        direct_resolve_validation_key_, static_cast<const uint8_t*>(mappings[0]),
++        static_cast<const uint8_t*>(mappings[1]), size_t(direct_resolve_validation_length_));
++  } else {
++    REXGPU_ERROR("TMPDV failed to map the readback buffers");
++  }
++  for (uint32_t i = 0; i < 2; ++i) {
++    if (mappings[i]) {
++      dfn.vkUnmapMemory(device, direct_resolve_validation_readback_memory_[i]);
++    }
++  }
++  direct_resolve_validation_submission_ = UINT64_MAX;
++}
++
+ bool VulkanRenderTargetCache::GetDirectResolveSourceConversion(
+     RenderTargetKey key, DirectResolveSourceConversion& conversion_out) const {
+   // The same conversions as in GetDumpPipeline.

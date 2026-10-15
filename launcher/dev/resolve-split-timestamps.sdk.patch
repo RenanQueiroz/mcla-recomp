@@ -1,5 +1,5 @@
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index f28a9fb..4663908 100644
+index 048f0b2..45b25b7 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
 @@ -15,6 +15,7 @@
@@ -10,7 +10,7 @@ index f28a9fb..4663908 100644
  #include <iterator>
  #include <memory>
  #include <string>
-@@ -1218,6 +1219,29 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1351,6 +1352,29 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
    }
  
    DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
@@ -40,36 +40,32 @@ index f28a9fb..4663908 100644
  
    // Copying.
    bool copied = false;
-@@ -1233,6 +1257,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
-           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
-       bool direct_resolved = false;
-       if (GetPath() == Path::kHostRenderTargets) {
-+        TmpPixMark(command_list, "<rdump");  // TMPR4
-         if (REXCVAR_GET(direct_host_resolve)) {
-           direct_resolved =
-               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
-@@ -1255,6 +1280,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1398,7 +1422,10 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+           uint32_t dump_rows;
+           uint32_t dump_pitch;
+           resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+-          if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
++          TmpPixMark(command_list, "<rdump");  // TMPR4
++          bool tmp_dumped = DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch);  // TMPR4
++          TmpPixMark(command_list, ">rdump");  // TMPR4
++          if (!tmp_dumped) {
+             REXGPU_ERROR("D3D12RenderTargetCache: Failed to dump host render targets for resolve");
              return false;
            }
-         }
-+        TmpPixMark(command_list, ">rdump");  // TMPR4
-       }
- 
-       // Make sure there is memory to write to.
-@@ -1336,8 +1362,12 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
-                 0, sizeof(copy_shader_constants) / sizeof(uint32_t), &copy_shader_constants, 0);
+@@ -1535,8 +1562,12 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            }
-           command_processor_.SetExternalPipeline(resolve_copy_pipelines_[size_t(copy_shader)]);
+           command_processor_.SetExternalPipeline(
+               direct_source ? direct_pipeline : resolve_copy_pipelines_[size_t(copy_shader)]);
 +          TmpPixMark(command_list, "<rbar");  // TMPR4
            command_processor_.SubmitBarriers();
 +          TmpPixMark(command_list, ">rbar");  // TMPR4
-+          TmpPixMark(command_list, "<rcopy");  // TMPR4
++          TmpPixMark(command_list, direct_source ? "<rdirect" : "<rcopy");  // TMPR4
            command_list.D3DDispatch(copy_group_count_x, copy_group_count_y, 1);
-+          TmpPixMark(command_list, ">rcopy");  // TMPR4
++          TmpPixMark(command_list, direct_source ? ">rdirect" : ">rcopy");  // TMPR4
  
            // Order the resolve with other work using the destination as a UAV.
            if (draw_resolution_scaled) {
-@@ -1367,6 +1397,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1566,6 +1597,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
    bool cleared = false;
    bool clear_depth = resolve_info.IsClearingDepth();
    bool clear_color = resolve_info.IsClearingColor();
@@ -78,7 +74,7 @@ index f28a9fb..4663908 100644
      switch (GetPath()) {
        case Path::kHostRenderTargets: {
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index ec3c00f..aa9d0d5 100644
+index dcdf992..b976db7 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -14,6 +14,7 @@
@@ -89,7 +85,7 @@ index ec3c00f..aa9d0d5 100644
  #include <memory>
  #include <tuple>
  #include <utility>
-@@ -1171,6 +1172,29 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1324,6 +1325,29 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
    DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
@@ -119,35 +115,31 @@ index ec3c00f..aa9d0d5 100644
  
    // Copying.
    bool copied = false;
-@@ -1186,6 +1210,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
-           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
-       bool direct_resolved = false;
-       if (GetPath() == Path::kHostRenderTargets) {
-+        if (g_vkgt_active) TmpGtMark(command_buffer, "<rdump");  // TMPR4
-         if (REXCVAR_GET(direct_host_resolve)) {
-           direct_resolved =
-               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
-@@ -1208,6 +1233,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1376,7 +1400,10 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+           uint32_t dump_rows;
+           uint32_t dump_pitch;
+           resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+-          if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
++          if (g_vkgt_active) TmpGtMark(command_buffer, "<rdump");  // TMPR4
++          bool tmp_dumped = DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch);  // TMPR4
++          if (g_vkgt_active) TmpGtMark(command_buffer, ">rdump");  // TMPR4
++          if (!tmp_dumped) {
+             REXGPU_ERROR("VulkanRenderTargetCache: Failed to dump host render targets for resolve");
              return false;
            }
-         }
-+        if (g_vkgt_active) TmpGtMark(command_buffer, ">rdump");  // TMPR4
-       }
- 
-       uint32_t copy_dest_range_unscaled = resolve_info.copy_dest_extent_start -
-@@ -1304,8 +1330,11 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
-                 resolve_copy_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                 sizeof(copy_shader_constants), &copy_shader_constants);
+@@ -1522,8 +1549,11 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+                 copy_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, copy_shader_constants_size,
+                 sizeof(direct_source_constants), &direct_source_constants);
            }
 +          if (g_vkgt_active) TmpGtMark(command_buffer, "<rbar");  // TMPR4
            command_processor_.SubmitBarriers(true);
-+          if (g_vkgt_active) { TmpGtMark(command_buffer, ">rbar"); TmpGtMark(command_buffer, "<rcopy"); }  // TMPR4
++          if (g_vkgt_active) { TmpGtMark(command_buffer, ">rbar"); TmpGtMark(command_buffer, direct_source ? "<rdirect" : "<rcopy"); }  // TMPR4
            command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
-+          if (g_vkgt_active) TmpGtMark(command_buffer, ">rcopy");  // TMPR4
++          if (g_vkgt_active) TmpGtMark(command_buffer, direct_source ? ">rdirect" : ">rcopy");  // TMPR4
  
            // Invalidate textures and mark the range as scaled if needed.
            texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
-@@ -1324,6 +1353,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1542,6 +1572,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    bool cleared = false;
    bool clear_depth = resolve_info.IsClearingDepth();
    bool clear_color = resolve_info.IsClearingColor();
