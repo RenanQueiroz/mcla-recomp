@@ -27,7 +27,10 @@ kinds of changes on top of upstream's `main`:
     placed in shared heaps instead of each being an allocation of its own (the
     map zoom-out's and races' stutters), and Vulkan texture loads copied into
     their images by a compute shader instead of `vkCmdCopyBufferToImage`
-    (NVIDIA only by default; 19% shorter frames at 3x).
+    (NVIDIA only by default; 19% shorter frames at 3x), and the game's
+    Direct3D 9-style clear rectangles done as host render target clears
+    instead of copying the render targets between MSAA modes and back (13 to
+    32% shorter frames at 3x on both APIs).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in

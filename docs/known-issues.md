@@ -298,3 +298,17 @@ At 3x, Vulkan's texture loads took 4.4 ms of each GPU frame, against 1.6 ms on D
 Validation shows nothing new; screenshots and the attract movie look the same. Measurements and method: `launcher/dev/vulkan-2026-10-14.md` in the fork; details in `patches/README.md`.
 
 **Not verified**: other GPUs and drivers, which is why it is on with NVIDIA only by default, and the bike.
+
+## Clears drawn at 4x MSAA took a quarter of the GPU frame at 3x (fixed 2026-10-15)
+
+The game clears its render targets the Direct3D 9 way, by drawing a rectangle over them, mostly with 4x MSAA over targets drawn with 2x (the main scene, in two tiles) or 1x (the HUD's depth). The emulator's host render targets can't change MSAA mode in place. So each such clear copied the whole range into a 4x MSAA target, drew there, and copied it all back for the next draw. At 3x that was 3.3 to 3.6 ms of a 13 to 14 ms GPU frame on D3D12, and 2.6 to 2.7 ms on Vulkan.
+
+`patches/rexglue-clear-rectangle-draws.patch` does these draws as clears of the host render targets, like a resolve's clear (setting `clear_rectangle_draws`, default on, both APIs). It clears in the MSAA mode that the range was drawn with next after the same clear last time, so the scene's tiles are cleared in place with no copies. Timedemo at 3x, median frame:
+- **D3D12:** standing in the city 14.0 to 10.7 ms (-24%), driving 13.8 to 10.3 ms (-26%), the map zoom-out 12.7 to 8.7 ms (-31%), the race 12.9 to 10.5 ms (-18%).
+- **Vulkan:** 12.1 to 9.8 ms (-19%), 12.3 to 9.8 ms (-20%), 11.3 to 7.7 ms (-32%), 13.6 to 11.9 ms (-13%).
+- **1% lows** rose with them, 59-61 to 74 FPS on D3D12 and 69-70 to 82-84 on Vulkan in the city.
+- **Native and pacing:** native resolution and 60 FPS pacing are unchanged.
+
+Screenshots taken with the setting switched on and off within one run look the same. The D3D12 debug layer and Vulkan validation report nothing new. Measurements and method: `launcher/dev/edram-transfers-2026-10-15.md` in the fork; details in `patches/README.md`.
+
+**Not verified**: other GPUs.
