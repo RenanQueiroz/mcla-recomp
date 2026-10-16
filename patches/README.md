@@ -26,6 +26,7 @@ git apply ../../patches/rexglue-texture-load-direct.patch
 git apply ../../patches/rexglue-async-pipelines-no-frame-wait.patch
 git apply ../../patches/rexglue-vulkan-pipeline-storage-parallel-translation.patch
 git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
+git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
 ```
 

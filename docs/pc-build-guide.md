@@ -76,6 +76,7 @@ git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-texture-load-direct.p
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-async-pipelines-no-frame-wait.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-vulkan-pipeline-storage-parallel-translation.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-vulkan-pipeline-cache-file.patch
+git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-resolve-4xmsaa-depth-samples.patch
 git -C third_party\rexglue-sdk apply ..\..\patches\rexglue-direct-resolve.patch
 ```
 

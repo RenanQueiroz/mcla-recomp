@@ -174,6 +174,7 @@ try {
         @{ Patch = "rexglue-async-pipelines-no-frame-wait.patch"; File = "src\graphics\command_processor.cpp"; Adds = "async_pipeline_wait_budget_ms" }
         @{ Patch = "rexglue-vulkan-pipeline-storage-parallel-translation.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "vulkan_pipeline_storage_translation_threads" }
         @{ Patch = "rexglue-vulkan-pipeline-cache-file.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "vulkan_pipeline_cache_file" }
+        @{ Patch = "rexglue-resolve-4xmsaa-depth-samples.patch"; File = "src\graphics\shaders\bytecode\d3d12_5_1\resolve_fast_32bpp_4xmsaa_cs.h"; Adds = "Approximately 200 instruction slots used" }
         @{ Patch = "rexglue-direct-resolve.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "GetDirectResolveSource" }
     )
     foreach ($later in $laterPatches) {

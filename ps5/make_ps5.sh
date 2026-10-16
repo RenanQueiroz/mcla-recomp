@@ -151,6 +151,7 @@ rexglue-texture-load-direct.patch src/graphics/pipeline/texture/cache.cpp textur
 rexglue-async-pipelines-no-frame-wait.patch src/graphics/command_processor.cpp async_pipeline_wait_budget_ms
 rexglue-vulkan-pipeline-storage-parallel-translation.patch src/graphics/vulkan/pipeline_cache.cpp vulkan_pipeline_storage_translation_threads
 rexglue-vulkan-pipeline-cache-file.patch src/graphics/vulkan/pipeline_cache.cpp vulkan_pipeline_cache_file
+rexglue-resolve-4xmsaa-depth-samples.patch src/graphics/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_4xmsaa_cs.h Approximately 200 instruction slots used
 rexglue-direct-resolve.patch src/graphics/pipeline/render_target/cache.cpp GetDirectResolveSource
 LATER
 
