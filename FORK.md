@@ -19,7 +19,9 @@ kinds of changes on top of upstream's `main`:
     waits for a career save being written; plus the launcher's four SDK
     settings as the game's PC defaults, and the single-tile hook's comments
     corrected: it has never taken effect, and can't without a larger EDRAM
-    in the SDK (`KNOWN-ISSUES.md`).
+    in the SDK, so its pause menu row is gone; and a display gamma setting,
+    the console's TV ramp or sRGB for PC monitors, switched during play
+    (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,

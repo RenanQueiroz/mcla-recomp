@@ -228,7 +228,7 @@ The launcher passed its choices on the command line at every start, and the comm
 
 ## Single-tile rendering has never taken effect (2026-10-16)
 
-Upstream's `mcla_single_tile` (on by default; PERFORMANCE › SINGLE TILE RENDERING in the pause menu) was meant to draw the main scene as one predicated tile instead of the Xbox 360's two. Every scene draw is submitted once per tile: 1280x512 and 1280x208 at 1x, about 1,370 draws each in the city. It has never changed anything, for two reasons:
+Upstream's `mcla_single_tile` (on by default; it had a PERFORMANCE › SINGLE TILE RENDERING row in the pause menu, removed since, see below) was meant to draw the main scene as one predicated tile instead of the Xbox 360's two. Every scene draw is submitted once per tile: 1280x512 and 1280x208 at 1x, about 1,370 draws each in the city. It has never changed anything, for two reasons:
 - **The hook never acts.** It acts only on a null render target in `grcDevice::BeginTiledRendering` (`sub_8217A470`), a condition taken from LARecomp. No call passes one in this game, the main scene's included: thousands of calls a session were logged on both APIs, at native and 3x, through the title, the city, the menus and a race, and the hook acted on none of them.
 - **The SDK has no room for one tile.** A 720p 2x MSAA tile needs 1,472 EDRAM tiles for the colour and as many for the depth. The SDK's EDRAM is the console's 2,048 tiles with addresses wrapping round, not the 4,096 the hook's comment claimed. Forced onto the main scene, the colour wraps into the depth's tiles: the picture is right down to row 288 (864 at 3x) and garbage below it, and the scene costs 1 ms more GPU time at 3x in EDRAM transfers.
 
@@ -248,3 +248,25 @@ With anti-aliasing off (`mcla_msaa = false`), the game draws the scene as one ti
 - **Native, in the race:** 8% shorter frames on D3D12 and 22% on Vulkan, where that thread was the bottleneck.
 
 The pause menu and the GPS map keep their own three 4x tiles. Measurements and method: `launcher/dev/single-tile-2026-10-16.md`.
+
+**The SINGLE TILE RENDERING row is gone from PERFORMANCE** (2026-10-16): it had no effect, whichever way it was set. The option itself is kept as it was (`--mcla_single_tile`, on by default, and a `mcla_single_tile` line in `mcla.toml` still loads), with its hooks; a comment in `src/settings_menu.cpp` points to the note above. The launcher never had this setting.
+
+## Display gamma for PC monitors (2026-10-16)
+
+The game's tonemap writes sRGB-encoded colour (`1.055·x^(1/2.2) − 0.055`) into a plain 8-bit front buffer and leaves the display transfer to the console's gamma ramp: a 256-entry, 10-bit table that the display hardware applied and the SDK's presenter applies, on both APIs (`launcher/dev/frame-structure-2026-10-16.md`). Direct3D sets the ramp once, when the device is created: the game's identity ramp goes through `D3DDevice_SetGammaRamp` (sub_82416000), which adjusts it for the display with a table that the XDK helper sub_82426B68 builds from `VdGetCurrentDisplayGamma`. The SDK answers type 2, a TV (BT.709), as for an Xbox 360 on an HDTV, which makes the table BT.709 OETF(sRGB EOTF(x)). Type 1, sRGB, makes it the identity. On a PC monitor, which expects sRGB, the TV ramp makes the shadows darker than the game drew them: 8-bit levels 64, 128 and 192 come out as 193, 462 and 741 of 1023 (48, 115 and 185 of 255) instead of 256, 513 and 770.
+
+`mcla_display_gamma` picks the type (`src/display_gamma.cpp`):
+- `tv`, the default, is type 2, as before; `pc` is type 1, the identity ramp.
+- The launcher's *Display gamma* and the pause menu's DISPLAY › DISPLAY GAMMA (TV, PC MONITOR) set it.
+- A mid-asm hook right after the helper's call to `VdGetCurrentDisplayGamma` (0x82426B98) puts the chosen type where the call wrote its answer. The helper caches its table by type, so a new type builds a new table.
+- **It switches during play.** The game never sets its ramp again, so when the option changes, an override of `D3DDevice_Swap` (sub_82419E98) calls `SetGammaRamp` again at the start of the next swap, with the identity ramp the device creation used (the PWL variant for a 10-bit front buffer, which this game doesn't use). That runs on the thread that owns the device, between two frames, and the swap sends the new ramp to the GPU with its frame, as a game changing its ramp would. A change shows on screen within a few frames (two or three at 60 FPS in the screenshots).
+- The log says which ramp is in use, at the first swap and after each change, with its values at levels 0, 64, 128, 192 and 255. It is a game-side change; the SDK is not patched.
+
+Checked on Windows, RTX 5080, with `devrun.py`, in the city at 23:30 (time of day poked), at 1x on both APIs and at 3x on D3D12:
+- **The ramps.** TV: 0, 193, 462, 741 and 1023, the values `frame-structure-2026-10-16.md` read from the presenter; PC monitor: 0, 256, 513, 770 and 1023, the identity.
+- **The picture.** Applying the TV ramp to a PC monitor screenshot gives the TV screenshot of the same moment to within 1 level on 97.6 to 99.98% of pixels (the rest is what moved between the two). The night city's average brightness went from 46 to 60 of 255, and the pixels below 64 from 73% to 61%; behind the pause menu, from 32 to 45. Dark detail such as the car's tyres, its rear bumper and the driver through the rear window shows with PC monitor and is black with TV.
+- **Switching during play.** 47 switches a run, 40 of them one every 3 frames, from the dev pad and from the menu row (right, right, A): every screenshot was wholly one ramp or the other, with no mixed or damaged frame. The menu row saved `mcla_display_gamma = "pc"` to `mcla.toml`.
+- **Starting with `pc`** in `mcla.toml` (through `--toml`): the first frame already had the identity ramp.
+- **D3D12 debug layer:** no errors, only the usual warnings (buffer initial states, MIN/MAX blend factors, live objects at exit). **Vulkan validation** with synchronization validation: only what it reports without this change (`vkCmdEndQuery` 07007 and 01923, `ShaderOutputNotConsumed`, and 10 write-after-write hazards between texture-load dispatches during start-up, before any switch).
+
+**Not verified**: other GPUs, Linux and the PS5 (the option is in the PS5's menu too); HDR output, which this fork doesn't have yet.

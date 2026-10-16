@@ -57,11 +57,14 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Resolution | Native (720p), 2× (1440p), 3× (2160p, 4K) | `resolution_scale` = `1`, `2` or `3` | DISPLAY › RESOLUTION (next start) |
 | Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `mcla_fps` (0 for uncapped) | DISPLAY › FPS TARGET |
 | Display | Fullscreen, Windowed | `fullscreen` = `true` or `false` | DISPLAY › FULLSCREEN |
+| Display gamma | TV (as on the console), PC monitor (sRGB, brighter shadows) | `mcla_display_gamma` = `tv` or `pc` | DISPLAY › DISPLAY GAMMA |
 | Anti-aliasing | On (2× MSAA), Off (one tile instead of two: 8 to 18% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
 | HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `mcla_ui_hud_rate` = `30`, `60`, `120` or `0` | DISPLAY › HUD UPDATES |
 | Graphics API | Automatic (Direct3D 12 first), Direct3D 12, Vulkan | `mcla_gpu_backend` = `any`, `d3d12` or `vulkan` | DISPLAY › GRAPHICS API (next start) |
 | Intro | Normal, Fast, Skip (hides the title logo) | `mcla_intro` = `normal`, `fast` or `skip` | CONTROLS › INTRO (next start) |
 | Button prompts | Follow the controller, Xbox, PlayStation | `mcla_button_prompts` = `auto`, `xbox` or `playstation` | CONTROLS › BUTTON PROMPTS |
+
+*Display gamma* is the ramp the picture goes through on its way to the screen, as the console's display hardware applied it. The game writes sRGB-encoded colour; *TV*, the default, is the console's ramp for an HDTV (BT.709), which on a PC monitor makes the shadows darker than the game drew them (8-bit levels 64, 128 and 192 show as 48, 115 and 185). *PC monitor* leaves the game's output as it is, as an sRGB monitor expects. It changes during play, from the launcher or the pause menu ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#display-gamma-for-pc-monitors-2026-10-16)).
 
 The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. The game turns vsync off by itself (the pause menu's DISPLAY › VSYNC turns it on): with it on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly.
 
@@ -83,7 +86,7 @@ This is upstream's one command, with the fork's patches. It leaves a **Midnight 
 
 Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120`; they win over `mcla.toml`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on.
 
-The pause menu's Settings tab has three extra submenus. DISPLAY has the frame-rate target, HUD updates, vsync, fullscreen, resolution, graphics API, motion blur and depth of field; PERFORMANCE has the detail options and anti-aliasing; CONTROLS has button prompts, intro speed and hiding the mouse pointer. What you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds; it is also saved when the window is closed with a submenu open.
+The pause menu's Settings tab has three extra submenus. DISPLAY has the frame-rate target, HUD updates, vsync, fullscreen, resolution, graphics API, display gamma, motion blur and depth of field; PERFORMANCE has the detail options and anti-aliasing; CONTROLS has button prompts, intro speed and hiding the mouse pointer. What you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds; it is also saved when the window is closed with a submenu open.
 
 Rows marked *(NEXT START)* take effect when the game next starts, and say *(RESTART NEEDED)* once changed. **RESTART GAME** (Windows; press it twice) saves, starts the game again with the same options and closes this one; the new one waits for the old one to have closed (if it hasn't within 30 seconds, it says so and doesn't start). As with **QUIT GAME**, progress since the last save is lost. QUIT GAME, RESTART GAME and the window's close button let a career save that is being written finish first, for up to 10 seconds.
 
@@ -157,6 +160,8 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | The mouse pointer hidden during play | goes on controller input or after about 3 s still; back when the mouse moves |
 | Loading-screen pacing | uncapped free roam at native: mean 81 to 145 FPS; the fast intro speeds up only the start-up logos |
 | The pause menu's settings: only what you change is saved, merged into `mcla.toml`, also when the window is closed; the FPS list has 40, 45 and 50; resolution, graphics API and hiding the pointer added; anti-aliasing switches during play; restart-only rows say so, and *(RESTART NEEDED)* once changed; RESTART GAME; the tabs come back after a submenu | command-line options and paths no longer end up in the file, and a file with an old-style path loads again (`patches/rexglue-cvar-toml-strings.patch`); QUIT GAME closes the game (it left it running behind a window that no longer answered); closing waits for a career save being written |
+| A display gamma setting: the console's TV ramp (the default) or sRGB for PC monitors, switched during play | on a PC monitor the shadows as the game drew them: a night scene's average brightness 46 to 60 of 255 |
+| The pause menu's SINGLE TILE RENDERING row removed | it never had an effect (`mcla_single_tile` is kept as it was) |
 | The launcher edits `mcla.toml` instead of passing options | the launcher and the pause menu show and change the same settings; a choice made in the game sticks |
 | Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD at 30 a second by default, or 60, 120 or every frame | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before); the song title under the speedometer scrolls at its original speed |
 

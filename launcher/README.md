@@ -114,11 +114,22 @@ rate, 30 per second unless set.
 If `settings.json` can't be saved, the launcher says so instead of carrying on
 as if it had.
 
+*Display gamma* (`mcla_display_gamma`) picks the gamma ramp the picture goes
+through on its way to the screen, and it switches during play too (the pause
+menu's DISPLAY > DISPLAY GAMMA). *TV* (`tv`, the default) is the console's ramp
+for an HDTV (BT.709), as before; *PC monitor* (`pc`) is sRGB, which leaves the
+game's own sRGB-encoded output as it is, as a PC monitor expects. On a PC
+monitor the TV ramp darkens the shadows: 8-bit levels 64, 128 and 192 come out
+as 48, 115 and 185. In a night scene the average brightness went from 46 to 60
+of 255 with *PC monitor* (`KNOWN-ISSUES.md`).
+
 *Anti-aliasing* is the game's 2× MSAA (`mcla_msaa`), and it switches during play
-too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, a 3× frame took 18 to
-25% less time on the title screen (13.2 → 9.9 ms in the night city view, 12.6 →
-10.2 ms in Hollywood; about half the draws), for slightly more jagged thin edges
-such as pylons and billboard frames; the dithered foliage looks cleaner.
+too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, the game draws the scene
+as one tile instead of two: a 3× frame is 8 to 18% shorter (7.6% in the city by
+day on D3D12, where the game's own limit is then reached, 13.6% on Vulkan, 17 to
+18% in the race on both; `dev\single-tile-2026-10-16.md`), for slightly more
+jagged thin edges such as pylons and billboard frames; the dithered foliage looks
+cleaner. (Before the clear-rectangle and direct-resolve work it was 18 to 25%.)
 
 *Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which
 tries Direct3D 12 first, `d3d12` or `vulkan`). Every setting and SDK patch here
