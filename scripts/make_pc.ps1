@@ -218,6 +218,7 @@ try {
         @{ Patch = "rexglue-edram-size.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "edram_tiles" }
         @{ Patch = "rexglue-guest-markers.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "OnGuestMarker" }
         @{ Patch = "rexglue-hdr-output.patch"; File = "src\ui\presenter.cpp"; Adds = "IsHdrOutputWanted" }
+        @{ Patch = "rexglue-hdr-ui-layer.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrBeforeResolve" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {

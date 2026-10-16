@@ -1,0 +1,2966 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index ec99380..7f7f0b6 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -190,7 +190,108 @@ class CommandProcessor {
+     kRenderEnd = 6,     // the title's render loop returned (UI drawn after it)
+     kPhase = 0x100,     // diagnostics: value = a title-specific phase
+   };
+-  virtual void OnGuestMarker([[maybe_unused]] uint32_t kind, [[maybe_unused]] uint32_t value) {}
++  virtual void OnGuestMarker(uint32_t kind, uint32_t value);
++
++  // HDR output (rexglue-hdr-ui-layer.patch): the guest's UI as a separate
++  // layer. From kUIBegin, the UI's render target (the one the first colour draw
++  // of the UI phase goes to, 8_8_8_8 at 1x or 4x) is copied, as the underlay,
++  // before its first blended draw (per tile in a tiled pass; opaque draws
++  // before it are underlay too) and cleared to 0; its blended draws then have
++  // the alpha blend ONE / INV_SRC_ALPHA, so it collects the UI premultiplied,
++  // with coverage in alpha. When the guest resolves it, the UI and the
++  // underlay are copied to the screen-space textures, and the target is put
++  // back to what the guest drew (UI + underlay x (1 - alpha)) for the resolve.
++  // A blend outside SrcAlpha or One / InvSrcAlpha ends the separation for the
++  // frame (the target is put back at once): the refresher then tells the UI
++  // from the scene by comparing the front buffer with the underlay.
++  enum HdrTexture : uint32_t {
++    kHdrTextureUnderlay,    // screen space
++    kHdrTextureUnderlayRt,  // render target space, for putting the target back
++    kHdrTextureUiLayer,     // screen space
++    kHdrTextureCount,
++  };
++  // In host (scaled) pixels.
++  struct HdrRect {
++    uint32_t x;
++    uint32_t y;
++    uint32_t width;
++    uint32_t height;
++  };
++  // How the refresher puts the frame together.
++  enum class HdrComposite {
++    kWholeFrame,  // the front buffer as SDR content
++    kMask,        // front buffer pixels equal to the underlay are the scene
++    kLayer,       // the UI layer over the scene
++    kScene,       // the front buffer as the scene (a frame without a UI pass)
++  };
++  struct HdrFrame {
++    bool tonemap = false;     // kTonemapBegin seen
++    bool ui_begin = false;    // kUIBegin seen
++    bool ui = false;          // kUIBegin seen after kTonemapBegin, HDR output on
++    // HdrColorTargetKey of the UI's render target: at kUIBegin the one drawn to
++    // last (for frames with no UI), then the one the first colour draw goes to.
++    uint32_t ui_target = 0;
++    bool ui_target_drawn = false;
++    bool snapshot = false;    // this tile's underlay is in kHdrTextureUnderlayRt
++    bool started = false;     // this tile's UI goes to the cleared target
++    bool failed = false;      // separation ended for this frame
++    bool ui_layer_cleared = false;
++    uint64_t captured_area = 0;  // screen pixels copied to the textures
++  };
++  HdrFrame hdr_frame_;
++  // The last two swaps' front buffers (physical addresses): only resolves to
++  // them are the picture.
++  uint32_t hdr_front_buffers_[2] = {};
++  // The scaled size of the last swap's guest output, the size of the textures
++  // (set by the backends' IssueSwap).
++  uint32_t hdr_output_width_ = 0;
++  uint32_t hdr_output_height_ = 0;
++  // Logs when it changes.
++  HdrComposite HdrGetComposite();
++  HdrComposite hdr_last_composite_ = HdrComposite::kWholeFrame;
++  // The refresher's flag bits 3:8 (hdr_refresh.cs.xesl) for a composite and
++  // the hdr_debug_ui view.
++  static uint32_t HdrRefreshCompositeFlags(HdrComposite composite, uint32_t debug_ui);
++  // For the backends' IssueDraw, after the render target update: copies and
++  // clears the UI's target if the draw starts the UI layer.
++  void HdrRenderTargetsReady();
++  // Backend operations, on the 8_8_8_8 host render target with the key `key`
++  // (HdrColorTargetKey); MSAA samples are averaged when copying from it.
++  virtual bool HdrCopyFromColorTarget([[maybe_unused]] uint32_t key,
++                                      [[maybe_unused]] HdrTexture dest,
++                                      [[maybe_unused]] const HdrRect& source,
++                                      [[maybe_unused]] uint32_t dest_x,
++                                      [[maybe_unused]] uint32_t dest_y) {
++    return false;
++  }
++  virtual bool HdrClearColorTarget([[maybe_unused]] uint32_t key,
++                                   [[maybe_unused]] const HdrRect& rect) {
++    return false;
++  }
++  // target = target + kHdrTextureUnderlayRt x (1 - target alpha).
++  virtual bool HdrRestoreColorTarget([[maybe_unused]] uint32_t key,
++                                     [[maybe_unused]] const HdrRect& rect) {
++    return false;
++  }
++  virtual bool HdrCopyTexture([[maybe_unused]] HdrTexture source, [[maybe_unused]] HdrTexture dest,
++                              [[maybe_unused]] const HdrRect& source_rect,
++                              [[maybe_unused]] uint32_t dest_x, [[maybe_unused]] uint32_t dest_y) {
++    return false;
++  }
++  virtual bool HdrClearTexture([[maybe_unused]] HdrTexture texture) { return false; }
++  virtual uint32_t HdrDrawResolutionScale() const { return 1; }
++  virtual uint32_t HdrEdramTileCount() const { return 2048; }
++
++ private:
++  uint32_t HdrColorTargetKey(uint32_t rt_index) const;
++  bool HdrBeforeDraw();
++  void HdrBeforeResolve();
++  void HdrFail(const char* reason);
++  enum class HdrPending { kNone, kStart, kSnapshot, kAbort };
++  HdrPending hdr_pending_ = HdrPending::kNone;
++  uint32_t hdr_saved_blend_control_ = 0;
++
++ protected:
+ 
+   virtual void MakeCoherent();
+   virtual void PrepareForWait();
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index ab32381..a40dc9b 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -646,6 +646,24 @@ class D3D12CommandProcessor : public CommandProcessor {
+   };
+   Microsoft::WRL::ComPtr<ID3D12RootSignature> hdr_refresh_root_signature_;
+   Microsoft::WRL::ComPtr<ID3D12PipelineState> hdr_refresh_pipeline_;
++  // HDR output (rexglue-hdr-ui-layer.patch): the UI layer's textures,
++  // R8G8B8A8_UNORM at the output's size, in kHdrTextureState when not copied
++  // to or cleared; the UI layer's RTV for clearing it.
++  static constexpr D3D12_RESOURCE_STATES kHdrTextureState =
++      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++  bool HdrCopyFromColorTarget(uint32_t key, HdrTexture dest, const HdrRect& source,
++                              uint32_t dest_x, uint32_t dest_y) override;
++  bool HdrClearColorTarget(uint32_t key, const HdrRect& rect) override;
++  bool HdrRestoreColorTarget(uint32_t key, const HdrRect& rect) override;
++  bool HdrCopyTexture(HdrTexture source, HdrTexture dest, const HdrRect& source_rect,
++                      uint32_t dest_x, uint32_t dest_y) override;
++  bool HdrClearTexture(HdrTexture texture) override;
++  uint32_t HdrDrawResolutionScale() const override;
++  uint32_t HdrEdramTileCount() const override;
++  ID3D12Resource* HdrGetTexture(HdrTexture texture);
++  void HdrWriteTextureSRV(HdrTexture texture, D3D12_CPU_DESCRIPTOR_HANDLE handle);
++  Microsoft::WRL::ComPtr<ID3D12Resource> hdr_textures_[kHdrTextureCount];
++  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> hdr_ui_layer_rtv_heap_;
+ 
+   struct FxaaConstants {
+     uint32_t size[2];
+diff --git a/include/rex/graphics/d3d12/deferred_command_list.h b/include/rex/graphics/d3d12/deferred_command_list.h
+index 2225e07..0469573 100644
+--- a/include/rex/graphics/d3d12/deferred_command_list.h
++++ b/include/rex/graphics/d3d12/deferred_command_list.h
+@@ -152,6 +152,19 @@ class DeferredCommandList {
+     }
+   }
+ 
++  void D3DResolveSubresourceRegion(ID3D12Resource* dst_resource, UINT dst_x, UINT dst_y,
++                                   ID3D12Resource* src_resource, const D3D12_RECT& src_rect,
++                                   DXGI_FORMAT format) {
++    auto& args = *reinterpret_cast<D3DResolveSubresourceRegionArguments*>(WriteCommand(
++        Command::kD3DResolveSubresourceRegion, sizeof(D3DResolveSubresourceRegionArguments)));
++    args.dst_resource = dst_resource;
++    args.dst_x = dst_x;
++    args.dst_y = dst_y;
++    args.src_resource = src_resource;
++    args.src_rect = src_rect;
++    args.format = format;
++  }
++
+   void D3DDispatch(UINT thread_group_count_x, UINT thread_group_count_y,
+                    UINT thread_group_count_z) {
+     auto& args = *reinterpret_cast<D3DDispatchArguments*>(
+@@ -476,6 +489,7 @@ class DeferredCommandList {
+     kD3DCopyResource,
+     kCopyTexture,
+     kD3DCopyTextureRegion,
++    kD3DResolveSubresourceRegion,
+     kD3DDispatch,
+     kD3DDrawIndexedInstanced,
+     kD3DDrawInstanced,
+@@ -562,6 +576,15 @@ class DeferredCommandList {
+     D3D12_TEXTURE_COPY_LOCATION src;
+   };
+ 
++  struct D3DResolveSubresourceRegionArguments {
++    ID3D12Resource* dst_resource;
++    UINT dst_x;
++    UINT dst_y;
++    ID3D12Resource* src_resource;
++    D3D12_RECT src_rect;
++    DXGI_FORMAT format;
++  };
++
+   struct D3DCopyTextureRegionArguments {
+     D3D12_TEXTURE_COPY_LOCATION dst;
+     UINT dst_x;
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index fc842f2..577356d 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -79,6 +79,17 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
+                uint32_t& written_length_out);
+ 
++  // HDR output (rexglue-hdr-ui-layer.patch), on the UI's render target
++  // (HdrFindColorTarget): copies an area to dest
++  // (R8G8B8A8_UNORM, in dest_state before and after; MSAA samples averaged),
++  // clears an area to 0, or blends an underlay (an SRV in the current view
++  // heap) under it.
++  bool HdrCopyColorTarget(uint32_t key, ID3D12Resource* dest, D3D12_RESOURCE_STATES dest_state,
++                          D3D12_RECT source, uint32_t dest_x, uint32_t dest_y);
++  bool HdrClearColorTarget(uint32_t key, D3D12_RECT rect);
++  bool HdrRestoreColorTarget(uint32_t key, D3D12_GPU_DESCRIPTOR_HANDLE underlay_srv,
++                             D3D12_RECT rect);
++
+   // For host render targets.
+ 
+   bool gamma_render_target_as_unorm16() const { return gamma_render_target_as_unorm16_; }
+@@ -202,6 +213,12 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   static const ResolveDirectShaderCode
+       kResolveDirectShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
+ 
++  // HDR output: the restore draw, for 1x and 4x.
++  Microsoft::WRL::ComPtr<ID3D12RootSignature> hdr_restore_root_signature_;
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> hdr_restore_pipelines_[2];
++  // The UI's render target, with the area clipped to it, or nullptr.
++  ID3D12Resource* HdrColorTarget(uint32_t key, D3D12_RECT& rect, bool& msaa_out);
++
+   // For host render targets.
+ 
+   class D3D12RenderTarget final : public RenderTarget {
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 4d1f60a..688fcb6 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -528,6 +528,25 @@ class RenderTargetCache {
+   virtual bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const = 0;
+ 
+   void ResetAccumulatedRenderTargets() { are_accumulated_render_targets_valid_ = false; }
++
++  // HDR output (rexglue-hdr-ui-layer.patch): the 8_8_8_8 host render target with
++  // the base, the MSAA and the pitch of `key` (CommandProcessor::
++  // HdrColorTargetKey), if it exists.
++  RenderTarget* HdrFindColorTarget(uint32_t key) const {
++    if (GetPath() != Path::kHostRenderTargets) {
++      return nullptr;
++    }
++    RenderTargetKey rt_key;
++    rt_key.base_tiles = key & 0xFFF;
++    rt_key.msaa_samples = xenos::MsaaSamples((key >> 12) & 3);
++    rt_key.pitch_tiles_at_32bpp =
++        (((key >> 18) << uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k4X)) +
++         xenos::kEdramTileWidthSamples - 1) /
++        xenos::kEdramTileWidthSamples;
++    rt_key.resource_format = uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8);
++    auto it = render_targets_.find(rt_key);
++    return it != render_targets_.end() ? it->second : nullptr;
++  }
+   RenderTarget* const* last_update_accumulated_render_targets() const {
+     assert_true(GetPath() == Path::kHostRenderTargets);
+     return last_update_accumulated_render_targets_;
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 1790c87..ca8bc19 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -781,6 +781,32 @@ class VulkanCommandProcessor : public CommandProcessor {
+   VkPipelineLayout swap_apply_gamma_compute_pipeline_layout_ = VK_NULL_HANDLE;
+   VkPipelineLayout hdr_refresh_pipeline_layout_ = VK_NULL_HANDLE;
+   VkPipeline hdr_refresh_pipeline_ = VK_NULL_HANDLE;
++  // HDR output (rexglue-hdr-ui-layer.patch): the UI layer's textures,
++  // R8G8B8A8_UNORM at the output's size, shader-readable (fragment and compute)
++  // when not copied to or cleared.
++  bool HdrCopyFromColorTarget(uint32_t key, HdrTexture dest, const HdrRect& source,
++                              uint32_t dest_x, uint32_t dest_y) override;
++  bool HdrClearColorTarget(uint32_t key, const HdrRect& rect) override;
++  bool HdrRestoreColorTarget(uint32_t key, const HdrRect& rect) override;
++  bool HdrCopyTexture(HdrTexture source, HdrTexture dest, const HdrRect& source_rect,
++                      uint32_t dest_x, uint32_t dest_y) override;
++  bool HdrClearTexture(HdrTexture texture) override;
++  uint32_t HdrDrawResolutionScale() const override;
++  uint32_t HdrEdramTileCount() const override;
++  struct HdrImage {
++    VkImage image = VK_NULL_HANDLE;
++    VkDeviceMemory memory = VK_NULL_HANDLE;
++    VkImageView view = VK_NULL_HANDLE;
++    uint32_t width = 0;
++    uint32_t height = 0;
++    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
++  };
++  HdrImage* HdrGetImage(HdrTexture texture);
++  void HdrTransitionImage(HdrImage& image, VkImageLayout layout);
++  HdrImage hdr_images_[kHdrTextureCount];
++  // The refresher's underlay and UI layer.
++  std::array<VkDescriptorSet, kMaxFramesInFlight> hdr_descriptors_underlay_{};
++  std::array<VkDescriptorSet, kMaxFramesInFlight> hdr_descriptors_ui_layer_{};
+   VkPipelineLayout swap_fxaa_pipeline_layout_ = VK_NULL_HANDLE;
+   // Has no dependencies on specific pipeline stages on both ends to simplify
+   // use in different scenarios with different pipelines - use explicit barriers
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index b9a9687..9fba6c1 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -250,6 +250,29 @@ class DeferredCommandBuffer {
+                 regions, sizeof(VkBufferImageCopy) * region_count);
+   }
+ 
++  void CmdVkCopyImage(VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image,
++                      VkImageLayout dst_image_layout, const VkImageCopy& region) {
++    auto& args = *reinterpret_cast<ArgsVkCopyImage*>(
++        WriteCommand(Command::kVkCopyImage, sizeof(ArgsVkCopyImage)));
++    args.src_image = src_image;
++    args.src_image_layout = src_image_layout;
++    args.dst_image = dst_image;
++    args.dst_image_layout = dst_image_layout;
++    args.region = region;
++  }
++  // The region's offsets and extent as in VkImageCopy, resolving multisampled
++  // src_image (vkCmdResolveImage).
++  void CmdVkResolveImage(VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image,
++                         VkImageLayout dst_image_layout, const VkImageCopy& region) {
++    auto& args = *reinterpret_cast<ArgsVkCopyImage*>(
++        WriteCommand(Command::kVkResolveImage, sizeof(ArgsVkCopyImage)));
++    args.src_image = src_image;
++    args.src_image_layout = src_image_layout;
++    args.dst_image = dst_image;
++    args.dst_image_layout = dst_image_layout;
++    args.region = region;
++  }
++
+   void CmdVkCopyQueryPoolResults(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count,
+                                  VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
+                                  VkQueryResultFlags flags) {
+@@ -403,6 +426,8 @@ class DeferredCommandBuffer {
+     kVkClearColorImage,
+     kVkCopyBuffer,
+     kVkCopyBufferToImage,
++    kVkCopyImage,
++    kVkResolveImage,
+     kVkCopyQueryPoolResults,
+     kVkDispatch,
+     kVkDraw,
+@@ -525,6 +550,14 @@ class DeferredCommandBuffer {
+     static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
+   };
+ 
++  struct ArgsVkCopyImage {
++    VkImage src_image;
++    VkImageLayout src_image_layout;
++    VkImage dst_image;
++    VkImageLayout dst_image_layout;
++    VkImageCopy region;
++  };
++
+   struct ArgsVkCopyQueryPoolResults {
+     VkQueryPool query_pool;
+     uint32_t first_query;
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index a3d77fb..c6c2b51 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -102,6 +102,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   VkBuffer edram_buffer() const { return edram_buffer_; }
+ 
++  // HDR output (rexglue-hdr-ui-layer.patch), on the UI's render target
++  // (HdrFindColorTarget): copies an area to dest
++  // (R8G8B8A8_UNORM in VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; MSAA samples
++  // averaged; the render pass must have been ended), clears an area to 0, or
++  // blends an underlay (R8G8B8A8_UNORM, shader-readable) under it.
++  bool HdrCopyColorTarget(uint32_t key, VkImage dest, VkRect2D source, int32_t dest_x,
++                          int32_t dest_y);
++  bool HdrClearColorTarget(uint32_t key, VkRect2D rect);
++  bool HdrRestoreColorTarget(uint32_t key, VkImageView underlay_view, VkRect2D rect);
++
+   // Performs the resolve to a shared memory area according to the current
+   // register values, and also clears the render targets if needed. Must be in a
+   // frame for calling.
+@@ -851,6 +861,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> transfer_vertex_buffer_pool_;
+   VkShaderModule transfer_passthrough_vertex_shader_ = VK_NULL_HANDLE;
++  // HDR output: the UI's render target (area clipped to it), entering its
++  // render pass alone, and the restore draw.
++  VulkanRenderTarget* HdrColorTarget(uint32_t key, VkRect2D& rect);
++  bool HdrEnterColorTargetRenderPass(VulkanRenderTarget& rt);
++  VkShaderModule hdr_restore_shaders_[2] = {};
++  VkPipelineLayout hdr_restore_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipeline hdr_restore_pipelines_[2] = {};
++  VkImageView hdr_restore_underlay_view_ = VK_NULL_HANDLE;
++  size_t hdr_restore_descriptor_set_ = SIZE_MAX;
+   VkPipelineLayout transfer_pipeline_layouts_[size_t(TransferPipelineLayoutIndex::kCount)] = {};
+   // VK_NULL_HANDLE if failed to create.
+   std::unordered_map<TransferShaderKey, VkShaderModule, TransferShaderKey::Hasher>
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index bf8eafa..80fc197 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -217,6 +217,8 @@ class Presenter {
+     float peak_nits = 1000.0f;
+     bool sdr_pure_gamma_2_2 = false;  // decode SDR with a 2.2 power, else piecewise sRGB
+     bool test_pattern = false;
++    // Debug: 1 shows the guest's UI in magenta, 2 the guest's own frame.
++    uint32_t debug_ui = 0;
+   };
+ 
+   class GuestOutputRefreshContext {
+diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
+index d9d6ed3..ddef152 100644
+--- a/include/rex/ui/vulkan/functions/device_1_0.inc
++++ b/include/rex/ui/vulkan/functions/device_1_0.inc
+@@ -14,6 +14,8 @@ XE_UI_VULKAN_FUNCTION(vkCmdClearAttachments)
+ XE_UI_VULKAN_FUNCTION(vkCmdClearColorImage)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyBuffer)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyBufferToImage)
++XE_UI_VULKAN_FUNCTION(vkCmdCopyImage)
++XE_UI_VULKAN_FUNCTION(vkCmdResolveImage)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyImageToBuffer)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyQueryPoolResults)
+ XE_UI_VULKAN_FUNCTION(vkCmdDispatch)
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 069c000..8883ba7 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -25,6 +25,7 @@
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/graphics_system.h>
+ #include <rex/graphics/pipeline/texture/info.h>
++#include <rex/graphics/util/draw.h>
+ #include <rex/graphics/sampler_info.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/logging.h>
+@@ -34,8 +35,12 @@
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/user_module.h>
++#include <rex/ui/presenter.h>
+ 
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
++REXCVAR_DEFINE_BOOL(hdr_ui_layer, true, "GPU",
++                    "HDR output: keep the game's HUD and menus as a separate SDR layer over the "
++                    "HDR scene (rexglue-hdr-ui-layer.patch); off: the whole frame is SDR content");
+ 
+ REXCVAR_DEFINE_BOOL(gpu_regwrite_bulk, true, "GPU",
+                     "Write blocks of registers in bulk and test for the few registers with side "
+@@ -1015,12 +1020,277 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
+   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
+ 
++  // HDR output: a UI target not resolved in this frame is put back.
++  if (hdr_frame_.started) {
++    HdrRestoreColorTarget(hdr_frame_.ui_target, {0, 0, hdr_output_width_, hdr_output_height_});
++  }
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
++  hdr_frame_ = HdrFrame();
++  if (hdr_front_buffers_[0] != (frontbuffer_ptr & 0x1FFFFFFF)) {
++    hdr_front_buffers_[1] = hdr_front_buffers_[0];
++    hdr_front_buffers_[0] = frontbuffer_ptr & 0x1FFFFFFF;
++  }
+ 
+   ++counter_;
+   return true;
+ }
+ 
++void CommandProcessor::OnGuestMarker(uint32_t kind, [[maybe_unused]] uint32_t value) {
++  switch (GuestMarkerKind(kind)) {
++    case GuestMarkerKind::kTonemapBegin:
++      hdr_frame_.tonemap = true;
++      break;
++    case GuestMarkerKind::kUIBegin:
++      // Replayed once per tile in a tiled UI pass.
++      hdr_frame_.ui_begin = true;
++      hdr_frame_.ui |= hdr_frame_.tonemap && hdr_output_width_ && REXCVAR_GET(hdr_ui_layer) &&
++                       ui::Presenter::IsHdrOutputActive();
++      if (hdr_frame_.ui && !hdr_frame_.ui_target) {
++        hdr_frame_.ui_target = HdrColorTargetKey(0);
++      }
++      break;
++    default:
++      break;
++  }
++}
++
++CommandProcessor::HdrComposite CommandProcessor::HdrGetComposite() {
++  HdrComposite composite = HdrComposite::kWholeFrame;
++  if (hdr_frame_.ui &&
++      hdr_frame_.captured_area >= uint64_t(hdr_output_width_) * hdr_output_height_) {
++    composite = hdr_frame_.failed ? HdrComposite::kMask : HdrComposite::kLayer;
++  } else if (hdr_frame_.tonemap && !hdr_frame_.ui_begin && REXCVAR_GET(hdr_ui_layer) &&
++             ui::Presenter::IsHdrOutputActive()) {
++    // A frame drawn without a UI pass (one now and then, at transitions).
++    composite = HdrComposite::kScene;
++  }
++  if (composite != hdr_last_composite_) {
++    hdr_last_composite_ = composite;
++    static const char* const kNames[] = {"the front buffer as SDR", "the difference mask",
++                                         "the UI layer", "the front buffer as the scene"};
++    REXGPU_INFO("HDR: frames are put together from {}", kNames[uint32_t(composite)]);
++  }
++  return composite;
++}
++
++uint32_t CommandProcessor::HdrRefreshCompositeFlags(HdrComposite composite, uint32_t debug_ui) {
++  // Bits 3:4: 0 the front buffer alone, 1 the difference mask, 2 the UI layer,
++  // 3 a texture shown raw (bits 6:7); bit 5: the UI in magenta; bit 8: the
++  // front buffer alone is the scene.
++  if (debug_ui >= 3) {
++    return (3u << 3) | ((debug_ui - 3) << 6);
++  }
++  if (debug_ui == 2) {
++    return 0;
++  }
++  uint32_t flags = uint32_t(debug_ui == 1) << 5;
++  if (composite == HdrComposite::kScene) {
++    return flags | (1u << 8);
++  }
++  return flags | (uint32_t(composite) << 3);
++}
++
++uint32_t CommandProcessor::HdrColorTargetKey(uint32_t rt_index) const {
++  const RegisterFile& regs = *register_file_;
++  auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  auto color_info = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[rt_index]);
++  return color_info.GetBaseTiles(HdrEdramTileCount()) | (uint32_t(surface_info.msaa_samples) << 12) |
++         (uint32_t(color_info.color_format) << 14) | (surface_info.surface_pitch << 18);
++}
++
++void CommandProcessor::HdrFail(const char* reason) {
++  if (!hdr_frame_.failed) {
++    hdr_frame_.failed = true;
++    static std::atomic<uint32_t> logged_reasons{0};
++    uint32_t reason_bit = uint32_t(1) << (std::hash<std::string_view>{}(reason) & 31);
++    if (!(logged_reasons.fetch_or(reason_bit) & reason_bit)) {
++      REXGPU_INFO("HDR: the UI layer fell back to the difference mask ({})", reason);
++    }
++  }
++}
++
++bool CommandProcessor::HdrBeforeDraw() {
++  hdr_pending_ = HdrPending::kNone;
++  if (!hdr_frame_.ui) {
++    return false;
++  }
++  RegisterFile& regs = *register_file_;
++  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
++  if (edram_mode == xenos::EdramMode::kCopy) {
++    HdrBeforeResolve();
++    return false;
++  }
++  uint32_t color_mask = regs[XE_GPU_REG_RB_COLOR_MASK] & 0xF;
++  if (edram_mode != xenos::EdramMode::kColorDepth || !color_mask) {
++    return false;
++  }
++  uint32_t key = HdrColorTargetKey(0);
++  if (!hdr_frame_.ui_target_drawn) {
++    // The UI's render target is the first one drawn to.
++    hdr_frame_.ui_target_drawn = true;
++    hdr_frame_.ui_target = key;
++    auto format = xenos::ColorRenderTargetFormat((key >> 14) & 0xF);
++    auto msaa = xenos::MsaaSamples((key >> 12) & 3);
++    if (format != xenos::ColorRenderTargetFormat::k_8_8_8_8 || msaa == xenos::MsaaSamples::k2X) {
++      HdrFail("render target format");
++    }
++  }
++  if (key != hdr_frame_.ui_target) {
++    return false;
++  }
++  Register blend_register = reg::RB_BLENDCONTROL::rt_register_indices[0];
++  auto blend = regs.Get<reg::RB_BLENDCONTROL>(blend_register);
++  bool opaque = blend.color_srcblend == xenos::BlendFactor::kOne &&
++                blend.color_destblend == xenos::BlendFactor::kZero &&
++                blend.color_comb_fcn == xenos::BlendOp::kAdd;
++  bool over = color_mask == 0xF && blend.color_comb_fcn == xenos::BlendOp::kAdd &&
++              blend.color_destblend == xenos::BlendFactor::kOneMinusSrcAlpha &&
++              (blend.color_srcblend == xenos::BlendFactor::kSrcAlpha ||
++               blend.color_srcblend == xenos::BlendFactor::kOne);
++  if (!hdr_frame_.failed && !hdr_frame_.started && !opaque) {
++    if (over) {
++      hdr_pending_ = HdrPending::kStart;
++    } else {
++      HdrFail("blend");
++    }
++  } else if (!hdr_frame_.failed && hdr_frame_.started && !over) {
++    HdrFail("blend");
++    hdr_pending_ = HdrPending::kAbort;
++    return false;
++  }
++  if (hdr_frame_.failed) {
++    // For the difference mask: the underlay of this tile.
++    if (!hdr_frame_.snapshot && !opaque) {
++      hdr_pending_ = HdrPending::kSnapshot;
++    }
++    return false;
++  }
++  if (!over) {
++    return false;
++  }
++  // Alpha collects the coverage.
++  hdr_saved_blend_control_ = blend.value;
++  blend.alpha_srcblend = xenos::BlendFactor::kOne;
++  blend.alpha_destblend = xenos::BlendFactor::kOneMinusSrcAlpha;
++  blend.alpha_comb_fcn = xenos::BlendOp::kAdd;
++  regs[blend_register] = blend.value;
++  return true;
++}
++
++void CommandProcessor::HdrRenderTargetsReady() {
++  HdrPending pending = hdr_pending_;
++  hdr_pending_ = HdrPending::kNone;
++  if (pending == HdrPending::kNone) {
++    return;
++  }
++  // The underlay and the clear cover what the output can show.
++  uint32_t key = hdr_frame_.ui_target;
++  HdrRect rect = {0, 0, hdr_output_width_, hdr_output_height_};
++  if (pending == HdrPending::kAbort) {
++    if (!HdrRestoreColorTarget(key, rect)) {
++      hdr_frame_.snapshot = false;
++    }
++    hdr_frame_.started = false;
++    return;
++  }
++  hdr_frame_.snapshot = HdrCopyFromColorTarget(key, kHdrTextureUnderlayRt, rect, 0, 0);
++  if (pending == HdrPending::kStart) {
++    if (hdr_frame_.snapshot && HdrClearColorTarget(key, rect)) {
++      hdr_frame_.started = true;
++    } else {
++      HdrFail("render target copy");
++    }
++  }
++}
++
++void CommandProcessor::HdrBeforeResolve() {
++  const RegisterFile& regs = *register_file_;
++  auto copy_control = regs.Get<reg::RB_COPY_CONTROL>();
++  if (!hdr_frame_.ui_target || copy_control.copy_src_select >= xenos::kMaxColorRenderTargets ||
++      HdrColorTargetKey(copy_control.copy_src_select) != hdr_frame_.ui_target) {
++    return;
++  }
++  // Where the resolved area is in the render target, and on the screen (the
++  // window offset moves a tile's screen area to the render target's origin).
++  uint32_t scale = HdrDrawResolutionScale();
++  draw_util::ResolveInfo info;
++  if (!draw_util::GetResolveInfo(regs, *memory_, scale, scale, HdrEdramTileCount(), false, false,
++                                 info) ||
++      !info.coordinate_info.width_div_8 || !info.height_div_8) {
++    return;
++  }
++  uint32_t key = hdr_frame_.ui_target;
++  // Only a resolve to a front buffer is the picture; another is put back first.
++  uint32_t front_buffer_size = hdr_output_width_ * hdr_output_height_ * 4 / (scale * scale);
++  bool to_front_buffer = !hdr_front_buffers_[0];
++  for (uint32_t front_buffer : hdr_front_buffers_) {
++    to_front_buffer |= front_buffer && info.copy_dest_base - front_buffer < front_buffer_size;
++  }
++  if (!to_front_buffer) {
++    if (hdr_frame_.started) {
++      HdrRestoreColorTarget(key, {0, 0, hdr_output_width_, hdr_output_height_});
++      hdr_frame_.started = false;
++    }
++    HdrFail("UI target resolved elsewhere");
++    return;
++  }
++  bool msaa_4x = info.color_edram_info.msaa_samples >= xenos::MsaaSamples::k4X;
++  uint32_t tile_width = xenos::kEdramTileWidthSamples >> uint32_t(msaa_4x);
++  uint32_t tile_height =
++      xenos::kEdramTileHeightSamples >>
++      uint32_t(info.color_edram_info.msaa_samples >= xenos::MsaaSamples::k2X);
++  uint32_t base_offset = (info.color_edram_info.GetBaseTiles() - (key & 0xFFF)) &
++                         (HdrEdramTileCount() - 1);
++  uint32_t pitch_tiles = std::max(info.color_edram_info.pitch_tiles, uint32_t(1));
++  int32_t rt_x = int32_t((base_offset % pitch_tiles) * tile_width +
++                         info.coordinate_info.edram_offset_x_div_8 * 8);
++  int32_t rt_y = int32_t((base_offset / pitch_tiles) * tile_height +
++                         info.coordinate_info.edram_offset_y_div_8 * 8);
++  int32_t screen_x = rt_x, screen_y = rt_y;
++  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
++    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    screen_x -= window_offset.window_x_offset;
++    screen_y -= window_offset.window_y_offset;
++  }
++  HdrRect rect = {uint32_t(rt_x) * scale, uint32_t(rt_y) * scale,
++                  info.coordinate_info.width_div_8 * 8 * scale, info.height_div_8 * 8 * scale};
++  if (screen_x < 0 || screen_y < 0) {
++    HdrFail("resolve area");
++    return;
++  }
++  uint32_t dest_x = uint32_t(screen_x) * scale, dest_y = uint32_t(screen_y) * scale;
++  rect.width = std::min(rect.width, hdr_output_width_ - std::min(dest_x, hdr_output_width_));
++  rect.height = std::min(rect.height, hdr_output_height_ - std::min(dest_y, hdr_output_height_));
++  if (!rect.width || !rect.height) {
++    return;
++  }
++  if (!hdr_frame_.ui_layer_cleared) {
++    hdr_frame_.ui_layer_cleared = true;
++    if (!HdrClearTexture(kHdrTextureUiLayer)) {
++      HdrFail("texture clear");
++    }
++  }
++  bool copied;
++  if (hdr_frame_.started) {
++    // The UI, the underlay, and the target put back for the resolve.
++    copied = HdrCopyFromColorTarget(key, kHdrTextureUiLayer, rect, dest_x, dest_y) &&
++             HdrCopyTexture(kHdrTextureUnderlayRt, kHdrTextureUnderlay, rect, dest_x, dest_y);
++    if (!HdrRestoreColorTarget(key, {0, 0, hdr_output_width_, hdr_output_height_})) {
++      HdrFail("render target restore");
++    }
++  } else if (hdr_frame_.snapshot) {
++    copied = HdrCopyTexture(kHdrTextureUnderlayRt, kHdrTextureUnderlay, rect, dest_x, dest_y);
++  } else {
++    // No UI over this area.
++    copied = HdrCopyFromColorTarget(key, kHdrTextureUnderlay, rect, dest_x, dest_y);
++  }
++  if (copied) {
++    hdr_frame_.captured_area += uint64_t(rect.width) * rect.height;
++  }
++  hdr_frame_.started = false;
++  hdr_frame_.snapshot = false;
++}
++
+ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* reader,
+                                                           uint32_t packet, uint32_t count) {
+   // indirect buffer dispatch
+@@ -1435,8 +1705,15 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+ 
+       bool major_mode_explicit =
+           xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
++      // HDR output: the UI layer (may change the alpha blend for this draw).
++      bool hdr_blend_overridden = HdrBeforeDraw();
+       draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+                                  is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
++      if (hdr_blend_overridden) {
++        (*register_file_)[reg::RB_BLENDCONTROL::rt_register_indices[0]] =
++            hdr_saved_blend_control_;
++      }
++      hdr_pending_ = HdrPending::kNone;
+       if (!draw_succeeded) {
+         auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
+         auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 732c161..a529618 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -1361,9 +1361,24 @@ bool D3D12CommandProcessor::SetupContext() {
+         "perceptual luma output");
+     return false;
+   }
+-  // HDR output: the same bindings with more constants.
++  // HDR output: the same bindings with more constants, and the UI's underlay
++  // (t2) as the last parameter.
+   apply_gamma_root_parameters[UINT(ApplyGammaRootParameter::kConstants)]
+       .Constants.Num32BitValues = sizeof(HdrRefreshConstants) / sizeof(uint32_t);
++  D3D12_ROOT_PARAMETER hdr_refresh_root_parameters[UINT(ApplyGammaRootParameter::kCount) + 2];
++  std::memcpy(hdr_refresh_root_parameters, apply_gamma_root_parameters,
++              sizeof(apply_gamma_root_parameters));
++  D3D12_DESCRIPTOR_RANGE hdr_refresh_root_descriptor_ranges_layer[2];
++  for (uint32_t i = 0; i < 2; ++i) {
++    hdr_refresh_root_descriptor_ranges_layer[i] = apply_gamma_root_descriptor_range_source;
++    hdr_refresh_root_descriptor_ranges_layer[i].BaseShaderRegister = 2 + i;
++    hdr_refresh_root_parameters[UINT(ApplyGammaRootParameter::kCount) + i] =
++        apply_gamma_root_parameters[UINT(ApplyGammaRootParameter::kSource)];
++    hdr_refresh_root_parameters[UINT(ApplyGammaRootParameter::kCount) + i]
++        .DescriptorTable.pDescriptorRanges = &hdr_refresh_root_descriptor_ranges_layer[i];
++  }
++  apply_gamma_root_signature_desc.NumParameters = UINT(ApplyGammaRootParameter::kCount) + 2;
++  apply_gamma_root_signature_desc.pParameters = hdr_refresh_root_parameters;
+   *(hdr_refresh_root_signature_.ReleaseAndGetAddressOf()) =
+       ui::d3d12::util::CreateRootSignature(provider, apply_gamma_root_signature_desc);
+   if (hdr_refresh_root_signature_) {
+@@ -2135,6 +2150,137 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+   gamma_ramp_pwl_up_to_date_ = false;
+ }
+ 
++ID3D12Resource* D3D12CommandProcessor::HdrGetTexture(HdrTexture texture) {
++  Microsoft::WRL::ComPtr<ID3D12Resource>& resource = hdr_textures_[texture];
++  if (resource && (resource->GetDesc().Width != hdr_output_width_ ||
++                   resource->GetDesc().Height != hdr_output_height_)) {
++    resource->AddRef();
++    resources_for_deletion_.emplace_back(GetCurrentSubmission(), resource.Get());
++    resource.Reset();
++  }
++  if (!resource && hdr_output_width_ && hdr_output_height_) {
++    ID3D12Device* device = GetD3D12Provider().GetDevice();
++    D3D12_RESOURCE_DESC desc = {};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    desc.Width = hdr_output_width_;
++    desc.Height = hdr_output_height_;
++    desc.DepthOrArraySize = 1;
++    desc.MipLevels = 1;
++    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    desc.SampleDesc.Count = 1;
++    bool is_ui_layer = texture == kHdrTextureUiLayer;
++    desc.Flags = is_ui_layer ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;
++    if (FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesDefault,
++                                               GetD3D12Provider().GetHeapFlagCreateNotZeroed(),
++                                               &desc, kHdrTextureState, nullptr,
++                                               IID_PPV_ARGS(&resource)))) {
++      return nullptr;
++    }
++    if (is_ui_layer) {
++      if (!hdr_ui_layer_rtv_heap_) {
++        D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
++                                                D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
++        device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&hdr_ui_layer_rtv_heap_));
++      }
++      if (hdr_ui_layer_rtv_heap_) {
++        device->CreateRenderTargetView(resource.Get(), nullptr,
++                                       hdr_ui_layer_rtv_heap_->GetCPUDescriptorHandleForHeapStart());
++      }
++    }
++  }
++  return resource.Get();
++}
++
++void D3D12CommandProcessor::HdrWriteTextureSRV(HdrTexture texture,
++                                               D3D12_CPU_DESCRIPTOR_HANDLE handle) {
++  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
++  srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++  srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++  srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++  srv_desc.Texture2D.MipLevels = 1;
++  GetD3D12Provider().GetDevice()->CreateShaderResourceView(hdr_textures_[texture].Get(),
++                                                           &srv_desc, handle);
++}
++
++uint32_t D3D12CommandProcessor::HdrDrawResolutionScale() const {
++  return render_target_cache_->draw_resolution_scale_x();
++}
++
++uint32_t D3D12CommandProcessor::HdrEdramTileCount() const {
++  return render_target_cache_->edram_tile_count();
++}
++
++template <typename Rect>
++static D3D12_RECT HdrD3D12Rect(const Rect& rect) {
++  return {LONG(rect.x), LONG(rect.y), LONG(rect.x + rect.width), LONG(rect.y + rect.height)};
++}
++
++bool D3D12CommandProcessor::HdrCopyFromColorTarget(uint32_t key, HdrTexture dest,
++                                                   const HdrRect& source, uint32_t dest_x,
++                                                   uint32_t dest_y) {
++  ID3D12Resource* dest_resource = HdrGetTexture(dest);
++  return BeginSubmission(true) && dest_resource &&
++         render_target_cache_->HdrCopyColorTarget(key, dest_resource, kHdrTextureState,
++                                                  HdrD3D12Rect(source), dest_x, dest_y);
++}
++
++bool D3D12CommandProcessor::HdrClearColorTarget(uint32_t key, const HdrRect& rect) {
++  return BeginSubmission(true) && render_target_cache_->HdrClearColorTarget(key, HdrD3D12Rect(rect));
++}
++
++bool D3D12CommandProcessor::HdrRestoreColorTarget(uint32_t key, const HdrRect& rect) {
++  ui::d3d12::util::DescriptorCpuGpuHandlePair underlay_srv;
++  if (!BeginSubmission(true) || !HdrGetTexture(kHdrTextureUnderlayRt) ||
++      !RequestOneUseSingleViewDescriptors(1, &underlay_srv)) {
++    return false;
++  }
++  HdrWriteTextureSRV(kHdrTextureUnderlayRt, underlay_srv.first);
++  return render_target_cache_->HdrRestoreColorTarget(key, underlay_srv.second, HdrD3D12Rect(rect));
++}
++
++bool D3D12CommandProcessor::HdrCopyTexture(HdrTexture source, HdrTexture dest,
++                                           const HdrRect& source_rect, uint32_t dest_x,
++                                           uint32_t dest_y) {
++  ID3D12Resource* source_resource = HdrGetTexture(source);
++  ID3D12Resource* dest_resource = HdrGetTexture(dest);
++  if (!BeginSubmission(true) || !source_resource || !dest_resource) {
++    return false;
++  }
++  PushTransitionBarrier(source_resource, kHdrTextureState, D3D12_RESOURCE_STATE_COPY_SOURCE);
++  PushTransitionBarrier(dest_resource, kHdrTextureState, D3D12_RESOURCE_STATE_COPY_DEST);
++  SubmitBarriers();
++  D3D12_TEXTURE_COPY_LOCATION copy_dest = {};
++  copy_dest.pResource = dest_resource;
++  copy_dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  D3D12_TEXTURE_COPY_LOCATION copy_source = {};
++  copy_source.pResource = source_resource;
++  copy_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  D3D12_BOX copy_box = {source_rect.x, source_rect.y, 0, source_rect.x + source_rect.width,
++                        source_rect.y + source_rect.height, 1};
++  deferred_command_list_.D3DCopyTextureRegion(&copy_dest, dest_x, dest_y, 0, &copy_source,
++                                              &copy_box);
++  PushTransitionBarrier(source_resource, D3D12_RESOURCE_STATE_COPY_SOURCE, kHdrTextureState);
++  PushTransitionBarrier(dest_resource, D3D12_RESOURCE_STATE_COPY_DEST, kHdrTextureState);
++  SubmitBarriers();
++  return true;
++}
++
++bool D3D12CommandProcessor::HdrClearTexture(HdrTexture texture) {
++  ID3D12Resource* resource = HdrGetTexture(texture);
++  if (!BeginSubmission(true) || !resource || texture != kHdrTextureUiLayer ||
++      !hdr_ui_layer_rtv_heap_) {
++    return false;
++  }
++  PushTransitionBarrier(resource, kHdrTextureState, D3D12_RESOURCE_STATE_RENDER_TARGET);
++  SubmitBarriers();
++  const float kZero[4] = {};
++  deferred_command_list_.D3DClearRenderTargetView(
++      hdr_ui_layer_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), kZero, 0, nullptr);
++  PushTransitionBarrier(resource, D3D12_RESOURCE_STATE_RENDER_TARGET, kHdrTextureState);
++  SubmitBarriers();
++  return true;
++}
++
+ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
+@@ -2229,6 +2375,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+ 
++  hdr_output_width_ = guest_output_width;
++  hdr_output_height_ = guest_output_height;
++
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+       [this, &swap_texture_srv_desc, frontbuffer_format, swap_texture_resource, guest_output_width,
+@@ -2341,11 +2490,14 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+                               : gamma_ramp_256_entry_table_up_to_date_) = true;
+         }
+ 
+-        // Destination, source, and if bindful, gamma ramp.
++        // Destination, source, and if bindful, gamma ramp; for HDR, the
++        // underlay and the UI layer (adjacent, one table).
+         ui::d3d12::util::DescriptorCpuGpuHandlePair apply_gamma_descriptors[3];
+         ui::d3d12::util::DescriptorCpuGpuHandlePair apply_gamma_descriptor_gamma_ramp;
++        ui::d3d12::util::DescriptorCpuGpuHandlePair hdr_layer_descriptors[2];
+         if (!RequestOneUseSingleViewDescriptors(bindless_resources_used_ ? 2 : 3,
+-                                                apply_gamma_descriptors)) {
++                                                apply_gamma_descriptors) ||
++            (use_hdr && !RequestOneUseSingleViewDescriptors(2, hdr_layer_descriptors))) {
+           return false;
+         }
+         // Must not call anything that can change the descriptor heap from now
+@@ -2395,10 +2547,25 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+         gamma_ramp_buffer_state_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+ 
+         if (use_hdr) {
++          // The UI layer and its underlay, if this frame has them at the
++          // output's size.
++          HdrComposite composite = HdrGetComposite();
++          if ((composite == HdrComposite::kMask || composite == HdrComposite::kLayer) &&
++              (guest_output_width != hdr_output_width_ ||
++               guest_output_height != hdr_output_height_)) {
++            composite = HdrComposite::kWholeFrame;
++          }
+           deferred_command_list_.D3DSetComputeRootSignature(hdr_refresh_root_signature_.Get());
++          for (uint32_t i = 0; i < 2; ++i) {
++            HdrWriteTextureSRV(i ? kHdrTextureUiLayer : kHdrTextureUnderlay,
++                               hdr_layer_descriptors[i].first);
++            deferred_command_list_.D3DSetComputeRootDescriptorTable(
++                UINT(ApplyGammaRootParameter::kCount) + i, hdr_layer_descriptors[i].second);
++          }
+           HdrRefreshConstants hdr_refresh_constants = {
+               {guest_output_width, guest_output_height},
+-              {uint32_t(hdr_state.sdr_pure_gamma_2_2) | (uint32_t(hdr_state.test_pattern) << 1),
++              {uint32_t(hdr_state.sdr_pure_gamma_2_2) | (uint32_t(hdr_state.test_pattern) << 1) |
++                   HdrRefreshCompositeFlags(composite, hdr_state.debug_ui),
+                0},
+               {hdr_state.sdr_white_nits, hdr_state.paper_white_nits, hdr_state.rolloff_start_nits,
+                hdr_state.peak_nits}};
+@@ -2662,6 +2829,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+                                     normalized_color_mask, *vertex_shader)) {
+     return false;
+   }
++  // HDR output: the UI layer may start with this draw.
++  HdrRenderTargetsReady();
+ 
+   // Create the pipeline (for this, need the actually used render target formats
+   // from the render target cache), translating the shaders - doing this now to
+diff --git a/src/graphics/d3d12/deferred_command_list.cpp b/src/graphics/d3d12/deferred_command_list.cpp
+index 987fb1a..13b49a2 100644
+--- a/src/graphics/d3d12/deferred_command_list.cpp
++++ b/src/graphics/d3d12/deferred_command_list.cpp
+@@ -82,6 +82,14 @@ void DeferredCommandList::ExecuteCommands(ID3D12GraphicsCommandList* command_lis
+         command_list->CopyTextureRegion(&args.dst, args.dst_x, args.dst_y, args.dst_z, &args.src,
+                                         args.has_src_box ? &args.src_box : nullptr);
+       } break;
++      case Command::kD3DResolveSubresourceRegion: {
++        auto& args = *reinterpret_cast<const D3DResolveSubresourceRegionArguments*>(stream);
++        if (command_list_1 != nullptr) {
++          command_list_1->ResolveSubresourceRegion(
++              args.dst_resource, 0, args.dst_x, args.dst_y, args.src_resource, 0,
++              const_cast<D3D12_RECT*>(&args.src_rect), args.format, D3D12_RESOLVE_MODE_AVERAGE);
++        }
++      } break;
+       case Command::kD3DDispatch: {
+         if (current_pipeline_state != nullptr) {
+           auto& args = *reinterpret_cast<const D3DDispatchArguments*>(stream);
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 8ec5c10..9d8219a 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -53,6 +53,8 @@ namespace rex::graphics::d3d12 {
+ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/clear_uint2_ps.h"
+ #include "../shaders/bytecode/d3d12_5_1/fullscreen_cw_vs.h"
++#include "../shaders/bytecode/d3d12_5_1/hdr_fullscreen_vs.h"
++#include "../shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h"
+ #include "../shaders/bytecode/d3d12_5_1/host_depth_store_1xmsaa_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/host_depth_store_2xmsaa_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/host_depth_store_4xmsaa_cs.h"
+@@ -5016,6 +5018,154 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+   }
+ }
+ 
++ID3D12Resource* D3D12RenderTargetCache::HdrColorTarget(uint32_t key, D3D12_RECT& rect,
++                                                       bool& msaa_out) {
++  auto* rt = static_cast<D3D12RenderTarget*>(HdrFindColorTarget(key));
++  if (!rt) {
++    return nullptr;
++  }
++  D3D12_RESOURCE_DESC desc = rt->resource()->GetDesc();
++  rect.right = std::min(rect.right, LONG(desc.Width));
++  rect.bottom = std::min(rect.bottom, LONG(desc.Height));
++  msaa_out = desc.SampleDesc.Count > 1;
++  return rect.right > rect.left && rect.bottom > rect.top ? rt->resource() : nullptr;
++}
++
++bool D3D12RenderTargetCache::HdrCopyColorTarget(uint32_t key, ID3D12Resource* dest,
++                                                D3D12_RESOURCE_STATES dest_state,
++                                                D3D12_RECT source, uint32_t dest_x,
++                                                uint32_t dest_y) {
++  bool msaa;
++  ID3D12Resource* rt_resource = HdrColorTarget(key, source, msaa);
++  if (!rt_resource) {
++    return false;
++  }
++  auto* rt = static_cast<D3D12RenderTarget*>(HdrFindColorTarget(key));
++  D3D12_RESOURCE_STATES source_state =
++      msaa ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_COPY_SOURCE;
++  D3D12_RESOURCE_STATES dest_op_state =
++      msaa ? D3D12_RESOURCE_STATE_RESOLVE_DEST : D3D12_RESOURCE_STATE_COPY_DEST;
++  command_processor_.PushTransitionBarrier(rt_resource, rt->SetResourceState(source_state),
++                                           source_state);
++  command_processor_.PushTransitionBarrier(dest, dest_state, dest_op_state);
++  command_processor_.SubmitBarriers();
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  if (msaa) {
++    command_list.D3DResolveSubresourceRegion(dest, dest_x, dest_y, rt_resource, source,
++                                             DXGI_FORMAT_R8G8B8A8_UNORM);
++  } else {
++    D3D12_TEXTURE_COPY_LOCATION copy_dest = {};
++    copy_dest.pResource = dest;
++    copy_dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    D3D12_TEXTURE_COPY_LOCATION copy_source = {};
++    copy_source.pResource = rt_resource;
++    copy_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    D3D12_BOX copy_box = {UINT(source.left), UINT(source.top), 0, UINT(source.right),
++                          UINT(source.bottom), 1};
++    command_list.D3DCopyTextureRegion(&copy_dest, dest_x, dest_y, 0, &copy_source, &copy_box);
++  }
++  command_processor_.PushTransitionBarrier(dest, dest_op_state, dest_state);
++  // The draw that may follow needs it as a render target. Submitted now, not
++  // merged with later barriers on the same resources.
++  command_processor_.PushTransitionBarrier(
++      rt_resource, rt->SetResourceState(D3D12_RESOURCE_STATE_RENDER_TARGET),
++      D3D12_RESOURCE_STATE_RENDER_TARGET);
++  command_processor_.SubmitBarriers();
++  return true;
++}
++
++bool D3D12RenderTargetCache::HdrClearColorTarget(uint32_t key, D3D12_RECT rect) {
++  bool msaa;
++  ID3D12Resource* rt_resource = HdrColorTarget(key, rect, msaa);
++  if (!rt_resource) {
++    return false;
++  }
++  auto* rt = static_cast<D3D12RenderTarget*>(HdrFindColorTarget(key));
++  command_processor_.PushTransitionBarrier(
++      rt_resource, rt->SetResourceState(D3D12_RESOURCE_STATE_RENDER_TARGET),
++      D3D12_RESOURCE_STATE_RENDER_TARGET);
++  command_processor_.SubmitBarriers();
++  const float kZero[4] = {};
++  command_processor_.GetDeferredCommandList().D3DClearRenderTargetView(
++      rt->descriptor_draw().GetHandle(), kZero, 1, &rect);
++  return true;
++}
++
++bool D3D12RenderTargetCache::HdrRestoreColorTarget(uint32_t key,
++                                                   D3D12_GPU_DESCRIPTOR_HANDLE underlay_srv,
++                                                   D3D12_RECT rect) {
++  bool msaa;
++  ID3D12Resource* rt_resource = HdrColorTarget(key, rect, msaa);
++  if (!rt_resource) {
++    return false;
++  }
++  auto* rt = static_cast<D3D12RenderTarget*>(HdrFindColorTarget(key));
++  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
++  if (!hdr_restore_root_signature_) {
++    D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
++    D3D12_ROOT_PARAMETER parameter = {};
++    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++    parameter.DescriptorTable.NumDescriptorRanges = 1;
++    parameter.DescriptorTable.pDescriptorRanges = &range;
++    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {1, &parameter, 0, nullptr,
++                                                     D3D12_ROOT_SIGNATURE_FLAG_NONE};
++    *(hdr_restore_root_signature_.ReleaseAndGetAddressOf()) = ui::d3d12::util::CreateRootSignature(
++        command_processor_.GetD3D12Provider(), root_signature_desc);
++    if (!hdr_restore_root_signature_) {
++      return false;
++    }
++  }
++  Microsoft::WRL::ComPtr<ID3D12PipelineState>& pipeline = hdr_restore_pipelines_[msaa];
++  if (!pipeline) {
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
++    pipeline_desc.pRootSignature = hdr_restore_root_signature_.Get();
++    pipeline_desc.VS.pShaderBytecode = shaders::hdr_fullscreen_vs;
++    pipeline_desc.VS.BytecodeLength = sizeof(shaders::hdr_fullscreen_vs);
++    pipeline_desc.PS.pShaderBytecode = shaders::hdr_underlay_restore_ps;
++    pipeline_desc.PS.BytecodeLength = sizeof(shaders::hdr_underlay_restore_ps);
++    D3D12_RENDER_TARGET_BLEND_DESC& blend = pipeline_desc.BlendState.RenderTarget[0];
++    blend.BlendEnable = TRUE;
++    blend.SrcBlend = D3D12_BLEND_INV_DEST_ALPHA;
++    blend.DestBlend = D3D12_BLEND_ONE;
++    blend.BlendOp = D3D12_BLEND_OP_ADD;
++    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
++    blend.DestBlendAlpha = D3D12_BLEND_ZERO;
++    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
++    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++    pipeline_desc.SampleMask = UINT_MAX;
++    pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++    pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
++    pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    pipeline_desc.NumRenderTargets = 1;
++    pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
++    pipeline_desc.SampleDesc.Count = rt_resource->GetDesc().SampleDesc.Count;
++    if (FAILED(device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline)))) {
++      return false;
++    }
++  }
++  command_processor_.PushTransitionBarrier(
++      rt_resource, rt->SetResourceState(D3D12_RESOURCE_STATE_RENDER_TARGET),
++      D3D12_RESOURCE_STATE_RENDER_TARGET);
++  command_processor_.SubmitBarriers();
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  are_current_command_list_render_targets_valid_ = false;
++  D3D12_CPU_DESCRIPTOR_HANDLE rtv = rt->descriptor_draw().GetHandle();
++  command_list.D3DOMSetRenderTargets(1, &rtv, FALSE, nullptr);
++  command_processor_.SetExternalPipeline(pipeline.Get());
++  command_processor_.SetExternalGraphicsRootSignature(hdr_restore_root_signature_.Get());
++  command_list.D3DSetGraphicsRootDescriptorTable(0, underlay_srv);
++  D3D12_RESOURCE_DESC desc = rt_resource->GetDesc();
++  command_processor_.SetViewport({0.0f, 0.0f, float(desc.Width), float(desc.Height), 0.0f, 1.0f});
++  command_processor_.SetScissorRect(rect);
++  command_processor_.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++  command_list.D3DDrawInstanced(3, 1, 0, 0);
++  // Back to the guest's render targets in case a draw follows.
++  SetCommandListRenderTargets(last_update_accumulated_render_targets());
++  return true;
++}
++
+ void D3D12RenderTargetCache::SetCommandListRenderTargets(
+     RenderTarget* const* depth_and_color_render_targets) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/hdr_fullscreen_vs.h b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_fullscreen_vs.h
+new file mode 100644
+index 0000000..d627d7c
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_fullscreen_vs.h
+@@ -0,0 +1,17 @@
++// Generated from hdr_fullscreen.vs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_fullscreen_vs[] = {
++    0x43425844, 0xDE3C2F2F, 0xF971CC05, 0x2FBC9540, 0xCA1467B2, 0x00000001, 0x0000019C, 0x00000003,
++    0x0000002C, 0x00000060, 0x00000094, 0x4E475349, 0x0000002C, 0x00000001, 0x00000008, 0x00000020,
++    0x00000000, 0x00000006, 0x00000001, 0x00000000, 0x00000101, 0x565F5653, 0x65747265, 0x00444978,
++    0x4E47534F, 0x0000002C, 0x00000001, 0x00000008, 0x00000020, 0x00000000, 0x00000001, 0x00000003,
++    0x00000000, 0x0000000F, 0x505F5653, 0x7469736F, 0x006E6F69, 0x58454853, 0x00000100, 0x00010051,
++    0x00000040, 0x0100086A, 0x04000060, 0x00101012, 0x00000000, 0x00000006, 0x04000067, 0x001020F2,
++    0x00000000, 0x00000001, 0x02000068, 0x00000001, 0x07000055, 0x00100022, 0x00000000, 0x0010100A,
++    0x00000000, 0x00004001, 0x00000001, 0x05000036, 0x00100012, 0x00000000, 0x0010100A, 0x00000000,
++    0x0A000001, 0x00100032, 0x00000000, 0x00100046, 0x00000000, 0x00004002, 0x00000001, 0x00000001,
++    0x00000000, 0x00000000, 0x05000056, 0x00100032, 0x00000000, 0x00100046, 0x00000000, 0x0F000032,
++    0x00102032, 0x00000000, 0x00100046, 0x00000000, 0x00004002, 0x40800000, 0x40800000, 0x00000000,
++    0x00000000, 0x00004002, 0xBF800000, 0xBF800000, 0x00000000, 0x00000000, 0x08000036, 0x001020C2,
++    0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x3F800000, 0x0100003E,
++};
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h
+index b848f09..901d0e6 100644
+--- a/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h
+@@ -1,87 +1,234 @@
+ // Generated from hdr_refresh.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
+ // sources (see patches/README.md). Not disassembled to keep the patch small.
+ const uint32_t hdr_refresh_cs[] = {
+-    0x43425844, 0x59F5498E, 0x9476E848, 0xD6C5792C, 0x09A6A199, 0x00000001, 0x00000A44, 0x00000003,
++    0x43425844, 0xF565364D, 0xCB5D627E, 0xA95CE115, 0xD1A68D01, 0x00000001, 0x00001CB0, 0x00000003,
+     0x0000002C, 0x0000003C, 0x0000004C, 0x4E475349, 0x00000008, 0x00000000, 0x00000008, 0x4E47534F,
+-    0x00000008, 0x00000000, 0x00000008, 0x58454853, 0x000009F0, 0x00050051, 0x0000027C, 0x0100086A,
++    0x00000008, 0x00000000, 0x00000008, 0x58454853, 0x00001C5C, 0x00050051, 0x00000717, 0x0100086A,
+     0x07000059, 0x00308E46, 0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x00000000, 0x07000858,
+     0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000, 0x07001858, 0x00307E46,
+-    0x00000001, 0x00000001, 0x00000001, 0x00005555, 0x00000000, 0x0700189C, 0x0031EE46, 0x00000000,
+-    0x00000000, 0x00000000, 0x00001111, 0x00000000, 0x0200005F, 0x00020032, 0x02000068, 0x00000004,
+-    0x0400009B, 0x00000010, 0x00000008, 0x00000001, 0x08000050, 0x00100032, 0x00000000, 0x00020046,
+-    0x00308046, 0x00000000, 0x00000000, 0x00000000, 0x0700003C, 0x00100012, 0x00000000, 0x0010001A,
+-    0x00000000, 0x0010000A, 0x00000000, 0x0304001F, 0x0010000A, 0x00000000, 0x0100003E, 0x01000015,
+-    0x04000036, 0x00100032, 0x00000000, 0x00020046, 0x08000036, 0x001000C2, 0x00000000, 0x00004002,
+-    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x00100072, 0x00000000, 0x00100E46,
+-    0x00000000, 0x00207D86, 0x00000001, 0x00000001, 0x0C000001, 0x00100072, 0x00000001, 0x00308AA6,
+-    0x00000000, 0x00000000, 0x00000000, 0x00004002, 0x00000004, 0x00000001, 0x00000002, 0x00000000,
+-    0x0304001F, 0x0010000A, 0x00000001, 0x05000036, 0x00100032, 0x00000000, 0x00100516, 0x00000000,
+-    0x01000015, 0x0F000032, 0x00100072, 0x00000000, 0x00100186, 0x00000000, 0x00004002, 0x437F0000,
+-    0x437F0000, 0x437F0000, 0x00000000, 0x00004002, 0x3F000000, 0x3F000000, 0x3F000000, 0x00000000,
+-    0x0500001C, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0800002D, 0x00100012, 0x00000002,
+-    0x00100006, 0x00000000, 0x00207D26, 0x00000000, 0x00000000, 0x0800002D, 0x00100022, 0x00000002,
+-    0x00100556, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x0800002D, 0x00100042, 0x00000002,
+-    0x00100AA6, 0x00000000, 0x00207C96, 0x00000000, 0x00000000, 0x0A000034, 0x00100072, 0x00000000,
+-    0x00100246, 0x00000002, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0304001F,
+-    0x0010001A, 0x00000001, 0x0500002F, 0x001000B2, 0x00000001, 0x00100846, 0x00000000, 0x0A000038,
+-    0x001000B2, 0x00000001, 0x00100C46, 0x00000001, 0x00004002, 0x400CCCCD, 0x400CCCCD, 0x00000000,
+-    0x400CCCCD, 0x05000019, 0x001000B2, 0x00000001, 0x00100C46, 0x00000001, 0x01000012, 0x0A000031,
+-    0x00100072, 0x00000002, 0x00004002, 0x3D25AEE6, 0x3D25AEE6, 0x3D25AEE6, 0x00000000, 0x00100246,
+-    0x00000000, 0x0A000000, 0x00100072, 0x00000003, 0x00100246, 0x00000000, 0x00004002, 0x3D6147AE,
++    0x00000001, 0x00000001, 0x00000001, 0x00005555, 0x00000000, 0x07001858, 0x00307E46, 0x00000002,
++    0x00000002, 0x00000002, 0x00005555, 0x00000000, 0x07001858, 0x00307E46, 0x00000003, 0x00000003,
++    0x00000003, 0x00005555, 0x00000000, 0x0700189C, 0x0031EE46, 0x00000000, 0x00000000, 0x00000000,
++    0x00001111, 0x00000000, 0x0200005F, 0x00020032, 0x02000068, 0x00000006, 0x0400009B, 0x00000010,
++    0x00000008, 0x00000001, 0x08000050, 0x00100032, 0x00000000, 0x00020046, 0x00308046, 0x00000000,
++    0x00000000, 0x00000000, 0x0700003C, 0x00100012, 0x00000000, 0x0010001A, 0x00000000, 0x0010000A,
++    0x00000000, 0x0304001F, 0x0010000A, 0x00000000, 0x0100003E, 0x01000015, 0x0B00008A, 0x00100012,
++    0x00000000, 0x00004001, 0x00000002, 0x00004001, 0x00000003, 0x0030802A, 0x00000000, 0x00000000,
++    0x00000000, 0x07000020, 0x00100022, 0x00000000, 0x0010000A, 0x00000000, 0x00004001, 0x00000003,
++    0x0304001F, 0x0010001A, 0x00000000, 0x0B00008A, 0x00100022, 0x00000000, 0x00004001, 0x00000002,
++    0x00004001, 0x00000006, 0x0030802A, 0x00000000, 0x00000000, 0x00000000, 0x0A000020, 0x001000E2,
++    0x00000000, 0x00100556, 0x00000000, 0x00004002, 0x00000000, 0x00000002, 0x00000003, 0x00000001,
++    0x04000036, 0x00100032, 0x00000001, 0x00020046, 0x08000036, 0x001000C2, 0x00000001, 0x00004002,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x001000F2, 0x00000002, 0x00100F46,
++    0x00000001, 0x00207E46, 0x00000002, 0x00000002, 0x0800002D, 0x001000F2, 0x00000003, 0x00100F46,
++    0x00000001, 0x00207E46, 0x00000003, 0x00000003, 0x09000037, 0x001000F2, 0x00000002, 0x00100556,
++    0x00000000, 0x00100E46, 0x00000002, 0x00100E46, 0x00000003, 0x0304001F, 0x0010002A, 0x00000000,
++    0x09000001, 0x00100022, 0x00000000, 0x0030802A, 0x00000000, 0x00000000, 0x00000000, 0x00004001,
++    0x00000004, 0x0800002D, 0x00100072, 0x00000001, 0x00100E46, 0x00000001, 0x00207E46, 0x00000001,
++    0x00000001, 0x09000037, 0x00100072, 0x00000002, 0x00100556, 0x00000000, 0x00100866, 0x00000001,
++    0x00100246, 0x00000001, 0x01000015, 0x09000037, 0x001000E2, 0x00000000, 0x00100FF6, 0x00000000,
++    0x00100FF6, 0x00000002, 0x00100906, 0x00000002, 0x09000001, 0x00100012, 0x00000001, 0x0030802A,
++    0x00000000, 0x00000000, 0x00000000, 0x00004001, 0x00000001, 0x0A000034, 0x001000E2, 0x00000000,
++    0x00100E56, 0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0304001F,
++    0x0010000A, 0x00000001, 0x0500002F, 0x00100072, 0x00000001, 0x00100796, 0x00000000, 0x0A000038,
++    0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x00004002, 0x400CCCCD, 0x400CCCCD, 0x400CCCCD,
++    0x00000000, 0x05000019, 0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x01000012, 0x0A000031,
++    0x00100072, 0x00000002, 0x00004002, 0x3D25AEE6, 0x3D25AEE6, 0x3D25AEE6, 0x00000000, 0x00100796,
++    0x00000000, 0x0A000000, 0x00100072, 0x00000003, 0x00100796, 0x00000000, 0x00004002, 0x3D6147AE,
+     0x3D6147AE, 0x3D6147AE, 0x00000000, 0x0A000038, 0x00100072, 0x00000003, 0x00100246, 0x00000003,
+     0x00004002, 0x3F72A76E, 0x3F72A76E, 0x3F72A76E, 0x00000000, 0x0500002F, 0x00100072, 0x00000003,
+     0x00100246, 0x00000003, 0x0A000038, 0x00100072, 0x00000003, 0x00100246, 0x00000003, 0x00004002,
+     0x4019999A, 0x4019999A, 0x4019999A, 0x00000000, 0x05000019, 0x00100072, 0x00000003, 0x00100246,
+-    0x00000003, 0x0A000038, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x3D9E8391,
+-    0x3D9E8391, 0x3D9E8391, 0x00000000, 0x09000037, 0x001000B2, 0x00000001, 0x00100846, 0x00000002,
+-    0x00100846, 0x00000003, 0x00100846, 0x00000000, 0x01000015, 0x09000038, 0x00100072, 0x00000000,
+-    0x00100346, 0x00000001, 0x00308006, 0x00000000, 0x00000000, 0x00000001, 0x0304001F, 0x0010002A,
+-    0x00000001, 0x04000056, 0x00100032, 0x00000001, 0x00020046, 0x0A000000, 0x00100032, 0x00000001,
+-    0x00100046, 0x00000001, 0x00004002, 0x3F000000, 0x3F000000, 0x00000000, 0x00000000, 0x07000056,
+-    0x001000C2, 0x00000001, 0x00308406, 0x00000000, 0x00000000, 0x00000000, 0x0700000E, 0x00100032,
+-    0x00000001, 0x00100046, 0x00000001, 0x00100AE6, 0x00000001, 0x07000031, 0x00100082, 0x00000000,
+-    0x0010001A, 0x00000001, 0x00004001, 0x3F000000, 0x09000032, 0x00100022, 0x00000001, 0x0010000A,
+-    0x00000001, 0x00004001, 0x40000000, 0x00004001, 0xBF800000, 0x09000037, 0x00100012, 0x00000001,
+-    0x0010003A, 0x00000000, 0x0010000A, 0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100022,
+-    0x00000001, 0x0010000A, 0x00000001, 0x00004001, 0x41C00000, 0x05000041, 0x00100022, 0x00000001,
+-    0x0010001A, 0x00000001, 0x07000038, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x00004001,
+-    0x3E800000, 0x05000019, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100022,
+-    0x00000001, 0x0010001A, 0x00000001, 0x00004001, 0x42C80000, 0x07000031, 0x00100012, 0x00000001,
+-    0x0010000A, 0x00000001, 0x00004001, 0x00000000, 0x0B000037, 0x00100012, 0x00000001, 0x0010000A,
+-    0x00000001, 0x0030801A, 0x00000000, 0x00000000, 0x00000001, 0x0010001A, 0x00000001, 0x09000037,
+-    0x00100072, 0x00000000, 0x00100FF6, 0x00000000, 0x00100556, 0x00000001, 0x00100006, 0x00000001,
+-    0x0304001F, 0x0010003A, 0x00000000, 0x05000036, 0x00100082, 0x00000000, 0x00004001, 0x461C4000,
+-    0x01000012, 0x07000036, 0x00100082, 0x00000000, 0x0030802A, 0x00000000, 0x00000000, 0x00000001,
+-    0x01000015, 0x01000012, 0x07000036, 0x00100082, 0x00000000, 0x0030802A, 0x00000000, 0x00000000,
+-    0x00000001, 0x01000015, 0x07000034, 0x00100012, 0x00000001, 0x0010002A, 0x00000000, 0x0010001A,
+-    0x00000000, 0x07000034, 0x00100012, 0x00000001, 0x0010000A, 0x00000000, 0x0010000A, 0x00000001,
+-    0x07000031, 0x00100022, 0x00000001, 0x0010003A, 0x00000000, 0x0010000A, 0x00000001, 0x09000031,
+-    0x00100042, 0x00000001, 0x0010003A, 0x00000000, 0x0030803A, 0x00000000, 0x00000000, 0x00000001,
+-    0x07000001, 0x00100022, 0x00000001, 0x0010002A, 0x00000001, 0x0010001A, 0x00000001, 0x0304001F,
+-    0x0010001A, 0x00000001, 0x0A000000, 0x00100022, 0x00000001, 0x8010003A, 0x00000041, 0x00000000,
+-    0x0030803A, 0x00000000, 0x00000000, 0x00000001, 0x08000000, 0x00100042, 0x00000001, 0x0010003A,
+-    0x00000000, 0x8010000A, 0x00000041, 0x00000001, 0x0700000E, 0x00100042, 0x00000001, 0x0010002A,
+-    0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100042, 0x00000001, 0x0010002A, 0x00000001,
+-    0x00004001, 0x3FB8AA3B, 0x05000019, 0x00100042, 0x00000001, 0x0010002A, 0x00000001, 0x08000000,
+-    0x00100042, 0x00000001, 0x8010002A, 0x00000041, 0x00000001, 0x00004001, 0x3F800000, 0x09000032,
+-    0x00100082, 0x00000000, 0x0010001A, 0x00000001, 0x0010002A, 0x00000001, 0x0010003A, 0x00000000,
+-    0x0700000E, 0x00100082, 0x00000000, 0x0010003A, 0x00000000, 0x0010000A, 0x00000001, 0x07000038,
+-    0x00100072, 0x00000000, 0x00100FF6, 0x00000000, 0x00100246, 0x00000000, 0x01000015, 0x0A000010,
+-    0x00100012, 0x00000001, 0x00100246, 0x00000000, 0x00004002, 0x3F209D8C, 0x3EA897C8, 0x3D3168F9,
+-    0x00000000, 0x0A000010, 0x00100022, 0x00000001, 0x00100246, 0x00000000, 0x00004002, 0x3D8D82BA,
+-    0x3F6B66F9, 0x3C3A27AF, 0x00000000, 0x0A000010, 0x00100042, 0x00000001, 0x00100246, 0x00000000,
+-    0x00004002, 0x3C86466B, 0x3DB44029, 0x3F6545B7, 0x00000000, 0x0A002038, 0x00100072, 0x00000000,
+-    0x00100246, 0x00000001, 0x00004002, 0x38D1B717, 0x38D1B717, 0x38D1B717, 0x00000000, 0x0500002F,
+-    0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038, 0x00100072, 0x00000000, 0x00100246,
+-    0x00000000, 0x00004002, 0x3E232000, 0x3E232000, 0x3E232000, 0x00000000, 0x05000019, 0x00100072,
+-    0x00000000, 0x00100246, 0x00000000, 0x0F000032, 0x00100072, 0x00000001, 0x00100246, 0x00000000,
+-    0x00004002, 0x4196D000, 0x4196D000, 0x4196D000, 0x00000000, 0x00004002, 0x3F560000, 0x3F560000,
+-    0x3F560000, 0x00000000, 0x0F000032, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002,
+-    0x41958000, 0x41958000, 0x41958000, 0x00000000, 0x00004002, 0x3F800000, 0x3F800000, 0x3F800000,
+-    0x00000000, 0x0700000E, 0x00100072, 0x00000000, 0x00100246, 0x00000001, 0x00100246, 0x00000000,
+-    0x0500002F, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038, 0x00100072, 0x00000000,
+-    0x00100246, 0x00000000, 0x00004002, 0x429DB000, 0x429DB000, 0x429DB000, 0x00000000, 0x05000019,
+-    0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x05000036, 0x00100082, 0x00000000, 0x00004001,
+-    0x3F800000, 0x070000A4, 0x0021E0F2, 0x00000000, 0x00000000, 0x00020546, 0x00100E46, 0x00000000,
+-    0x0100003E,
++    0x00000003, 0x0A000038, 0x001000E2, 0x00000000, 0x00100E56, 0x00000000, 0x00004002, 0x00000000,
++    0x3D9E8391, 0x3D9E8391, 0x3D9E8391, 0x09000037, 0x00100072, 0x00000001, 0x00100246, 0x00000002,
++    0x00100246, 0x00000003, 0x00100796, 0x00000000, 0x01000015, 0x09000038, 0x001000E2, 0x00000000,
++    0x00100906, 0x00000001, 0x00308006, 0x00000000, 0x00000000, 0x00000001, 0x01000012, 0x07000020,
++    0x00100012, 0x00000001, 0x0010000A, 0x00000000, 0x00004001, 0x00000002, 0x0304001F, 0x0010000A,
++    0x00000001, 0x04000036, 0x00100032, 0x00000001, 0x00020046, 0x08000036, 0x001000C2, 0x00000001,
++    0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x001000F2, 0x00000002,
++    0x00100F46, 0x00000001, 0x00207E46, 0x00000003, 0x00000003, 0x07000034, 0x00100012, 0x00000003,
++    0x0010003A, 0x00000002, 0x00004001, 0x3B808081, 0x0700200E, 0x00100072, 0x00000002, 0x00100246,
++    0x00000002, 0x00100006, 0x00000003, 0x0C000001, 0x00100032, 0x00000003, 0x00308AA6, 0x00000000,
++    0x00000000, 0x00000000, 0x00004002, 0x00000020, 0x00000001, 0x00000000, 0x00000000, 0x0304001F,
++    0x0010000A, 0x00000003, 0x08000036, 0x00100072, 0x00000002, 0x00004002, 0x3F800000, 0x00000000,
++    0x3F800000, 0x00000000, 0x01000012, 0x0F000032, 0x00100072, 0x00000002, 0x00100246, 0x00000002,
++    0x00004002, 0x437F0000, 0x437F0000, 0x437F0000, 0x00000000, 0x00004002, 0x3F000000, 0x3F000000,
++    0x3F000000, 0x00000000, 0x0500001C, 0x00100072, 0x00000002, 0x00100246, 0x00000002, 0x0800002D,
++    0x00100012, 0x00000003, 0x00100006, 0x00000002, 0x002074E6, 0x00000000, 0x00000000, 0x0800002D,
++    0x00100042, 0x00000003, 0x00100556, 0x00000002, 0x002079C6, 0x00000000, 0x00000000, 0x0800002D,
++    0x00100082, 0x00000003, 0x00100AA6, 0x00000002, 0x002072D6, 0x00000000, 0x00000000, 0x09000001,
++    0x00100012, 0x00000002, 0x0030802A, 0x00000000, 0x00000000, 0x00000000, 0x00004001, 0x00000001,
++    0x0A000034, 0x001000D2, 0x00000003, 0x00100E06, 0x00000003, 0x00004002, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x0304001F, 0x0010000A, 0x00000002, 0x0500002F, 0x00100072, 0x00000002,
++    0x00100386, 0x00000003, 0x0A000038, 0x00100072, 0x00000002, 0x00100246, 0x00000002, 0x00004002,
++    0x400CCCCD, 0x400CCCCD, 0x400CCCCD, 0x00000000, 0x05000019, 0x00100072, 0x00000002, 0x00100246,
++    0x00000002, 0x01000012, 0x0A000031, 0x00100072, 0x00000004, 0x00004002, 0x3D25AEE6, 0x3D25AEE6,
++    0x3D25AEE6, 0x00000000, 0x00100386, 0x00000003, 0x0A000000, 0x00100072, 0x00000005, 0x00100386,
++    0x00000003, 0x00004002, 0x3D6147AE, 0x3D6147AE, 0x3D6147AE, 0x00000000, 0x0A000038, 0x00100072,
++    0x00000005, 0x00100246, 0x00000005, 0x00004002, 0x3F72A76E, 0x3F72A76E, 0x3F72A76E, 0x00000000,
++    0x0500002F, 0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x0A000038, 0x00100072, 0x00000005,
++    0x00100246, 0x00000005, 0x00004002, 0x4019999A, 0x4019999A, 0x4019999A, 0x00000000, 0x05000019,
++    0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x0A000038, 0x001000D2, 0x00000003, 0x00100E06,
++    0x00000003, 0x00004002, 0x3D9E8391, 0x00000000, 0x3D9E8391, 0x3D9E8391, 0x09000037, 0x00100072,
++    0x00000002, 0x00100246, 0x00000004, 0x00100246, 0x00000005, 0x00100386, 0x00000003, 0x01000015,
++    0x01000015, 0x0800002D, 0x00100072, 0x00000001, 0x00100E46, 0x00000001, 0x00207E46, 0x00000002,
++    0x00000002, 0x05002036, 0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x0F000032, 0x00100072,
++    0x00000001, 0x00100246, 0x00000001, 0x00004002, 0x437F0000, 0x437F0000, 0x437F0000, 0x00000000,
++    0x00004002, 0x3F000000, 0x3F000000, 0x3F000000, 0x00000000, 0x0500001C, 0x00100072, 0x00000001,
++    0x00100246, 0x00000001, 0x0800002D, 0x00100012, 0x00000003, 0x00100006, 0x00000001, 0x002074E6,
++    0x00000000, 0x00000000, 0x0800002D, 0x00100042, 0x00000003, 0x00100556, 0x00000001, 0x002079C6,
++    0x00000000, 0x00000000, 0x0800002D, 0x00100082, 0x00000003, 0x00100AA6, 0x00000001, 0x002072D6,
++    0x00000000, 0x00000000, 0x0A000034, 0x00100072, 0x00000001, 0x00100386, 0x00000003, 0x00004002,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0304001F, 0x0010001A, 0x00000003, 0x0500002F,
++    0x00100072, 0x00000003, 0x00100246, 0x00000001, 0x0A000038, 0x00100072, 0x00000003, 0x00100246,
++    0x00000003, 0x00004002, 0x400CCCCD, 0x400CCCCD, 0x400CCCCD, 0x00000000, 0x05000019, 0x00100072,
++    0x00000003, 0x00100246, 0x00000003, 0x01000012, 0x0A000031, 0x00100072, 0x00000004, 0x00004002,
++    0x3D25AEE6, 0x3D25AEE6, 0x3D25AEE6, 0x00000000, 0x00100246, 0x00000001, 0x0A000000, 0x00100072,
++    0x00000005, 0x00100246, 0x00000001, 0x00004002, 0x3D6147AE, 0x3D6147AE, 0x3D6147AE, 0x00000000,
++    0x0A000038, 0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x00004002, 0x3F72A76E, 0x3F72A76E,
++    0x3F72A76E, 0x00000000, 0x0500002F, 0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x0A000038,
++    0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x00004002, 0x4019999A, 0x4019999A, 0x4019999A,
++    0x00000000, 0x05000019, 0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x0A000038, 0x00100072,
++    0x00000001, 0x00100246, 0x00000001, 0x00004002, 0x3D9E8391, 0x3D9E8391, 0x3D9E8391, 0x00000000,
++    0x09000037, 0x00100072, 0x00000003, 0x00100246, 0x00000004, 0x00100246, 0x00000005, 0x00100246,
++    0x00000001, 0x01000015, 0x09000038, 0x00100012, 0x00000001, 0x0010003A, 0x00000002, 0x0030800A,
++    0x00000000, 0x00000000, 0x00000001, 0x08000000, 0x00100022, 0x00000001, 0x8010003A, 0x00000041,
++    0x00000002, 0x00004001, 0x3F800000, 0x09000038, 0x00100022, 0x00000001, 0x0010001A, 0x00000001,
++    0x0030801A, 0x00000000, 0x00000000, 0x00000001, 0x07000038, 0x001000E2, 0x00000001, 0x00100556,
++    0x00000001, 0x00100906, 0x00000003, 0x09000032, 0x001000E2, 0x00000000, 0x00100906, 0x00000002,
++    0x00100006, 0x00000001, 0x00100E56, 0x00000001, 0x01000012, 0x09000001, 0x00100012, 0x00000001,
++    0x0030802A, 0x00000000, 0x00000000, 0x00000000, 0x00004001, 0x00000004, 0x04000036, 0x00100032,
++    0x00000002, 0x00020046, 0x08000036, 0x001000C2, 0x00000002, 0x00004002, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x0800002D, 0x001000E2, 0x00000001, 0x00100F46, 0x00000002, 0x00207936,
++    0x00000001, 0x00000001, 0x09000037, 0x001000E2, 0x00000001, 0x00100006, 0x00000001, 0x001006F6,
++    0x00000001, 0x00100E56, 0x00000001, 0x07000020, 0x00100012, 0x00000000, 0x0010000A, 0x00000000,
++    0x00004001, 0x00000001, 0x0304001F, 0x0010000A, 0x00000000, 0x0800002D, 0x00100072, 0x00000003,
++    0x00100F46, 0x00000002, 0x00207E46, 0x00000002, 0x00000002, 0x08000000, 0x00100072, 0x00000003,
++    0x00100796, 0x00000001, 0x80100246, 0x00000041, 0x00000003, 0x0B000031, 0x00100072, 0x00000003,
++    0x00004002, 0x3B008081, 0x3B008081, 0x3B008081, 0x00000000, 0x80100246, 0x00000081, 0x00000003,
++    0x0700003C, 0x00100012, 0x00000003, 0x0010001A, 0x00000003, 0x0010000A, 0x00000003, 0x0700003C,
++    0x00100012, 0x00000003, 0x0010002A, 0x00000003, 0x0010000A, 0x00000003, 0x0600004F, 0x00100022,
++    0x00000003, 0x00004001, 0x00000000, 0x0002001A, 0x0900001E, 0x00100072, 0x00000004, 0x00020146,
++    0x00004002, 0x00000000, 0xFFFFFFFF, 0x00000001, 0x00000000, 0x05000036, 0x00100082, 0x00000004,
++    0x00004001, 0x00000000, 0x0800002D, 0x00100072, 0x00000005, 0x00100F46, 0x00000004, 0x00207E46,
++    0x00000001, 0x00000001, 0x09000037, 0x00100072, 0x00000005, 0x00100006, 0x00000001, 0x00100866,
++    0x00000005, 0x00100246, 0x00000005, 0x0800002D, 0x001000B2, 0x00000004, 0x00100F46, 0x00000004,
++    0x00207B46, 0x00000002, 0x00000002, 0x08000000, 0x001000B2, 0x00000004, 0x80100C46, 0x00000041,
++    0x00000004, 0x00100846, 0x00000005, 0x0B000031, 0x001000B2, 0x00000004, 0x00004002, 0x3B008081,
++    0x3B008081, 0x00000000, 0x3B008081, 0x80100C46, 0x00000081, 0x00000004, 0x0700003C, 0x00100042,
++    0x00000003, 0x0010001A, 0x00000004, 0x0010000A, 0x00000004, 0x0700003C, 0x00100042, 0x00000003,
++    0x0010003A, 0x00000004, 0x0010002A, 0x00000003, 0x07000001, 0x00100022, 0x00000003, 0x0010002A,
++    0x00000003, 0x0010001A, 0x00000003, 0x0900004F, 0x00100042, 0x00000003, 0x0010002A, 0x00000004,
++    0x0030801A, 0x00000000, 0x00000000, 0x00000000, 0x0900001E, 0x00100032, 0x00000004, 0x00020046,
++    0x00004002, 0x00000000, 0x00000001, 0x00000000, 0x00000000, 0x08000036, 0x001000C2, 0x00000004,
++    0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x00100072, 0x00000005,
++    0x00100F46, 0x00000004, 0x00207E46, 0x00000001, 0x00000001, 0x09000037, 0x00100072, 0x00000005,
++    0x00100006, 0x00000001, 0x00100866, 0x00000005, 0x00100246, 0x00000005, 0x0800002D, 0x00100072,
++    0x00000004, 0x00100E46, 0x00000004, 0x00207E46, 0x00000002, 0x00000002, 0x08000000, 0x00100072,
++    0x00000004, 0x80100246, 0x00000041, 0x00000004, 0x00100246, 0x00000005, 0x0B000031, 0x00100072,
++    0x00000004, 0x00004002, 0x3B008081, 0x3B008081, 0x3B008081, 0x00000000, 0x80100246, 0x00000081,
++    0x00000004, 0x0700003C, 0x00100012, 0x00000001, 0x0010001A, 0x00000004, 0x0010000A, 0x00000004,
++    0x0700003C, 0x00100012, 0x00000001, 0x0010002A, 0x00000004, 0x0010000A, 0x00000001, 0x07000001,
++    0x00100012, 0x00000001, 0x0010000A, 0x00000001, 0x0010002A, 0x00000003, 0x0700003C, 0x00100012,
++    0x00000001, 0x0010000A, 0x00000001, 0x0010001A, 0x00000003, 0x07000001, 0x00100012, 0x00000001,
++    0x0010000A, 0x00000001, 0x0010000A, 0x00000003, 0x01000012, 0x05000036, 0x00100012, 0x00000001,
++    0x00004001, 0xFFFFFFFF, 0x01000015, 0x0304001F, 0x0010000A, 0x00000001, 0x0C000001, 0x00100072,
++    0x00000003, 0x00308AA6, 0x00000000, 0x00000000, 0x00000000, 0x00004002, 0x00000020, 0x00000001,
++    0x00000100, 0x00000000, 0x07000027, 0x00100012, 0x00000001, 0x0010000A, 0x00000003, 0x00004001,
++    0x00000000, 0x07000001, 0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x0010000A, 0x00000001,
++    0x05002036, 0x001000E2, 0x00000001, 0x00100E56, 0x00000001, 0x0F000032, 0x00100072, 0x00000001,
++    0x00100796, 0x00000001, 0x00004002, 0x437F0000, 0x437F0000, 0x437F0000, 0x00000000, 0x00004002,
++    0x3F000000, 0x3F000000, 0x3F000000, 0x00000000, 0x0500001C, 0x00100072, 0x00000001, 0x00100246,
++    0x00000001, 0x0800002D, 0x00100012, 0x00000004, 0x00100006, 0x00000001, 0x00207D26, 0x00000000,
++    0x00000000, 0x0800002D, 0x00100022, 0x00000004, 0x00100556, 0x00000001, 0x00207E46, 0x00000000,
++    0x00000000, 0x0800002D, 0x00100042, 0x00000004, 0x00100AA6, 0x00000001, 0x00207C96, 0x00000000,
++    0x00000000, 0x0A000034, 0x00100072, 0x00000001, 0x00100246, 0x00000004, 0x00004002, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x0304001F, 0x0010001A, 0x00000003, 0x0500002F, 0x001000B2,
++    0x00000003, 0x00100846, 0x00000001, 0x0A000038, 0x001000B2, 0x00000003, 0x00100C46, 0x00000003,
++    0x00004002, 0x400CCCCD, 0x400CCCCD, 0x00000000, 0x400CCCCD, 0x05000019, 0x001000B2, 0x00000003,
++    0x00100C46, 0x00000003, 0x01000012, 0x0A000031, 0x00100072, 0x00000004, 0x00004002, 0x3D25AEE6,
++    0x3D25AEE6, 0x3D25AEE6, 0x00000000, 0x00100246, 0x00000001, 0x0A000000, 0x00100072, 0x00000005,
++    0x00100246, 0x00000001, 0x00004002, 0x3D6147AE, 0x3D6147AE, 0x3D6147AE, 0x00000000, 0x0A000038,
++    0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x00004002, 0x3F72A76E, 0x3F72A76E, 0x3F72A76E,
++    0x00000000, 0x0500002F, 0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x0A000038, 0x00100072,
++    0x00000005, 0x00100246, 0x00000005, 0x00004002, 0x4019999A, 0x4019999A, 0x4019999A, 0x00000000,
++    0x05000019, 0x00100072, 0x00000005, 0x00100246, 0x00000005, 0x0A000038, 0x00100072, 0x00000001,
++    0x00100246, 0x00000001, 0x00004002, 0x3D9E8391, 0x3D9E8391, 0x3D9E8391, 0x00000000, 0x09000037,
++    0x001000B2, 0x00000003, 0x00100846, 0x00000004, 0x00100846, 0x00000005, 0x00100846, 0x00000001,
++    0x01000015, 0x0C000037, 0x00100072, 0x00000001, 0x00100006, 0x00000000, 0x00004002, 0x3F800000,
++    0x00000000, 0x3F800000, 0x00000000, 0x00100346, 0x00000003, 0x0D000037, 0x00100012, 0x00000000,
++    0x0010002A, 0x00000003, 0x0030801A, 0x00000000, 0x00000000, 0x00000001, 0x0030800A, 0x00000000,
++    0x00000000, 0x00000001, 0x07000038, 0x001000E2, 0x00000000, 0x00100006, 0x00000000, 0x00100906,
++    0x00000001, 0x01000012, 0x0800002D, 0x00100072, 0x00000001, 0x00100E46, 0x00000002, 0x00207E46,
++    0x00000002, 0x00000002, 0x05002036, 0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x0F000032,
++    0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x00004002, 0x437F0000, 0x437F0000, 0x437F0000,
++    0x00000000, 0x00004002, 0x3F000000, 0x3F000000, 0x3F000000, 0x00000000, 0x0500001C, 0x00100072,
++    0x00000001, 0x00100246, 0x00000001, 0x0800002D, 0x00100012, 0x00000002, 0x00100006, 0x00000001,
++    0x00207D26, 0x00000000, 0x00000000, 0x0800002D, 0x00100022, 0x00000002, 0x00100556, 0x00000001,
++    0x00207E46, 0x00000000, 0x00000000, 0x0800002D, 0x00100042, 0x00000002, 0x00100AA6, 0x00000001,
++    0x00207C96, 0x00000000, 0x00000000, 0x09000001, 0x00100012, 0x00000000, 0x0030802A, 0x00000000,
++    0x00000000, 0x00000000, 0x00004001, 0x00000001, 0x0A000034, 0x00100072, 0x00000001, 0x00100246,
++    0x00000002, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0304001F, 0x0010000A,
++    0x00000000, 0x0500002F, 0x00100072, 0x00000002, 0x00100246, 0x00000001, 0x0A000038, 0x00100072,
++    0x00000002, 0x00100246, 0x00000002, 0x00004002, 0x400CCCCD, 0x400CCCCD, 0x400CCCCD, 0x00000000,
++    0x05000019, 0x00100072, 0x00000002, 0x00100246, 0x00000002, 0x01000012, 0x0A000031, 0x00100072,
++    0x00000003, 0x00004002, 0x3D25AEE6, 0x3D25AEE6, 0x3D25AEE6, 0x00000000, 0x00100246, 0x00000001,
++    0x0A000000, 0x00100072, 0x00000004, 0x00100246, 0x00000001, 0x00004002, 0x3D6147AE, 0x3D6147AE,
++    0x3D6147AE, 0x00000000, 0x0A000038, 0x00100072, 0x00000004, 0x00100246, 0x00000004, 0x00004002,
++    0x3F72A76E, 0x3F72A76E, 0x3F72A76E, 0x00000000, 0x0500002F, 0x00100072, 0x00000004, 0x00100246,
++    0x00000004, 0x0A000038, 0x00100072, 0x00000004, 0x00100246, 0x00000004, 0x00004002, 0x4019999A,
++    0x4019999A, 0x4019999A, 0x00000000, 0x05000019, 0x00100072, 0x00000004, 0x00100246, 0x00000004,
++    0x0A000038, 0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x00004002, 0x3D9E8391, 0x3D9E8391,
++    0x3D9E8391, 0x00000000, 0x09000037, 0x00100072, 0x00000002, 0x00100246, 0x00000003, 0x00100246,
++    0x00000004, 0x00100246, 0x00000001, 0x01000015, 0x09000038, 0x001000E2, 0x00000000, 0x00100906,
++    0x00000002, 0x00308556, 0x00000000, 0x00000000, 0x00000001, 0x01000015, 0x01000015, 0x01000015,
++    0x09000001, 0x00100012, 0x00000000, 0x0030802A, 0x00000000, 0x00000000, 0x00000000, 0x00004001,
++    0x00000002, 0x0304001F, 0x0010000A, 0x00000000, 0x04000056, 0x00100032, 0x00000001, 0x00020046,
++    0x0A000000, 0x00100032, 0x00000001, 0x00100046, 0x00000001, 0x00004002, 0x3F000000, 0x3F000000,
++    0x00000000, 0x00000000, 0x07000056, 0x001000C2, 0x00000001, 0x00308406, 0x00000000, 0x00000000,
++    0x00000000, 0x0700000E, 0x00100032, 0x00000001, 0x00100046, 0x00000001, 0x00100AE6, 0x00000001,
++    0x07000031, 0x00100012, 0x00000000, 0x0010001A, 0x00000001, 0x00004001, 0x3F000000, 0x09000032,
++    0x00100022, 0x00000001, 0x0010000A, 0x00000001, 0x00004001, 0x40000000, 0x00004001, 0xBF800000,
++    0x09000037, 0x00100012, 0x00000001, 0x0010000A, 0x00000000, 0x0010000A, 0x00000001, 0x0010001A,
++    0x00000001, 0x07000038, 0x00100022, 0x00000001, 0x0010000A, 0x00000001, 0x00004001, 0x41C00000,
++    0x05000041, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100022, 0x00000001,
++    0x0010001A, 0x00000001, 0x00004001, 0x3E800000, 0x05000019, 0x00100022, 0x00000001, 0x0010001A,
++    0x00000001, 0x07000038, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x00004001, 0x42C80000,
++    0x07000031, 0x00100012, 0x00000001, 0x0010000A, 0x00000001, 0x00004001, 0x00000000, 0x0B000037,
++    0x00100012, 0x00000001, 0x0010000A, 0x00000001, 0x0030801A, 0x00000000, 0x00000000, 0x00000001,
++    0x0010001A, 0x00000001, 0x09000037, 0x001000E2, 0x00000000, 0x00100006, 0x00000000, 0x00100556,
++    0x00000001, 0x00100006, 0x00000001, 0x0304001F, 0x0010000A, 0x00000000, 0x05000036, 0x00100012,
++    0x00000000, 0x00004001, 0x461C4000, 0x01000012, 0x07000036, 0x00100012, 0x00000000, 0x0030802A,
++    0x00000000, 0x00000000, 0x00000001, 0x01000015, 0x01000012, 0x07000036, 0x00100012, 0x00000000,
++    0x0030802A, 0x00000000, 0x00000000, 0x00000001, 0x01000015, 0x07000034, 0x00100012, 0x00000001,
++    0x0010003A, 0x00000000, 0x0010002A, 0x00000000, 0x07000034, 0x00100012, 0x00000001, 0x0010001A,
++    0x00000000, 0x0010000A, 0x00000001, 0x07000031, 0x00100022, 0x00000001, 0x0010000A, 0x00000000,
++    0x0010000A, 0x00000001, 0x09000031, 0x00100042, 0x00000001, 0x0010000A, 0x00000000, 0x0030803A,
++    0x00000000, 0x00000000, 0x00000001, 0x07000001, 0x00100022, 0x00000001, 0x0010002A, 0x00000001,
++    0x0010001A, 0x00000001, 0x0304001F, 0x0010001A, 0x00000001, 0x0A000000, 0x00100022, 0x00000001,
++    0x8010000A, 0x00000041, 0x00000000, 0x0030803A, 0x00000000, 0x00000000, 0x00000001, 0x08000000,
++    0x00100042, 0x00000001, 0x0010000A, 0x00000000, 0x8010000A, 0x00000041, 0x00000001, 0x0700000E,
++    0x00100042, 0x00000001, 0x0010002A, 0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100042,
++    0x00000001, 0x0010002A, 0x00000001, 0x00004001, 0x3FB8AA3B, 0x05000019, 0x00100042, 0x00000001,
++    0x0010002A, 0x00000001, 0x08000000, 0x00100042, 0x00000001, 0x8010002A, 0x00000041, 0x00000001,
++    0x00004001, 0x3F800000, 0x09000032, 0x00100012, 0x00000000, 0x0010001A, 0x00000001, 0x0010002A,
++    0x00000001, 0x0010000A, 0x00000000, 0x0700000E, 0x00100012, 0x00000000, 0x0010000A, 0x00000000,
++    0x0010000A, 0x00000001, 0x07000038, 0x001000E2, 0x00000000, 0x00100006, 0x00000000, 0x00100E56,
++    0x00000000, 0x01000015, 0x0A000010, 0x00100012, 0x00000001, 0x00100796, 0x00000000, 0x00004002,
++    0x3F209D8C, 0x3EA897C8, 0x3D3168F9, 0x00000000, 0x0A000010, 0x00100022, 0x00000001, 0x00100796,
++    0x00000000, 0x00004002, 0x3D8D82BA, 0x3F6B66F9, 0x3C3A27AF, 0x00000000, 0x0A000010, 0x00100042,
++    0x00000001, 0x00100796, 0x00000000, 0x00004002, 0x3C86466B, 0x3DB44029, 0x3F6545B7, 0x00000000,
++    0x0A002038, 0x00100072, 0x00000000, 0x00100246, 0x00000001, 0x00004002, 0x38D1B717, 0x38D1B717,
++    0x38D1B717, 0x00000000, 0x0500002F, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038,
++    0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x3E232000, 0x3E232000, 0x3E232000,
++    0x00000000, 0x05000019, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0F000032, 0x00100072,
++    0x00000001, 0x00100246, 0x00000000, 0x00004002, 0x4196D000, 0x4196D000, 0x4196D000, 0x00000000,
++    0x00004002, 0x3F560000, 0x3F560000, 0x3F560000, 0x00000000, 0x0F000032, 0x00100072, 0x00000000,
++    0x00100246, 0x00000000, 0x00004002, 0x41958000, 0x41958000, 0x41958000, 0x00000000, 0x00004002,
++    0x3F800000, 0x3F800000, 0x3F800000, 0x00000000, 0x0700000E, 0x00100072, 0x00000000, 0x00100246,
++    0x00000001, 0x00100246, 0x00000000, 0x0500002F, 0x00100072, 0x00000000, 0x00100246, 0x00000000,
++    0x0A000038, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x429DB000, 0x429DB000,
++    0x429DB000, 0x00000000, 0x05000019, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x05000036,
++    0x00100082, 0x00000000, 0x00004001, 0x3F800000, 0x070000A4, 0x0021E0F2, 0x00000000, 0x00000000,
++    0x00020546, 0x00100E46, 0x00000000, 0x0100003E,
+ };
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h
+new file mode 100644
+index 0000000..8f04e18
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h
+@@ -0,0 +1,16 @@
++// Generated from hdr_underlay_restore.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_underlay_restore_ps[] = {
++    0x43425844, 0x3932B6B2, 0x54B95642, 0x35DC9570, 0x79C3532E, 0x00000001, 0x00000168, 0x00000003,
++    0x0000002C, 0x00000060, 0x00000094, 0x4E475349, 0x0000002C, 0x00000001, 0x00000008, 0x00000020,
++    0x00000000, 0x00000001, 0x00000003, 0x00000000, 0x0000030F, 0x505F5653, 0x7469736F, 0x006E6F69,
++    0x4E47534F, 0x0000002C, 0x00000001, 0x00000008, 0x00000020, 0x00000000, 0x00000000, 0x00000003,
++    0x00000000, 0x0000000F, 0x545F5653, 0x65677261, 0xABAB0074, 0x58454853, 0x000000CC, 0x00000051,
++    0x00000033, 0x0100086A, 0x07001858, 0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555,
++    0x00000000, 0x04002064, 0x00101032, 0x00000000, 0x00000001, 0x03000065, 0x001020F2, 0x00000000,
++    0x02000068, 0x00000001, 0x0500001B, 0x00100032, 0x00000000, 0x00101046, 0x00000000, 0x08000036,
++    0x001000C2, 0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D,
++    0x00100072, 0x00000000, 0x00100E46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x05000036,
++    0x00102072, 0x00000000, 0x00100246, 0x00000000, 0x05000036, 0x00102082, 0x00000000, 0x00004001,
++    0x3F800000, 0x0100003E,
++};
+diff --git a/src/graphics/shaders/hdr_fullscreen.vs.xesl b/src/graphics/shaders/hdr_fullscreen.vs.xesl
+new file mode 100644
+index 0000000..3192b8c
+--- /dev/null
++++ b/src/graphics/shaders/hdr_fullscreen.vs.xesl
+@@ -0,0 +1,17 @@
++// HDR output (rexglue-hdr-ui-layer.patch): one triangle over the whole
++// viewport, from the vertex index (3 vertices), with the scissor limiting it.
++
++#include "../../ui/shaders/xesl.xesli"
++
++entry_outputs_begin_xe
++  entry_out_position_xe
++entry_outputs_end_stage_inputs_begin_xe
++entry_stage_inputs_end_bindings_begin_vertex_xe
++entry_bindings_end_inputs_begin_xe
++  entry_in_vertex_id_xe
++entry_inputs_end_code_begin_xe
++{
++  float2_xe corner = float2_xe((uint_x2_xe(in_vertex_id_xe) >> uint2_xe(0u, 1u)) & 1u);
++  out_position_xe = float4_xe(corner * 4.0f - 1.0f, 0.0f, 1.0f);
++}
++entry_code_end_xe
+diff --git a/src/graphics/shaders/hdr_refresh.cs.xesl b/src/graphics/shaders/hdr_refresh.cs.xesl
+index 137dbd2..54e54bd 100644
+--- a/src/graphics/shaders/hdr_refresh.cs.xesl
++++ b/src/graphics/shaders/hdr_refresh.cs.xesl
+@@ -1,12 +1,18 @@
+-// HDR output (rexglue-hdr-output.patch): the swap's refresher when the
+-// presenter's swap chain is HDR10, in place of apply_gamma_table.cs.xesl (same
+-// bindings, more constants). The guest's front buffer goes through the guest's
+-// own 256-entry display table, as in SDR (so a game's gamma setting, such as
+-// MCLA's DISPLAY GAMMA, works the same), then is decoded as SDR content
+-// (piecewise sRGB or pure 2.2) at the SDR content level in nits, and written as
+-// HDR10 code values (BT.2020, PQ) into the guest output image.
+-// The table is never applied to PQ values, and the presenter's scaling only
+-// reads what this writes.
++// HDR output (rexglue-hdr-output.patch, rexglue-hdr-ui-layer.patch): the swap's
++// refresher when the presenter's swap chain is HDR10, in place of
++// apply_gamma_table.cs.xesl (its bindings, more constants and textures). SDR
++// values go through the guest's own 256-entry display table, as in SDR (so a
++// game's gamma setting, such as MCLA's DISPLAY GAMMA, works the same), are
++// decoded as SDR content (piecewise sRGB or pure 2.2) and placed in nits, and
++// the result is written as HDR10 code values (BT.2020, PQ) into the guest
++// output image. The table is never applied to PQ values, and the presenter's
++// scaling only reads what this writes.
++// The frame is put together from the front buffer alone (SDR content at the
++// SDR level), or, when the guest's UI was separated
++// (CommandProcessor::HdrFrame), from the UI over the scene: the UI layer
++// (premultiplied, coverage in alpha) at the SDR level, over the underlay at
++// paper white; or, as the fallback, the front buffer where it differs from
++// the underlay and the underlay elsewhere.
+ 
+ #include "../../ui/shaders/xesl.xesli"
+ #include "../../ui/shaders/hdr_output.xesli"
+@@ -15,7 +21,12 @@ push_const_begin_xe(b0, space0)
+   uint2_xe xe_hdr_refresh_size;
+   // x: bit 0: decode SDR with a pure 2.2 power, else the piecewise sRGB curve;
+   //    bit 1: test pattern in place of the game's frame;
+-  //    bit 2: swap red and blue of the source.
++  //    bit 2: swap red and blue of the source;
++  //    bits 3:4: 0 the front buffer alone, 1 the difference with the underlay,
++  //    2 the UI layer over the underlay, 3 debug, a texture shown raw (bits
++  //    6:7: the UI layer's colour, its alpha, the underlay, the front buffer);
++  //    bit 5: debug, the UI in magenta;
++  //    bit 8: with 0, the front buffer is the scene (a frame without UI).
+   uint2_xe xe_hdr_refresh_flags;
+   // x: SDR content white, y: paper white, z: roll-off start, w: peak (nits).
+   float4_xe xe_hdr_refresh_levels;
+@@ -24,6 +35,30 @@ push_const_end_xe
+ #define LOCAL_SIZE_X_XE 16
+ #define LOCAL_SIZE_Y_XE 8
+ #define LOCAL_SIZE_Z_XE 1
++// The front buffer at a pixel, red and blue swapped if needed.
++#define XeHdrRefreshSource(pixel, flags)                                         \
++  ((((flags) & 4u) != 0u)                                                        \
++       ? texel_fetch_2d_xe(xe_hdr_refresh_source, pixel, 0).bgr                  \
++       : texel_fetch_2d_xe(xe_hdr_refresh_source, pixel, 0).rgb)
++// Whether the front buffer differs from the underlay row_offset rows away.
++#define XeHdrRefreshDiffers(pixel, row_offset, flags)                            \
++  any(greater_than_xe(                                                           \
++      abs(XeHdrRefreshSource(pixel + int2_xe(0, row_offset), flags) -            \
++          texel_fetch_2d_xe(xe_hdr_refresh_underlay,                             \
++                            pixel + int2_xe(0, row_offset), 0).rgb),             \
++      XeHdrSplat(0.5f / 255.0f)))
++// An SDR colour through the display table (at the nearest code), as linear
++// light relative to SDR white. The table has blue in bits 0:9, green in 10:19,
++// red in 20:29 - BGR passed as an R10G10B10A2 buffer.
++#define XeHdrRefreshSdr(color, flags)                                            \
++  XeHdrSdrToLinear(                                                              \
++      float3_xe(texel_fetch_buffer_xe(xe_hdr_refresh_ramp,                      \
++                                      uint(saturate_xe((color).r) * 255.0f + 0.5f)).b, \
++                texel_fetch_buffer_xe(xe_hdr_refresh_ramp,                      \
++                                      uint(saturate_xe((color).g) * 255.0f + 0.5f)).g, \
++                texel_fetch_buffer_xe(xe_hdr_refresh_ramp,                      \
++                                      uint(saturate_xe((color).b) * 255.0f + 0.5f)).r), \
++      ((flags) & 1u) != 0u)
+ entry_bindings_begin_compute_xe
+   push_const_binding_xe(buffer(0))
+   entry_binding_next_xe
+@@ -35,6 +70,12 @@ entry_bindings_begin_compute_xe
+   entry_binding_next_xe
+   image_wo_xe(image_2d_xe, image_format_rgb10_a2_xe, xe_hdr_refresh_dest,
+               set=2, binding=0, u0, space0, texture(2))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_hdr_refresh_underlay, set=3, binding=0, t2,
++             space0, texture(3))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_hdr_refresh_ui_layer, set=4, binding=0, t3,
++             space0, texture(4))
+ entry_bindings_end_inputs_begin_compute_xe
+   entry_in_global_thread_id_xe
+ entry_inputs_end_code_begin_compute_xe
+@@ -44,23 +85,57 @@ entry_inputs_end_code_begin_compute_xe
+   if (any(greater_than_equal_xe(pixel_index, size))) {
+     return;
+   }
++  int2_xe pixel = int2_xe(pixel_index);
+   uint flags = push_const_xe(xe_hdr_refresh_flags).x;
++  uint composite = (flags >> 3u) & 3u;
+   float4_xe levels = push_const_xe(xe_hdr_refresh_levels);
++  float3_xe magenta = float3_xe(1.0f, 0.0f, 1.0f);
+ 
+-  // UNORM conversion according to the Direct3D 10+ rules, as apply_gamma.
+-  float3_xe source = texel_fetch_2d_xe(xe_hdr_refresh_source,
+-                                       int2_xe(pixel_index), 0).rgb;
+-  dont_flatten_xe if ((flags & 4u) != 0u) {
+-    source = source.bgr;
++  float3_xe nits;
++  dont_flatten_xe if (composite == 3u) {
++    // Debug: a texture's values shown as SDR codes: the UI layer's colour, its
++    // alpha, or the underlay (bits 6:7).
++    uint shown = (flags >> 6u) & 3u;
++    float4_xe texel = shown == 2u ? texel_fetch_2d_xe(xe_hdr_refresh_underlay, pixel, 0)
++                                  : texel_fetch_2d_xe(xe_hdr_refresh_ui_layer, pixel, 0);
++    dont_flatten_xe if (shown == 3u) {
++      texel.rgb = XeHdrRefreshSource(pixel, flags);
++    }
++    nits = XeHdrSdrToLinear(shown == 1u ? texel.aaa : texel.rgb, (flags & 1u) != 0u) * levels.x;
++  } else dont_flatten_xe if (composite == 2u) {
++    // The UI layer over the scene.
++    float4_xe ui = texel_fetch_2d_xe(xe_hdr_refresh_ui_layer, pixel, 0);
++    float3_xe ui_color = ui.rgb / max(ui.a, 1.0f / 255.0f);
++    dont_flatten_xe if ((flags & 32u) != 0u) {
++      ui_color = magenta;
++    } else {
++      ui_color = XeHdrRefreshSdr(ui_color, flags);
++    }
++    float3_xe scene = XeHdrRefreshSdr(
++        texel_fetch_2d_xe(xe_hdr_refresh_underlay, pixel, 0).rgb, flags);
++    nits = ui_color * (ui.a * levels.x) + scene * ((1.0f - ui.a) * levels.y);
++  } else {
++    float3_xe source = XeHdrRefreshSource(pixel, flags);
++    // In the fallback, the UI is where the front buffer differs from the
++    // underlay, and so does it in the row above or below: single rows that
++    // differ are the seams of a tiled UI pass and the top row, not UI (at a
++    // scaled resolution, UI is at least as tall as the scale).
++    bool ui = true;
++    dont_flatten_xe if (composite == 1u) {
++      ui = XeHdrRefreshDiffers(pixel, 0, flags) &&
++           ((pixel_index.y > 0u && XeHdrRefreshDiffers(pixel, -1, flags)) ||
++            (pixel_index.y + 1u < size.y && XeHdrRefreshDiffers(pixel, 1, flags)));
++    }
++    dont_flatten_xe if (ui) {
++      nits = ((flags & 32u) != 0u && composite == 1u ? magenta
++                                                     : XeHdrRefreshSdr(source, flags)) *
++             ((flags & 256u) != 0u ? levels.y : levels.x);
++    } else {
++      nits = XeHdrRefreshSdr(texel_fetch_2d_xe(xe_hdr_refresh_underlay, pixel, 0).rgb,
++                             flags) *
++             levels.y;
++    }
+   }
+-  uint3_xe code = uint3_xe(source * 255.0f + 0.5f);
+-  // The table has blue in bits 0:9, green in 10:19, red in 20:29 - BGR passed
+-  // as an R10G10B10A2 buffer.
+-  float3_xe ramped = float3_xe(
+-      texel_fetch_buffer_xe(xe_hdr_refresh_ramp, code.r).b,
+-      texel_fetch_buffer_xe(xe_hdr_refresh_ramp, code.g).g,
+-      texel_fetch_buffer_xe(xe_hdr_refresh_ramp, code.b).r);
+-  float3_xe nits = XeHdrSdrToLinear(ramped, (flags & 1u) != 0u) * levels.x;
+ 
+   dont_flatten_xe if ((flags & 2u) != 0u) {
+     // Test pattern. Top half: 24 bars from 100 nits doubling every 4 bars
+diff --git a/src/graphics/shaders/hdr_underlay_restore.ps.xesl b/src/graphics/shaders/hdr_underlay_restore.ps.xesl
+new file mode 100644
+index 0000000..fe4b37c
+--- /dev/null
++++ b/src/graphics/shaders/hdr_underlay_restore.ps.xesl
+@@ -0,0 +1,24 @@
++// HDR output (rexglue-hdr-ui-layer.patch): puts the guest's own frame back
++// together after its UI was drawn on a cleared target: drawn over the target
++// with the colour blend INV_DEST_ALPHA / ONE and the alpha blend ONE / ZERO, so
++// target = UI + underlay x (1 - UI alpha), per sample (the menus' target is 4x
++// MSAA). The underlay is the copy taken before the UI, in render target
++// pixels.
++
++#include "../../ui/shaders/xesl.xesli"
++
++entry_outputs_begin_xe
++  entry_out_target_xe(float4_xe, xe_underlay_color, 0)
++entry_outputs_end_stage_inputs_begin_xe
++entry_stage_inputs_end_bindings_begin_pixel_xe
++  texture_xe(texture_2d_xe, xe_underlay_source, set=0, binding=0, t0, space0,
++             texture(0))
++entry_bindings_end_inputs_begin_xe
++  entry_in_pixel_coord_xe
++entry_inputs_end_code_begin_xe
++{
++  out_xe(xe_underlay_color) = float4_xe(
++      texel_fetch_2d_xe(xe_underlay_source, int2_xe(in_pixel_coord_xe.xy), 0).rgb,
++      1.0f);
++}
++entry_code_end_xe
+diff --git a/src/graphics/shaders/vulkan_spirv/hdr_fullscreen_vs.h b/src/graphics/shaders/vulkan_spirv/hdr_fullscreen_vs.h
+new file mode 100644
+index 0000000..0751511
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/hdr_fullscreen_vs.h
+@@ -0,0 +1,32 @@
++// Generated from hdr_fullscreen.vs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_fullscreen_vs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00004A57, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0007000F, 0x00000000, 0x0000161F, 0x6E69616D, 0x00000000, 0x00001029, 0x00001342, 0x00040047,
++    0x00001029, 0x0000000B, 0x0000002A, 0x00030047, 0x00000338, 0x00000002, 0x00050048, 0x00000338,
++    0x00000000, 0x0000000B, 0x00000000, 0x00050048, 0x00000338, 0x00000001, 0x0000000B, 0x00000001,
++    0x00050048, 0x00000338, 0x00000002, 0x0000000B, 0x00000003, 0x00050048, 0x00000338, 0x00000003,
++    0x0000000B, 0x00000004, 0x00020013, 0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00040015,
++    0x0000000B, 0x00000020, 0x00000000, 0x00040017, 0x00000011, 0x0000000B, 0x00000002, 0x00030016,
++    0x0000000D, 0x00000020, 0x00040017, 0x00000013, 0x0000000D, 0x00000002, 0x00040015, 0x0000000C,
++    0x00000020, 0x00000001, 0x00040020, 0x00000289, 0x00000001, 0x0000000C, 0x0004003B, 0x00000289,
++    0x00001029, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A0A, 0x00000000, 0x0004002B, 0x0000000B,
++    0x00000A0D, 0x00000001, 0x0005002C, 0x00000011, 0x0000071B, 0x00000A0A, 0x00000A0D, 0x00040017,
++    0x0000001D, 0x0000000D, 0x00000004, 0x0004001C, 0x0000028E, 0x0000000D, 0x00000A0D, 0x0006001E,
++    0x00000338, 0x0000001D, 0x0000000D, 0x0000028E, 0x0000028E, 0x00040020, 0x000005B5, 0x00000003,
++    0x00000338, 0x0004003B, 0x000005B5, 0x00001342, 0x00000003, 0x0004002B, 0x0000000C, 0x00000A0B,
++    0x00000000, 0x0004002B, 0x0000000D, 0x00000B69, 0x40800000, 0x0004002B, 0x0000000D, 0x0000008A,
++    0x3F800000, 0x0004002B, 0x0000000D, 0x00000A0C, 0x00000000, 0x00040020, 0x0000029A, 0x00000003,
++    0x0000001D, 0x0005002C, 0x00000011, 0x00000724, 0x00000A0D, 0x00000A0D, 0x0005002C, 0x00000013,
++    0x00000300, 0x0000008A, 0x0000008A, 0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502,
++    0x000200F8, 0x00001A4D, 0x0004003D, 0x0000000C, 0x000027E8, 0x00001029, 0x0004007C, 0x0000000B,
++    0x00003BD1, 0x000027E8, 0x00050050, 0x00000011, 0x00003C30, 0x00003BD1, 0x00003BD1, 0x000500C2,
++    0x00000011, 0x00003A8F, 0x00003C30, 0x0000071B, 0x000500C7, 0x00000011, 0x00004A56, 0x00003A8F,
++    0x00000724, 0x00040070, 0x00000013, 0x00003A58, 0x00004A56, 0x0005008E, 0x00000013, 0x0000296C,
++    0x00003A58, 0x00000B69, 0x00050083, 0x00000013, 0x0000260E, 0x0000296C, 0x00000300, 0x00050051,
++    0x0000000D, 0x00001DFA, 0x0000260E, 0x00000000, 0x00050051, 0x0000000D, 0x00003CD1, 0x0000260E,
++    0x00000001, 0x00070050, 0x0000001D, 0x00004754, 0x00001DFA, 0x00003CD1, 0x00000A0C, 0x0000008A,
++    0x00050041, 0x0000029A, 0x00002F17, 0x00001342, 0x00000A0B, 0x0003003E, 0x00002F17, 0x00004754,
++    0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h b/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h
+index 3fedeb4..b06a8d3 100644
+--- a/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h
++++ b/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h
+@@ -1,25 +1,27 @@
+ // Generated from hdr_refresh.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
+ // sources (see patches/README.md). Not disassembled to keep the patch small.
+ const uint32_t hdr_refresh_cs[] = {
+-    0x07230203, 0x00010000, 0x0008000B, 0x000061B3, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
++    0x07230203, 0x00010000, 0x0008000B, 0x00006234, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
+     0x0000002E, 0x00020011, 0x00000031, 0x0006000B, 0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E,
+     0x00000000, 0x0003000E, 0x00000000, 0x00000001, 0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D,
+     0x00000000, 0x00000F48, 0x00060010, 0x0000161F, 0x00000011, 0x00000010, 0x00000008, 0x00000001,
+     0x00040047, 0x00000F48, 0x0000000B, 0x0000001C, 0x00030047, 0x00000450, 0x00000002, 0x00050048,
+     0x00000450, 0x00000000, 0x00000023, 0x00000000, 0x00050048, 0x00000450, 0x00000001, 0x00000023,
+-    0x00000008, 0x00050048, 0x00000450, 0x00000002, 0x00000023, 0x00000010, 0x00040047, 0x000014D3,
++    0x00000008, 0x00050048, 0x00000450, 0x00000002, 0x00000023, 0x00000010, 0x00040047, 0x00000C67,
++    0x00000021, 0x00000000, 0x00040047, 0x00000C67, 0x00000022, 0x00000003, 0x00040047, 0x00001091,
++    0x00000021, 0x00000000, 0x00040047, 0x00001091, 0x00000022, 0x00000004, 0x00040047, 0x000014D3,
+     0x00000021, 0x00000000, 0x00040047, 0x000014D3, 0x00000022, 0x00000001, 0x00040047, 0x000010ED,
+     0x00000021, 0x00000000, 0x00040047, 0x000010ED, 0x00000022, 0x00000000, 0x00030047, 0x00000CC3,
+     0x00000019, 0x00040047, 0x00000CC3, 0x00000021, 0x00000000, 0x00040047, 0x00000CC3, 0x00000022,
+     0x00000002, 0x00040047, 0x00000B0F, 0x0000000B, 0x00000019, 0x00020013, 0x00000008, 0x00030021,
+     0x00000502, 0x00000008, 0x00030016, 0x0000000D, 0x00000020, 0x00040017, 0x00000018, 0x0000000D,
+     0x00000003, 0x00020014, 0x00000009, 0x0004002B, 0x0000000D, 0x00000A0C, 0x00000000, 0x0004002B,
+-    0x0000000D, 0x00000976, 0x400CCCCD, 0x0004002B, 0x0000000D, 0x000007AD, 0x3D9E8391, 0x0004002B,
+-    0x0000000D, 0x0000035E, 0x3D6147AE, 0x0004002B, 0x0000000D, 0x0000070C, 0x3F72A76E, 0x0004002B,
+-    0x0000000D, 0x00000711, 0x4019999A, 0x0004002B, 0x0000000D, 0x000009A2, 0x3D25AEE6, 0x00040017,
+-    0x00000010, 0x00000009, 0x00000003, 0x00040015, 0x0000000B, 0x00000020, 0x00000000, 0x0004002B,
+-    0x0000000B, 0x00000A0A, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B,
+-    0x0000000B, 0x00000A10, 0x00000002, 0x0004002B, 0x0000000D, 0x0000008A, 0x3F800000, 0x0004002B,
++    0x0000000D, 0x0000008A, 0x3F800000, 0x0004002B, 0x0000000D, 0x00000976, 0x400CCCCD, 0x0004002B,
++    0x0000000D, 0x000007AD, 0x3D9E8391, 0x0004002B, 0x0000000D, 0x0000035E, 0x3D6147AE, 0x0004002B,
++    0x0000000D, 0x0000070C, 0x3F72A76E, 0x0004002B, 0x0000000D, 0x00000711, 0x4019999A, 0x0004002B,
++    0x0000000D, 0x000009A2, 0x3D25AEE6, 0x00040017, 0x00000010, 0x00000009, 0x00000003, 0x00040015,
++    0x0000000B, 0x00000020, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A0A, 0x00000000, 0x0004002B,
++    0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A10, 0x00000002, 0x0004002B,
+     0x0000000D, 0x000000DF, 0x3FB8AA3B, 0x0004002B, 0x0000000D, 0x000008ED, 0x3F209D8C, 0x0004002B,
+     0x0000000D, 0x00000838, 0x3EA897C8, 0x0004002B, 0x0000000D, 0x00000661, 0x3D3168F9, 0x0006002C,
+     0x00000018, 0x00000112, 0x000008ED, 0x00000838, 0x00000661, 0x0004002B, 0x0000000D, 0x000004AA,
+@@ -36,125 +38,368 @@ const uint32_t hdr_refresh_cs[] = {
+     0x00000011, 0x0000001D, 0x00040020, 0x000006CD, 0x00000009, 0x00000450, 0x0004003B, 0x000006CD,
+     0x00000CE9, 0x00000009, 0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x0004002B, 0x0000000C,
+     0x00000A0B, 0x00000000, 0x00040020, 0x0000028E, 0x00000009, 0x00000011, 0x00040017, 0x0000000F,
+-    0x00000009, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A0E, 0x00000001, 0x00040020, 0x00000288,
+-    0x00000009, 0x0000000B, 0x0004002B, 0x0000000C, 0x00000A11, 0x00000002, 0x00040020, 0x0000029A,
+-    0x00000009, 0x0000001D, 0x00090019, 0x00000096, 0x0000000D, 0x00000001, 0x00000000, 0x00000000,
+-    0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000313, 0x00000000, 0x00000096, 0x0004003B,
+-    0x00000313, 0x000014D3, 0x00000000, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x0004002B,
+-    0x0000000B, 0x00000A16, 0x00000004, 0x0004002B, 0x0000000D, 0x00000540, 0x437F0000, 0x0004002B,
+-    0x0000000D, 0x000000FC, 0x3F000000, 0x00090019, 0x0000009A, 0x0000000D, 0x00000005, 0x00000000,
+-    0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000317, 0x00000000, 0x0000009A,
+-    0x0004003B, 0x00000317, 0x000010ED, 0x00000000, 0x00040017, 0x00000013, 0x0000000D, 0x00000002,
+-    0x0004002B, 0x0000000D, 0x00000019, 0x40000000, 0x0004002B, 0x0000000D, 0x00000207, 0x42C80000,
+-    0x0004002B, 0x0000000D, 0x00000A4C, 0x41C00000, 0x0004002B, 0x0000000D, 0x0000016E, 0x3E800000,
+-    0x0004002B, 0x0000000D, 0x00000224, 0x461C4000, 0x00090019, 0x000000A6, 0x0000000D, 0x00000001,
+-    0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x0000000B, 0x00040020, 0x00000323, 0x00000000,
+-    0x000000A6, 0x0004003B, 0x00000323, 0x00000CC3, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A3A,
+-    0x00000010, 0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0006002C, 0x00000014, 0x00000B0F,
+-    0x00000A3A, 0x00000A22, 0x00000A0D, 0x0006002C, 0x00000018, 0x000003AB, 0x000000FC, 0x000000FC,
+-    0x000000FC, 0x0006002C, 0x00000018, 0x00000A2C, 0x00000A0C, 0x00000A0C, 0x00000A0C, 0x0006002C,
+-    0x00000018, 0x000004F6, 0x00000976, 0x00000976, 0x00000976, 0x0006002C, 0x00000018, 0x000008BD,
+-    0x0000035E, 0x0000035E, 0x0000035E, 0x0006002C, 0x00000018, 0x00000B83, 0x00000711, 0x00000711,
+-    0x00000711, 0x0006002C, 0x00000018, 0x00000198, 0x000009A2, 0x000009A2, 0x000009A2, 0x0005002C,
+-    0x00000013, 0x0000061E, 0x000000FC, 0x000000FC, 0x0006002C, 0x00000018, 0x00000A17, 0x0000008A,
+-    0x0000008A, 0x0000008A, 0x0006002C, 0x00000018, 0x00000892, 0x00000841, 0x00000841, 0x00000841,
+-    0x0006002C, 0x00000018, 0x0000047D, 0x000006EF, 0x000006EF, 0x000006EF, 0x0006002C, 0x00000018,
+-    0x000005E0, 0x000003A8, 0x000003A8, 0x000003A8, 0x0003002E, 0x00000018, 0x000000CF, 0x00050036,
+-    0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x00003B06, 0x000300F7, 0x00005445,
+-    0x00000000, 0x000300FB, 0x00000A0A, 0x00003272, 0x000200F8, 0x00003272, 0x0004003D, 0x00000014,
+-    0x000035C1, 0x00000F48, 0x0007004F, 0x00000011, 0x000054D5, 0x000035C1, 0x000035C1, 0x00000000,
+-    0x00000001, 0x00050041, 0x0000028E, 0x00001E50, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000011,
+-    0x00003442, 0x00001E50, 0x000500AE, 0x0000000F, 0x00005B8D, 0x000054D5, 0x00003442, 0x0004009A,
+-    0x00000009, 0x00005A24, 0x00005B8D, 0x000300F7, 0x0000401D, 0x00000002, 0x000400FA, 0x00005A24,
+-    0x000055E8, 0x0000401D, 0x000200F8, 0x000055E8, 0x000200F9, 0x00005445, 0x000200F8, 0x0000401D,
+-    0x00060041, 0x00000288, 0x00005098, 0x00000CE9, 0x00000A0E, 0x00000A0A, 0x0004003D, 0x0000000B,
+-    0x00003D0B, 0x00005098, 0x00050041, 0x0000029A, 0x00004E6E, 0x00000CE9, 0x00000A11, 0x0004003D,
+-    0x0000001D, 0x00005EE9, 0x00004E6E, 0x0004003D, 0x00000096, 0x00005BE6, 0x000014D3, 0x0004007C,
+-    0x00000012, 0x00005CDB, 0x000054D5, 0x0007005F, 0x0000001D, 0x00001E53, 0x00005BE6, 0x00005CDB,
+-    0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x00001C0B, 0x00001E53, 0x00001E53, 0x00000000,
+-    0x00000001, 0x00000002, 0x000500C7, 0x0000000B, 0x00004A5D, 0x00003D0B, 0x00000A16, 0x000500AB,
+-    0x00000009, 0x00002F26, 0x00004A5D, 0x00000A0A, 0x000300F7, 0x000037BB, 0x00000002, 0x000400FA,
+-    0x00002F26, 0x000033DF, 0x000037BB, 0x000200F8, 0x000033DF, 0x0008004F, 0x00000018, 0x00001F16,
+-    0x00001E53, 0x000000CF, 0x00000002, 0x00000001, 0x00000000, 0x000200F9, 0x000037BB, 0x000200F8,
+-    0x000037BB, 0x000700F5, 0x00000018, 0x00001E27, 0x00001C0B, 0x0000401D, 0x00001F16, 0x000033DF,
+-    0x0005008E, 0x00000018, 0x00005DA1, 0x00001E27, 0x00000540, 0x00050081, 0x00000018, 0x000055A8,
+-    0x00005DA1, 0x000003AB, 0x0004006D, 0x00000014, 0x00002B5B, 0x000055A8, 0x0004003D, 0x0000009A,
+-    0x000048C0, 0x000010ED, 0x00050051, 0x0000000B, 0x00003C4B, 0x00002B5B, 0x00000000, 0x0004007C,
+-    0x0000000C, 0x0000606E, 0x00003C4B, 0x0005005F, 0x0000001D, 0x00001F4B, 0x000048C0, 0x0000606E,
+-    0x00050051, 0x0000000D, 0x0000329D, 0x00001F4B, 0x00000002, 0x0004003D, 0x0000009A, 0x000046E2,
+-    0x000010ED, 0x00050051, 0x0000000B, 0x00002FC0, 0x00002B5B, 0x00000001, 0x0004007C, 0x0000000C,
+-    0x0000606F, 0x00002FC0, 0x0005005F, 0x0000001D, 0x00001F4C, 0x000046E2, 0x0000606F, 0x00050051,
+-    0x0000000D, 0x0000329E, 0x00001F4C, 0x00000001, 0x0004003D, 0x0000009A, 0x000046E3, 0x000010ED,
+-    0x00050051, 0x0000000B, 0x00002FC1, 0x00002B5B, 0x00000002, 0x0004007C, 0x0000000C, 0x00006070,
+-    0x00002FC1, 0x0005005F, 0x0000001D, 0x000020B4, 0x000046E3, 0x00006070, 0x00050051, 0x0000000D,
+-    0x00002E88, 0x000020B4, 0x00000000, 0x00060050, 0x00000018, 0x00003905, 0x0000329D, 0x0000329E,
+-    0x00002E88, 0x000500C7, 0x0000000B, 0x00002539, 0x00003D0B, 0x00000A0D, 0x000500AB, 0x00000009,
+-    0x000052D8, 0x00002539, 0x00000A0A, 0x0007000C, 0x00000018, 0x00005890, 0x00000001, 0x00000028,
+-    0x00003905, 0x00000A2C, 0x000300F7, 0x0000213D, 0x00000002, 0x000400FA, 0x000052D8, 0x000019A6,
+-    0x00002924, 0x000200F8, 0x000019A6, 0x0007000C, 0x00000018, 0x000058FA, 0x00000001, 0x0000001A,
+-    0x00005890, 0x000004F6, 0x000200F9, 0x0000213D, 0x000200F8, 0x00002924, 0x0005008E, 0x00000018,
+-    0x000053B3, 0x00005890, 0x000007AD, 0x00050081, 0x00000018, 0x000038A9, 0x00005890, 0x000008BD,
+-    0x0005008E, 0x00000018, 0x00004A13, 0x000038A9, 0x0000070C, 0x0007000C, 0x00000018, 0x00004888,
+-    0x00000001, 0x0000001A, 0x00004A13, 0x00000B83, 0x000500BA, 0x00000010, 0x00001DC1, 0x00005890,
+-    0x00000198, 0x000600A9, 0x00000018, 0x0000283E, 0x00001DC1, 0x00004888, 0x000053B3, 0x000200F9,
+-    0x0000213D, 0x000200F8, 0x0000213D, 0x000700F5, 0x00000018, 0x00004857, 0x000058FA, 0x000019A6,
+-    0x0000283E, 0x00002924, 0x00050051, 0x0000000D, 0x00003997, 0x00005EE9, 0x00000000, 0x0005008E,
+-    0x00000018, 0x00004EAC, 0x00004857, 0x00003997, 0x000500C7, 0x0000000B, 0x00005810, 0x00003D0B,
+-    0x00000A10, 0x000500AB, 0x00000009, 0x000051AD, 0x00005810, 0x00000A0A, 0x000300F7, 0x0000530F,
+-    0x00000002, 0x000400FA, 0x000051AD, 0x00005F29, 0x0000530F, 0x000200F8, 0x00005F29, 0x00040070,
+-    0x00000013, 0x000058E7, 0x000054D5, 0x00050081, 0x00000013, 0x00004449, 0x000058E7, 0x0000061E,
+-    0x00040070, 0x00000013, 0x00001ACF, 0x00003442, 0x00050088, 0x00000013, 0x000051EB, 0x00004449,
+-    0x00001ACF, 0x00050051, 0x0000000D, 0x000048D4, 0x000051EB, 0x00000001, 0x000500B8, 0x00000009,
+-    0x00004607, 0x000048D4, 0x000000FC, 0x000300F7, 0x00005CC5, 0x00000000, 0x000400FA, 0x00004607,
+-    0x00003285, 0x000061B2, 0x000200F8, 0x00003285, 0x00050051, 0x0000000D, 0x00002993, 0x000051EB,
+-    0x00000000, 0x000200F9, 0x00005CC5, 0x000200F8, 0x000061B2, 0x00050051, 0x0000000D, 0x00002E3F,
+-    0x000051EB, 0x00000000, 0x00050085, 0x0000000D, 0x00004408, 0x00002E3F, 0x00000019, 0x00050083,
+-    0x0000000D, 0x00003D3B, 0x00004408, 0x0000008A, 0x000200F9, 0x00005CC5, 0x000200F8, 0x00005CC5,
+-    0x000700F5, 0x0000000D, 0x00001B95, 0x00002993, 0x00003285, 0x00003D3B, 0x000061B2, 0x00050085,
+-    0x0000000D, 0x00005786, 0x00001B95, 0x00000A4C, 0x0006000C, 0x0000000D, 0x00004DF9, 0x00000001,
+-    0x00000008, 0x00005786, 0x00050085, 0x0000000D, 0x00003E1C, 0x00004DF9, 0x0000016E, 0x0006000C,
+-    0x0000000D, 0x00003C04, 0x00000001, 0x0000001D, 0x00003E1C, 0x00050085, 0x0000000D, 0x00005BEE,
+-    0x00000207, 0x00003C04, 0x000300F7, 0x000046D0, 0x00000000, 0x000400FA, 0x00004607, 0x000055E9,
+-    0x000047FF, 0x000200F8, 0x000055E9, 0x000200F9, 0x000046D0, 0x000200F8, 0x000047FF, 0x000500B8,
+-    0x00000009, 0x0000533C, 0x00001B95, 0x00000A0C, 0x000300F7, 0x00001EEC, 0x00000000, 0x000400FA,
+-    0x0000533C, 0x00003286, 0x00004332, 0x000200F8, 0x00003286, 0x00050051, 0x0000000D, 0x00002994,
+-    0x00005EE9, 0x00000001, 0x000200F9, 0x00001EEC, 0x000200F8, 0x00004332, 0x000200F9, 0x00001EEC,
+-    0x000200F8, 0x00001EEC, 0x000700F5, 0x0000000D, 0x0000292C, 0x00002994, 0x00003286, 0x00005BEE,
+-    0x00004332, 0x000200F9, 0x000046D0, 0x000200F8, 0x000046D0, 0x000700F5, 0x0000000D, 0x000050CF,
+-    0x00005BEE, 0x000055E9, 0x0000292C, 0x00001EEC, 0x00060050, 0x00000018, 0x000060EB, 0x000050CF,
+-    0x000050CF, 0x000050CF, 0x000300F7, 0x000055BC, 0x00000002, 0x000400FA, 0x00004607, 0x000031D8,
+-    0x000055BC, 0x000200F8, 0x000031D8, 0x00060052, 0x0000001D, 0x00005411, 0x00000224, 0x00005EE9,
+-    0x00000002, 0x000200F9, 0x000055BC, 0x000200F8, 0x000055BC, 0x000700F5, 0x0000001D, 0x0000292D,
+-    0x00005EE9, 0x000046D0, 0x00005411, 0x000031D8, 0x000200F9, 0x0000530F, 0x000200F8, 0x0000530F,
+-    0x000700F5, 0x0000001D, 0x00001F7B, 0x00005EE9, 0x0000213D, 0x0000292D, 0x000055BC, 0x000700F5,
+-    0x00000018, 0x00001EEB, 0x00004EAC, 0x0000213D, 0x000060EB, 0x000055BC, 0x00050051, 0x0000000D,
+-    0x00005D37, 0x00001F7B, 0x00000002, 0x00050051, 0x0000000D, 0x00002B4E, 0x00001F7B, 0x00000003,
+-    0x00050051, 0x0000000D, 0x00001DEC, 0x00001EEB, 0x00000000, 0x00050051, 0x0000000D, 0x000018F5,
+-    0x00001EEB, 0x00000001, 0x00050051, 0x0000000D, 0x000051ED, 0x00001EEB, 0x00000002, 0x0007000C,
+-    0x0000000D, 0x00001EED, 0x00000001, 0x00000028, 0x000018F5, 0x000051ED, 0x0007000C, 0x0000000D,
+-    0x000058F3, 0x00000001, 0x00000028, 0x00001DEC, 0x00001EED, 0x000500BA, 0x00000009, 0x000049BB,
+-    0x000058F3, 0x00005D37, 0x000500BA, 0x00000009, 0x00002BC2, 0x00002B4E, 0x00005D37, 0x000500A7,
+-    0x00000009, 0x000025BF, 0x000049BB, 0x00002BC2, 0x000300F7, 0x0000543F, 0x00000002, 0x000400FA,
+-    0x000025BF, 0x00005278, 0x0000543F, 0x000200F8, 0x00005278, 0x00050083, 0x0000000D, 0x00004D3A,
+-    0x00002B4E, 0x00005D37, 0x00050083, 0x0000000D, 0x00005BF4, 0x00005D37, 0x000058F3, 0x00050088,
+-    0x0000000D, 0x0000460C, 0x00005BF4, 0x00004D3A, 0x00050085, 0x0000000D, 0x00003CC1, 0x0000460C,
+-    0x000000DF, 0x0006000C, 0x0000000D, 0x00001DB6, 0x00000001, 0x0000001D, 0x00003CC1, 0x00050083,
+-    0x0000000D, 0x00004B01, 0x0000008A, 0x00001DB6, 0x00050085, 0x0000000D, 0x000049D2, 0x00004D3A,
+-    0x00004B01, 0x00050081, 0x0000000D, 0x00004C26, 0x00005D37, 0x000049D2, 0x00050088, 0x0000000D,
+-    0x000059B0, 0x00004C26, 0x000058F3, 0x0005008E, 0x00000018, 0x00004EA2, 0x00001EEB, 0x000059B0,
+-    0x000200F9, 0x0000543F, 0x000200F8, 0x0000543F, 0x000700F5, 0x00000018, 0x0000564D, 0x00001EEB,
+-    0x0000530F, 0x00004EA2, 0x00005278, 0x0004003D, 0x000000A6, 0x00005DDC, 0x00000CC3, 0x00050094,
+-    0x0000000D, 0x000040F9, 0x0000564D, 0x00000112, 0x00050094, 0x0000000D, 0x000028E0, 0x0000564D,
+-    0x00000BBE, 0x00050094, 0x0000000D, 0x00004CA0, 0x0000564D, 0x0000048A, 0x00060050, 0x00000018,
+-    0x00004259, 0x000040F9, 0x000028E0, 0x00004CA0, 0x0005008E, 0x00000018, 0x000045B3, 0x00004259,
+-    0x00000383, 0x0008000C, 0x00000018, 0x00002A1C, 0x00000001, 0x0000002B, 0x000045B3, 0x00000A2C,
+-    0x00000A17, 0x0007000C, 0x00000018, 0x00004E66, 0x00000001, 0x0000001A, 0x00002A1C, 0x00000892,
+-    0x0005008E, 0x00000018, 0x000055B9, 0x00004E66, 0x0000058F, 0x00050081, 0x00000018, 0x000027FC,
+-    0x0000047D, 0x000055B9, 0x0005008E, 0x00000018, 0x00003ECC, 0x00004E66, 0x00000911, 0x00050081,
+-    0x00000018, 0x00004B99, 0x00000A17, 0x00003ECC, 0x00050088, 0x00000018, 0x000022D1, 0x000027FC,
+-    0x00004B99, 0x0007000C, 0x00000018, 0x00002C3F, 0x00000001, 0x0000001A, 0x000022D1, 0x000005E0,
+-    0x00050051, 0x0000000D, 0x000029E3, 0x00002C3F, 0x00000000, 0x00050051, 0x0000000D, 0x0000594F,
+-    0x00002C3F, 0x00000001, 0x00050051, 0x0000000D, 0x00001FEF, 0x00002C3F, 0x00000002, 0x00070050,
+-    0x0000001D, 0x00003E3B, 0x000029E3, 0x0000594F, 0x00001FEF, 0x0000008A, 0x00040063, 0x00005DDC,
+-    0x00005CDB, 0x00003E3B, 0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++    0x00000009, 0x00000002, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000C,
++    0x00000A0E, 0x00000001, 0x00040020, 0x00000288, 0x00000009, 0x0000000B, 0x0004002B, 0x0000000B,
++    0x00000A13, 0x00000003, 0x0004002B, 0x0000000C, 0x00000A11, 0x00000002, 0x00040020, 0x0000029A,
++    0x00000009, 0x0000001D, 0x0006002C, 0x00000018, 0x0000084E, 0x0000008A, 0x00000A0C, 0x0000008A,
++    0x0004002B, 0x0000000B, 0x00000A1C, 0x00000006, 0x00090019, 0x00000096, 0x0000000D, 0x00000001,
++    0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000313, 0x00000000,
++    0x00000096, 0x0004003B, 0x00000313, 0x00000C67, 0x00000000, 0x0004003B, 0x00000313, 0x00001091,
++    0x00000000, 0x0004002B, 0x0000000B, 0x00000A16, 0x00000004, 0x0004003B, 0x00000313, 0x000014D3,
++    0x00000000, 0x0004002B, 0x0000000D, 0x0000017A, 0x3B808081, 0x0004002B, 0x0000000B, 0x00000A6A,
++    0x00000020, 0x00090019, 0x0000009A, 0x0000000D, 0x00000005, 0x00000000, 0x00000000, 0x00000000,
++    0x00000001, 0x00000000, 0x00040020, 0x00000317, 0x00000000, 0x0000009A, 0x0004003B, 0x00000317,
++    0x000010ED, 0x00000000, 0x0004002B, 0x0000000D, 0x00000540, 0x437F0000, 0x0004002B, 0x0000000D,
++    0x000000FC, 0x3F000000, 0x00030029, 0x00000009, 0x00000786, 0x0004002B, 0x0000000D, 0x000001EC,
++    0x3B008081, 0x0004002B, 0x0000000C, 0x00000A08, 0xFFFFFFFF, 0x0005002C, 0x00000012, 0x0000070B,
++    0x00000A0B, 0x00000A08, 0x0005002C, 0x00000012, 0x00000723, 0x00000A0B, 0x00000A0E, 0x0004002B,
++    0x0000000B, 0x00000147, 0x00000100, 0x00040017, 0x00000013, 0x0000000D, 0x00000002, 0x0004002B,
++    0x0000000D, 0x00000019, 0x40000000, 0x0004002B, 0x0000000D, 0x00000207, 0x42C80000, 0x0004002B,
++    0x0000000D, 0x00000A4C, 0x41C00000, 0x0004002B, 0x0000000D, 0x0000016E, 0x3E800000, 0x0004002B,
++    0x0000000D, 0x00000224, 0x461C4000, 0x00090019, 0x000000A6, 0x0000000D, 0x00000001, 0x00000000,
++    0x00000000, 0x00000000, 0x00000002, 0x0000000B, 0x00040020, 0x00000323, 0x00000000, 0x000000A6,
++    0x0004003B, 0x00000323, 0x00000CC3, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A3A, 0x00000010,
++    0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0006002C, 0x00000014, 0x00000B0F, 0x00000A3A,
++    0x00000A22, 0x00000A0D, 0x0006002C, 0x00000018, 0x00000A2C, 0x00000A0C, 0x00000A0C, 0x00000A0C,
++    0x0006002C, 0x00000018, 0x000004F6, 0x00000976, 0x00000976, 0x00000976, 0x0006002C, 0x00000018,
++    0x000008BD, 0x0000035E, 0x0000035E, 0x0000035E, 0x0006002C, 0x00000018, 0x00000B83, 0x00000711,
++    0x00000711, 0x00000711, 0x0006002C, 0x00000018, 0x00000198, 0x000009A2, 0x000009A2, 0x000009A2,
++    0x0006002C, 0x00000018, 0x00000328, 0x000001EC, 0x000001EC, 0x000001EC, 0x0005002C, 0x00000013,
++    0x0000061E, 0x000000FC, 0x000000FC, 0x0006002C, 0x00000018, 0x00000A17, 0x0000008A, 0x0000008A,
++    0x0000008A, 0x0006002C, 0x00000018, 0x00000892, 0x00000841, 0x00000841, 0x00000841, 0x0006002C,
++    0x00000018, 0x0000047D, 0x000006EF, 0x000006EF, 0x000006EF, 0x0006002C, 0x00000018, 0x000005E0,
++    0x000003A8, 0x000003A8, 0x000003A8, 0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502,
++    0x000200F8, 0x00003B06, 0x000300F7, 0x00005445, 0x00000000, 0x000300FB, 0x00000A0A, 0x00003272,
++    0x000200F8, 0x00003272, 0x0004003D, 0x00000014, 0x000035C1, 0x00000F48, 0x0007004F, 0x00000011,
++    0x000054D5, 0x000035C1, 0x000035C1, 0x00000000, 0x00000001, 0x00050041, 0x0000028E, 0x00001E50,
++    0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000011, 0x00003442, 0x00001E50, 0x000500AE, 0x0000000F,
++    0x00005B8D, 0x000054D5, 0x00003442, 0x0004009A, 0x00000009, 0x00005A24, 0x00005B8D, 0x000300F7,
++    0x0000188A, 0x00000002, 0x000400FA, 0x00005A24, 0x000055E8, 0x0000188A, 0x000200F8, 0x000055E8,
++    0x000200F9, 0x00005445, 0x000200F8, 0x0000188A, 0x0004007C, 0x00000012, 0x00001A8B, 0x000054D5,
++    0x00060041, 0x00000288, 0x000051CB, 0x00000CE9, 0x00000A0E, 0x00000A0A, 0x0004003D, 0x0000000B,
++    0x00002D20, 0x000051CB, 0x000500C2, 0x0000000B, 0x00004E05, 0x00002D20, 0x00000A13, 0x000500C7,
++    0x0000000B, 0x00001CCA, 0x00004E05, 0x00000A13, 0x00050041, 0x0000029A, 0x000050F7, 0x00000CE9,
++    0x00000A11, 0x0004003D, 0x0000001D, 0x00002585, 0x000050F7, 0x000500AA, 0x00000009, 0x00005272,
++    0x00001CCA, 0x00000A13, 0x000300F7, 0x00004FA6, 0x00000002, 0x000400FA, 0x00005272, 0x00002CF1,
++    0x00004A3D, 0x000200F8, 0x00002CF1, 0x000500C2, 0x0000000B, 0x00004E38, 0x00002D20, 0x00000A1C,
++    0x000500C7, 0x0000000B, 0x000044EB, 0x00004E38, 0x00000A13, 0x000500AA, 0x00000009, 0x00004CE4,
++    0x000044EB, 0x00000A10, 0x000300F7, 0x000052FE, 0x00000000, 0x000400FA, 0x00004CE4, 0x0000349B,
++    0x000034C7, 0x000200F8, 0x0000349B, 0x0004003D, 0x00000096, 0x000028D6, 0x00000C67, 0x0007005F,
++    0x0000001D, 0x00003A46, 0x000028D6, 0x00001A8B, 0x00000002, 0x00000A0B, 0x000200F9, 0x000052FE,
++    0x000200F8, 0x000034C7, 0x0004003D, 0x00000096, 0x0000324C, 0x00001091, 0x0007005F, 0x0000001D,
++    0x00003A47, 0x0000324C, 0x00001A8B, 0x00000002, 0x00000A0B, 0x000200F9, 0x000052FE, 0x000200F8,
++    0x000052FE, 0x000700F5, 0x0000001D, 0x00005E7C, 0x00003A46, 0x0000349B, 0x00003A47, 0x000034C7,
++    0x000500AA, 0x00000009, 0x000060B1, 0x000044EB, 0x00000A13, 0x000300F7, 0x00004FDF, 0x00000002,
++    0x000400FA, 0x000060B1, 0x0000277C, 0x00004FDF, 0x000200F8, 0x0000277C, 0x000500C7, 0x0000000B,
++    0x00005BD4, 0x00002D20, 0x00000A16, 0x000500AB, 0x00000009, 0x00003FAC, 0x00005BD4, 0x00000A0A,
++    0x000300F7, 0x00003334, 0x00000000, 0x000400FA, 0x00003FAC, 0x0000349C, 0x00001B98, 0x000200F8,
++    0x0000349C, 0x0004003D, 0x00000096, 0x00001C38, 0x000014D3, 0x0007005F, 0x0000001D, 0x0000183D,
++    0x00001C38, 0x00001A8B, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x000027F0, 0x0000183D,
++    0x0000183D, 0x00000002, 0x00000001, 0x00000000, 0x000200F9, 0x00003334, 0x000200F8, 0x00001B98,
++    0x0004003D, 0x00000096, 0x000025AE, 0x000014D3, 0x0007005F, 0x0000001D, 0x0000183E, 0x000025AE,
++    0x00001A8B, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x000027F1, 0x0000183E, 0x0000183E,
++    0x00000000, 0x00000001, 0x00000002, 0x000200F9, 0x00003334, 0x000200F8, 0x00003334, 0x000700F5,
++    0x00000018, 0x000043E3, 0x000027F0, 0x0000349C, 0x000027F1, 0x00001B98, 0x00050051, 0x0000000D,
++    0x00005961, 0x000043E3, 0x00000000, 0x00060052, 0x0000001D, 0x000055DF, 0x00005961, 0x00005E7C,
++    0x00000000, 0x00050051, 0x0000000D, 0x00004D8C, 0x000043E3, 0x00000001, 0x00060052, 0x0000001D,
++    0x00003F07, 0x00004D8C, 0x000055DF, 0x00000001, 0x00050051, 0x0000000D, 0x00005A04, 0x000043E3,
++    0x00000002, 0x00060052, 0x0000001D, 0x00002450, 0x00005A04, 0x00003F07, 0x00000002, 0x000200F9,
++    0x00004FDF, 0x000200F8, 0x00004FDF, 0x000700F5, 0x0000001D, 0x00005E7D, 0x00005E7C, 0x000052FE,
++    0x00002450, 0x00003334, 0x000500AA, 0x00000009, 0x000060B2, 0x000044EB, 0x00000A0D, 0x000300F7,
++    0x00003BF6, 0x00000000, 0x000400FA, 0x000060B2, 0x000033DF, 0x00001ADC, 0x000200F8, 0x000033DF,
++    0x0008004F, 0x00000018, 0x00001F16, 0x00005E7D, 0x00005E7D, 0x00000003, 0x00000003, 0x00000003,
++    0x000200F9, 0x00003BF6, 0x000200F8, 0x00001ADC, 0x0008004F, 0x00000018, 0x0000288C, 0x00005E7D,
++    0x00005E7D, 0x00000000, 0x00000001, 0x00000002, 0x000200F9, 0x00003BF6, 0x000200F8, 0x00003BF6,
++    0x000700F5, 0x00000018, 0x0000453F, 0x00001F16, 0x000033DF, 0x0000288C, 0x00001ADC, 0x000500C7,
++    0x0000000B, 0x00006062, 0x00002D20, 0x00000A0D, 0x000500AB, 0x00000009, 0x000056C4, 0x00006062,
++    0x00000A0A, 0x0007000C, 0x00000018, 0x00005890, 0x00000001, 0x00000028, 0x0000453F, 0x00000A2C,
++    0x000300F7, 0x0000213D, 0x00000002, 0x000400FA, 0x000056C4, 0x000019A6, 0x00002924, 0x000200F8,
++    0x000019A6, 0x0007000C, 0x00000018, 0x000058FA, 0x00000001, 0x0000001A, 0x00005890, 0x000004F6,
++    0x000200F9, 0x0000213D, 0x000200F8, 0x00002924, 0x0005008E, 0x00000018, 0x000053B3, 0x00005890,
++    0x000007AD, 0x00050081, 0x00000018, 0x000038A9, 0x00005890, 0x000008BD, 0x0005008E, 0x00000018,
++    0x00004A13, 0x000038A9, 0x0000070C, 0x0007000C, 0x00000018, 0x00004888, 0x00000001, 0x0000001A,
++    0x00004A13, 0x00000B83, 0x000500BA, 0x00000010, 0x00001DC1, 0x00005890, 0x00000198, 0x000600A9,
++    0x00000018, 0x0000283E, 0x00001DC1, 0x00004888, 0x000053B3, 0x000200F9, 0x0000213D, 0x000200F8,
++    0x0000213D, 0x000700F5, 0x00000018, 0x00004857, 0x000058FA, 0x000019A6, 0x0000283E, 0x00002924,
++    0x00050051, 0x0000000D, 0x00003D4D, 0x00002585, 0x00000000, 0x0005008E, 0x00000018, 0x00003299,
++    0x00004857, 0x00003D4D, 0x000200F9, 0x00004FA6, 0x000200F8, 0x00004A3D, 0x000500AA, 0x00000009,
++    0x00005450, 0x00001CCA, 0x00000A10, 0x000300F7, 0x0000535D, 0x00000002, 0x000400FA, 0x00005450,
++    0x0000349D, 0x00002DE1, 0x000200F8, 0x0000349D, 0x0004003D, 0x00000096, 0x00001C39, 0x00001091,
++    0x0007005F, 0x0000001D, 0x00005644, 0x00001C39, 0x00001A8B, 0x00000002, 0x00000A0B, 0x0008004F,
++    0x00000018, 0x00003D9D, 0x00005644, 0x00005644, 0x00000000, 0x00000001, 0x00000002, 0x00050051,
++    0x0000000D, 0x00002126, 0x00005644, 0x00000003, 0x0007000C, 0x0000000D, 0x0000271C, 0x00000001,
++    0x00000028, 0x00002126, 0x0000017A, 0x00060050, 0x00000018, 0x00002D42, 0x0000271C, 0x0000271C,
++    0x0000271C, 0x00050088, 0x00000018, 0x00005A40, 0x00003D9D, 0x00002D42, 0x000500C7, 0x0000000B,
++    0x00003616, 0x00002D20, 0x00000A6A, 0x000500AB, 0x00000009, 0x000057FF, 0x00003616, 0x00000A0A,
++    0x000300F7, 0x00004567, 0x00000002, 0x000400FA, 0x000057FF, 0x000055E9, 0x0000444D, 0x000200F8,
++    0x000055E9, 0x000200F9, 0x00004567, 0x000200F8, 0x0000444D, 0x0004003D, 0x0000009A, 0x00002A56,
++    0x000010ED, 0x00050051, 0x0000000D, 0x0000349E, 0x00005A40, 0x00000000, 0x0008000C, 0x0000000D,
++    0x000030D2, 0x00000001, 0x0000002B, 0x0000349E, 0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D,
++    0x0000220E, 0x000030D2, 0x00000540, 0x00050081, 0x0000000D, 0x0000224B, 0x0000220E, 0x000000FC,
++    0x0004006D, 0x0000000B, 0x000055CC, 0x0000224B, 0x0004007C, 0x0000000C, 0x00001E06, 0x000055CC,
++    0x0005005F, 0x0000001D, 0x00002BD6, 0x00002A56, 0x00001E06, 0x00050051, 0x0000000D, 0x0000329D,
++    0x00002BD6, 0x00000002, 0x0004003D, 0x0000009A, 0x00003EBD, 0x000010ED, 0x00050051, 0x0000000D,
++    0x00002A64, 0x00005A40, 0x00000001, 0x0008000C, 0x0000000D, 0x000030D3, 0x00000001, 0x0000002B,
++    0x00002A64, 0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x0000220F, 0x000030D3, 0x00000540,
++    0x00050081, 0x0000000D, 0x0000224C, 0x0000220F, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055CD,
++    0x0000224C, 0x0004007C, 0x0000000C, 0x00001E07, 0x000055CD, 0x0005005F, 0x0000001D, 0x00002BD7,
++    0x00003EBD, 0x00001E07, 0x00050051, 0x0000000D, 0x0000329E, 0x00002BD7, 0x00000001, 0x0004003D,
++    0x0000009A, 0x00003EBE, 0x000010ED, 0x00050051, 0x0000000D, 0x00002A65, 0x00005A40, 0x00000002,
++    0x0008000C, 0x0000000D, 0x000030D4, 0x00000001, 0x0000002B, 0x00002A65, 0x00000A0C, 0x0000008A,
++    0x00050085, 0x0000000D, 0x00002210, 0x000030D4, 0x00000540, 0x00050081, 0x0000000D, 0x0000224D,
++    0x00002210, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055CE, 0x0000224D, 0x0004007C, 0x0000000C,
++    0x00001E08, 0x000055CE, 0x0005005F, 0x0000001D, 0x00002D3F, 0x00003EBE, 0x00001E08, 0x00050051,
++    0x0000000D, 0x00002E88, 0x00002D3F, 0x00000000, 0x00060050, 0x00000018, 0x00003905, 0x0000329D,
++    0x0000329E, 0x00002E88, 0x000500C7, 0x0000000B, 0x00002539, 0x00002D20, 0x00000A0D, 0x000500AB,
++    0x00000009, 0x000052D8, 0x00002539, 0x00000A0A, 0x0007000C, 0x00000018, 0x00005891, 0x00000001,
++    0x00000028, 0x00003905, 0x00000A2C, 0x000300F7, 0x00002DB5, 0x00000002, 0x000400FA, 0x000052D8,
++    0x000019A7, 0x00002925, 0x000200F8, 0x000019A7, 0x0007000C, 0x00000018, 0x000058FB, 0x00000001,
++    0x0000001A, 0x00005891, 0x000004F6, 0x000200F9, 0x00002DB5, 0x000200F8, 0x00002925, 0x0005008E,
++    0x00000018, 0x000053B4, 0x00005891, 0x000007AD, 0x00050081, 0x00000018, 0x000038AA, 0x00005891,
++    0x000008BD, 0x0005008E, 0x00000018, 0x00004A14, 0x000038AA, 0x0000070C, 0x0007000C, 0x00000018,
++    0x00004889, 0x00000001, 0x0000001A, 0x00004A14, 0x00000B83, 0x000500BA, 0x00000010, 0x00001DC2,
++    0x00005891, 0x00000198, 0x000600A9, 0x00000018, 0x0000283F, 0x00001DC2, 0x00004889, 0x000053B4,
++    0x000200F9, 0x00002DB5, 0x000200F8, 0x00002DB5, 0x000700F5, 0x00000018, 0x0000292C, 0x000058FB,
++    0x000019A7, 0x0000283F, 0x00002925, 0x000200F9, 0x00004567, 0x000200F8, 0x00004567, 0x000700F5,
++    0x00000018, 0x00004FD8, 0x0000084E, 0x000055E9, 0x0000292C, 0x00002DB5, 0x0004003D, 0x0000009A,
++    0x00004A39, 0x000010ED, 0x0004003D, 0x00000096, 0x0000314E, 0x00000C67, 0x0007005F, 0x0000001D,
++    0x0000392D, 0x0000314E, 0x00001A8B, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x00002BB0,
++    0x0000392D, 0x00000000, 0x0008000C, 0x0000000D, 0x00005044, 0x00000001, 0x0000002B, 0x00002BB0,
++    0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002211, 0x00005044, 0x00000540, 0x00050081,
++    0x0000000D, 0x0000224E, 0x00002211, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055CF, 0x0000224E,
++    0x0004007C, 0x0000000C, 0x00001E09, 0x000055CF, 0x0005005F, 0x0000001D, 0x00002BD8, 0x00004A39,
++    0x00001E09, 0x00050051, 0x0000000D, 0x00003121, 0x00002BD8, 0x00000002, 0x0004003D, 0x0000009A,
++    0x0000523F, 0x000010ED, 0x0004003D, 0x00000096, 0x000023EC, 0x00000C67, 0x0007005F, 0x0000001D,
++    0x0000392E, 0x000023EC, 0x00001A8B, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x00002BB1,
++    0x0000392E, 0x00000001, 0x0008000C, 0x0000000D, 0x00005045, 0x00000001, 0x0000002B, 0x00002BB1,
++    0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002212, 0x00005045, 0x00000540, 0x00050081,
++    0x0000000D, 0x0000224F, 0x00002212, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055D0, 0x0000224F,
++    0x0004007C, 0x0000000C, 0x00001E0A, 0x000055D0, 0x0005005F, 0x0000001D, 0x00002BD9, 0x0000523F,
++    0x00001E0A, 0x00050051, 0x0000000D, 0x00003122, 0x00002BD9, 0x00000001, 0x0004003D, 0x0000009A,
++    0x00005240, 0x000010ED, 0x0004003D, 0x00000096, 0x000023ED, 0x00000C67, 0x0007005F, 0x0000001D,
++    0x0000392F, 0x000023ED, 0x00001A8B, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x00002BB2,
++    0x0000392F, 0x00000002, 0x0008000C, 0x0000000D, 0x00005046, 0x00000001, 0x0000002B, 0x00002BB2,
++    0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002213, 0x00005046, 0x00000540, 0x00050081,
++    0x0000000D, 0x00002250, 0x00002213, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055D1, 0x00002250,
++    0x0004007C, 0x0000000C, 0x00001E0B, 0x000055D1, 0x0005005F, 0x0000001D, 0x00002D40, 0x00005240,
++    0x00001E0B, 0x00050051, 0x0000000D, 0x00002E89, 0x00002D40, 0x00000000, 0x00060050, 0x00000018,
++    0x00003906, 0x00003121, 0x00003122, 0x00002E89, 0x000500C7, 0x0000000B, 0x0000253A, 0x00002D20,
++    0x00000A0D, 0x000500AB, 0x00000009, 0x000052D9, 0x0000253A, 0x00000A0A, 0x0007000C, 0x00000018,
++    0x00005892, 0x00000001, 0x00000028, 0x00003906, 0x00000A2C, 0x000300F7, 0x0000213E, 0x00000002,
++    0x000400FA, 0x000052D9, 0x000019A8, 0x00002926, 0x000200F8, 0x000019A8, 0x0007000C, 0x00000018,
++    0x000058FC, 0x00000001, 0x0000001A, 0x00005892, 0x000004F6, 0x000200F9, 0x0000213E, 0x000200F8,
++    0x00002926, 0x0005008E, 0x00000018, 0x000053B5, 0x00005892, 0x000007AD, 0x00050081, 0x00000018,
++    0x000038AB, 0x00005892, 0x000008BD, 0x0005008E, 0x00000018, 0x00004A15, 0x000038AB, 0x0000070C,
++    0x0007000C, 0x00000018, 0x0000488A, 0x00000001, 0x0000001A, 0x00004A15, 0x00000B83, 0x000500BA,
++    0x00000010, 0x00001DC3, 0x00005892, 0x00000198, 0x000600A9, 0x00000018, 0x00002840, 0x00001DC3,
++    0x0000488A, 0x000053B5, 0x000200F9, 0x0000213E, 0x000200F8, 0x0000213E, 0x000700F5, 0x00000018,
++    0x000047AC, 0x000058FC, 0x000019A8, 0x00002840, 0x00002926, 0x00050051, 0x0000000D, 0x00003B71,
++    0x00002585, 0x00000000, 0x00050085, 0x0000000D, 0x00001DC7, 0x00002126, 0x00003B71, 0x0005008E,
++    0x00000018, 0x00004A85, 0x00004FD8, 0x00001DC7, 0x00050083, 0x0000000D, 0x00002D04, 0x0000008A,
++    0x00002126, 0x00050051, 0x0000000D, 0x000049EF, 0x00002585, 0x00000001, 0x00050085, 0x0000000D,
++    0x00002FA7, 0x00002D04, 0x000049EF, 0x0005008E, 0x00000018, 0x00005857, 0x000047AC, 0x00002FA7,
++    0x00050081, 0x00000018, 0x00004E86, 0x00004A85, 0x00005857, 0x000200F9, 0x0000535D, 0x000200F8,
++    0x00002DE1, 0x000500C7, 0x0000000B, 0x00001ACB, 0x00002D20, 0x00000A16, 0x000500AB, 0x00000009,
++    0x00003FAD, 0x00001ACB, 0x00000A0A, 0x000300F7, 0x000039CF, 0x00000000, 0x000400FA, 0x00003FAD,
++    0x0000349F, 0x00001B99, 0x000200F8, 0x0000349F, 0x0004003D, 0x00000096, 0x00001C3A, 0x000014D3,
++    0x0007005F, 0x0000001D, 0x0000183F, 0x00001C3A, 0x00001A8B, 0x00000002, 0x00000A0B, 0x0008004F,
++    0x00000018, 0x000027F2, 0x0000183F, 0x0000183F, 0x00000002, 0x00000001, 0x00000000, 0x000200F9,
++    0x000039CF, 0x000200F8, 0x00001B99, 0x0004003D, 0x00000096, 0x000025AF, 0x000014D3, 0x0007005F,
++    0x0000001D, 0x00001840, 0x000025AF, 0x00001A8B, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018,
++    0x000027F3, 0x00001840, 0x00001840, 0x00000000, 0x00000001, 0x00000002, 0x000200F9, 0x000039CF,
++    0x000200F8, 0x000039CF, 0x000700F5, 0x00000018, 0x00005E7E, 0x000027F2, 0x0000349F, 0x000027F3,
++    0x00001B99, 0x000500AA, 0x00000009, 0x000060B3, 0x00001CCA, 0x00000A0D, 0x000300F7, 0x00005335,
++    0x00000002, 0x000400FA, 0x000060B3, 0x00005768, 0x00005335, 0x000200F8, 0x00005768, 0x000300F7,
++    0x000031B8, 0x00000000, 0x000400FA, 0x00003FAD, 0x000034A0, 0x00001B9A, 0x000200F8, 0x000034A0,
++    0x0004003D, 0x00000096, 0x00001C3B, 0x000014D3, 0x0007005F, 0x0000001D, 0x00001841, 0x00001C3B,
++    0x00001A8B, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x000027F4, 0x00001841, 0x00001841,
++    0x00000002, 0x00000001, 0x00000000, 0x000200F9, 0x000031B8, 0x000200F8, 0x00001B9A, 0x0004003D,
++    0x00000096, 0x000025B0, 0x000014D3, 0x0007005F, 0x0000001D, 0x00001842, 0x000025B0, 0x00001A8B,
++    0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x000027F5, 0x00001842, 0x00001842, 0x00000000,
++    0x00000001, 0x00000002, 0x000200F9, 0x000031B8, 0x000200F8, 0x000031B8, 0x000700F5, 0x00000018,
++    0x0000525E, 0x000027F4, 0x000034A0, 0x000027F5, 0x00001B9A, 0x0004003D, 0x00000096, 0x0000320F,
++    0x00000C67, 0x0007005F, 0x0000001D, 0x00005D23, 0x0000320F, 0x00001A8B, 0x00000002, 0x00000A0B,
++    0x0008004F, 0x00000018, 0x00001BAF, 0x00005D23, 0x00005D23, 0x00000000, 0x00000001, 0x00000002,
++    0x00050083, 0x00000018, 0x0000438E, 0x0000525E, 0x00001BAF, 0x0006000C, 0x00000018, 0x00001F94,
++    0x00000001, 0x00000004, 0x0000438E, 0x000500BA, 0x00000010, 0x0000465A, 0x00001F94, 0x00000328,
++    0x0004009A, 0x00000009, 0x00004361, 0x0000465A, 0x000300F7, 0x0000535C, 0x00000000, 0x000400FA,
++    0x00004361, 0x00002CCE, 0x0000535C, 0x000200F8, 0x00002CCE, 0x00050051, 0x0000000B, 0x00005D89,
++    0x000035C1, 0x00000001, 0x000500AC, 0x00000009, 0x00003945, 0x00005D89, 0x00000A0A, 0x000300F7,
++    0x00001E46, 0x00000000, 0x000400FA, 0x00003945, 0x00005769, 0x00001E46, 0x000200F8, 0x00005769,
++    0x000300F7, 0x000031B9, 0x00000000, 0x000400FA, 0x00003FAD, 0x0000370E, 0x00001E0C, 0x000200F8,
++    0x0000370E, 0x0004003D, 0x00000096, 0x0000519A, 0x000014D3, 0x00050080, 0x00000012, 0x00003E1F,
++    0x00001A8B, 0x0000070B, 0x0007005F, 0x0000001D, 0x00004F6B, 0x0000519A, 0x00003E1F, 0x00000002,
++    0x00000A0B, 0x0008004F, 0x00000018, 0x00003DD8, 0x00004F6B, 0x00004F6B, 0x00000002, 0x00000001,
++    0x00000000, 0x000200F9, 0x000031B9, 0x000200F8, 0x00001E0C, 0x0004003D, 0x00000096, 0x00005B10,
++    0x000014D3, 0x00050080, 0x00000012, 0x00003E20, 0x00001A8B, 0x0000070B, 0x0007005F, 0x0000001D,
++    0x00004F6C, 0x00005B10, 0x00003E20, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x00003DD9,
++    0x00004F6C, 0x00004F6C, 0x00000000, 0x00000001, 0x00000002, 0x000200F9, 0x000031B9, 0x000200F8,
++    0x000031B9, 0x000700F5, 0x00000018, 0x000054D1, 0x00003DD8, 0x0000370E, 0x00003DD9, 0x00001E0C,
++    0x0004003D, 0x00000096, 0x00001CF2, 0x00000C67, 0x00050080, 0x00000012, 0x00004148, 0x00001A8B,
++    0x0000070B, 0x0007005F, 0x0000001D, 0x000046A9, 0x00001CF2, 0x00004148, 0x00000002, 0x00000A0B,
++    0x0008004F, 0x00000018, 0x00003197, 0x000046A9, 0x000046A9, 0x00000000, 0x00000001, 0x00000002,
++    0x00050083, 0x00000018, 0x0000438F, 0x000054D1, 0x00003197, 0x0006000C, 0x00000018, 0x00001F95,
++    0x00000001, 0x00000004, 0x0000438F, 0x000500BA, 0x00000010, 0x00004680, 0x00001F95, 0x00000328,
++    0x0004009A, 0x00000009, 0x000041E1, 0x00004680, 0x000200F9, 0x00001E46, 0x000200F8, 0x00001E46,
++    0x000700F5, 0x00000009, 0x00005FD6, 0x00003945, 0x00002CCE, 0x000041E1, 0x000031B9, 0x000400A8,
++    0x00000009, 0x00005634, 0x00005FD6, 0x000300F7, 0x0000535B, 0x00000000, 0x000400FA, 0x00005634,
++    0x000050C9, 0x0000535B, 0x000200F8, 0x000050C9, 0x00050080, 0x0000000B, 0x00003D01, 0x00005D89,
++    0x00000A0D, 0x00050051, 0x0000000B, 0x00003ECE, 0x00003442, 0x00000001, 0x000500B0, 0x00000009,
++    0x00001C18, 0x00003D01, 0x00003ECE, 0x000300F7, 0x00002449, 0x00000000, 0x000400FA, 0x00001C18,
++    0x0000576A, 0x00002449, 0x000200F8, 0x0000576A, 0x000300F7, 0x000031BA, 0x00000000, 0x000400FA,
++    0x00003FAD, 0x0000370F, 0x00001E0D, 0x000200F8, 0x0000370F, 0x0004003D, 0x00000096, 0x0000519B,
++    0x000014D3, 0x00050080, 0x00000012, 0x00003E21, 0x00001A8B, 0x00000723, 0x0007005F, 0x0000001D,
++    0x00004F6D, 0x0000519B, 0x00003E21, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x00003DDA,
++    0x00004F6D, 0x00004F6D, 0x00000002, 0x00000001, 0x00000000, 0x000200F9, 0x000031BA, 0x000200F8,
++    0x00001E0D, 0x0004003D, 0x00000096, 0x00005B11, 0x000014D3, 0x00050080, 0x00000012, 0x00003E22,
++    0x00001A8B, 0x00000723, 0x0007005F, 0x0000001D, 0x00004F6E, 0x00005B11, 0x00003E22, 0x00000002,
++    0x00000A0B, 0x0008004F, 0x00000018, 0x00003DDB, 0x00004F6E, 0x00004F6E, 0x00000000, 0x00000001,
++    0x00000002, 0x000200F9, 0x000031BA, 0x000200F8, 0x000031BA, 0x000700F5, 0x00000018, 0x000054D2,
++    0x00003DDA, 0x0000370F, 0x00003DDB, 0x00001E0D, 0x0004003D, 0x00000096, 0x00001CF3, 0x00000C67,
++    0x00050080, 0x00000012, 0x00004149, 0x00001A8B, 0x00000723, 0x0007005F, 0x0000001D, 0x000046AA,
++    0x00001CF3, 0x00004149, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x00003198, 0x000046AA,
++    0x000046AA, 0x00000000, 0x00000001, 0x00000002, 0x00050083, 0x00000018, 0x00004390, 0x000054D2,
++    0x00003198, 0x0006000C, 0x00000018, 0x00001F96, 0x00000001, 0x00000004, 0x00004390, 0x000500BA,
++    0x00000010, 0x00004681, 0x00001F96, 0x00000328, 0x0004009A, 0x00000009, 0x000041E2, 0x00004681,
++    0x000200F9, 0x00002449, 0x000200F8, 0x00002449, 0x000700F5, 0x00000009, 0x0000292D, 0x00001C18,
++    0x000050C9, 0x000041E2, 0x000031BA, 0x000200F9, 0x0000535B, 0x000200F8, 0x0000535B, 0x000700F5,
++    0x00000009, 0x0000292E, 0x00005FD6, 0x00001E46, 0x0000292D, 0x00002449, 0x000200F9, 0x0000535C,
++    0x000200F8, 0x0000535C, 0x000700F5, 0x00000009, 0x0000292F, 0x00004361, 0x000031B8, 0x0000292E,
++    0x0000535B, 0x000200F9, 0x00005335, 0x000200F8, 0x00005335, 0x000700F5, 0x00000009, 0x00002AAC,
++    0x00000786, 0x000039CF, 0x0000292F, 0x0000535C, 0x000300F7, 0x00006233, 0x00000002, 0x000400FA,
++    0x00002AAC, 0x0000277D, 0x000054D3, 0x000200F8, 0x0000277D, 0x000500C7, 0x0000000B, 0x000055E4,
++    0x00002D20, 0x00000A6A, 0x000500AB, 0x00000009, 0x00002B04, 0x000055E4, 0x00000A0A, 0x000500A7,
++    0x00000009, 0x000038A1, 0x00002B04, 0x000060B3, 0x000300F7, 0x00004FA5, 0x00000000, 0x000400FA,
++    0x000038A1, 0x000055EA, 0x0000444E, 0x000200F8, 0x000055EA, 0x000200F9, 0x00004FA5, 0x000200F8,
++    0x0000444E, 0x0004003D, 0x0000009A, 0x00002A57, 0x000010ED, 0x00050051, 0x0000000D, 0x000034A1,
++    0x00005E7E, 0x00000000, 0x0008000C, 0x0000000D, 0x000030D5, 0x00000001, 0x0000002B, 0x000034A1,
++    0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002214, 0x000030D5, 0x00000540, 0x00050081,
++    0x0000000D, 0x00002251, 0x00002214, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055D2, 0x00002251,
++    0x0004007C, 0x0000000C, 0x00001E0E, 0x000055D2, 0x0005005F, 0x0000001D, 0x00002BDA, 0x00002A57,
++    0x00001E0E, 0x00050051, 0x0000000D, 0x0000329F, 0x00002BDA, 0x00000002, 0x0004003D, 0x0000009A,
++    0x00003EBF, 0x000010ED, 0x00050051, 0x0000000D, 0x00002A66, 0x00005E7E, 0x00000001, 0x0008000C,
++    0x0000000D, 0x000030D6, 0x00000001, 0x0000002B, 0x00002A66, 0x00000A0C, 0x0000008A, 0x00050085,
++    0x0000000D, 0x00002215, 0x000030D6, 0x00000540, 0x00050081, 0x0000000D, 0x00002252, 0x00002215,
++    0x000000FC, 0x0004006D, 0x0000000B, 0x000055D3, 0x00002252, 0x0004007C, 0x0000000C, 0x00001E0F,
++    0x000055D3, 0x0005005F, 0x0000001D, 0x00002BDB, 0x00003EBF, 0x00001E0F, 0x00050051, 0x0000000D,
++    0x000032A0, 0x00002BDB, 0x00000001, 0x0004003D, 0x0000009A, 0x00003EC0, 0x000010ED, 0x00050051,
++    0x0000000D, 0x00002A67, 0x00005E7E, 0x00000002, 0x0008000C, 0x0000000D, 0x000030D7, 0x00000001,
++    0x0000002B, 0x00002A67, 0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002216, 0x000030D7,
++    0x00000540, 0x00050081, 0x0000000D, 0x00002253, 0x00002216, 0x000000FC, 0x0004006D, 0x0000000B,
++    0x000055D4, 0x00002253, 0x0004007C, 0x0000000C, 0x00001E10, 0x000055D4, 0x0005005F, 0x0000001D,
++    0x00002D41, 0x00003EC0, 0x00001E10, 0x00050051, 0x0000000D, 0x00002E8A, 0x00002D41, 0x00000000,
++    0x00060050, 0x00000018, 0x00003907, 0x0000329F, 0x000032A0, 0x00002E8A, 0x000500C7, 0x0000000B,
++    0x0000253B, 0x00002D20, 0x00000A0D, 0x000500AB, 0x00000009, 0x000052DA, 0x0000253B, 0x00000A0A,
++    0x0007000C, 0x00000018, 0x00005893, 0x00000001, 0x00000028, 0x00003907, 0x00000A2C, 0x000300F7,
++    0x00002DB6, 0x00000002, 0x000400FA, 0x000052DA, 0x000019A9, 0x00002927, 0x000200F8, 0x000019A9,
++    0x0007000C, 0x00000018, 0x000058FD, 0x00000001, 0x0000001A, 0x00005893, 0x000004F6, 0x000200F9,
++    0x00002DB6, 0x000200F8, 0x00002927, 0x0005008E, 0x00000018, 0x000053B6, 0x00005893, 0x000007AD,
++    0x00050081, 0x00000018, 0x000038AC, 0x00005893, 0x000008BD, 0x0005008E, 0x00000018, 0x00004A16,
++    0x000038AC, 0x0000070C, 0x0007000C, 0x00000018, 0x0000488B, 0x00000001, 0x0000001A, 0x00004A16,
++    0x00000B83, 0x000500BA, 0x00000010, 0x00001DC4, 0x00005893, 0x00000198, 0x000600A9, 0x00000018,
++    0x00002841, 0x00001DC4, 0x0000488B, 0x000053B6, 0x000200F9, 0x00002DB6, 0x000200F8, 0x00002DB6,
++    0x000700F5, 0x00000018, 0x00002930, 0x000058FD, 0x000019A9, 0x00002841, 0x00002927, 0x000200F9,
++    0x00004FA5, 0x000200F8, 0x00004FA5, 0x000700F5, 0x00000018, 0x00004540, 0x0000084E, 0x000055EA,
++    0x00002930, 0x00002DB6, 0x000500C7, 0x0000000B, 0x0000272C, 0x00002D20, 0x00000147, 0x000500AB,
++    0x00000009, 0x000042D5, 0x0000272C, 0x00000A0A, 0x000300F7, 0x00003E08, 0x00000000, 0x000400FA,
++    0x000042D5, 0x00003285, 0x00001FCF, 0x000200F8, 0x00003285, 0x00050051, 0x0000000D, 0x00002993,
++    0x00002585, 0x00000001, 0x000200F9, 0x00003E08, 0x000200F8, 0x00001FCF, 0x00050051, 0x0000000D,
++    0x00003309, 0x00002585, 0x00000000, 0x000200F9, 0x00003E08, 0x000200F8, 0x00003E08, 0x000700F5,
++    0x0000000D, 0x0000270F, 0x00002993, 0x00003285, 0x00003309, 0x00001FCF, 0x0005008E, 0x00000018,
++    0x00006159, 0x00004540, 0x0000270F, 0x000200F9, 0x00006233, 0x000200F8, 0x000054D3, 0x0004003D,
++    0x0000009A, 0x00003DDC, 0x000010ED, 0x0004003D, 0x00000096, 0x0000475E, 0x00000C67, 0x0007005F,
++    0x0000001D, 0x00003930, 0x0000475E, 0x00001A8B, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D,
++    0x00002BB3, 0x00003930, 0x00000000, 0x0008000C, 0x0000000D, 0x00005047, 0x00000001, 0x0000002B,
++    0x00002BB3, 0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002217, 0x00005047, 0x00000540,
++    0x00050081, 0x0000000D, 0x00002254, 0x00002217, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055D5,
++    0x00002254, 0x0004007C, 0x0000000C, 0x00001E11, 0x000055D5, 0x0005005F, 0x0000001D, 0x00002BDC,
++    0x00003DDC, 0x00001E11, 0x00050051, 0x0000000D, 0x00003123, 0x00002BDC, 0x00000002, 0x0004003D,
++    0x0000009A, 0x00005241, 0x000010ED, 0x0004003D, 0x00000096, 0x000023EE, 0x00000C67, 0x0007005F,
++    0x0000001D, 0x00003931, 0x000023EE, 0x00001A8B, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D,
++    0x00002BB4, 0x00003931, 0x00000001, 0x0008000C, 0x0000000D, 0x00005048, 0x00000001, 0x0000002B,
++    0x00002BB4, 0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002218, 0x00005048, 0x00000540,
++    0x00050081, 0x0000000D, 0x00002255, 0x00002218, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055D6,
++    0x00002255, 0x0004007C, 0x0000000C, 0x00001E12, 0x000055D6, 0x0005005F, 0x0000001D, 0x00002BDD,
++    0x00005241, 0x00001E12, 0x00050051, 0x0000000D, 0x00003124, 0x00002BDD, 0x00000001, 0x0004003D,
++    0x0000009A, 0x00005242, 0x000010ED, 0x0004003D, 0x00000096, 0x000023EF, 0x00000C67, 0x0007005F,
++    0x0000001D, 0x00003932, 0x000023EF, 0x00001A8B, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D,
++    0x00002BB5, 0x00003932, 0x00000002, 0x0008000C, 0x0000000D, 0x00005049, 0x00000001, 0x0000002B,
++    0x00002BB5, 0x00000A0C, 0x0000008A, 0x00050085, 0x0000000D, 0x00002219, 0x00005049, 0x00000540,
++    0x00050081, 0x0000000D, 0x00002256, 0x00002219, 0x000000FC, 0x0004006D, 0x0000000B, 0x000055D7,
++    0x00002256, 0x0004007C, 0x0000000C, 0x00001E13, 0x000055D7, 0x0005005F, 0x0000001D, 0x00002D43,
++    0x00005242, 0x00001E13, 0x00050051, 0x0000000D, 0x00002E8B, 0x00002D43, 0x00000000, 0x00060050,
++    0x00000018, 0x00003908, 0x00003123, 0x00003124, 0x00002E8B, 0x000500C7, 0x0000000B, 0x0000253C,
++    0x00002D20, 0x00000A0D, 0x000500AB, 0x00000009, 0x000052DB, 0x0000253C, 0x00000A0A, 0x0007000C,
++    0x00000018, 0x00005894, 0x00000001, 0x00000028, 0x00003908, 0x00000A2C, 0x000300F7, 0x0000213F,
++    0x00000002, 0x000400FA, 0x000052DB, 0x000019AA, 0x00002928, 0x000200F8, 0x000019AA, 0x0007000C,
++    0x00000018, 0x000058FE, 0x00000001, 0x0000001A, 0x00005894, 0x000004F6, 0x000200F9, 0x0000213F,
++    0x000200F8, 0x00002928, 0x0005008E, 0x00000018, 0x000053B7, 0x00005894, 0x000007AD, 0x00050081,
++    0x00000018, 0x000038AD, 0x00005894, 0x000008BD, 0x0005008E, 0x00000018, 0x00004A17, 0x000038AD,
++    0x0000070C, 0x0007000C, 0x00000018, 0x0000488C, 0x00000001, 0x0000001A, 0x00004A17, 0x00000B83,
++    0x000500BA, 0x00000010, 0x00001DC5, 0x00005894, 0x00000198, 0x000600A9, 0x00000018, 0x00002842,
++    0x00001DC5, 0x0000488C, 0x000053B7, 0x000200F9, 0x0000213F, 0x000200F8, 0x0000213F, 0x000700F5,
++    0x00000018, 0x00004858, 0x000058FE, 0x000019AA, 0x00002842, 0x00002928, 0x00050051, 0x0000000D,
++    0x00003D4E, 0x00002585, 0x00000001, 0x0005008E, 0x00000018, 0x0000329A, 0x00004858, 0x00003D4E,
++    0x000200F9, 0x00006233, 0x000200F8, 0x00006233, 0x000700F5, 0x00000018, 0x00002931, 0x00006159,
++    0x00003E08, 0x0000329A, 0x0000213F, 0x000200F9, 0x0000535D, 0x000200F8, 0x0000535D, 0x000700F5,
++    0x00000018, 0x00002932, 0x00004E86, 0x0000213E, 0x00002931, 0x00006233, 0x000200F9, 0x00004FA6,
++    0x000200F8, 0x00004FA6, 0x000700F5, 0x00000018, 0x00004541, 0x00003299, 0x0000213D, 0x00002932,
++    0x0000535D, 0x000500C7, 0x0000000B, 0x0000272D, 0x00002D20, 0x00000A10, 0x000500AB, 0x00000009,
++    0x000042D6, 0x0000272D, 0x00000A0A, 0x000300F7, 0x0000530F, 0x00000002, 0x000400FA, 0x000042D6,
++    0x00005F29, 0x0000530F, 0x000200F8, 0x00005F29, 0x00040070, 0x00000013, 0x000058E7, 0x000054D5,
++    0x00050081, 0x00000013, 0x00004449, 0x000058E7, 0x0000061E, 0x00040070, 0x00000013, 0x00001ACF,
++    0x00003442, 0x00050088, 0x00000013, 0x000051EB, 0x00004449, 0x00001ACF, 0x00050051, 0x0000000D,
++    0x000048D4, 0x000051EB, 0x00000001, 0x000500B8, 0x00000009, 0x00004607, 0x000048D4, 0x000000FC,
++    0x000300F7, 0x00005CC5, 0x00000000, 0x000400FA, 0x00004607, 0x00003286, 0x000061B2, 0x000200F8,
++    0x00003286, 0x00050051, 0x0000000D, 0x00002994, 0x000051EB, 0x00000000, 0x000200F9, 0x00005CC5,
++    0x000200F8, 0x000061B2, 0x00050051, 0x0000000D, 0x00002E3F, 0x000051EB, 0x00000000, 0x00050085,
++    0x0000000D, 0x00004408, 0x00002E3F, 0x00000019, 0x00050083, 0x0000000D, 0x00003D3B, 0x00004408,
++    0x0000008A, 0x000200F9, 0x00005CC5, 0x000200F8, 0x00005CC5, 0x000700F5, 0x0000000D, 0x00001B95,
++    0x00002994, 0x00003286, 0x00003D3B, 0x000061B2, 0x00050085, 0x0000000D, 0x00005786, 0x00001B95,
++    0x00000A4C, 0x0006000C, 0x0000000D, 0x00004DF9, 0x00000001, 0x00000008, 0x00005786, 0x00050085,
++    0x0000000D, 0x00003E1C, 0x00004DF9, 0x0000016E, 0x0006000C, 0x0000000D, 0x00003C04, 0x00000001,
++    0x0000001D, 0x00003E1C, 0x00050085, 0x0000000D, 0x00005BEE, 0x00000207, 0x00003C04, 0x000300F7,
++    0x000046D0, 0x00000000, 0x000400FA, 0x00004607, 0x000055EB, 0x000047FF, 0x000200F8, 0x000055EB,
++    0x000200F9, 0x000046D0, 0x000200F8, 0x000047FF, 0x000500B8, 0x00000009, 0x0000533C, 0x00001B95,
++    0x00000A0C, 0x000300F7, 0x00001EEC, 0x00000000, 0x000400FA, 0x0000533C, 0x00003287, 0x00004332,
++    0x000200F8, 0x00003287, 0x00050051, 0x0000000D, 0x00002995, 0x00002585, 0x00000001, 0x000200F9,
++    0x00001EEC, 0x000200F8, 0x00004332, 0x000200F9, 0x00001EEC, 0x000200F8, 0x00001EEC, 0x000700F5,
++    0x0000000D, 0x00002933, 0x00002995, 0x00003287, 0x00005BEE, 0x00004332, 0x000200F9, 0x000046D0,
++    0x000200F8, 0x000046D0, 0x000700F5, 0x0000000D, 0x000050CF, 0x00005BEE, 0x000055EB, 0x00002933,
++    0x00001EEC, 0x00060050, 0x00000018, 0x000060EB, 0x000050CF, 0x000050CF, 0x000050CF, 0x000300F7,
++    0x000055BC, 0x00000002, 0x000400FA, 0x00004607, 0x000031D8, 0x000055BC, 0x000200F8, 0x000031D8,
++    0x00060052, 0x0000001D, 0x00005411, 0x00000224, 0x00002585, 0x00000002, 0x000200F9, 0x000055BC,
++    0x000200F8, 0x000055BC, 0x000700F5, 0x0000001D, 0x00002934, 0x00002585, 0x000046D0, 0x00005411,
++    0x000031D8, 0x000200F9, 0x0000530F, 0x000200F8, 0x0000530F, 0x000700F5, 0x0000001D, 0x00001F7B,
++    0x00002585, 0x00004FA6, 0x00002934, 0x000055BC, 0x000700F5, 0x00000018, 0x00001EEB, 0x00004541,
++    0x00004FA6, 0x000060EB, 0x000055BC, 0x00050051, 0x0000000D, 0x00005D37, 0x00001F7B, 0x00000002,
++    0x00050051, 0x0000000D, 0x00002B4E, 0x00001F7B, 0x00000003, 0x00050051, 0x0000000D, 0x00001DEC,
++    0x00001EEB, 0x00000000, 0x00050051, 0x0000000D, 0x000018F5, 0x00001EEB, 0x00000001, 0x00050051,
++    0x0000000D, 0x000051ED, 0x00001EEB, 0x00000002, 0x0007000C, 0x0000000D, 0x00001EED, 0x00000001,
++    0x00000028, 0x000018F5, 0x000051ED, 0x0007000C, 0x0000000D, 0x000058F3, 0x00000001, 0x00000028,
++    0x00001DEC, 0x00001EED, 0x000500BA, 0x00000009, 0x000049BB, 0x000058F3, 0x00005D37, 0x000500BA,
++    0x00000009, 0x00002BC2, 0x00002B4E, 0x00005D37, 0x000500A7, 0x00000009, 0x000025BF, 0x000049BB,
++    0x00002BC2, 0x000300F7, 0x0000543F, 0x00000002, 0x000400FA, 0x000025BF, 0x00005278, 0x0000543F,
++    0x000200F8, 0x00005278, 0x00050083, 0x0000000D, 0x00004D3A, 0x00002B4E, 0x00005D37, 0x00050083,
++    0x0000000D, 0x00005BF4, 0x00005D37, 0x000058F3, 0x00050088, 0x0000000D, 0x0000460C, 0x00005BF4,
++    0x00004D3A, 0x00050085, 0x0000000D, 0x00003CC1, 0x0000460C, 0x000000DF, 0x0006000C, 0x0000000D,
++    0x00001DB6, 0x00000001, 0x0000001D, 0x00003CC1, 0x00050083, 0x0000000D, 0x00004B01, 0x0000008A,
++    0x00001DB6, 0x00050085, 0x0000000D, 0x000049D2, 0x00004D3A, 0x00004B01, 0x00050081, 0x0000000D,
++    0x00004C26, 0x00005D37, 0x000049D2, 0x00050088, 0x0000000D, 0x000059B0, 0x00004C26, 0x000058F3,
++    0x0005008E, 0x00000018, 0x00004EA2, 0x00001EEB, 0x000059B0, 0x000200F9, 0x0000543F, 0x000200F8,
++    0x0000543F, 0x000700F5, 0x00000018, 0x0000564D, 0x00001EEB, 0x0000530F, 0x00004EA2, 0x00005278,
++    0x0004003D, 0x000000A6, 0x00005DDC, 0x00000CC3, 0x00050094, 0x0000000D, 0x000040F9, 0x0000564D,
++    0x00000112, 0x00050094, 0x0000000D, 0x000028E0, 0x0000564D, 0x00000BBE, 0x00050094, 0x0000000D,
++    0x00004CA0, 0x0000564D, 0x0000048A, 0x00060050, 0x00000018, 0x00004259, 0x000040F9, 0x000028E0,
++    0x00004CA0, 0x0005008E, 0x00000018, 0x000045B3, 0x00004259, 0x00000383, 0x0008000C, 0x00000018,
++    0x00002A1C, 0x00000001, 0x0000002B, 0x000045B3, 0x00000A2C, 0x00000A17, 0x0007000C, 0x00000018,
++    0x00004E66, 0x00000001, 0x0000001A, 0x00002A1C, 0x00000892, 0x0005008E, 0x00000018, 0x000055B9,
++    0x00004E66, 0x0000058F, 0x00050081, 0x00000018, 0x000027FC, 0x0000047D, 0x000055B9, 0x0005008E,
++    0x00000018, 0x00003ECC, 0x00004E66, 0x00000911, 0x00050081, 0x00000018, 0x00004B99, 0x00000A17,
++    0x00003ECC, 0x00050088, 0x00000018, 0x000022D1, 0x000027FC, 0x00004B99, 0x0007000C, 0x00000018,
++    0x00002C3F, 0x00000001, 0x0000001A, 0x000022D1, 0x000005E0, 0x00050051, 0x0000000D, 0x000029E3,
++    0x00002C3F, 0x00000000, 0x00050051, 0x0000000D, 0x0000594F, 0x00002C3F, 0x00000001, 0x00050051,
++    0x0000000D, 0x00001FEF, 0x00002C3F, 0x00000002, 0x00070050, 0x0000001D, 0x00003E3B, 0x000029E3,
++    0x0000594F, 0x00001FEF, 0x0000008A, 0x00040063, 0x00005DDC, 0x00001A8B, 0x00003E3B, 0x000200F9,
++    0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
+ };
+diff --git a/src/graphics/shaders/vulkan_spirv/hdr_underlay_restore_ps.h b/src/graphics/shaders/vulkan_spirv/hdr_underlay_restore_ps.h
+new file mode 100644
+index 0000000..9c55f63
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/hdr_underlay_restore_ps.h
+@@ -0,0 +1,25 @@
++// Generated from hdr_underlay_restore.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_underlay_restore_ps[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00006202, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0007000F, 0x00000004, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000BF2, 0x00000C93, 0x00030010,
++    0x0000161F, 0x00000007, 0x00040047, 0x00000BF2, 0x0000001E, 0x00000000, 0x00040047, 0x000015AB,
++    0x00000021, 0x00000000, 0x00040047, 0x000015AB, 0x00000022, 0x00000000, 0x00040047, 0x00000C93,
++    0x0000000B, 0x0000000F, 0x00020013, 0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00030016,
++    0x0000000D, 0x00000020, 0x00040017, 0x0000001D, 0x0000000D, 0x00000004, 0x00040020, 0x0000029A,
++    0x00000003, 0x0000001D, 0x0004003B, 0x0000029A, 0x00000BF2, 0x00000003, 0x00090019, 0x00000096,
++    0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00040020,
++    0x00000313, 0x00000000, 0x00000096, 0x0004003B, 0x00000313, 0x000015AB, 0x00000000, 0x00040020,
++    0x0000029B, 0x00000001, 0x0000001D, 0x0004003B, 0x0000029B, 0x00000C93, 0x00000001, 0x00040017,
++    0x00000013, 0x0000000D, 0x00000002, 0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x00040017,
++    0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x0004002B,
++    0x0000000D, 0x0000008A, 0x3F800000, 0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502,
++    0x000200F8, 0x0000601F, 0x0004003D, 0x00000096, 0x00005268, 0x000015AB, 0x0004003D, 0x0000001D,
++    0x00005455, 0x00000C93, 0x0007004F, 0x00000013, 0x00002229, 0x00005455, 0x00005455, 0x00000000,
++    0x00000001, 0x0004006E, 0x00000012, 0x0000322E, 0x00002229, 0x0007005F, 0x0000001D, 0x00002944,
++    0x00005268, 0x0000322E, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x00005CB6, 0x00002944,
++    0x00000000, 0x00050051, 0x0000000D, 0x00006201, 0x00002944, 0x00000001, 0x00050051, 0x0000000D,
++    0x00001D30, 0x00002944, 0x00000002, 0x00070050, 0x0000001D, 0x00005788, 0x00005CB6, 0x00006201,
++    0x00001D30, 0x0000008A, 0x0003003E, 0x00000BF2, 0x00005788, 0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 8291267..3ba5977 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -1387,9 +1387,9 @@ bool VulkanCommandProcessor::SetupContext() {
+     VkDescriptorPoolSize& swap_descriptor_pool_size_sampled_image =
+         swap_descriptor_pool_sizes[swap_descriptor_pool_create_info.poolSizeCount++];
+     swap_descriptor_pool_size_sampled_image.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+-    // Source images.
+-    swap_descriptor_pool_size_sampled_image.descriptorCount = kMaxFramesInFlight;
+-    swap_descriptor_pool_create_info.maxSets += kMaxFramesInFlight;
++    // Source images, and HDR output's underlays and UI layers.
++    swap_descriptor_pool_size_sampled_image.descriptorCount = kMaxFramesInFlight * 3;
++    swap_descriptor_pool_create_info.maxSets += kMaxFramesInFlight * 3;
+   }
+   {
+     VkDescriptorPoolSize& swap_descriptor_pool_size_combined_image_sampler =
+@@ -1439,6 +1439,10 @@ bool VulkanCommandProcessor::SetupContext() {
+   swap_descriptor_set_allocate_info.pSetLayouts = &swap_descriptor_set_layout_sampled_image_;
+   for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+     if (dfn.vkAllocateDescriptorSets(device, &swap_descriptor_set_allocate_info,
++                                     &hdr_descriptors_underlay_[i]) != VK_SUCCESS ||
++        dfn.vkAllocateDescriptorSets(device, &swap_descriptor_set_allocate_info,
++                                     &hdr_descriptors_ui_layer_[i]) != VK_SUCCESS ||
++        dfn.vkAllocateDescriptorSets(device, &swap_descriptor_set_allocate_info,
+                                      &swap_descriptors_source_[i]) != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to allocate the presentation source image descriptor sets");
+       return false;
+@@ -1567,7 +1571,15 @@ bool VulkanCommandProcessor::SetupContext() {
+     REXGPU_ERROR("Failed to create the gamma ramp application compute pipeline layout");
+     return false;
+   }
+-  // HDR output: the same bindings with more constants.
++  // HDR output: the same bindings with more constants, and the UI's underlay
++  // and the UI layer as sets 3 and 4.
++  VkDescriptorSetLayout hdr_refresh_descriptor_set_layouts[] = {
++      swap_apply_gamma_compute_descriptor_set_layouts[0],
++      swap_apply_gamma_compute_descriptor_set_layouts[1],
++      swap_apply_gamma_compute_descriptor_set_layouts[2],
++      swap_descriptor_set_layout_sampled_image_, swap_descriptor_set_layout_sampled_image_};
++  swap_apply_gamma_pipeline_layout_create_info.setLayoutCount = 5;
++  swap_apply_gamma_pipeline_layout_create_info.pSetLayouts = hdr_refresh_descriptor_set_layouts;
+   swap_apply_gamma_compute_push_constant_range.size = sizeof(HdrRefreshConstants);
+   if (dfn.vkCreatePipelineLayout(device, &swap_apply_gamma_pipeline_layout_create_info, nullptr,
+                                  &hdr_refresh_pipeline_layout_) == VK_SUCCESS) {
+@@ -2225,6 +2237,11 @@ void VulkanCommandProcessor::ShutdownContext() {
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          swap_apply_gamma_compute_pipeline_layout_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, hdr_refresh_pipeline_);
++  for (HdrImage& image : hdr_images_) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, image.view);
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, device, image.image);
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, image.memory);
++  }
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          hdr_refresh_pipeline_layout_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+@@ -2505,6 +2522,176 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
+ }
+ 
++VulkanCommandProcessor::HdrImage* VulkanCommandProcessor::HdrGetImage(HdrTexture texture) {
++  if (!BeginSubmission(true)) {
++    return nullptr;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  HdrImage& snapshot = hdr_images_[texture];
++  if (snapshot.image != VK_NULL_HANDLE &&
++      (snapshot.width != hdr_output_width_ || snapshot.height != hdr_output_height_)) {
++    destroy_image_views_.emplace_back(GetCurrentSubmission(), snapshot.view);
++    destroy_images_.emplace_back(GetCurrentSubmission(), snapshot.image);
++    destroy_memory_.emplace_back(GetCurrentSubmission(), snapshot.memory);
++    snapshot = HdrImage();
++  }
++  if (snapshot.image == VK_NULL_HANDLE && hdr_output_width_ && hdr_output_height_) {
++    VkImageCreateInfo image_create_info = {};
++    image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    image_create_info.imageType = VK_IMAGE_TYPE_2D;
++    image_create_info.format = VK_FORMAT_R8G8B8A8_UNORM;
++    image_create_info.extent = {hdr_output_width_, hdr_output_height_, 1};
++    image_create_info.mipLevels = 1;
++    image_create_info.arrayLayers = 1;
++    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                              VK_IMAGE_USAGE_SAMPLED_BIT;
++    image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (!ui::vulkan::util::CreateDedicatedAllocationImage(
++            vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal,
++            snapshot.image, snapshot.memory)) {
++      return nullptr;
++    }
++    VkImageViewCreateInfo view_create_info = {};
++    view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++    view_create_info.image = snapshot.image;
++    view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++    view_create_info.format = VK_FORMAT_R8G8B8A8_UNORM;
++    view_create_info.subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
++    if (dfn.vkCreateImageView(device, &view_create_info, nullptr, &snapshot.view) != VK_SUCCESS) {
++      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, device, snapshot.image);
++      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, snapshot.memory);
++      return nullptr;
++    }
++    snapshot.width = hdr_output_width_;
++    snapshot.height = hdr_output_height_;
++    // Readable from the start.
++    HdrTransitionImage(snapshot, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    VkClearColorValue zero = {};
++    VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
++    SubmitBarriers(true);
++    deferred_command_buffer_.CmdVkClearColorImage(snapshot.image, snapshot.layout, &zero, 1,
++                                                  &range);
++    HdrTransitionImage(snapshot, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  }
++  return snapshot.image != VK_NULL_HANDLE ? &snapshot : nullptr;
++}
++
++void VulkanCommandProcessor::HdrTransitionImage(HdrImage& image, VkImageLayout layout) {
++  auto usage = [](VkImageLayout image_layout, VkPipelineStageFlags& stage_mask,
++                  VkAccessFlags& access_mask) {
++    switch (image_layout) {
++      case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
++        stage_mask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++        access_mask = VK_ACCESS_SHADER_READ_BIT;
++        break;
++      case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
++        stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
++        access_mask = VK_ACCESS_TRANSFER_READ_BIT;
++        break;
++      case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
++        stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
++        access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
++        break;
++      default:
++        stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
++        access_mask = 0;
++        break;
++    }
++  };
++  VkPipelineStageFlags src_stage_mask, dst_stage_mask;
++  VkAccessFlags src_access_mask, dst_access_mask;
++  usage(image.layout, src_stage_mask, src_access_mask);
++  usage(layout, dst_stage_mask, dst_access_mask);
++  PushImageMemoryBarrier(image.image, ui::vulkan::util::InitializeSubresourceRange(),
++                         src_stage_mask, dst_stage_mask, src_access_mask, dst_access_mask,
++                         image.layout, layout);
++  image.layout = layout;
++}
++
++uint32_t VulkanCommandProcessor::HdrDrawResolutionScale() const {
++  return render_target_cache_->draw_resolution_scale_x();
++}
++
++uint32_t VulkanCommandProcessor::HdrEdramTileCount() const {
++  return render_target_cache_->edram_tile_count();
++}
++
++bool VulkanCommandProcessor::HdrCopyFromColorTarget(uint32_t key, HdrTexture dest,
++                                                    const HdrRect& source, uint32_t dest_x,
++                                                    uint32_t dest_y) {
++  HdrImage* image = HdrGetImage(dest);
++  if (!image) {
++    return false;
++  }
++  EndRenderPass();
++  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++  bool copied = render_target_cache_->HdrCopyColorTarget(
++      key, image->image,
++      {{int32_t(source.x), int32_t(source.y)}, {source.width, source.height}}, int32_t(dest_x),
++      int32_t(dest_y));
++  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  return copied;
++}
++
++bool VulkanCommandProcessor::HdrClearColorTarget(uint32_t key, const HdrRect& rect) {
++  return BeginSubmission(true) &&
++         render_target_cache_->HdrClearColorTarget(
++             key, {{int32_t(rect.x), int32_t(rect.y)}, {rect.width, rect.height}});
++}
++
++bool VulkanCommandProcessor::HdrRestoreColorTarget(uint32_t key, const HdrRect& rect) {
++  HdrImage* underlay = HdrGetImage(kHdrTextureUnderlayRt);
++  return underlay && render_target_cache_->HdrRestoreColorTarget(
++                         key, underlay->view,
++                         {{int32_t(rect.x), int32_t(rect.y)}, {rect.width, rect.height}});
++}
++
++bool VulkanCommandProcessor::HdrCopyTexture(HdrTexture source, HdrTexture dest,
++                                            const HdrRect& source_rect, uint32_t dest_x,
++                                            uint32_t dest_y) {
++  HdrImage* source_image = HdrGetImage(source);
++  HdrImage* dest_image = HdrGetImage(dest);
++  if (!source_image || !dest_image) {
++    return false;
++  }
++  EndRenderPass();
++  HdrTransitionImage(*source_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++  HdrTransitionImage(*dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++  SubmitBarriers(true);
++  VkImageCopy region = {};
++  region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++  region.srcSubresource.layerCount = 1;
++  region.srcOffset = {int32_t(source_rect.x), int32_t(source_rect.y), 0};
++  region.dstSubresource = region.srcSubresource;
++  region.dstOffset = {int32_t(dest_x), int32_t(dest_y), 0};
++  region.extent = {source_rect.width, source_rect.height, 1};
++  deferred_command_buffer_.CmdVkCopyImage(source_image->image, source_image->layout,
++                                          dest_image->image, dest_image->layout, region);
++  HdrTransitionImage(*source_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  HdrTransitionImage(*dest_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  return true;
++}
++
++bool VulkanCommandProcessor::HdrClearTexture(HdrTexture texture) {
++  HdrImage* image = HdrGetImage(texture);
++  if (!image) {
++    return false;
++  }
++  EndRenderPass();
++  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++  SubmitBarriers(true);
++  VkClearColorValue zero = {};
++  VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
++  deferred_command_buffer_.CmdVkClearColorImage(image->image, image->layout, &zero, 1, &range);
++  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  return true;
++}
++
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
+@@ -2658,6 +2845,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+ 
++  hdr_output_width_ = guest_output_width;
++  hdr_output_height_ = guest_output_height;
++
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+       [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
+@@ -2932,12 +3122,44 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+               use_hdr ? hdr_refresh_pipeline_layout_ : swap_apply_gamma_compute_pipeline_layout_,
+               0, uint32_t(swap_apply_gamma_compute_descriptor_sets.size()),
+               swap_apply_gamma_compute_descriptor_sets.data(), 0, nullptr);
++          // HDR output: the UI layer and its underlay, if this frame has
++          // them at the output's size (otherwise the source again, unused).
++          HdrComposite composite = use_hdr ? HdrGetComposite() : HdrComposite::kWholeFrame;
++          bool hdr_textures_used =
++              composite == HdrComposite::kMask || composite == HdrComposite::kLayer;
++          if (hdr_textures_used &&
++              (guest_output_width != hdr_output_width_ ||
++               guest_output_height != hdr_output_height_ ||
++               hdr_images_[kHdrTextureUnderlay].view == VK_NULL_HANDLE ||
++               hdr_images_[kHdrTextureUiLayer].view == VK_NULL_HANDLE)) {
++            composite = HdrComposite::kWholeFrame;
++            hdr_textures_used = false;
++          }
++          if (use_hdr) {
++            VkDescriptorSet layer_sets[2] = {hdr_descriptors_underlay_[swap_frame_index],
++                                             hdr_descriptors_ui_layer_[swap_frame_index]};
++            for (uint32_t i = 0; i < 2; ++i) {
++              VkDescriptorImageInfo layer_image_info = swap_descriptor_source_image_info;
++              if (hdr_textures_used) {
++                layer_image_info.imageView =
++                    hdr_images_[i ? kHdrTextureUiLayer : kHdrTextureUnderlay].view;
++              }
++              VkWriteDescriptorSet layer_write = swap_descriptor_source_write;
++              layer_write.dstSet = layer_sets[i];
++              layer_write.pImageInfo = &layer_image_info;
++              dfn.vkUpdateDescriptorSets(device, 1, &layer_write, 0, nullptr);
++            }
++            deferred_command_buffer_.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
++                                                             hdr_refresh_pipeline_layout_, 3, 2,
++                                                             layer_sets, 0, nullptr);
++          }
+           if (use_hdr) {
+             HdrRefreshConstants hdr_refresh_constants = {
+                 {guest_output_width, guest_output_height},
+                 {uint32_t(hdr_state.sdr_pure_gamma_2_2) |
+                      (uint32_t(hdr_state.test_pattern) << 1) |
+-                     (uint32_t(swap_source_requires_compute_rb_swap) << 2),
++                     (uint32_t(swap_source_requires_compute_rb_swap) << 2) |
++                     HdrRefreshCompositeFlags(composite, hdr_state.debug_ui),
+                  0},
+                 {hdr_state.sdr_white_nits, hdr_state.paper_white_nits,
+                  hdr_state.rolloff_start_nits, hdr_state.peak_nits}};
+@@ -4219,6 +4441,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                     normalized_color_mask, *vertex_shader)) {
+     return draw_fail("render_target_update");
+   }
++  // HDR output: the UI layer may start with this draw.
++  HdrRenderTargetsReady();
+ 
+   // Create the pipeline (for this, need the render pass from the render target
+   // cache), translating the shaders - doing this now to obtain the used
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index a180b7c..6b3c9d5 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -179,6 +179,24 @@ void DeferredCommandBuffer::ExecuteCommands(VkCommandBuffer command_buffer,
+                 rex::align(sizeof(ArgsVkCopyBufferToImage), alignof(VkBufferImageCopy))));
+       } break;
+ 
++      case Command::kVkCopyImage: {
++        auto& args = *reinterpret_cast<const ArgsVkCopyImage*>(stream);
++        dfn.vkCmdCopyImage(command_buffer, args.src_image, args.src_image_layout, args.dst_image,
++                           args.dst_image_layout, 1, &args.region);
++      } break;
++
++      case Command::kVkResolveImage: {
++        auto& args = *reinterpret_cast<const ArgsVkCopyImage*>(stream);
++        VkImageResolve region;
++        region.srcSubresource = args.region.srcSubresource;
++        region.srcOffset = args.region.srcOffset;
++        region.dstSubresource = args.region.dstSubresource;
++        region.dstOffset = args.region.dstOffset;
++        region.extent = args.region.extent;
++        dfn.vkCmdResolveImage(command_buffer, args.src_image, args.src_image_layout,
++                              args.dst_image, args.dst_image_layout, 1, &region);
++      } break;
++
+       case Command::kVkCopyQueryPoolResults: {
+         auto& args = *reinterpret_cast<const ArgsVkCopyQueryPoolResults*>(stream);
+         dfn.vkCmdCopyQueryPoolResults(command_buffer, args.query_pool, args.first_query,
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index e8d1997..1b027e6 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -70,6 +70,8 @@ namespace shaders {
+ #include "../shaders/vulkan_spirv/host_depth_store_2xmsaa_cs.h"
+ #include "../shaders/vulkan_spirv/host_depth_store_4xmsaa_cs.h"
+ #include "../shaders/vulkan_spirv/passthrough_position_xy_vs.h"
++#include "../shaders/vulkan_spirv/hdr_fullscreen_vs.h"
++#include "../shaders/vulkan_spirv/hdr_underlay_restore_ps.h"
+ #include "../shaders/vulkan_spirv/resolve_clear_32bpp_cs.h"
+ #include "../shaders/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_edram4096_cs.h"
+ #include "../shaders/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_scaled_edram4096_cs.h"
+@@ -1241,6 +1243,15 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+   // already too late.
+   DestroyAllRenderTargets(true);
+ 
++  for (size_t i = 0; i < 2; ++i) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
++                                           hdr_restore_pipelines_[i]);
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
++                                           hdr_restore_shaders_[i]);
++  }
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
++                                         hdr_restore_pipeline_layout_);
++
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
+                                          resolve_fsi_clear_64bpp_pipeline_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
+@@ -1714,6 +1725,248 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+   return copied && cleared;
+ }
+ 
++VulkanRenderTargetCache::VulkanRenderTarget* VulkanRenderTargetCache::HdrColorTarget(
++    uint32_t key, VkRect2D& rect) {
++  auto* rt = static_cast<VulkanRenderTarget*>(HdrFindColorTarget(key));
++  if (!rt) {
++    return nullptr;
++  }
++  uint32_t width = rt->key().GetWidth() * draw_resolution_scale_x();
++  uint32_t height = GetRenderTargetHeight(rt->key().pitch_tiles_at_32bpp, rt->key().msaa_samples) *
++                    draw_resolution_scale_y();
++  if (uint32_t(rect.offset.x) >= width || uint32_t(rect.offset.y) >= height) {
++    return nullptr;
++  }
++  rect.extent.width = std::min(rect.extent.width, width - uint32_t(rect.offset.x));
++  rect.extent.height = std::min(rect.extent.height, height - uint32_t(rect.offset.y));
++  return rect.extent.width && rect.extent.height ? rt : nullptr;
++}
++
++bool VulkanRenderTargetCache::HdrCopyColorTarget(uint32_t key, VkImage dest, VkRect2D source,
++                                                 int32_t dest_x, int32_t dest_y) {
++  VulkanRenderTarget* rt = HdrColorTarget(key, source);
++  if (!rt) {
++    return false;
++  }
++  command_processor_.PushImageMemoryBarrier(
++      rt->image(), ui::vulkan::util::InitializeSubresourceRange(), rt->current_stage_mask(),
++      VK_PIPELINE_STAGE_TRANSFER_BIT, rt->current_access_mask(), VK_ACCESS_TRANSFER_READ_BIT,
++      rt->current_layout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++  rt->SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++  command_processor_.SubmitBarriers(true);
++  VkImageCopy region = {};
++  region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++  region.srcSubresource.layerCount = 1;
++  region.srcOffset = {source.offset.x, source.offset.y, 0};
++  region.dstSubresource = region.srcSubresource;
++  region.dstOffset = {dest_x, dest_y, 0};
++  region.extent = {source.extent.width, source.extent.height, 1};
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  if (rt->key().msaa_samples != xenos::MsaaSamples::k1X) {
++    command_buffer.CmdVkResolveImage(rt->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest,
++                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
++  } else {
++    command_buffer.CmdVkCopyImage(rt->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest,
++                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
++  }
++  // The draw that may follow needs it as an attachment.
++  VkPipelineStageFlags stage_mask;
++  VkAccessFlags access_mask;
++  VkImageLayout layout;
++  rt->GetDrawUsage(&stage_mask, &access_mask, &layout);
++  command_processor_.PushImageMemoryBarrier(
++      rt->image(), ui::vulkan::util::InitializeSubresourceRange(), VK_PIPELINE_STAGE_TRANSFER_BIT,
++      stage_mask, VK_ACCESS_TRANSFER_READ_BIT, access_mask, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++      layout);
++  rt->SetUsage(stage_mask, access_mask, layout);
++  return true;
++}
++
++bool VulkanRenderTargetCache::HdrEnterColorTargetRenderPass(VulkanRenderTarget& rt) {
++  RenderPassKey render_pass_key;
++  render_pass_key.msaa_samples = rt.key().msaa_samples;
++  render_pass_key.depth_and_color_used = 0b1 << 1;
++  render_pass_key.color_0_view_format = rt.key().GetColorFormat();
++  VkRenderPass render_pass = GetHostRenderTargetsRenderPass(render_pass_key);
++  const RenderTarget* render_targets[1 + xenos::kMaxColorRenderTargets] = {};
++  render_targets[1] = &rt;
++  const Framebuffer* framebuffer = render_pass != VK_NULL_HANDLE
++                                       ? GetHostRenderTargetsFramebuffer(
++                                             render_pass_key, rt.key().pitch_tiles_at_32bpp,
++                                             render_targets)
++                                       : nullptr;
++  if (!framebuffer) {
++    return false;
++  }
++  VkPipelineStageFlags stage_mask;
++  VkAccessFlags access_mask;
++  VkImageLayout layout;
++  rt.GetDrawUsage(&stage_mask, &access_mask, &layout);
++  command_processor_.PushImageMemoryBarrier(
++      rt.image(), ui::vulkan::util::InitializeSubresourceRange(), rt.current_stage_mask(),
++      stage_mask, rt.current_access_mask(), access_mask, rt.current_layout(), layout);
++  rt.SetUsage(stage_mask, access_mask, layout);
++  command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
++      render_pass, framebuffer, rt.view_depth_color(), false);
++  return true;
++}
++
++bool VulkanRenderTargetCache::HdrClearColorTarget(uint32_t key, VkRect2D rect) {
++  VulkanRenderTarget* rt = HdrColorTarget(key, rect);
++  if (!rt || !HdrEnterColorTargetRenderPass(*rt)) {
++    return false;
++  }
++  VkClearAttachment attachment = {};
++  attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++  VkClearRect clear_rect = {rect, 0, 1};
++  command_processor_.deferred_command_buffer().CmdVkClearAttachments(1, &attachment, 1,
++                                                                     &clear_rect);
++  return true;
++}
++
++bool VulkanRenderTargetCache::HdrRestoreColorTarget(uint32_t key, VkImageView underlay_view,
++                                                    VkRect2D rect) {
++  VulkanRenderTarget* rt = HdrColorTarget(key, rect);
++  if (!rt) {
++    return false;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  if (hdr_restore_pipeline_layout_ == VK_NULL_HANDLE) {
++    hdr_restore_shaders_[0] = ui::vulkan::util::CreateShaderModule(
++        vulkan_device, shaders::hdr_fullscreen_vs, sizeof(shaders::hdr_fullscreen_vs));
++    hdr_restore_shaders_[1] = ui::vulkan::util::CreateShaderModule(
++        vulkan_device, shaders::hdr_underlay_restore_ps, sizeof(shaders::hdr_underlay_restore_ps));
++    VkPipelineLayoutCreateInfo layout_create_info = {};
++    layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
++    layout_create_info.setLayoutCount = 1;
++    layout_create_info.pSetLayouts = &descriptor_set_layout_sampled_image_;
++    if (!hdr_restore_shaders_[0] || !hdr_restore_shaders_[1] ||
++        dfn.vkCreatePipelineLayout(device, &layout_create_info, nullptr,
++                                   &hdr_restore_pipeline_layout_) != VK_SUCCESS) {
++      return false;
++    }
++  }
++  bool msaa = rt->key().msaa_samples != xenos::MsaaSamples::k1X;
++  VkPipeline& pipeline = hdr_restore_pipelines_[msaa];
++  bool use_dynamic_rendering =
++      REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
++  if (pipeline == VK_NULL_HANDLE) {
++    VkPipelineShaderStageCreateInfo stages[2] = {};
++    for (uint32_t i = 0; i < 2; ++i) {
++      stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
++      stages[i].stage = i ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
++      stages[i].module = hdr_restore_shaders_[i];
++      stages[i].pName = "main";
++    }
++    VkPipelineVertexInputStateCreateInfo vertex_input = {};
++    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
++    VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
++    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
++    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    VkPipelineViewportStateCreateInfo viewport_state = {};
++    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
++    viewport_state.viewportCount = 1;
++    viewport_state.scissorCount = 1;
++    VkPipelineRasterizationStateCreateInfo rasterization = {};
++    rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
++    rasterization.cullMode = VK_CULL_MODE_NONE;
++    rasterization.lineWidth = 1.0f;
++    VkPipelineMultisampleStateCreateInfo multisample = {};
++    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
++    multisample.rasterizationSamples = msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
++    VkPipelineColorBlendAttachmentState blend_attachment = {};
++    blend_attachment.blendEnable = VK_TRUE;
++    blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
++    blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
++    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
++    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
++                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
++    VkPipelineColorBlendStateCreateInfo blend = {};
++    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
++    blend.attachmentCount = 1;
++    blend.pAttachments = &blend_attachment;
++    VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
++    VkPipelineDynamicStateCreateInfo dynamic_state = {};
++    dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
++    dynamic_state.dynamicStateCount = 2;
++    dynamic_state.pDynamicStates = dynamic_states;
++    VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
++    VkPipelineRenderingCreateInfo rendering = {};
++    rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
++    rendering.colorAttachmentCount = 1;
++    rendering.pColorAttachmentFormats = &color_format;
++    RenderPassKey render_pass_key;
++    render_pass_key.msaa_samples = rt->key().msaa_samples;
++    render_pass_key.depth_and_color_used = 0b1 << 1;
++    render_pass_key.color_0_view_format = rt->key().GetColorFormat();
++    VkGraphicsPipelineCreateInfo pipeline_create_info = {};
++    pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
++    pipeline_create_info.pNext = use_dynamic_rendering ? &rendering : nullptr;
++    pipeline_create_info.stageCount = 2;
++    pipeline_create_info.pStages = stages;
++    pipeline_create_info.pVertexInputState = &vertex_input;
++    pipeline_create_info.pInputAssemblyState = &input_assembly;
++    pipeline_create_info.pViewportState = &viewport_state;
++    pipeline_create_info.pRasterizationState = &rasterization;
++    pipeline_create_info.pMultisampleState = &multisample;
++    pipeline_create_info.pColorBlendState = &blend;
++    pipeline_create_info.pDynamicState = &dynamic_state;
++    pipeline_create_info.layout = hdr_restore_pipeline_layout_;
++    pipeline_create_info.renderPass =
++        use_dynamic_rendering ? VK_NULL_HANDLE : GetHostRenderTargetsRenderPass(render_pass_key);
++    pipeline_create_info.basePipelineIndex = -1;
++    if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info, nullptr,
++                                      &pipeline) != VK_SUCCESS) {
++      pipeline = VK_NULL_HANDLE;
++      return false;
++    }
++  }
++  // A descriptor set per underlay image (they change only with the output
++  // size), so none is rewritten while in use.
++  if (hdr_restore_underlay_view_ != underlay_view) {
++    hdr_restore_descriptor_set_ = descriptor_set_pool_sampled_image_->Allocate();
++    if (hdr_restore_descriptor_set_ == SIZE_MAX) {
++      return false;
++    }
++    hdr_restore_underlay_view_ = underlay_view;
++    VkDescriptorImageInfo image_info = {VK_NULL_HANDLE, underlay_view,
++                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
++    VkWriteDescriptorSet write = {};
++    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++    write.dstSet = descriptor_set_pool_sampled_image_->Get(hdr_restore_descriptor_set_);
++    write.descriptorCount = 1;
++    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++    write.pImageInfo = &image_info;
++    dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
++  }
++  if (!HdrEnterColorTargetRenderPass(*rt)) {
++    return false;
++  }
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  command_processor_.BindExternalGraphicsPipeline(pipeline);
++  VkDescriptorSet descriptor_set =
++      descriptor_set_pool_sampled_image_->Get(hdr_restore_descriptor_set_);
++  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS,
++                                         hdr_restore_pipeline_layout_, 0, 1, &descriptor_set, 0,
++                                         nullptr);
++  VkViewport viewport = {0.0f,
++                         0.0f,
++                         float(rt->key().GetWidth() * draw_resolution_scale_x()),
++                         float(GetRenderTargetHeight(rt->key().pitch_tiles_at_32bpp,
++                                                     rt->key().msaa_samples) *
++                               draw_resolution_scale_y()),
++                         0.0f,
++                         1.0f};
++  command_processor_.SetViewport(viewport);
++  command_processor_.SetScissor(rect);
++  command_buffer.CmdVkDraw(3, 1, 0, 0);
++  return true;
++}
++
+ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+                                      reg::RB_DEPTHCONTROL normalized_depth_control,
+                                      uint32_t normalized_color_mask, const Shader& vertex_shader) {
+@@ -2241,6 +2494,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+       image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+     }
+     image_create_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++    // HDR output (rexglue-hdr-ui-layer.patch): 8_8_8_8 targets can be copied
++    // from (HdrCopyColorTarget).
++    if (color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8) {
++      image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++    }
+   }
+   if (image_create_info.format == VK_FORMAT_UNDEFINED) {
+     REXGPU_ERROR("VulkanRenderTargetCache: Unknown {} render target format {}",
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 78af997..e7562a0 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -113,6 +113,11 @@ REXCVAR_DEFINE_STRING(hdr_sdr_eotf, "srgb", "UI/Presenter",
+ REXCVAR_DEFINE_BOOL(hdr_test_pattern, false, "UI/Presenter",
+                     "HDR: show a test pattern instead of the game (bars from 100 nits, doubling "
+                     "every 4 bars; paper white at the bottom left)");
++REXCVAR_DEFINE_INT32(hdr_debug_ui, 0, "UI/Presenter",
++                     "HDR debugging: 1 shows what the game drew as UI in magenta, 2 the game's own "
++                     "frame (SDR), 3 the UI layer's colour, 4 its alpha, 5 the underlay, 6 the front buffer, without "
++                     "the display table")
++    .range(0, 6);
+ 
+ namespace {
+ using GuestOutputPaintConfig = rex::ui::Presenter::GuestOutputPaintConfig;
+@@ -1761,6 +1766,7 @@ Presenter::HdrOutputState Presenter::GetHdrOutputState() {
+   state.rolloff_start_nits = 0.75f * peak;
+   state.sdr_pure_gamma_2_2 = hdr_sdr_pure_gamma_2_2.load(std::memory_order_relaxed);
+   state.test_pattern = REXCVAR_GET(hdr_test_pattern);
++  state.debug_ui = uint32_t(REXCVAR_GET(hdr_debug_ui));
+   return state;
+ }
+ 
