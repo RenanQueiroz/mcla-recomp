@@ -1,17 +1,15 @@
 diff --git a/src/render_perf.cpp b/src/render_perf.cpp
 --- a/src/render_perf.cpp
 +++ b/src/render_perf.cpp
-@@ -3,7 +3,9 @@
+@@ -5,6 +5,7 @@
  
- #include "generated/default/mcla_init.h"
- 
-+#include <atomic>
+ #include <atomic>
  #include <cstdint>
 +#include <functional>
+ #include <string>
  #include <thread>
  
- #include <rex/cvar.h>
-@@ -71,3 +73,83 @@
+@@ -235,3 +236,83 @@ bool mcla_fence_spin() {
    }
    return true;
  }
