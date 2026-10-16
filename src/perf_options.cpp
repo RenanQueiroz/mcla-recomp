@@ -174,9 +174,9 @@ void ApplyShadowPhases(uint8_t* base) {
 // The renderer's multisample mode, which the game sets when it creates the
 // renderer (sub_822E4AB0, where mcla_msaa's hook picks none at start-up) and
 // reads while it renders: 2 is the 2x MSAA it uses on an HD display, 1 none
-// (what its own developer switches give). Switched during play, it changes
-// cleanly on both APIs from the next frame (checked with the D3D12 debug layer
-// and Vulkan validation at 3x, standing, driving and in the pause menu).
+// (what its own developer switches give). Written at the swap
+// (MclaApplyMsaaAtSwap, from mcla_present_interval), on the presenting thread
+// between two frames, so that no frame sees two modes.
 constexpr uint32_t kMsaaMode = 384;
 constexpr uint32_t kMsaaNone = 1;
 constexpr uint32_t kMsaaGame = 2;
@@ -329,9 +329,15 @@ void MclaTickPerfOptions() {
     return;
   }
   TickAbTest();
-  ApplyMsaa(base);
   ApplyShadowPhases(base);
   ApplyAmbientIfChanged(base);
+}
+
+// At every swap, between two frames: the anti-aliasing option's mode.
+void MclaApplyMsaaAtSwap() {
+  if (uint8_t* base = Base()) {
+    ApplyMsaa(base);
+  }
 }
 
 void mcla_dev_option_registered(PPCRegister& r3) {

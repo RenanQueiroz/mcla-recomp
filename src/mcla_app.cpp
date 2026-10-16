@@ -2,10 +2,16 @@
 
 #include "mcla_app.h"
 
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -21,6 +27,9 @@
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/gpu_plugin.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/util/object_table.h>
+#include <rex/system/xfile.h>
 
 REXCVAR_DEFINE_STRING(mcla_gpu_backend, "any", "MCLA",
                       "Graphics backend for the Xenos GPU plugin: any, vulkan or d3d12")
@@ -39,31 +48,40 @@ void MclaSaveMenuSettings();  // src/settings_menu.cpp
 
 #ifdef _WIN32
 // The pause menu's RESTART GAME (src/settings_menu.cpp) starts the game again
-// with this added to its command line, and quits. The new one waits for the
-// old one to be gone before it reads the settings, opens its window or loads
-// the GPU plugin. Read straight from the command line, not as an option, so
+// with this on its command line: a handle to the old process, inherited by the
+// new one (a handle, not a process id, which could be reused). The new one
+// waits for the old one to be gone before it reads the settings, opens its
+// window or loads the GPU plugin; if it is still there after the wait, the new
+// one quits rather than run beside it, as two games would both write the
+// career save. Read straight from the command line, not as an option, so that
 // it can never be saved into mcla.toml.
+constexpr std::wstring_view kRestartFlag = L"--mcla_restart_wait_handle=";
+
 static void WaitForRestartedGame() {
   int argc = 0;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv) {
     return;
   }
-  constexpr std::wstring_view kFlag = L"--mcla_restart_wait_pid=";
-  DWORD pid = 0;
+  HANDLE old_game = nullptr;
   for (int i = 1; i < argc; ++i) {
-    const std::wstring_view arg = argv[i];
-    if (arg.starts_with(kFlag)) {
-      pid = DWORD(std::wcstoul(argv[i] + kFlag.size(), nullptr, 10));
+    if (std::wstring_view(argv[i]).starts_with(kRestartFlag)) {
+      old_game = reinterpret_cast<HANDLE>(
+          static_cast<uintptr_t>(std::wcstoull(argv[i] + kRestartFlag.size(), nullptr, 16)));
     }
   }
   LocalFree(argv);
-  if (!pid) {
+  if (!old_game) {
     return;
   }
-  if (HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
-    WaitForSingleObject(process, 30'000);
-    CloseHandle(process);
+  const DWORD waited = WaitForSingleObject(old_game, 30'000);
+  CloseHandle(old_game);
+  if (waited == WAIT_TIMEOUT) {
+    MessageBoxW(nullptr,
+                L"The game that was restarting is still running, so this one is not starting. "
+                L"Close it, then start the game again.",
+                L"Midnight Club: Los Angeles", MB_OK | MB_ICONWARNING);
+    ExitProcess(1);
   }
 }
 
@@ -89,8 +107,9 @@ static std::wstring QuoteArgument(std::wstring_view arg) {
 }
 
 // The pause menu's RESTART GAME: starts mcla.exe again with this process's
-// command line, plus the id the new one waits on (WaitForRestartedGame). The
-// caller saves the settings first and quits after.
+// command line, plus an inheritable handle to this process for the new one to
+// wait on (WaitForRestartedGame). Only that handle is inherited. The caller
+// saves the settings first and closes the game after.
 bool MclaRelaunchGame() {
   int argc = 0;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -99,22 +118,48 @@ bool MclaRelaunchGame() {
   }
   std::wstring command;
   for (int i = 0; i < argc; ++i) {
-    if (i > 0 && std::wstring_view(argv[i]).starts_with(L"--mcla_restart_wait_pid=")) {
+    if (i > 0 && std::wstring_view(argv[i]).starts_with(kRestartFlag)) {
       continue;
     }
     command += (command.empty() ? L"" : L" ") + QuoteArgument(argv[i]);
   }
   LocalFree(argv);
-  command += L" --mcla_restart_wait_pid=" + std::to_wstring(GetCurrentProcessId());
 
+  HANDLE self = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &self,
+                       SYNCHRONIZE, TRUE, 0)) {
+    REXLOG_ERROR("restart: no handle for the new game to wait on (error {})", GetLastError());
+    return false;
+  }
+  wchar_t handle_text[32];
+  std::swprintf(handle_text, 32, L"%llx", static_cast<unsigned long long>(
+                                              reinterpret_cast<uintptr_t>(self)));
+  command += L" " + std::wstring(kRestartFlag) + handle_text;
+
+  SIZE_T list_size = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &list_size);
+  std::vector<uint8_t> list_storage(list_size);
+  auto* list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(list_storage.data());
   std::wstring exe(32768, L'\0');
   exe.resize(GetModuleFileNameW(nullptr, exe.data(), DWORD(exe.size())));
-  STARTUPINFOW startup{};
-  startup.cb = sizeof(startup);
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
-  if (exe.empty() || !CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, 0,
-                                     nullptr, nullptr, &startup, &process)) {
-    REXLOG_ERROR("restart: could not start the game again (error {})", GetLastError());
+  const bool started =
+      !exe.empty() && InitializeProcThreadAttributeList(list, 1, 0, &list_size) &&
+      UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &self, sizeof(self),
+                                nullptr, nullptr) &&
+      (startup.lpAttributeList = list,
+       CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, TRUE,
+                      EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &startup.StartupInfo,
+                      &process));
+  const DWORD error = GetLastError();
+  if (startup.lpAttributeList) {
+    DeleteProcThreadAttributeList(list);
+  }
+  CloseHandle(self);
+  if (!started) {
+    REXLOG_ERROR("restart: could not start the game again (error {})", error);
     return false;
   }
   REXLOG_INFO("restart: started again as process {}", process.dwProcessId);
@@ -123,6 +168,49 @@ bool MclaRelaunchGame() {
   return true;
 }
 #endif
+
+// A career save being written: a file open for writing on a content package,
+// which the SDK mounts at \Device\Content\<n>\ (xam/content_manager.cpp).
+static bool SaveInProgress() {
+  auto* runtime = rex::Runtime::instance();
+  auto* kernel = runtime ? runtime->kernel_state() : nullptr;
+  if (!kernel) {
+    return false;
+  }
+  // GENERIC_WRITE, GENERIC_ALL, FILE_WRITE_DATA, FILE_APPEND_DATA.
+  constexpr uint32_t kWriteAccess = 0x40000000u | 0x10000000u | 0x2u | 0x4u;
+  for (const auto& file : kernel->object_table()->GetObjectsByType<rex::system::XFile>()) {
+    if (file && (file->file_access() & kWriteAccess) &&
+        file->device()->mount_path().starts_with("\\Device\\Content\\")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Before the game ends (QUIT GAME, RESTART GAME, the window's close button):
+// a career save that is being written is let finish first, for up to ten
+// seconds. Ending the title gives the game's threads only 200 ms, which could
+// cut a save short. A save takes well under a second (50 ms measured), and
+// the log says when closing waited for one.
+void MclaWaitForSaves() {
+  using Clock = std::chrono::steady_clock;
+  const auto start = Clock::now();
+  if (!SaveInProgress()) {
+    return;
+  }
+  REXLOG_INFO("closing: a save is being written; waiting for it");
+  while (SaveInProgress() && Clock::now() - start < std::chrono::seconds(10)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  const auto waited =
+      std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+  if (SaveInProgress()) {
+    REXLOG_WARN("closing: the save was still being written after {} ms", waited);
+  } else {
+    REXLOG_INFO("closing: the save finished after {} ms", waited);
+  }
+}
 
 // Started with no options (a double-click on mcla.exe), the game should just
 // run: find the extracted game next to the executable or, as the build leaves
@@ -169,9 +257,10 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
 }
 
 // SDK settings measured to suit this game on PC (README.md, "Turning a change
-// off"; the PS5 host sets its own). Each is used unless the command line, an
-// environment variable or mcla.toml already set it, and none of them is
-// written to mcla.toml. They were options the Windows launcher passed.
+// off"; the PS5 host sets its own). They become the options' defaults
+// (rex::cvar::SetDefaultValue): used unless the command line, an environment
+// variable or mcla.toml sets them, and never saved as if the user had chosen
+// them. They were options the Windows launcher passed.
 void MclaApp::ApplyPcDefaults() {
   // - uploaded guest memory stays valid across frames instead of being copied
   //   to the GPU again every frame;
@@ -187,9 +276,12 @@ void MclaApp::ApplyPcDefaults() {
       {"shared_memory_hot_page_ms", "10000"},
   };
   for (const auto& [name, value] : kDefaults) {
-    if (rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) {
+    const bool user_set = rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault;
+    if (!rex::cvar::SetDefaultValue(name, value)) {
+      REXLOG_WARN("PC defaults: {} = {} not taken", name, value);
+    } else if (user_set) {
       REXLOG_INFO("PC defaults: {} = {} set by the user", name, rex::cvar::GetFlagByName(name));
-    } else if (rex::cvar::SetFlagByName(name, value)) {
+    } else {
       REXLOG_INFO("PC defaults: {} = {}", name, value);
     }
   }
@@ -221,6 +313,7 @@ void MclaApp::FollowCursorSetting() {
 }
 
 bool MclaApp::OnWindowCloseRequested() {
+  MclaWaitForSaves();
   MclaSaveMenuSettings();
   return true;
 }

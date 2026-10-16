@@ -49,6 +49,9 @@ const char* g_mcla_settings_path = nullptr;
 #if REX_PLATFORM_WIN32
 bool MclaRelaunchGame();  // src/mcla_app.cpp
 #endif
+#if !REX_PLATFORM_PS5
+void MclaWaitForSaves();  // src/mcla_app.cpp
+#endif
 
 namespace {
 
@@ -894,128 +897,14 @@ void RestorePauseList() {
 // --- Saving ------------------------------------------------------------------
 //
 // Only the options the player changed in these menus are written, merged into
-// the file: each one's `name = value` line is replaced or added, and every
-// other line is kept. (rex::cvar::SaveConfig, used before, rewrote the whole
-// file with every option that differed from its default, wherever it came
-// from: the launcher's command line, a host's own settings, the developer
-// tools, and paths, which it wrote as TOML that no longer parsed.)
-
-// A TOML basic string.
-std::string TomlString(std::string_view text) {
-  std::string out = "\"";
-  for (const char c : text) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) {
-          char escape[8];
-          std::snprintf(escape, sizeof escape, "\\u%04X", static_cast<unsigned char>(c));
-          out += escape;
-        } else {
-          out += c;
-        }
-    }
-  }
-  return out + '"';
-}
-
-std::string TomlValue(const std::string& option) {
-  const std::string value = OptionGet(option.c_str());
-  const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(option);
-  return info && info->type == rex::cvar::FlagType::String ? TomlString(value) : value;
-}
-
-// The key a `key = value` line sets, or empty for anything else.
-std::string_view LineKey(std::string_view line) {
-  const size_t first = line.find_first_not_of(" \t");
-  if (first == std::string_view::npos) {
-    return {};
-  }
-  size_t end = first;
-  while (end < line.size() && (std::isalnum(static_cast<unsigned char>(line[end])) ||
-                               line[end] == '_' || line[end] == '-')) {
-    ++end;
-  }
-  const size_t equals = line.find_first_not_of(" \t", end);
-  if (end == first || equals == std::string_view::npos || line[equals] != '=') {
-    return {};
-  }
-  return line.substr(first, end - first);
-}
-
-bool IsTableHeader(std::string_view line) {
-  const size_t first = line.find_first_not_of(" \t");
-  return first != std::string_view::npos && line[first] == '[';
-}
-
-// Whether text[at, at + count) is that many hexadecimal digits.
-bool HexDigits(std::string_view text, size_t at, size_t count) {
-  if (at + count > text.size()) {
-    return false;
-  }
-  for (size_t i = at; i < at + count; ++i) {
-    if (!std::isxdigit(static_cast<unsigned char>(text[i]))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// The old save wrote a Windows path between double quotes as it was, so its
-// backslashes read as escapes ("C:\Users\..." has \U) and nothing in the file
-// loaded. Such a value is rewritten as the same text in a literal string,
-// which is what it meant. Empty when the line needs nothing, or can't be
-// mended that way.
-std::string MendedLine(const std::string& line) {
-  if (LineKey(line).empty()) {
-    return {};
-  }
-  const size_t equals = line.find('=');
-  const size_t open = line.find_first_not_of(" \t", equals + 1);
-  const size_t close = line.rfind('"');
-  if (open == std::string::npos || line[open] != '"' || close == std::string::npos ||
-      close <= open) {
-    return {};
-  }
-  const std::string_view body(line.data() + open + 1, close - open - 1);
-  if (body.find('\'') != std::string_view::npos || body.find('"') != std::string_view::npos) {
-    return {};
-  }
-  bool valid = true;
-  for (size_t i = 0; i < body.size() && valid; ++i) {
-    if (body[i] != '\\') {
-      continue;
-    }
-    const char next = i + 1 < body.size() ? body[i + 1] : '\0';
-    if (next != '\0' && std::strchr("btnfr\\", next)) {
-      ++i;
-    } else if (next == 'u' && HexDigits(body, i + 2, 4)) {
-      i += 5;
-    } else if (next == 'U' && HexDigits(body, i + 2, 8)) {
-      i += 9;
-    } else {
-      valid = false;
-    }
-  }
-  if (valid) {
-    return {};
-  }
-  return line.substr(0, open) + "'" + std::string(body) + "'" + line.substr(close + 1);
-}
+// the file by rex::cvar::SaveConfigValues: each one's `name = value` line is
+// replaced where it is or added before the first [table], every other line is
+// kept, and the file is written beside the old one, flushed and renamed over
+// it. (rex::cvar::SaveConfig, used before, rewrote the whole file with every
+// option that differed from its default, wherever it came from: the launcher's
+// command line, a host's own settings, the developer tools, and paths, which it
+// wrote as TOML that no longer parsed.) A save that fails leaves the file as it
+// was and is tried again at the next chance (leaving a submenu, closing).
 
 std::mutex g_save_mutex;
 
@@ -1039,86 +928,12 @@ void SaveSettingsIfChanged() {
   const auto path = g_mcla_settings_path
                         ? std::filesystem::path(g_mcla_settings_path)
                         : rex::filesystem::GetExecutableFolder() / "mcla.toml";
-
-  std::vector<std::string> lines;
-  bool crlf = false;
-  {
-    std::ifstream in(path, std::ios::binary);
-    for (std::string line; std::getline(in, line);) {
-      if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
-        crlf = true;
-      }
-      lines.push_back(std::move(line));
-    }
-  }
-  if (lines.empty()) {
-    lines.emplace_back("# Settings saved by the game's pause menu");
-  }
-
-  // Top-level keys come before the first [table]; new ones go there too.
-  size_t top_end = lines.size();
-  for (size_t i = 0; i < lines.size(); ++i) {
-    if (IsTableHeader(lines[i])) {
-      top_end = i;
-      break;
-    }
-  }
-  std::vector<bool> written(changed.size(), false);
-  int mended = 0;
-  for (size_t i = 0; i < lines.size(); ++i) {
-    const std::string_view key = i < top_end ? LineKey(lines[i]) : std::string_view();
-    bool own = false;
-    for (size_t k = 0; k < changed.size() && !key.empty(); ++k) {
-      if (key == changed[k]) {
-        lines[i] = changed[k] + " = " + TomlValue(changed[k]);
-        written[k] = own = true;
-        break;
-      }
-    }
-    if (!own) {
-      if (std::string mended_line = MendedLine(lines[i]); !mended_line.empty()) {
-        lines[i] = std::move(mended_line);
-        ++mended;
-      }
-    }
-  }
-  std::vector<std::string> added;
-  for (size_t k = 0; k < changed.size(); ++k) {
-    if (!written[k]) {
-      added.push_back(changed[k] + " = " + TomlValue(changed[k]));
-    }
-  }
-  lines.insert(lines.begin() + std::ptrdiff_t(top_end), added.begin(), added.end());
-
-  // Written beside it, then renamed over it, so that a crash can't leave
-  // half a file.
-  auto temporary = path;
-  temporary += ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    for (const std::string& line : lines) {
-      out << line << (crlf ? "\r\n" : "\n");
-    }
-    if (!out) {
-      REXLOG_ERROR("settings menu: could not write {}", temporary.string());
-      return;
-    }
-  }
-  std::error_code error;
-  std::filesystem::rename(temporary, path, error);
-  if (error) {
-    REXLOG_ERROR("settings menu: could not replace {}: {}", path.string(), error.message());
-    std::filesystem::remove(temporary, error);
+  if (!rex::cvar::SaveConfigValues(path, changed)) {
+    REXLOG_ERROR("settings menu: could not save to {}; will try again", path.string());
+    g_settings_dirty.store(true, std::memory_order_relaxed);
     return;
   }
   REXLOG_INFO("settings menu: {} setting(s) saved to {}", changed.size(), path.string());
-  if (mended) {
-    REXLOG_INFO(
-        "settings menu: {} line(s) with backslashes in a double-quoted value kept as literal "
-        "strings",
-        mended);
-  }
 }
 
 void CreateSubmenus() {
@@ -1183,29 +998,63 @@ void CreateSubmenus() {
   REXLOG_INFO("settings menu: {} submenus added to the pause menu", kMenuCount);
 }
 
+bool InImage(uint32_t address) {
+  return address >= 0x82000000 && address < 0x82A00000;
+}
+
 // The tab strip the game rendered last, if it belongs to the pause screen.
+// Checked to be one (its vtable holds the strip's render) before a virtual
+// of it is called.
 uint32_t PauseTabStrip() {
   const uint32_t strip = g_last_tab_strip.load(std::memory_order_relaxed);
-  const uint32_t vtable = strip ? Read32(strip) : 0;
-  const uint32_t context_fn = vtable ? Read32(vtable + kWidgetMovieContextSlot) : 0;
-  if (!context_fn) {
+  const uint32_t vtable = strip >= 0x10000 ? Read32(strip) : 0;
+  if (!InImage(vtable)) {
+    return 0;
+  }
+  bool is_strip = false;
+  for (uint32_t slot = 0; slot < 160 && !is_strip; ++slot) {
+    is_strip = Read32(vtable + 4 * slot) == kTabStripRenderFn;
+  }
+  const uint32_t context_fn = is_strip ? Read32(vtable + kWidgetMovieContextSlot) : 0;
+  if (!InImage(context_fn)) {
     return 0;
   }
   const uint32_t context = CallGuest(context_fn, strip);
   return context && context == PauseMovieContext() ? strip : 0;
 }
 
-// Ends the game as the window's close button does: the window is closed on the
-// UI thread, and ReXApp::OnClosing ends the title and the process.
-// (WindowedAppContext::RequestDeferredQuit, used before, only left the UI
-// loop: the app then waited for the game's main thread, which doesn't end, so
-// the game played on behind a window that no longer answered.)
-void CloseGame() {
+// Ends the game as the window's close button does: on the UI thread, after any
+// career save in progress (MclaWaitForSaves), the game is started again if
+// asked, and the window is closed, which ends the title and the process
+// (ReXApp::OnClosing). WindowedAppContext::RequestDeferredQuit, used before,
+// only left the UI loop: the app then waited for the game's main thread,
+// which doesn't end, so the game played on behind a window that no longer
+// answered. The PS5 host has no window listener of that kind, so it keeps the
+// request it had.
+void CloseGame(bool restart) {
   auto* runtime = rex::Runtime::instance();
-  rex::ui::Window* window = runtime ? runtime->display_window() : nullptr;
-  if (window) {
-    window->app_context().CallInUIThread([window] { window->RequestClose(); });
+#if REX_PLATFORM_PS5
+  (void)restart;
+  if (auto* context = runtime ? runtime->app_context() : nullptr) {
+    context->RequestDeferredQuit();
   }
+#else
+  rex::ui::Window* window = runtime ? runtime->display_window() : nullptr;
+  if (!window) {
+    return;
+  }
+  window->app_context().CallInUIThread([window, restart] {
+    MclaWaitForSaves();
+#if REX_PLATFORM_WIN32
+    if (restart && !MclaRelaunchGame()) {
+      return;  // keep playing rather than quit without the new one
+    }
+#else
+    (void)restart;
+#endif
+    window->RequestClose();
+  });
+#endif
 }
 
 bool ButtonClicked(uint32_t key) {
@@ -1322,10 +1171,8 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
       g_restart_asked_ms.store(0, std::memory_order_relaxed);
       SetStringTableText(kRestartKey, kRestartLabel);
       SaveSettingsIfChanged();
-      if (MclaRelaunchGame()) {
-        REXLOG_INFO("settings menu: restarting");
-        CloseGame();
-      }
+      REXLOG_INFO("settings menu: restarting");
+      CloseGame(true);
     }
     r3.u64 = 1;
     return true;
@@ -1335,7 +1182,7 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
   if (ButtonClicked(g_quit_button_key.load(std::memory_order_relaxed))) {
     REXLOG_INFO("settings menu: quit requested");
     SaveSettingsIfChanged();
-    CloseGame();
+    CloseGame(false);
     r3.u64 = 1;
     return true;
   }

@@ -156,6 +156,7 @@ void MclaTickButtonPrompts();
 void MclaTickPerfOptions();
 void MclaDevPadFrame(uint64_t& ticks);
 void MclaDevPadSwap();
+void MclaApplyMsaaAtSwap();
 
 void mcla_frame_delta(PPCRegister& r8) {
   MclaTickButtonPrompts();
@@ -227,6 +228,7 @@ static void PaceUnlimitedSwap(bool timed) {
 
 bool mcla_present_interval(PPCRegister& r11) {
   MclaDevPadSwap();
+  MclaApplyMsaaAtSwap();
   if (OriginalTiming()) {
     return false;
   }
