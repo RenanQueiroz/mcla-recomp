@@ -1,0 +1,448 @@
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -37,6 +37,73 @@
+ 
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+ 
++// TMPFL: development frame log (launcher/dev/frame-log.sdk.patch). Setting
++// tmp_frame_log to a new non-empty label logs the next tmp_frame_log_frames
++// frames, every draw, resolve, marker and swap, to
++// <tmp_frame_log_dir>/<label>_<n>.txt.
++#include <cstdarg>  // TMPFL
++#include <cstdio>   // TMPFL
++REXCVAR_DEFINE_STRING(tmp_frame_log, "", "GPU", "TMPFL: label; a new one logs the next frames")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_UINT32(tmp_frame_log_frames, 1, "GPU", "TMPFL: frames per request")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(tmp_frame_log_dir, "", "GPU", "TMPFL: folder for the logs")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(tmp_frame_log_quiet, false, "GPU",
++                    "TMPFL: GPU timestamps only (draw, marker and pass labels), no text log")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++bool g_tmpfl_active = false;
++std::string g_tmpfl_name;
++REXCVAR_DEFINE_STRING(tmp_frame_dump_ps, "", "GPU",
++                      "TMPFL: in logged frames, write the guest memory of every texture of the "
++                      "draws with this pixel shader hash (16 hex digits)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++std::FILE* g_tmpfl_file = nullptr;
++uint32_t g_tmpfl_draw = 0;
++void (*g_tmpfl_marker_hook)(const char*) = nullptr;
++void TmpFl(const char* format, ...) {
++  if (!g_tmpfl_file) return;
++  va_list args;
++  va_start(args, format);
++  std::vfprintf(g_tmpfl_file, format, args);
++  va_end(args);
++}
++// At every swap: closes the frame being logged, opens the next one. Returns
++// true when a new frame starts being logged.
++bool TmpFlSwap(std::string* label_out) {
++  static std::string last_label;
++  static std::string label;
++  static uint32_t remaining = 0, index = 0;
++  if (g_tmpfl_file) {
++    std::fclose(g_tmpfl_file);
++    g_tmpfl_file = nullptr;
++  }
++  g_tmpfl_active = false;
++  const std::string want = REXCVAR_GET(tmp_frame_log);
++  if (!want.empty() && want != last_label) {
++    last_label = want;
++    label = want;
++    remaining = std::max<uint32_t>(1, REXCVAR_GET(tmp_frame_log_frames));
++    index = 0;
++  }
++  if (!remaining) return false;
++  --remaining;
++  std::string dir = REXCVAR_GET(tmp_frame_log_dir);
++  if (dir.empty()) dir = ".";
++  const std::string name = label + "_" + std::to_string(index++);
++  const std::string path = dir + "/" + name + ".txt";
++  if (!REXCVAR_GET(tmp_frame_log_quiet)) {
++    g_tmpfl_file = std::fopen(path.c_str(), "w");
++    if (!g_tmpfl_file) return false;
++    std::setvbuf(g_tmpfl_file, nullptr, _IOFBF, 1 << 20);
++  }
++  g_tmpfl_active = true;
++  g_tmpfl_draw = 0;
++  g_tmpfl_name = name;
++  if (label_out) *label_out = name;
++  return true;
++}
++
+ REXCVAR_DEFINE_BOOL(gpu_regwrite_bulk, true, "GPU",
+                     "Write blocks of registers in bulk and test for the few registers with side "
+                     "effects, instead of one virtual WriteRegister call and switch per register "
+@@ -886,6 +953,8 @@
+       uint32_t value = reader->ReadAndSwap<uint32_t>();
+       bin_select_ = (bin_select_ & 0xFFFFFFFF00000000ull) | value;
+       result = true;
++      if (g_tmpfl_active) TmpFl("B n=%u select=%016llX mask=%016llX\n", g_tmpfl_draw,  // TMPFL
++                                (unsigned long long)bin_select_, (unsigned long long)bin_mask_);
+     } break;
+     case PM4_SET_BIN_SELECT_HI: {
+       uint32_t value = reader->ReadAndSwap<uint32_t>();
+@@ -905,6 +974,8 @@
+       uint64_t val_lo = reader->ReadAndSwap<uint32_t>();
+       bin_select_ = (val_hi << 32) | val_lo;
+       result = true;
++      if (g_tmpfl_active) TmpFl("B n=%u select=%016llX mask=%016llX\n", g_tmpfl_draw,  // TMPFL
++                                (unsigned long long)bin_select_, (unsigned long long)bin_mask_);
+     } break;
+     case PM4_CONTEXT_UPDATE: {
+       assert_true(count == 1);
+@@ -950,6 +1021,21 @@
+                                               uint32_t count) {
+   // skip N 32-bit words to get to the next packet
+   // No-op, ignore some data.
++  if (count == 3) {  // TMPFL: markers from the game ('MCPH', kind, value)
++    uint32_t words[3];
++    for (uint32_t i = 0; i < 3; ++i) words[i] = reader->ReadAndSwap<uint32_t>();
++    if (words[0] == 0x4D435048) {
++      static uint64_t markers = 0;
++      ++markers;
++      if (g_tmpfl_active) {
++        char text[96];
++        std::snprintf(text, sizeof(text), "M kind=%08X value=%08X", words[1], words[2]);
++        TmpFl("%s n=%u\n", text, g_tmpfl_draw);
++        if (g_tmpfl_marker_hook) g_tmpfl_marker_hook(text);
++      }
++    }
++    return true;
++  }
+   reader->AdvanceRead(count * sizeof(uint32_t));
+   return true;
+ }
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -66,6 +66,8 @@
+ #include <cstdio>  // TMPGT
+ #include <cstdlib>  // TMPGT
+ #include <vector>  // TMPGT
++#include <unordered_set>  // TMPFL
++#include <rex/graphics/pipeline/texture/info.h>  // TMPFL
+ #include <string>  // TMPPIX
+ 
+ // TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
+@@ -91,6 +93,16 @@
+   ~TmpPixScope() { TmpPixMark(l, e); }
+ };
+ extern std::string g_tmppix_last_pass;  // TMPPIX
++// TMPFL (src/graphics/command_processor.cpp)
++extern bool g_tmpfl_active;
++extern uint32_t g_tmpfl_draw;
++extern void (*g_tmpfl_marker_hook)(const char*);
++void TmpFl(const char* format, ...);
++bool TmpFlSwap(std::string* label_out);
++REXCVAR_DECLARE(std::string, tmp_frame_log_dir);
++static std::vector<std::string> g_tmpfl_pending_marks;
++extern std::string g_tmpfl_name;
++REXCVAR_DECLARE(std::string, tmp_frame_dump_ps);
+ 
+ namespace rex::graphics::d3d12 {
+ 
+@@ -2153,12 +2165,32 @@
+ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
+   g_tmppix_last_pass.clear();  // TMPPIX
++  if (g_tmpfl_active) {  // TMPFL: the frame being logged ends with this swap
++    const auto fetch0 = register_file_->GetTextureFetch(0);
++    TmpFl("S n=%u fb=%08X w=%u h=%u fetch0_fmt=%u fetch0_base=%08X fetch0=%08X %08X %08X %08X "
++          "%08X %08X lutactl=%08X\n",
++          g_tmpfl_draw, frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
++          uint32_t(fetch0.format), uint32_t(fetch0.base_address) << 12, fetch0.dword_0,
++          fetch0.dword_1, fetch0.dword_2, fetch0.dword_3, fetch0.dword_4, fetch0.dword_5,
++          (*register_file_)[XE_GPU_REG_DC_LUTA_CONTROL]);
++    const reg::DC_LUT_30_COLOR* lut = gamma_ramp_256_entry_table();
++    TmpFl("G256");
++    for (uint32_t i = 0; i < 256; ++i) TmpFl(" %08X", lut[i].value);
++    TmpFl("\n");
++    const reg::DC_LUT_PWL_DATA* pwl = gamma_ramp_pwl_rgb();
++    TmpFl("GPWL");
++    for (uint32_t i = 0; i < 128 * 3; ++i) TmpFl(" %08X", pwl[i].value);
++    TmpFl("\n");
++  }
++  std::string tmpfl_name;  // TMPFL
++  const bool tmpfl_started = TmpFlSwap(&tmpfl_name);
+   {  // TMPGT
+     static uint64_t tmpgt_last_ms = 0, tmpgt_pending_submission = 0;
+     static uint32_t tmpgt_pending_count = 0, tmpgt_dumped = 0;
+     static std::vector<std::string> tmpgt_pending_labels;
++    static std::string tmpgt_name, tmpgt_pending_name;  // TMPFL
+     const char* every_env = std::getenv("MCLA_GT_EVERY");
+-    if (every_env && *every_env) {
++    if ((every_env && *every_env) || tmpfl_started || g_tmpgt_active || tmpgt_pending_count) {
+       if (!g_tmpgt_heap) {
+         ID3D12Device* device = GetD3D12Provider().GetDevice();
+         D3D12_QUERY_HEAP_DESC qd = {};
+@@ -2181,6 +2213,10 @@
+         g_tmpgt_labels.resize(kTmpGtMax);
+       }
+       if (g_tmpgt_active) {
++        for (const std::string& mark : g_tmpfl_pending_marks) {  // TMPFL
++          TmpGtMark(deferred_command_list_, mark.c_str());
++        }
++        g_tmpfl_pending_marks.clear();
+         TmpGtMark(deferred_command_list_, "SWAP");
+         deferred_command_list_.D3DResolveQueryData(g_tmpgt_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0,
+                                                    g_tmpgt_count, g_tmpgt_readback, 0);
+@@ -2189,6 +2225,8 @@
+         tmpgt_pending_count = g_tmpgt_count;
+         tmpgt_pending_labels.assign(g_tmpgt_labels.begin(),
+                                     g_tmpgt_labels.begin() + g_tmpgt_count);
++        tmpgt_pending_name = tmpgt_name;  // TMPFL
++        tmpgt_name.clear();
+       } else if (tmpgt_pending_count) {
+         if (GetCompletedSubmission() >= tmpgt_pending_submission) {
+           uint64_t freq = 0;
+@@ -2199,6 +2237,11 @@
+             const char* dir = std::getenv("MCLA_GT_DIR");
+             std::string path = std::string(dir ? dir : ".") + "\\gt_" +
+                                std::to_string(tmpgt_dumped++) + ".csv";
++            if (!tmpgt_pending_name.empty()) {  // TMPFL
++              std::string fl_dir = REXCVAR_GET(tmp_frame_log_dir);
++              path = (fl_dir.empty() ? std::string(".") : fl_dir) + "/" + tmpgt_pending_name +
++                     "_gt.csv";
++            }
+             if (std::FILE* f = std::fopen(path.c_str(), "w")) {
+               std::fprintf(f, "freq,%llu\n", (unsigned long long)freq);
+               const uint64_t* t = static_cast<const uint64_t*>(data);
+@@ -2215,10 +2258,13 @@
+         }
+       } else {
+         const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
+-        if (now_ms - tmpgt_last_ms >= uint64_t(std::atoi(every_env)) * 1000) {
++        if (tmpfl_started ||
++            (every_env && *every_env &&
++             now_ms - tmpgt_last_ms >= uint64_t(std::atoi(every_env)) * 1000)) {
+           tmpgt_last_ms = now_ms;
+           g_tmpgt_active = true;
+           g_tmpgt_count = 0;
++          tmpgt_name = tmpfl_started ? tmpfl_name : std::string();  // TMPFL
+           TmpGtMark(deferred_command_list_, "FRAME");
+         }
+       }
+@@ -2602,6 +2648,127 @@
+   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+ }
+ 
++// TMPFL: one line per draw with the state that matters for the frame
++// structure; constants of the first draw of each shader in the frame and of
++// every small draw (full-screen passes, HUD quads).
++static void TmpFlConstants(const char* tag, const RegisterFile& regs, const Shader& shader,
++                           uint32_t first_reg, uint32_t draw) {
++  const Shader::ConstantRegisterMap& map = shader.constant_register_map();
++  TmpFl("%s n=%u h=%016llX", tag, draw, (unsigned long long)shader.ucode_data_hash());
++  uint32_t logged = 0;
++  for (uint32_t i = 0; i < 256 && logged < 128; ++i) {
++    if (!(map.float_bitmap[i >> 6] & (uint64_t(1) << (i & 63)))) continue;
++    float c[4];
++    std::memcpy(c, &regs.values[first_reg + i * 4], sizeof(c));
++    TmpFl(" c%u=%.6g,%.6g,%.6g,%.6g", i, c[0], c[1], c[2], c[3]);
++    ++logged;
++  }
++  TmpFl(" dyn=%d\n", int(map.float_dynamic_addressing));
++}
++static void TmpFlTextures(const RegisterFile& regs, const Shader& shader) {
++  const char kind = shader.type() == xenos::ShaderType::kPixel ? 't' : 'v';
++  for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
++    const xenos::xe_gpu_texture_fetch_t f = regs.GetTextureFetch(binding.fetch_constant);
++    TmpFl(" %c%u:%08X:%u:%ux%u:d%u:s%u%u%u%u:e%u", kind, binding.fetch_constant,
++          uint32_t(f.base_address) << 12, uint32_t(f.format), uint32_t(f.size_2d.width) + 1,
++          uint32_t(f.size_2d.height) + 1, uint32_t(f.dimension), uint32_t(f.sign_x),
++          uint32_t(f.sign_y), uint32_t(f.sign_z), uint32_t(f.sign_w),
++          uint32_t(f.exp_adjust) & 63);
++  }
++}
++static void TmpFlDraw(const RegisterFile& regs, xenos::PrimitiveType primitive_type,
++                      uint32_t index_count, bool indexed, xenos::EdramMode edram_mode,
++                      const Shader& vertex_shader, const Shader* pixel_shader) {
++  static std::unordered_set<uint64_t> seen_vs, seen_ps;
++  if (g_tmpfl_draw == 0) {
++    seen_vs.clear();
++    seen_ps.clear();
++  }
++  const uint32_t n = g_tmpfl_draw++;
++  uint32_t param_gen = UINT32_MAX;
++  if (pixel_shader) {
++    pixel_shader->GetInterpolatorInputMask(regs.Get<reg::SQ_PROGRAM_CNTL>(),
++                                           regs.Get<reg::SQ_CONTEXT_MISC>(), param_gen);
++  }
++  auto f32 = [&](uint32_t r) {
++    float v;
++    std::memcpy(&v, &regs.values[r], 4);
++    return v;
++  };
++  TmpFl("D n=%u prim=%u cnt=%u ib=%d mode=%u si=%08X ci=%08X,%08X,%08X,%08X di=%08X cm=%08X "
++        "dc=%08X sr=%08X cc=%08X ar=%g bc=%08X,%08X,%08X,%08X wo=%08X ws=%08X,%08X ss=%08X,%08X "
++        "vte=%08X mc=%08X clip=%08X vp=%g,%g,%g,%g,%g,%g vs=%016llX ps=%016llX pg=%d wd=%d kill=%d "
++        "wct=%X",
++        n, uint32_t(primitive_type), index_count, int(indexed), uint32_t(edram_mode),
++        regs[XE_GPU_REG_RB_SURFACE_INFO], regs[XE_GPU_REG_RB_COLOR_INFO],
++        regs[XE_GPU_REG_RB_COLOR1_INFO], regs[XE_GPU_REG_RB_COLOR2_INFO],
++        regs[XE_GPU_REG_RB_COLOR3_INFO], regs[XE_GPU_REG_RB_DEPTH_INFO],
++        regs[XE_GPU_REG_RB_COLOR_MASK], regs[XE_GPU_REG_RB_DEPTHCONTROL],
++        regs[XE_GPU_REG_RB_STENCILREFMASK], regs[XE_GPU_REG_RB_COLORCONTROL],
++        f32(XE_GPU_REG_RB_ALPHA_REF), regs[XE_GPU_REG_RB_BLENDCONTROL0],
++        regs[XE_GPU_REG_RB_BLENDCONTROL1], regs[XE_GPU_REG_RB_BLENDCONTROL2],
++        regs[XE_GPU_REG_RB_BLENDCONTROL3], regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
++        regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
++        regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
++        regs[XE_GPU_REG_PA_CL_VTE_CNTL], regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
++        regs[XE_GPU_REG_PA_CL_CLIP_CNTL], f32(XE_GPU_REG_PA_CL_VPORT_XSCALE),
++        f32(XE_GPU_REG_PA_CL_VPORT_XOFFSET), f32(XE_GPU_REG_PA_CL_VPORT_YSCALE),
++        f32(XE_GPU_REG_PA_CL_VPORT_YOFFSET), f32(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
++        f32(XE_GPU_REG_PA_CL_VPORT_ZOFFSET), (unsigned long long)vertex_shader.ucode_data_hash(),
++        (unsigned long long)(pixel_shader ? pixel_shader->ucode_data_hash() : 0),
++        param_gen == UINT32_MAX ? -1 : int(param_gen),
++        int(pixel_shader && pixel_shader->writes_depth()),
++        int(pixel_shader && pixel_shader->kills_pixels()),
++        pixel_shader ? pixel_shader->writes_color_targets() : 0);
++  TmpFlTextures(regs, vertex_shader);
++  if (pixel_shader) TmpFlTextures(regs, *pixel_shader);
++  TmpFl("\n");
++  const bool tiny_draw = index_count <= 6;
++  if (seen_vs.insert(vertex_shader.ucode_data_hash()).second || tiny_draw) {
++    TmpFlConstants("VC", regs, vertex_shader, XE_GPU_REG_SHADER_CONSTANT_000_X, n);
++  }
++  if (pixel_shader && (seen_ps.insert(pixel_shader->ucode_data_hash()).second || tiny_draw)) {
++    TmpFlConstants("PC", regs, *pixel_shader, XE_GPU_REG_SHADER_CONSTANT_256_X, n);
++  }
++}
++
++// TMPFL: the guest memory of the textures of draws with one pixel shader (with
++// readback_resolve=full, resolved data is there by the time the draw runs).
++static void TmpFlDumpTextures(const RegisterFile& regs, const Shader& vertex_shader,
++                              const Shader* pixel_shader, const memory::Memory& memory,
++                              uint32_t draw) {
++  const std::string want = REXCVAR_GET(tmp_frame_dump_ps);
++  if (want.empty() || !pixel_shader) return;
++  char hash[24];
++  std::snprintf(hash, sizeof(hash), "%016llX", (unsigned long long)pixel_shader->ucode_data_hash());
++  if (want != hash) return;
++  std::string dir = REXCVAR_GET(tmp_frame_log_dir);
++  if (dir.empty()) dir = ".";
++  for (const Shader* shader : {&vertex_shader, pixel_shader}) {
++    const char kind = shader == pixel_shader ? 't' : 'v';
++    for (const Shader::TextureBinding& binding : shader->texture_bindings()) {
++      const xenos::xe_gpu_texture_fetch_t f = regs.GetTextureFetch(binding.fetch_constant);
++      const FormatInfo* info = FormatInfo::Get(uint32_t(f.format));
++      if (!info || info->block_width != 1 || info->block_height != 1) continue;
++      const uint32_t w = uint32_t(f.size_2d.width) + 1, h = uint32_t(f.size_2d.height) + 1;
++      const uint32_t pitch = std::max(uint32_t(f.pitch) << 5, w);
++      const uint32_t bytes = rex::align(pitch, 32u) * rex::align(h, 32u) * (info->bits_per_pixel / 8);
++      const uint32_t base = uint32_t(f.base_address) << 12;
++      char name[96];
++      std::snprintf(name, sizeof(name), "%s_tex%u_%c%u.bin", g_tmpfl_name.c_str(), draw, kind,
++                    binding.fetch_constant);
++      if (std::FILE* out = std::fopen((dir + "/" + name).c_str(), "wb")) {
++        std::fwrite(memory.TranslatePhysical<const uint8_t*>(base), 1, bytes, out);
++        std::fclose(out);
++      }
++      TmpFl("X n=%u %c%u base=%08X fmt=%u w=%u h=%u pitch=%u tiled=%u endian=%u bytes=%u "
++            "exp=%d file=%s\n",
++            draw, kind, binding.fetch_constant, base, uint32_t(f.format), w, h, pitch,
++            uint32_t(f.tiled), uint32_t(f.endianness), bytes, int(f.exp_adjust), name);
++    }
++  }
++}
++
+ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
+                                       bool major_mode_explicit) {
+@@ -2675,6 +2842,23 @@
+     return false;
+   }
+   ++submission_draws_;
++  if (g_tmpfl_active) {  // TMPFL
++    // Markers arrive between draws, possibly with no submission open: their
++    // timestamps go in with the next draw's.
++    if (!g_tmpfl_marker_hook) {
++      g_tmpfl_marker_hook = [](const char* text) { g_tmpfl_pending_marks.emplace_back(text); };
++    }
++    for (const std::string& mark : g_tmpfl_pending_marks) {
++      TmpGtMark(deferred_command_list_, mark.c_str());
++    }
++    g_tmpfl_pending_marks.clear();
++    char tmp_label[24];
++    std::snprintf(tmp_label, sizeof(tmp_label), "D%u", g_tmpfl_draw);
++    TmpGtMark(deferred_command_list_, tmp_label);
++    TmpFlDraw(regs, primitive_type, index_count, index_buffer_info != nullptr, edram_mode,
++              *vertex_shader, pixel_shader);
++    TmpFlDumpTextures(regs, *vertex_shader, pixel_shader, *memory_, g_tmpfl_draw - 1);
++  }
+ 
+   // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
+   if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
+@@ -2684,6 +2868,7 @@
+           draw_util::GetNormalizedDepthControl(regs),
+           pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                        : 0)) {
++    if (g_tmpfl_active) TmpFl("  hostclear\n");  // TMPFL
+     return true;
+   }
+ 
+@@ -2694,6 +2879,7 @@
+   }
+   if (!primitive_processing_result.host_draw_vertex_count) {
+     // Nothing to draw.
++    if (g_tmpfl_active) TmpFl("  novertices\n");  // TMPFL
+     return true;
+   }
+ 
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -62,6 +62,10 @@
+   ~TmpPixScope() { TmpPixMark(l, e); }
+ };
+ std::string g_tmppix_last_pass;  // TMPPIX
++// TMPFL (src/graphics/command_processor.cpp)
++extern bool g_tmpfl_active;
++extern uint32_t g_tmpfl_draw;
++void TmpFl(const char* format, ...);
+ 
+ namespace rex::graphics::d3d12 {
+ 
+@@ -1384,6 +1388,38 @@
+   }
+ 
+   DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  if (g_tmpfl_active) {  // TMPFL: one line per resolve
++    const draw_util::ResolveEdramInfo& tmp_ei =
++        resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
++    const RegisterFile& tmp_regs = register_file();
++    TmpFl("R n=%u dst=%08X len=%u base=%08X w=%u h=%u x=%u y=%u fmt=%u num=%u bias=%d endian=%u "
++          "swap=%u dpitch=%u dheight=%u depth=%u ebase=%u epitch=%u msaa=%u efmt=%u sample=%u "
++          "cdepth=%u ccolor=%u src=%u cc=%08X dinfo=%08X dpi=%08X clr=%08X,%08X,%08X wo=%08X "
++          "ws=%08X,%08X si=%08X ci=%08X di=%08X\n",
++          g_tmpfl_draw, resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length,
++          resolve_info.copy_dest_base, resolve_info.coordinate_info.width_div_8 * 8,
++          resolve_info.height_div_8 * 8,
++          uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8) * 8,
++          uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8) * 8,
++          uint32_t(resolve_info.copy_dest_info.copy_dest_format),
++          uint32_t(resolve_info.copy_dest_info.copy_dest_number),
++          int(resolve_info.copy_dest_info.copy_dest_exp_bias),
++          uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
++          uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
++          uint32_t(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32) * 32,
++          uint32_t(resolve_info.copy_dest_coordinate_info.height_aligned_div_32) * 32,
++          uint32_t(resolve_info.IsCopyingDepth()), uint32_t(tmp_ei.base_tiles),
++          uint32_t(tmp_ei.pitch_tiles), uint32_t(tmp_ei.msaa_samples), uint32_t(tmp_ei.format),
++          uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
++          uint32_t(resolve_info.IsClearingDepth()), uint32_t(resolve_info.IsClearingColor()),
++          uint32_t(resolve_info.rb_copy_control.copy_src_select),
++          resolve_info.rb_copy_control.value, resolve_info.copy_dest_info.value,
++          tmp_regs[XE_GPU_REG_RB_COPY_DEST_PITCH], resolve_info.rb_depth_clear,
++          resolve_info.rb_color_clear, resolve_info.rb_color_clear_lo,
++          tmp_regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], tmp_regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
++          tmp_regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], tmp_regs[XE_GPU_REG_RB_SURFACE_INFO],
++          tmp_regs[XE_GPU_REG_RB_COLOR_INFO], tmp_regs[XE_GPU_REG_RB_DEPTH_INFO]);
++  }
+ 
+   // Copying.
+   bool copied = false;

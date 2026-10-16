@@ -1,0 +1,97 @@
+diff --git a/src/render_perf.cpp b/src/render_perf.cpp
+--- a/src/render_perf.cpp
++++ b/src/render_perf.cpp
+@@ -3,7 +3,9 @@
+ 
+ #include "generated/default/mcla_init.h"
+ 
++#include <atomic>
+ #include <cstdint>
++#include <functional>
+ #include <thread>
+ 
+ #include <rex/cvar.h>
+@@ -71,3 +73,83 @@
+   }
+   return true;
+ }
++
++// --- Development: render markers (launcher/dev/phase-markers.patch) -----------
++// Writes a PM4 type-3 NOP ('MCPH', kind, value) into the game's command buffer
++// where a frame-level function starts and ends and where each render phase of
++// sub_822E6408 starts, so that the SDK's frame log (frame-log.sdk.patch) shows
++// which draws each one made. Only on the thread that renders frames.
++REXCVAR_DEFINE_BOOL(mcla_dev_render_markers, false, "MCLA",
++                    "Development: PM4 NOP markers at render phases and frame functions");
++
++namespace {
++
++// The D3D device: [device+48] is the command buffer's write pointer (the last
++// word written; writers store at +4 onwards), [device+56] its limit, which a
++// writer checks once before writing up to 8 words (sub_824199B0).
++constexpr uint32_t kD3DDevicePointer = 0x82839254;
++std::atomic<size_t> g_render_thread{0};
++
++size_t RenderThreadId() {
++  return std::hash<std::thread::id>{}(std::this_thread::get_id());
++}
++
++uint32_t LoadBe32(const uint8_t* base, uint32_t address) {
++  const uint8_t* p = base + address;
++  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
++}
++
++void StoreBe32(uint8_t* base, uint32_t address, uint32_t value) {
++  uint8_t* p = base + address;
++  p[0] = uint8_t(value >> 24);
++  p[1] = uint8_t(value >> 16);
++  p[2] = uint8_t(value >> 8);
++  p[3] = uint8_t(value);
++}
++
++void EmitRenderMarker(uint8_t* base, uint32_t kind, uint32_t value) {
++  if (!REXCVAR_GET(mcla_dev_render_markers) || g_render_thread.load() != RenderThreadId()) {
++    return;
++  }
++  const uint32_t device = LoadBe32(base, kD3DDevicePointer);
++  if (device < 0x10000) {
++    return;
++  }
++  const uint32_t put = LoadBe32(base, device + 48);
++  const uint32_t limit = LoadBe32(base, device + 56);
++  if (put < 0x10000 || put > limit) {
++    return;
++  }
++  StoreBe32(base, put + 4, 0xC0021000);  // type 3, NOP, 3 words
++  StoreBe32(base, put + 8, 0x4D435048);  // 'MCPH'
++  StoreBe32(base, put + 12, kind);
++  StoreBe32(base, put + 16, value);
++  StoreBe32(base, device + 48, put + 16);
++}
++
++}  // namespace
++
++// The frame's render function: the thread that calls it renders.
++extern "C" REX_FUNC(sub_822C0980) {
++  g_render_thread.store(RenderThreadId());
++  EmitRenderMarker(base, 1, 0x822C0980);
++  __imp__sub_822C0980(ctx, base);
++  EmitRenderMarker(base, 2, 0x822C0980);
++}
++
++// Each render phase the phase loop runs (r4 = the phase bit).
++extern "C" REX_FUNC(sub_822E55D0) {
++  EmitRenderMarker(base, 3, ctx.r4.u32);
++  __imp__sub_822E55D0(ctx, base);
++}
++
++#define MCLA_DEV_MARKED(address)                   \
++  extern "C" REX_FUNC(sub_##address) {             \
++    EmitRenderMarker(base, 1, 0x##address);        \
++    __imp__sub_##address(ctx, base);               \
++    EmitRenderMarker(base, 2, 0x##address);        \
++  }
++
++MCLA_DEV_MARKED(822E6408)  // the render phase loop
++MCLA_DEV_MARKED(8260E9A0)  // motion blur setup (LARecomp notes)
++MCLA_DEV_MARKED(8260EBB8)  // depth of field composite (LARecomp notes)
