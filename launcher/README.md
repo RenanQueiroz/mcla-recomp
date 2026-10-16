@@ -69,9 +69,11 @@ Like the settings below, it is left out when *More mcla.exe options* sets `mcla_
 *Graphics API* picks the GPU plugin's backend (`--mcla_gpu_backend=d3d12` or
 `vulkan`; "Game setting" passes nothing, and the plugin then tries Direct3D 12
 first). Every setting and SDK patch here works on both. On this machine, in
-scripted runs in the city, Vulkan matches D3D12 at native resolution and is 7 to
-11% slower at 3x (`dev\vulkan-2026-10-14.md`); since D3D12's textures are placed
-in shared heaps, both are about as smooth in the map zoom-out after the title
+scripted runs, Vulkan matches D3D12 at native resolution; at 3x the two are
+within a few percent in the city (Vulkan slightly ahead in free roam), and
+D3D12 is 10 to 15% faster in the race benchmark
+(`dev\direct-resolve-2026-10-15.md`). Since D3D12's textures are placed in
+shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`). Left out when
 *More mcla.exe options* sets `mcla_gpu_backend`.
 
