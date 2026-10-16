@@ -8,7 +8,11 @@ Upstream's notes on its frame limiter (2026-10-03) left frame-to-frame jitter of
 
 Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D: on the title screen at 60 the frame-time standard deviation went from 3.1 ms to 0.38 ms. PresentMon at 45, 50 and 60 caps: median exactly on target, about 98% of presents within 1 ms of it, no dropped frames. In play the user reported it smooth at 60 and 120.
 
-Measured with `--vsync=false` on the command line. Another open point in those notes, whether `vsync=false` set from the app reaches the GPU plugin, has the answer no: it changes only mcla.exe's copy of the setting, and the GPU plugin, which has its own, keeps vsync on. Its emulated 60 Hz vblank then caps the game at 60 and paces it unevenly at any target.
+Measured with `--vsync=false` on the command line. Another open point in those notes was whether `vsync=false` set from the app reaches the GPU plugin. It does (rechecked on 2026-10-16, free roam, native, D3D12, 120 FPS cap):
+- **At start:** with neither `--vsync` on the command line nor a `vsync` line in `mcla.toml`, `ConfigureFrameTiming` turns it off and the cap holds (8.33 ms median).
+- **While running:** set from the game (as the pause menu's VSYNC does), `vsync=true` held the game to 60 (15.8 ms median), and `false` gave 120 back.
+
+With vsync on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly, so it stays off unless the player turns it on. An earlier note here said that a setting from the app never reached the plugin; that was not reproduced.
 
 ## Timer resolution kept while the window is hidden (2026-10-14)
 
@@ -36,7 +40,7 @@ Cause: a texture loaded from a hot page was never reloaded while the page stayed
 
 ## Mouse pointer over the game during play (2026-10-14)
 
-Playing with a controller, the mouse pointer stayed in the middle of the picture until it was moved off the screen. The game now hides it the way PC games do. It goes as soon as a controller is used, or once the mouse has been still for about 3 seconds, and comes back as soon as the mouse moves or is clicked. It is hidden only over the game's picture while the game has focus. With another window in front, over the title bar or borders in windowed mode, or while the SDK's console, settings or achievements overlay is open, it stays. `mcla_hide_cursor` (default on; `--mcla_hide_cursor=false` keeps the pointer) selects the SDK's auto-hidden cursor, which `patches/rexglue-cursor-auto-hide.patch` makes focus-aware and lets the pads hide (details and checks there). **Not verified by hand**: the controller path, as unattended runs have no pad to press.
+Playing with a controller, the mouse pointer stayed in the middle of the picture until it was moved off the screen. The game now hides it the way PC games do. It goes as soon as a controller is used, or once the mouse has been still for about 3 seconds, and comes back as soon as the mouse moves or is clicked. It is hidden only over the game's picture while the game has focus. With another window in front, over the title bar or borders in windowed mode, or while the SDK's console, settings or achievements overlay is open, it stays. `mcla_hide_cursor` (default on; `--mcla_hide_cursor=false` keeps the pointer) selects the SDK's auto-hidden cursor, which `patches/rexglue-cursor-auto-hide.patch` makes focus-aware and lets the pads hide (details and checks there). Verified by the user with a controller on 2026-10-16: the pointer goes as soon as the controller is used.
 
 ## Vulkan on Windows (2026-10-14)
 
@@ -53,7 +57,7 @@ Two faults in `PaceUnlimitedSwap` (`src/frame_timing.cpp`), the hold that keeps 
 
 Unchanged: the start-up sequence at `normal` (334 swaps over 11.3 s at 29.4 per second, against 327 over 11.1 s before), at `fast` (879 swaps in 3.7 s, against 893 in 3.8 s), and capped play, where every swap has exactly one update (120 cap, free roam: 1,200 of 1,200 swaps). In the reachable path (start-up, title, attract movie, map zoom-out, free roam) the start-up sequence is the only untimed loop, so the fast intro's new limit was checked by reading the code, not on a later loading screen.
 
-## Menus and HUD animations ran faster above 30 FPS (menus fixed 2026-10-14, the HUD optional)
+## Menus and HUD animations ran faster above 30 FPS (menus fixed 2026-10-14, the HUD at a rate of its own since 2026-10-16)
 
 Reported by the user at a steady 120 cap: the song title scrolling under the speedometer ran far too fast while the game itself ran at normal speed. Every UI screen is a Flash movie (menus, pop-ups, the HUD with its song ticker and "LOADING" badge), and the UI manager steps each one with the Flash player's one-frame mode, which advances exactly one movie frame per game update and ignores the elapsed time (from LARecomp's notes, used with its author's permission: mcUIManager::Update, sub_821FC588, passes byte_827DC1FC = 1, which nothing writes, to the advance, sub_825EDC08). The console updated 30 times a second, so at 120 FPS every Flash animation ran four times as fast.
 
@@ -63,7 +67,7 @@ Measured with the dev pad's frame-by-frame screenshots, timedemo at each cap (`-
 
 | | 30 FPS | 120 FPS before | 120 FPS after |
 |---|---|---|---|
-| Song ticker under the speedometer (px/s at 720p), with `mcla_ui_timing_hud=true` | 59.9 | 239.9 | 60.0 |
+| Song ticker under the speedometer (px/s at 720p), with the HUD paced at 30 | 59.9 | 239.9 | 60.0 |
 | Pause menu opening (Start in the city) | 933 ms | 183 ms | 883 ms |
 
 The 30 FPS figures are the same with the fix on and off (59.5 to 59.9 px/s). The car's path over the scripted drive from the spawn point differed between runs with the fix on and off no more than between runs with the same setting (up to 13 m apart either way; the closest pair, 0.4 m, was one of each), and the drive's frame time was unchanged. Short presses still reach the menus: the GPS map's legend toggled on each of eight 15 ms presses of X at 120 FPS with the fix on, as with it off.
@@ -74,14 +78,20 @@ What else this covers and what it does not:
 - Not affected: the minimap, which the game moves itself (it changed on every new frame with the fix on, as off), and the GPS map's zoom-out, which is a camera move.
 - Not affected: the 3D icons over the world (`3DICONSMOVIE0`-`2`), which the game advances by elapsed time already.
 
-The in-game HUD is paced only with `--mcla_ui_timing_hud=true` (default off). It is two movies: HUDMAPMOVIE and the gauge movie, which the HUD code creates itself, outside the UI manager's screens. The game sets the gauges' values every update (`GearValue`, `Nitrovalue`, `map_rotation` and so on, seen by logging the player's variable lookups) and the movies' own scripts draw them as they advance, in the same frame step (`sub_825FB0D8` on the root sprite, one call for timeline and scripts) that scrolls the song ticker. Each of the two movies is needed for both: with either one paced alone, the ticker ran at 60 px/s and the needle stepped. Splitting the timeline step from the scripts would mean changing the Flash player's frame step, so the HUD is either paced or not:
+The in-game HUD has a rate of its own, `mcla_ui_hud_rate` (default 30). It is two movies: HUDMAPMOVIE and the gauge movie, which the HUD code creates itself, outside the UI manager's screens. The game sets the gauges' values every update (`GearValue`, `Nitrovalue`, `map_rotation` and so on, seen by logging the player's variable lookups) and the movies' own scripts draw them as they advance, in the same frame step (`sub_825FB0D8` on the root sprite, one call for timeline and scripts) that scrolls the song ticker. Each of the two movies is needed for both: with either one paced alone, the ticker ran at 60 px/s and the needle stepped. Splitting the timeline step from the scripts would mean changing the Flash player's frame step, so the needles move exactly as often as the ticker steps. The rate picks the balance: 30 a second as on the console (the ticker at its original speed, the needles in 30 Hz steps), 60 or 120 (smoother needles, the ticker two or four times as fast), or 0 for every frame, as with no pacing. The HUD's movies get their own schedule at that rate, the same way as the screens' at 30; the value is read at every advance, so a change takes effect at once. It is the launcher's *HUD updates* and DISPLAY › HUD UPDATES in the pause menu. Until 2026-10-16 the HUD was paced only with `mcla_ui_timing_hud=true`, off by default, so the default was every frame.
 
-| 120 FPS | Song ticker | Tachometer needle |
+At a 120 FPS cap, timedemo (`--mcla_fixed_dt=120`), native, D3D12, measured on 2026-10-16 as the title scrolls in after arriving in the city, and with the car accelerating:
+
+| `mcla_ui_hud_rate` | Song ticker | Tachometer needle |
 |---|---|---|
-| `mcla_ui_timing_hud=false` (default) | 239.9 px/s, as before | moves on every frame (69 of 116 frame pairs, the same as with no pacing at all) |
-| `mcla_ui_timing_hud=true` | 60.1 px/s, as at 30 FPS | moves 30 times a second (28 of 119 frame pairs, in steps of about 2 px instead of 0.7 at 640x360) |
+| 30 (default) | 59.2 px/s, as at 30 FPS | moved in 30 of 119 frame pairs |
+| 60 | 118.2 px/s | moved in 50 of 116 frame pairs |
+| 120 | 237.2 px/s | moved in 75 of 117 frame pairs |
+| 0 (every frame) | 238.7 px/s | moved in 74 of 115 frame pairs |
 
-The menus stay paced either way: the pause menu opened in 883 ms at 120 FPS with the default settings. LARecomp left its HUD out of the same kind of pacing for the same reason. The "LOADING" badge belongs to the HUD and follows the same setting.
+The ticker figures are a fit of its position over 2.5 s, shots every 2 frames; 60, 120 and 240 px/s are what 30, 60 and 120 steps of 2 px a second give. The needle was found by its colour in a shot every frame for 1 s of acceleration; it rests for part of that second at every rate, so it moves in fewer pairs than the rate allows. Before the HUD had a rate of its own, paced and unpaced gave 60.1 and 239.9 px/s, and 28 of 119 and 69 of 116 pairs.
+
+The menus stay paced either way: the pause menu opened in 883 ms at 120 FPS with the default settings. LARecomp left its HUD out of the same kind of pacing for the same reason. The "LOADING" badge belongs to the HUD and follows its rate.
 
 ## D3D12 stutter in the map zoom-out and in races (fixed 2026-10-15)
 

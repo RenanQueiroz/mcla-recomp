@@ -56,12 +56,12 @@ From then on the shortcut is the way in. The launcher opens on the game's settin
 | Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `--mcla_fps=N --vsync=false` (0 for uncapped) |
 | Display | Fullscreen, Windowed | `--fullscreen=true` or `false` |
 | Anti-aliasing | On (2× MSAA), Off (about 20% faster at 3×) | `--mcla_msaa=true` or `false` |
-| HUD updates | Match frame rate (smooth gauges), Match console (30 per second) | `--mcla_ui_timing_hud=false` or `true` |
+| HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `--mcla_ui_hud_rate=30`, `60`, `120` or `0` |
 | Graphics API | Direct3D 12, Vulkan | `--mcla_gpu_backend=d3d12` or `vulkan` |
 | Intro | Normal, Fast, Skip (hides the title logo) | `--mcla_intro=normal`, `fast` or `skip` |
 | Button prompts | Follow the controller, Xbox, PlayStation | `--mcla_button_prompts=auto`, `xbox` or `playstation` |
 
-Every setting except Resolution and HUD updates also offers *Game setting*, which passes nothing and keeps what you chose in the game's pause menu (or the game's default); any other choice replaces it every time the game starts. With Graphics API at *Game setting* the game tries Direct3D 12 first. The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. A frame rate always comes with `--vsync=false`, which has to be on the command line: set from the pause menu, vsync off reaches only `mcla.exe`'s copy of the setting, and the GPU plugin's emulated 60 Hz vblank then caps the game at 60 and paces it unevenly.
+Every setting except Resolution and HUD updates also offers *Game setting*, which passes nothing and keeps what you chose in the game's pause menu (or the game's default); any other choice replaces it every time the game starts. With Graphics API at *Game setting* the game tries Direct3D 12 first. The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. A frame rate always comes with `--vsync=false`: with vsync on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly. The game also turns vsync off by itself unless `mcla.toml` or the pause menu's VSYNC turns it on.
 
 Under *Advanced* are **More mcla.exe options** (any other options, for example `--log_file=run.log`) and three checkboxes: check for updates when the launcher opens (on), close the launcher when the game starts (on), and start the game right away when there's nothing to update (off; a short countdown you can cancel).
 
@@ -77,7 +77,7 @@ cd mcla-recomp
 
 This is upstream's one command, with the fork's patches. It leaves a **Midnight Club Los Angeles** shortcut in the repository folder; double-click it, or `mcla.exe` itself. An Xbox or PlayStation controller works.
 
-Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120 --vsync=false`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; pass `--vsync=false` with it, for the reason above. The launcher's four SDK settings are not passed for you; add them for the same results. The pause menu has three extra entries: DISPLAY (frame-rate target, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`.
+Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120 --vsync=false`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on. The launcher's four SDK settings are not passed for you; add them for the same results. The pause menu has three extra entries: DISPLAY (frame-rate target, HUD updates, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`.
 
 ### Updating
 
@@ -94,7 +94,7 @@ By hand: `git pull`, then `.\scripts\make_pc.ps1` again. It adds new SDK patches
 | `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
 | After an update, the build says a patch has changed since it was applied, is in the SDK without a record, or does not apply | `.\launcher\build-game.ps1 -ResetSdk`, or the launcher's **More** → *Re-patch and rebuild the SDK*. |
 | `no .NET 10 SDK found` | `winget install Microsoft.DotNet.SDK.10`, then `.\launcher\build-launcher.ps1` again. |
-| Started without the launcher, the game stays at 60 FPS or paces unevenly | Add `--vsync=false` to its options. |
+| Started without the launcher, the game stays at 60 FPS or paces unevenly | Turn VSYNC off in the pause menu's DISPLAY, or add `--vsync=false` to its options. |
 | The game doesn't start after you added options under *More mcla.exe options* | Check that none of them is also set by a drop-down: an option given twice is an error. |
 | Geometry or textures look stale | Try `--clear_memory_page_state=true`, then the switches in [Turning a change off](#turning-a-change-off), and report what made the difference. |
 | The game closes by itself | Start it with `--log_file=run.log --log_level=info` (the file is written next to `mcla.exe`; **More** → *Open the game folder*) and open an issue with the end of that file (see [Missed functions](#missed-functions) for where). |
@@ -148,7 +148,7 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | The motorcycle's lean eased by elapsed time | matches the console at any frame rate (not verified by riding) |
 | The mouse pointer hidden during play | goes on controller input or after about 3 s still; back when the mouse moves |
 | Loading-screen pacing | uncapped free roam at native: mean 81 to 145 FPS; the fast intro speeds up only the start-up logos |
-| Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD optionally | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before) |
+| Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD at 30 a second by default, or 60, 120 or every frame | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before); the song title under the speedometer scrolls at its original speed |
 
 Upstream's own fixes, such as the car reflections and the camera-flight warp that never ended, are in the fork too.
 
@@ -185,7 +185,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Frame pacing at the swap | `--mcla_pace_at_swap=false` | |
 | Motorcycle lean | `--mcla_bike_gyro_fix=false` | |
 | Menus at the console's pace | `--mcla_ui_timing_fix=false` | |
-| HUD at the console's pace | `--mcla_ui_timing_hud=true` turns it on | Off by default; the launcher's *HUD updates*. |
+| HUD at the console's pace | `--mcla_ui_hud_rate=0` advances it with every frame | Default 30 a second; also 60 or 120. The launcher's *HUD updates*, and DISPLAY › HUD UPDATES in the pause menu. |
 | Mouse pointer hidden during play | `--mcla_hide_cursor=false` | |
 | Camera-flight warp fix (upstream's) | `--mcla_warp_fix=false` | |
 
@@ -273,8 +273,8 @@ If you hand this to an AI agent: it needs your disc image's path and the console
 
 - Nothing of the fork has been tried on AMD or Intel graphics, on Linux or on the PS5. On Vulkan, the compute texture copies and the direct texture loads are on with NVIDIA only by default (`--vulkan_texture_load_storage_copy=on` tries them elsewhere). D3D12's texture heaps take video memory in 256 MB steps, which matters most on cards with little of it.
 - On a first run, in new places, or after a driver update, objects can be missing for a moment while their shaders compile, where the game used to hold the frame until they were ready.
-- With *HUD updates* at *Match frame rate* (the default), the song title under the speedometer scrolls faster above 30 FPS (four times as fast at 120). *Match console* fixes that, but the gauges' needles then move 30 times a second.
-- Not verified by hand: the motorcycle lean (it needs a bike in play) and the pointer hiding on controller input.
+- The HUD's gauges and the song title under the speedometer move in the same steps. At *HUD updates* 30 per second (the default) the title scrolls at its original speed and the needles move 30 times a second; at 60 or 120 the needles are smoother and the title scrolls two or four times as fast.
+- Not verified by hand: the motorcycle lean (it needs a bike in play).
 
 ## Missed functions
 
