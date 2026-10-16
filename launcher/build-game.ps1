@@ -69,6 +69,13 @@ try {
         Show-UpstreamLag
     }
 
+    # make_pc.ps1 stops at an SDK patched before it recorded each patch's hash
+    # (.mcla-patches), which may hold older versions of them: patch it afresh.
+    if (-not $ResetSdk -and (Test-Path "$sdk\.mcla-patched") -and -not (Test-Path "$sdk\.mcla-patches")) {
+        "the SDK was patched before patches were recorded"
+        $ResetSdk = $true
+    }
+
     # -----------------------------------------------------------------------
     if ($ResetSdk -and (Test-Path "$sdk\.git")) {
         Step "reset the ReXGlue SDK so that make_pc.ps1 patches and builds it again"
@@ -87,7 +94,7 @@ try {
             Invoke-Git -C $sdk checkout "--" .
             Invoke-Git -C $sdk clean -fdq
             Invoke-Git -C $sdk submodule foreach --quiet --recursive "git checkout -- . && git clean -fdq"
-            Remove-Item -LiteralPath "$sdk\.mcla-patched" -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "$sdk\.mcla-patched", "$sdk\.mcla-patches" -Force -ErrorAction SilentlyContinue
             "SDK reset to $($current.Substring(0, 7))"
         }
     }

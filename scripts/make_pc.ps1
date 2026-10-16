@@ -48,8 +48,39 @@ function Logged([string]$name, [scriptblock]$command) {
 function Patch([string]$name, [string]$repo, [string]$patch) {
     $ErrorActionPreference = "Continue"
     git -C $repo apply --reverse --check $patch 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { "already applied: $(Split-Path $patch -Leaf)"; return }
-    Logged $name { git -C $repo apply $patch }
+    if ($LASTEXITCODE -eq 0) { "already applied: $(Split-Path $patch -Leaf)" }
+    else { Logged $name { git -C $repo apply $patch } }
+    RecordPatch $patch
+}
+
+# A patch revised later still adds the name the SDK is checked for, so the
+# SHA-256 of every patch applied goes into the SDK's .mcla-patches, and a patch
+# that is in without its current hash there stops the build: the SDK has to
+# be patched afresh, as reverting an older version can fail where later
+# patches change the same lines.
+function PatchHash([string]$patch) { (Get-FileHash -Algorithm SHA256 $patch).Hash.ToLowerInvariant() }
+function RecordPatch([string]$patch) {
+    $leaf = Split-Path $patch -Leaf
+    $lines = @()
+    if (Test-Path "$sdk\.mcla-patches") {
+        $lines = @(Get-Content "$sdk\.mcla-patches" | Where-Object { -not $_.EndsWith(" $leaf") })
+    }
+    $lines += "$(PatchHash $patch) $leaf"
+    Set-Content -Force -Encoding Ascii "$sdk\.mcla-patches" $lines
+}
+function CheckPatch([string]$patch) {
+    $leaf = Split-Path $patch -Leaf
+    $record = $null
+    if (Test-Path "$sdk\.mcla-patches") {
+        $record = Get-Content "$sdk\.mcla-patches" | Where-Object { $_.EndsWith(" $leaf") } | Select-Object -First 1
+    }
+    $again = "Patch the SDK afresh: launcher\build-game.ps1 -ResetSdk, or delete third_party\rexglue-sdk, and run this again."
+    if (-not $record) {
+        Fail "$leaf is in the SDK without a record in third_party\rexglue-sdk\.mcla-patches: it was patched by an older make_pc.ps1 and may hold an older version of it. $again"
+    }
+    if ($record.Split(" ")[0] -ne (PatchHash $patch)) {
+        Fail "patches\$leaf has changed since it was applied to the SDK. $again"
+    }
 }
 
 Push-Location $root
@@ -143,6 +174,8 @@ try {
         New-Item -ItemType File "$sdk\.mcla-patched" | Out-Null
     } else {
         "already patched: $sdk"
+        CheckPatch "$root\patches\rexglue-v0.10.0-mcla.patch"
+        CheckPatch "$root\patches\rexglue-ffmpeg-ps5-config.patch"
     }
     # The car reflection fix came later than the patches
     # above: an SDK patched before it gets it here, and the marker's new time
@@ -150,11 +183,14 @@ try {
     if (-not (Select-String -Quiet -SimpleMatch "kSysFlag_MinMaxColor0TimesSrcAlpha" "$sdk\include\rex\graphics\pipeline\shader\spirv_translator.h")) {
         Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
         (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+    } else {
+        CheckPatch "$root\patches\rexglue-minmax-blend-factor.patch"
     }
     # Later patches to the SDK (patches\README.md), applied in the order they
     # were made, as several change neighbouring lines. Each goes onto an SDK
     # patched before it existed, found by a name it adds, and the marker's new
-    # time has step 3 build the SDK again.
+    # time has step 3 build the SDK again. One that is in already must be the
+    # version recorded (CheckPatch).
     $laterPatches = @(
         @{ Patch = "rexglue-gpu-regwrite-bulk.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_regwrite_bulk" }
         @{ Patch = "rexglue-imgui-dialog-repaint-on-demand.patch"; File = "include\rex\ui\imgui_dialog.h"; Adds = "RepaintsContinuously" }
@@ -183,6 +219,8 @@ try {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
             Patch "sdk-patch-$($later.Patch -replace '^rexglue-|\.patch$')" $sdk "$root\patches\$($later.Patch)"
             (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+        } else {
+            CheckPatch "$root\patches\$($later.Patch)"
         }
     }
 

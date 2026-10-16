@@ -107,6 +107,13 @@ The fork's SDK patches are built and tested on Windows only. On Linux they
 apply in this order on top of the two Linux patches, but have not been built
 or run there.
 
+The two scripts record each patch they apply, with its SHA-256, in the SDK
+checkout's `.mcla-patches`, and stop at a patch that is in without its
+current hash there: one revised since, or an SDK patched by hand or by an
+older script. Patch the SDK afresh then (`launcher\build-game.ps1 -ResetSdk`,
+or delete the SDK checkout and run the script again); `patches/README.md` has
+the details.
+
 ## Keeping up with upstream
 
 The fork takes upstream's changes **only when asked to**, never automatically:

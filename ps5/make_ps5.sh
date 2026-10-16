@@ -98,37 +98,71 @@ fi
 
 # ---------------------------------------------------------------------------
 step "3/9 ReXGlue SDK $rex_tag with this project's patches"
+# A patch revised later still adds the name the SDK is checked for, so the
+# SHA-256 of every patch applied goes into the SDK's .mcla-patches, and a patch
+# that is in without its current hash there stops the build: the SDK has to be
+# patched afresh, as reverting an older version can fail where later patches
+# change the same lines.
+records="$rex_src/.mcla-patches"
+patch_hash() { sha256sum < "$1" | cut -d' ' -f1; }
+record_patch() {
+    local leaf; leaf=$(basename "$1")
+    { grep -v " $leaf\$" "$records" 2> /dev/null || true; echo "$(patch_hash "$1") $leaf"; } > "$records.new"
+    mv "$records.new" "$records"
+}
+check_patch() {
+    local leaf record again; leaf=$(basename "$1")
+    again="Patch the SDK afresh: delete $rex_src and run this again."
+    record=$(grep " $leaf\$" "$records" 2> /dev/null | head -1 | cut -d' ' -f1 || true)
+    [ -n "$record" ] || fail "$leaf is in the SDK without a record in $records: it was patched by an older make_ps5.sh and may hold an older version of it. $again"
+    [ "$record" = "$(patch_hash "$1")" ] || fail "patches/$leaf has changed since it was applied to the SDK. $again"
+}
 if [ ! -f "$rex_src/.mcla-patched" ]; then
     if [ ! -d "$rex_src/.git" ]; then
         logged sdk-clone git clone --recursive --branch "$rex_tag" https://github.com/rexglue/rexglue-sdk.git "$rex_src"
     fi
     [ "$(git -C "$rex_src" rev-parse HEAD)" = "$rex_commit" ] || fail "the SDK checkout is not $rex_tag ($rex_commit)"
     git -C "$rex_src" apply "$repo/patches/rexglue-v0.10.0-mcla.patch" || fail "SDK patch does not apply (is the checkout clean?)"
+    record_patch "$repo/patches/rexglue-v0.10.0-mcla.patch"
     git -C "$rex_src/thirdparty/FFmpeg" apply "$repo/patches/rexglue-ffmpeg-ps5-config.patch" || fail "FFmpeg patch does not apply"
+    record_patch "$repo/patches/rexglue-ffmpeg-ps5-config.patch"
     touch "$rex_src/.mcla-patched"
 else
     echo "already patched: $rex_src"
+    check_patch "$repo/patches/rexglue-v0.10.0-mcla.patch"
+    check_patch "$repo/patches/rexglue-ffmpeg-ps5-config.patch"
 fi
 # The car reflection fix came later than the patches above:
 # an SDK patched before it gets it here, and step 6 builds what changed.
 if ! grep -q kSysFlag_MinMaxColor0TimesSrcAlpha "$rex_src/include/rex/graphics/pipeline/shader/spirv_translator.h"; then
     git -C "$rex_src" apply "$repo/patches/rexglue-minmax-blend-factor.patch" || fail "the reflection fix does not apply (is the checkout clean?)"
+    record_patch "$repo/patches/rexglue-minmax-blend-factor.patch"
     echo "applied: rexglue-minmax-blend-factor.patch"
+else
+    check_patch "$repo/patches/rexglue-minmax-blend-factor.patch"
 fi
 # Short waits that spun instead of sleeping (from the Linux build, PR #4): the
 # PS5 runs the same POSIX threading code. Added later, so applied the same way.
 if ! grep -q "Sleep the real remaining time" "$rex_src/src/core/threading_posix.cpp"; then
     git -C "$rex_src" apply "$repo/patches/rexglue-linux-wait-sleep.patch" || fail "the wait fix does not apply (is the checkout clean?)"
+    record_patch "$repo/patches/rexglue-linux-wait-sleep.patch"
     echo "applied: rexglue-linux-wait-sleep.patch"
+else
+    check_patch "$repo/patches/rexglue-linux-wait-sleep.patch"
 fi
 
 # Later patches to the SDK (patches/README.md), applied in the order they were
 # made, as several change neighbouring lines. Each goes onto an SDK patched
-# before it existed, found by a name it adds. Built and run on Windows only so
-# far.
+# before it existed, found by a name it adds; one that is in already must be
+# the version recorded (check_patch). Built and run on Windows only so far.
 while read -r patch file adds; do
-    grep -qF "$adds" "$rex_src/$file" && continue
-    git -C "$rex_src" apply "$repo/patches/$patch" || fail "$patch does not apply (is the checkout clean?)"
+    if grep -qF "$adds" "$rex_src/$file"; then
+        check_patch "$repo/patches/$patch"
+        continue
+    fi
+    # nowarn: rebuilt shader headers keep the compiler listing's trailing spaces.
+    git -C "$rex_src" apply --whitespace=nowarn "$repo/patches/$patch" || fail "$patch does not apply (is the checkout clean?)"
+    record_patch "$repo/patches/$patch"
     echo "applied: $patch"
 done <<'LATER'
 rexglue-gpu-regwrite-bulk.patch src/graphics/command_processor.cpp gpu_regwrite_bulk
