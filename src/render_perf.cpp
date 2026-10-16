@@ -14,7 +14,8 @@
 #endif
 
 REXCVAR_DEFINE_BOOL(mcla_single_tile, true, "MCLA",
-                    "Render the main scene as one tile instead of the Xbox 360's two");
+                    "Render the main scene as one tile instead of the Xbox 360's two. Needs a "
+                    "host EDRAM of 4096 tiles; this SDK's has 2048, so it has no effect");
 REXCVAR_DEFINE_BOOL(mcla_fence_yield, true, "MCLA",
                     "Yield the CPU while the game waits on the GPU instead of spinning");
 
@@ -22,7 +23,8 @@ namespace {
 
 // Tile count the game computed for the current frame.
 constexpr uint32_t kGuestTileCount = 0x827D42A4;
-// Size of the runtime's virtual EDRAM, in tiles. The console has 0x800.
+// The EDRAM size, in tiles, that single tile assumes the host has. The
+// console has 0x800, and so does this SDK (xenos::kEdramTileCount).
 constexpr uint32_t kHostEdramTiles = 4096;
 
 }  // namespace
@@ -32,8 +34,10 @@ void mcla_single_tile(PPCRegister& r7, PPCRegister& r8, PPCRegister& r17, PPCReg
   if (!REXCVAR_GET(mcla_single_tile)) {
     return;
   }
-  // Only the main scene. A non-null render target is an offscreen pass
-  // (shadows, bloom, pause snapshot) with its own layout.
+  // Meant for the main scene only, but every call passes a render target, the
+  // main scene's too, so this always returns here. Applied to the main scene
+  // on this SDK, the scene's colour would wrap into its depth's EDRAM tiles
+  // (config/render_perf.toml).
   if (r17.u64 != 0) {
     return;
   }

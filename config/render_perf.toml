@@ -4,20 +4,34 @@
 
 # 0x8217A700 in grcDevice::BeginTiledRendering (sub_8217A470), after the tile
 # size has been computed and before the tile rectangle loop. r7/r8 = tile
-# width/height, r28/r25 = screen width/height, r17 = render target (0 for the
-# main scene). The Xbox 360 had 10 MiB of framebuffer memory, so the game
-# renders 720p with MSAA as two tiles and submits the scene once per tile.
-# Making the tile the size of the screen submits it once.
+# width/height, r28/r25 = target width/height, r17 = render target. The Xbox
+# 360 had 10 MiB of framebuffer memory, so the game renders 720p with 2x MSAA
+# as two tiles (1280x512 and 1280x208; 4x MSAA as three) and submits the scene
+# once per tile. Making the tile the size of the screen would submit it once.
+#
+# This hook never takes effect with this SDK. It acts only when r17 is 0, and
+# every call passes a render target, the main scene's included (sub_822E5ED8,
+# the call returning to 0x822E6020). Nor could it work: a 720p 2x MSAA tile
+# needs 1,472 EDRAM tiles for the colour and as many for the depth, and the
+# SDK's EDRAM is the console's 2,048 tiles, with addresses wrapping around
+# (xenos::kEdramTileCount; the resolve shaders wrap at 10 MiB). Forced onto
+# the main scene, the colour at tile 1,472 wraps into the depth's tiles, and
+# everything below row 288 (at 1x) resolves as garbage. It needs a host EDRAM
+# of at least 2,944 tiles; LARecomp's unpublished SDK has 4,096. With MSAA
+# off the game draws the scene as one tile by itself.
 [[midasm_hook]]
 address = 0x8217A700
 name = "mcla_single_tile"
 registers = ["r7", "r8", "r17", "r25", "r28"]
 
 # 0x82410E34 in sub_82410D70 (surface creation): rejects a surface whose end
-# exceeds 0x800 EDRAM tiles, the real console's capacity. One 720p MSAA tile
-# needs more. The runtime's virtual EDRAM is 4096 tiles, and the surface
-# header's base field is 12 bits, so up to 4096 is safe. r3 = base, r30 =
-# size, r11 = base + size; true jumps to the success branch.
+# exceeds 0x800 EDRAM tiles, the real console's capacity. With
+# mcla_single_tile on it lets a surface end anywhere up to 4,096 tiles (the
+# surface header's base field is 12 bits). That is for a host EDRAM of 4,096
+# tiles; the SDK's has 2,048 (see above), so a surface past it would wrap.
+# None did in the sessions measured (the title, the city, the menus and a
+# race): 11 surfaces each, none ending past 2,048. r3 = base, r30 = size,
+# r11 = base + size; true jumps to the success branch.
 [[midasm_hook]]
 address = 0x82410E34
 name = "mcla_edram_limit"
