@@ -513,7 +513,9 @@ def game_args(a, out):
         f"--mcla_gpu_backend={a.backend}",
         f"--resolution_scale={a.res}",
         f"--mcla_fps={a.fps}",
-        "--vsync=false",
+        # As the launcher passes it with every frame rate; "unset" leaves it to
+        # mcla.toml and the game (src/frame_timing.cpp, ConfigureFrameTiming).
+        *([] if a.vsync == "unset" else [f"--vsync={a.vsync}"]),
         f"--fullscreen={'true' if a.fullscreen else 'false'}",
         f"--mcla_intro={a.intro}",
         f"--mcla_pad_frames_csv={out / 'frames.csv'}",
@@ -555,6 +557,13 @@ def run(a, tag=None):
     (out / "gpu-guard.json").unlink(missing_ok=True)
     before = fingerprint()
     toml_backup = TOML.read_bytes() if TOML.exists() else None
+    if a.toml:
+        # The settings file the run starts with, instead of the real one
+        # (which is put back afterwards either way); "none" for no file.
+        if a.toml == "none":
+            TOML.unlink(missing_ok=True)
+        else:
+            shutil.copyfile(a.toml, TOML)
     env = dict(os.environ, REX_PERF_LOG_CSV=str(out / "perf.csv"))
     env.update(kv.split("=", 1) for kv in a.env)
     args = game_args(a, out)
@@ -575,6 +584,10 @@ def run(a, tag=None):
             proc.wait()
     elapsed = time.monotonic() - start
     gpu = guard.finish(out) if guard else None
+    # What the game saved (the pause menu's settings), before the real file
+    # is put back.
+    if TOML.exists():
+        shutil.copyfile(TOML, out / "mcla.toml.after")
     if toml_backup is not None:
         TOML.write_bytes(toml_backup)
     elif TOML.exists():
@@ -813,6 +826,12 @@ def main():
         # benchmarks keep "normal" so start-up runs as the user sees it.
         p.add_argument("--intro", default="normal" if name == "bench" else "fast")
         p.add_argument("--fullscreen", action="store_true")
+        p.add_argument("--vsync", default="false", choices=["false", "true", "unset"],
+                       help="--vsync on the command line (default false, as the launcher); "
+                       "unset passes none")
+        p.add_argument("--toml", help="start the run with this mcla.toml instead of the real "
+                       "one (\"none\": with none); the real one is put back afterwards, and "
+                       "what the game saved is kept as mcla.toml.after in the run folder")
         p.add_argument("--record", help="record user 0's controller to this CSV")
         p.add_argument("--timeout", type=float, default=600)
         p.add_argument("--keep-open", action="store_true", help="don't quit when the script ends")
@@ -855,7 +874,7 @@ def main():
         # the cap it was recorded at.
         a.script, a.pipe, a.fixed_dt, a.intro = str(HERE / "scripts" / "mark-roam.pad"), "", 0, "normal"
         a.record, a.keep_open, a.timeout, a.extra = a.file, True, 3 * 3600, []
-        a.cache_root, a.env = None, []
+        a.cache_root, a.env, a.vsync, a.toml = None, [], "false", None
         analyze(run(a))
     elif a.cmd == "gpu":
         gpu_watch(a.seconds, a.gpu_threshold)
