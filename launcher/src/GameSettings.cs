@@ -46,12 +46,14 @@ static class GameSettings
     public static readonly GameSetting DisplayGamma = new("mcla_display_gamma", "Display gamma",
         [new("TV (as on the console)", "tv"), new("PC monitor (sRGB, brighter shadows)", "pc")], "tv");
     public static readonly GameSetting AntiAliasing = new("mcla_msaa", "Anti-aliasing",
-        [new("On (2× MSAA)", true), new("Off (2 to 5% faster at 3×)", false)], true);
+        [new("On (2× MSAA)", true), new("Off (2 to 5% faster at 3× with single tile rendering on)", false)], true);
     // With anti-aliasing on, the scene drawn once instead of in the Xbox 360's
     // two tiles, in the larger EDRAM the game sets up on PC
-    // (src/render_perf.cpp); it changes during play too.
+    // (src/render_perf.cpp); it changes during play too. It does nothing with
+    // anti-aliasing off (one tile anyway); edram_tiles = 2048 in mcla.toml
+    // goes back to the console's EDRAM altogether.
     public static readonly GameSetting SingleTile = new("mcla_single_tile", "Single tile rendering",
-        [new("On (9 to 20% faster at 3×)", true), new("Off (two tiles, as on the console)", false)], true);
+        [new("On (with anti-aliasing: 9 to 20% faster at 3×)", true), new("Off (two tiles, as on the console)", false)], true);
     public static readonly GameSetting HudRate = new("mcla_ui_hud_rate", "HUD updates",
         [new("30 per second (as on the console)", 30L), new("60 per second", 60L),
          new("120 per second", 120L), new("Every frame", 0L)], 30L);
