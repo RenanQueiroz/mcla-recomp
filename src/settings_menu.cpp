@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,7 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
 REXCVAR_DEFINE_BOOL(mcla_motion_blur, true, "MCLA", "Motion blur");
@@ -43,6 +45,10 @@ REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
 // Set by a host that keeps the settings file somewhere other than next to
 // the executable (PS5).
 const char* g_mcla_settings_path = nullptr;
+
+#if REX_PLATFORM_WIN32
+bool MclaRelaunchGame();  // src/mcla_app.cpp
+#endif
 
 namespace {
 
@@ -385,6 +391,17 @@ constexpr double kHudRates[] = {30.0, 60.0, 0.0};
 constexpr double kHudRates[] = {30.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kHudRateCount = int(sizeof(kHudRates) / sizeof(kHudRates[0]));
+#if !REX_PLATFORM_PS5
+// resolution_scale (the SDK's; kRequiresRestart): the render targets, caches
+// and translated shaders are made for one scale when the GPU emulation starts.
+constexpr const char* kScaleValues[] = {"1", "2", "3"};
+constexpr const char* kScaleLabels[] = {"NATIVE (720P)", "2X (1440P)", "3X (2160P)"};
+#endif
+#if REX_PLATFORM_WIN32
+// mcla_gpu_backend (src/mcla_app.cpp): chosen before the window opens.
+constexpr const char* kBackendValues[] = {"any", "d3d12", "vulkan"};
+constexpr const char* kBackendLabels[] = {"AUTO", "D3D12", "VULKAN"};
+#endif
 constexpr const char* kPromptValues[] = {"auto", "xbox", "playstation"};
 constexpr const char* kPromptLabels[] = {"AUTO", "XBOX", "PLAYSTATION"};
 constexpr const char* kIntroValues[] = {"normal", "fast", "skip"};
@@ -400,6 +417,12 @@ const ItemDef kDisplayItems[] = {
     // the PS5 host turns the emulated vsync off at every start.
     {"PM_MxVsync", ItemKind::kToggle, "vsync", "VSYNC"},
     {"PM_MxFullscreen", ItemKind::kToggle, "fullscreen", "FULLSCREEN"},
+    {"PM_MxResolution", ItemKind::kStringChoice, "resolution_scale", "RESOLUTION", kScaleValues,
+     kScaleLabels, nullptr, 3},
+#endif
+#if REX_PLATFORM_WIN32
+    {"PM_MxBackend", ItemKind::kStringChoice, "mcla_gpu_backend", "GRAPHICS API", kBackendValues,
+     kBackendLabels, nullptr, 3},
 #endif
     {"PM_MxMotionBlur", ItemKind::kToggle, "mcla_motion_blur", "MOTION BLUR"},
     {"PM_MxDof", ItemKind::kToggle, "mcla_depth_of_field", "DEPTH OF FIELD"},
@@ -439,6 +462,9 @@ const ItemDef kControlItems[] = {
      kPromptValues, kPromptLabels, nullptr, 3},
     {"PM_MxIntro", ItemKind::kStringChoice, "mcla_intro", "INTRO", kIntroValues, kIntroLabels,
      nullptr, 3},
+#if !REX_PLATFORM_PS5
+    {"PM_MxHideCursor", ItemKind::kToggle, "mcla_hide_cursor", "HIDE MOUSE POINTER"},
+#endif
 };
 
 struct MenuDef {
@@ -466,10 +492,12 @@ bool RestartOnly(const char* option) {
   return info && info->lifecycle == rex::cvar::Lifecycle::kRequiresRestart;
 }
 
-std::string RowLabel(const ItemDef& item) {
+// A restart-only row says "(NEXT START)", and "(RESTART NEEDED)" once its
+// value differs from the one the game started with.
+std::string RowLabel(const ItemDef& item, bool pending) {
   std::string label = item.label;
   if (RestartOnly(item.option)) {
-    label += " (NEXT START)";
+    label += pending ? " (RESTART NEEDED)" : " (NEXT START)";
   }
   return label;
 }
@@ -577,7 +605,10 @@ constexpr int kRowWindow = 3;
 struct MenuRows {
   uint32_t array = 0;
   uint32_t row[kMaxRows] = {};
+  uint32_t name[kMaxRows] = {};      // the row's string-table key, a guest string
   int last_index[kMaxRows] = {};
+  std::string label[kMaxRows];       // the text its label has now
+  std::string start_value[kMaxRows];  // the option's value when the menus were built
   int count = 0;
 };
 
@@ -586,6 +617,20 @@ std::atomic<uint32_t> g_menu_button_key[kMenuCount] = {};
 std::atomic<uint32_t> g_menu_state[kMenuCount] = {};
 std::atomic<uint32_t> g_menu_title[kMenuCount] = {};
 std::atomic<uint32_t> g_quit_button_key{0};
+// RESTART GAME (Windows): pressed once it asks to be pressed again, which
+// restarts the game if it comes within kRestartConfirmMs.
+constexpr const char* kRestartKey = "PM_MxRestart";
+constexpr const char* kRestartLabel = "RESTART GAME";
+constexpr const char* kRestartConfirmLabel = "RESTART GAME (PRESS AGAIN)";
+constexpr uint64_t kRestartConfirmMs = 5000;
+std::atomic<uint32_t> g_restart_button_key{0};
+std::atomic<uint64_t> g_restart_asked_ms{0};
+
+uint64_t NowMs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
 std::atomic<int> g_active_menu{-1};
 std::atomic<bool> g_menus_created{false};
 
@@ -663,13 +708,16 @@ bool BuildRows(int menu) {
     const ItemDef& item = def.items[i];
     // The row constructor resolves its label through the string table once,
     // so the text has to exist first.
-    SetStringTableText(item.key, RowLabel(item).c_str());
+    rows.start_value[i] = OptionGet(item.option);
+    rows.label[i] = RowLabel(item, false);
+    SetStringTableText(item.key, rows.label[i].c_str());
     uint32_t name = AllocGuestString(item.key);
     uint32_t row = CallGuest(kGuestMallocFn, kRowObjectSize);
     if (!name || !row) {
       return false;
     }
     std::memset(Membase() + row, 0, kRowObjectSize);
+    rows.name[i] = name;
 
     if (item.kind == ItemKind::kToggle) {
       // The checkbox class has no constructor of its own: the label row's
@@ -713,6 +761,27 @@ void InstallRows(int menu, uint32_t list) {
   Write32(list + kListCountCap, count_cap);
 }
 
+// Marks a restart-only row whose value now differs from the one the game
+// started with. The row constructor caches its label, so it is set again
+// (kSetRowLabelFn) after the string-table text changes.
+void UpdateRowLabels(int menu) {
+  MenuRows& rows = g_rows[menu];
+  const MenuDef& def = kMenus[menu];
+  for (int i = 0; i < rows.count; ++i) {
+    const ItemDef& item = def.items[i];
+    if (!RestartOnly(item.option)) {
+      continue;
+    }
+    std::string label = RowLabel(item, OptionGet(item.option) != rows.start_value[i]);
+    if (label == rows.label[i] || !rows.row[i] || !rows.name[i]) {
+      continue;
+    }
+    rows.label[i] = std::move(label);
+    SetStringTableText(item.key, rows.label[i].c_str());
+    CallGuest(kSetRowLabelFn, rows.row[i], rows.name[i]);
+  }
+}
+
 // Brings every row in line with the current option values.
 void SyncRowsFromOptions(int menu) {
   MenuRows& rows = g_rows[menu];
@@ -727,6 +796,7 @@ void SyncRowsFromOptions(int menu) {
       CentreRowWindow(rows, i, item, index);
     }
   }
+  UpdateRowLabels(menu);
 }
 
 // Left and right are handled inside the row, which then re-renders the list.
@@ -751,6 +821,7 @@ void PollRows(int menu) {
       const int index = ((rows.last_index[i] + direction) % count + count) % count;
       ItemSetIndex(item, index);
       CentreRowWindow(rows, i, item, index);
+      UpdateRowLabels(menu);
     }
   }
 }
@@ -946,7 +1017,12 @@ std::string MendedLine(const std::string& line) {
   return line.substr(0, open) + "'" + std::string(body) + "'" + line.substr(close + 1);
 }
 
+std::mutex g_save_mutex;
+
 void SaveSettingsIfChanged() {
+  // From the game's thread (leaving a submenu, QUIT GAME, RESTART GAME) and
+  // from the UI thread (the window closing).
+  std::lock_guard save_lock(g_save_mutex);
   if (!g_settings_dirty.exchange(false, std::memory_order_relaxed)) {
     return;
   }
@@ -1085,6 +1161,16 @@ void CreateSubmenus() {
     BuildRows(menu);
   }
 
+#if REX_PLATFORM_WIN32
+  uint32_t restart = CreateMenuState(kRestartKey);
+  uint32_t restart_key = AllocGuestString(kRestartKey);
+  if (restart && restart_key) {
+    AppendMenuItem(settings, restart);
+    SetStringTableText(kRestartKey, kRestartLabel);
+    g_restart_button_key.store(restart_key, std::memory_order_relaxed);
+  }
+#endif
+
   constexpr const char* kQuitKey = "PM_MxQuit";
   uint32_t quit = CreateMenuState(kQuitKey);
   uint32_t quit_key = AllocGuestString(kQuitKey);
@@ -1107,6 +1193,19 @@ uint32_t PauseTabStrip() {
   }
   const uint32_t context = CallGuest(context_fn, strip);
   return context && context == PauseMovieContext() ? strip : 0;
+}
+
+// Ends the game as the window's close button does: the window is closed on the
+// UI thread, and ReXApp::OnClosing ends the title and the process.
+// (WindowedAppContext::RequestDeferredQuit, used before, only left the UI
+// loop: the app then waited for the game's main thread, which doesn't end, so
+// the game played on behind a window that no longer answered.)
+void CloseGame() {
+  auto* runtime = rex::Runtime::instance();
+  rex::ui::Window* window = runtime ? runtime->display_window() : nullptr;
+  if (window) {
+    window->app_context().CallInUIThread([window] { window->RequestClose(); });
+  }
 }
 
 bool ButtonClicked(uint32_t key) {
@@ -1139,6 +1238,11 @@ bool NodeReachesList(uint32_t node, uint32_t list, int depth, int& budget) {
 }
 
 }  // namespace
+
+// What was changed in these menus, saved now: the window is closing.
+void MclaSaveMenuSettings() {
+  SaveSettingsIfChanged();
+}
 
 // --- Hooks -------------------------------------------------------------------
 
@@ -1198,13 +1302,40 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     return true;
   }
 
-  if (ButtonClicked(g_quit_button_key.load(std::memory_order_relaxed))) {
-    auto* runtime = rex::Runtime::instance();
-    if (auto* context = runtime ? runtime->app_context() : nullptr) {
-      REXLOG_INFO("settings menu: quit requested");
+#if REX_PLATFORM_WIN32
+  if (ButtonClicked(g_restart_button_key.load(std::memory_order_relaxed))) {
+    // Progress since the last save is lost, as with QUIT GAME, so the first
+    // press only asks for a second one.
+    const uint64_t now = NowMs();
+    const uint64_t asked = g_restart_asked_ms.load(std::memory_order_relaxed);
+    if (!asked || now - asked > kRestartConfirmMs) {
+      g_restart_asked_ms.store(now, std::memory_order_relaxed);
+      SetStringTableText(kRestartKey, kRestartConfirmLabel);
+      if (uint32_t list = g_last_list.load(std::memory_order_relaxed)) {
+        const uint32_t vtable = Read32(list);
+        if (const uint32_t render = vtable ? Read32(vtable + 176) : 0) {
+          CallGuest(render, list);
+        }
+      }
+      REXLOG_INFO("settings menu: restart asked for; press again to restart");
+    } else {
+      g_restart_asked_ms.store(0, std::memory_order_relaxed);
+      SetStringTableText(kRestartKey, kRestartLabel);
       SaveSettingsIfChanged();
-      context->RequestDeferredQuit();
+      if (MclaRelaunchGame()) {
+        REXLOG_INFO("settings menu: restarting");
+        CloseGame();
+      }
     }
+    r3.u64 = 1;
+    return true;
+  }
+#endif
+
+  if (ButtonClicked(g_quit_button_key.load(std::memory_order_relaxed))) {
+    REXLOG_INFO("settings menu: quit requested");
+    SaveSettingsIfChanged();
+    CloseGame();
     r3.u64 = 1;
     return true;
   }
@@ -1270,6 +1401,11 @@ bool mcla_menu_list_populate(PPCRegister& r3) {
   const uint32_t list = r3.u32;
   if (!list) {
     return false;
+  }
+  if (const uint64_t asked = g_restart_asked_ms.load(std::memory_order_relaxed);
+      asked && NowMs() - asked > kRestartConfirmMs) {
+    g_restart_asked_ms.store(0, std::memory_order_relaxed);
+    SetStringTableText(kRestartKey, kRestartLabel);
   }
   g_last_list.store(list, std::memory_order_relaxed);
   const int menu = g_active_menu.load(std::memory_order_relaxed);

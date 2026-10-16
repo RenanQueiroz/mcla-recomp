@@ -23,6 +23,9 @@ class MclaApp : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override;
   void OnPostSetup() override;
   void OnPreLaunchModule() override;
+  // Saves what was changed in the pause menu's settings, in case the window is
+  // closed while one of its submenus is open (src/settings_menu.cpp).
+  bool OnWindowCloseRequested() override;
 
   // Achievement pop-ups, registered with the ImGui drawer only while one is
   // on screen (src/achievement_toast.h). The SDK's toast is registered for the
@@ -37,5 +40,7 @@ class MclaApp : public rex::ReXApp {
  private:
   void InstallCrashTrace();
   void ConfigureFrameTiming();
+  void ApplyPcDefaults();
+  void FollowCursorSetting();
   void StartProfilerIfRequested();
 };

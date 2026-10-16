@@ -26,8 +26,10 @@ address = 0x8230C874
 registers = ["r11"]
 jump_address_on_true = 0x8230C878
 
-# 0x822E4B80 in the renderer constructor (sub_822E47E0): the multisample
-# setting. r11 = 1 selects none.
+# 0x822E4B80 in the renderer's creation (sub_822E4AB0, after the constructor
+# sub_822E47E0): the multisample setting. r11 = 1 selects none (renderer+384 =
+# 1 instead of 2). That is the start-up value; src/perf_options.cpp (ApplyMsaa)
+# switches the same field during play.
 [[midasm_hook]]
 name = "mcla_msaa"
 address = 0x822E4B80

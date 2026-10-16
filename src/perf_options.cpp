@@ -40,8 +40,7 @@ REXCVAR_DEFINE_BOOL(mcla_foliage_impostors, true, "MCLA",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_fullscreen_blur, true, "MCLA", "The full-screen blur pass (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA", "Multisample anti-aliasing (next start)")
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA", "Multisample anti-aliasing (2x)");
 REXCVAR_DEFINE_DOUBLE(mcla_city_lod, 1.0, "MCLA",
                       "Scale of the distance at which the city switches to less detail")
     .range(0.1, 4.0);
@@ -170,6 +169,42 @@ void ApplyShadowPhases(uint8_t* base) {
   }
 }
 
+// --- Anti-aliasing ----------------------------------------------------------------
+
+// The renderer's multisample mode, which the game sets when it creates the
+// renderer (sub_822E4AB0, where mcla_msaa's hook picks none at start-up) and
+// reads while it renders: 2 is the 2x MSAA it uses on an HD display, 1 none
+// (what its own developer switches give). Switched during play, it changes
+// cleanly on both APIs from the next frame (checked with the D3D12 debug layer
+// and Vulkan validation at 3x, standing, driving and in the pause menu).
+constexpr uint32_t kMsaaMode = 384;
+constexpr uint32_t kMsaaNone = 1;
+constexpr uint32_t kMsaaGame = 2;
+
+void ApplyMsaa(uint8_t* base) {
+  static int applied = -1;
+  static uint32_t game_mode = kMsaaGame;
+  const int want = REXCVAR_GET(mcla_msaa) ? 1 : 0;
+  if (want == applied) {
+    return;
+  }
+  const uint32_t renderer = Read32(base, kRendererPointer);
+  if (!LooksLikePointer(renderer)) {
+    return;
+  }
+  const uint32_t mode = Read32(base, renderer + kMsaaMode);
+  if (!want && mode != kMsaaNone) {
+    game_mode = mode;
+    Write32(base, renderer + kMsaaMode, kMsaaNone);
+  } else if (want && mode == kMsaaNone) {
+    Write32(base, renderer + kMsaaMode, game_mode);
+  }
+  if (applied >= 0) {
+    REXLOG_INFO("perf options: anti-aliasing {}", want ? "on" : "off");
+  }
+  applied = want;
+}
+
 // --- Ambient density ------------------------------------------------------------
 
 // The tuning fields at the start of an ambient zone.
@@ -294,6 +329,7 @@ void MclaTickPerfOptions() {
     return;
   }
   TickAbTest();
+  ApplyMsaa(base);
   ApplyShadowPhases(base);
   ApplyAmbientIfChanged(base);
 }
