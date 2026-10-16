@@ -59,10 +59,15 @@ The drop-downs are the game's own settings, in `mcla.toml` next to `mcla.exe`
 of the game's pause menu (DISPLAY, PERFORMANCE, CONTROLS), so each shows what the
 other set. A drop-down shows the file's value, or the game's default while the
 file doesn't set it; a value set by hand that isn't one of its choices shows as
-"... (set in mcla.toml)". A change is written at once, the way the game writes:
-the key's line is replaced where it is or added before the first `[table]`,
-every other line is kept, and the file is written beside the old one and
-renamed over it (`src\GameSettings.cs`).
+"... (set in mcla.toml)". A change is written at once, the way the game writes
+(`rex::cvar::SaveConfigValues`, from `patches\rexglue-cvar-toml-strings.patch`):
+the key's `key = value` is replaced where it is, keeping a comment after it, or
+added before the first `[table]`; every other line is kept (comments, keys it
+doesn't know, tables, values over several lines, a BOM, CRLF), and the file is
+written beside the old one, flushed to the disk and renamed over it
+(`src\GameSettings.cs`). A file that isn't UTF-8 text is left as it is, with
+a message, rather than rewritten; a value it can't read, such as a broken
+escape, shows as set by hand.
 
 While the game runs (started here, from its shortcut, or again by its own
 RESTART GAME; any `mcla.exe` counts, checked every two seconds) the drop-downs
@@ -73,7 +78,9 @@ file is read again and shows what was changed in the game.
 
 The launcher passes only what is typed under *Advanced*, **More mcla.exe
 options**; an option there wins over `mcla.toml` and the pause menu at every
-start. It no longer passes `--vsync=false`: the game turns vsync off by itself
+start, also after the pause menu's RESTART GAME, which starts the game again
+with the same options: `--resolution_scale` there overrides the pause menu's
+RESOLUTION. It no longer passes `--vsync=false`: the game turns vsync off by itself
 unless the pause menu's VSYNC (or `vsync = true` in the file) turns it on, and
 with it on the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces
 it unevenly. (An earlier note here said vsync set from the game never reached
@@ -83,15 +90,29 @@ menu.)
 Launchers before 2026-10-16 passed every choice on the command line at every
 start, which beat what the pause menu saved. The first time this one opens it
 moves those choices into `mcla.toml`, once (`SettingsMigration` in
-`src\GameSettings.cs`, flag `SettingsInGameFile` in `settings.json`):
+`src\GameSettings.cs`):
 
 1. it keeps a copy of `mcla.toml` as `mcla.toml.before-launcher-settings`, next
-   to it, before writing anything (and never replaces that copy);
+   to it, before writing anything (an empty file when there was no
+   `mcla.toml`), and takes the copy back if the write fails, to try again at
+   the next start;
 2. it writes each choice that was forcing a value: every one but "Game setting",
-   and Resolution and HUD updates, which had no "Game setting";
-3. it deletes nothing, and running it again writes the same values.
+   and Resolution and HUD updates, which had no "Game setting"; and
+   `vsync = false` with any frame rate, which came with `--vsync=false`;
+3. it deletes nothing, and drops the old choices from `settings.json`, which
+   then holds `SettingsInGameFile: true`.
 
-A new install (no `settings.json`) has nothing to move.
+It runs only once: not when the copy already exists or the flag is set, and
+not from a `settings.json` it can't read (whose choices are unknown; it is
+kept as `settings.json.unreadable` before the defaults replace it). A choice
+made in the launcher before then also ends it. It doesn't run while the game
+is running, which writes the file itself: it waits until the game has closed.
+A new install (no `settings.json`) has nothing to move. The old HUD updates
+choice (`HudUpdates`, an on/off switch) isn't carried over; the new one is a
+rate, 30 per second unless set.
+
+If `settings.json` can't be saved, the launcher says so instead of carrying on
+as if it had.
 
 *Anti-aliasing* is the game's 2× MSAA (`mcla_msaa`), and it switches during play
 too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, a 3× frame took 18 to
@@ -305,7 +326,9 @@ in front. A real controller keeps working alongside it.
   `--mcla_pad_exit_on_end` the game; `devrun.py` then reports the run as
   failed. `set <option> <value>` changes an
   option while the game runs, for comparing two settings within one run (the
-  time of day and the traffic differ from run to run).
+  time of day and the traffic differ from run to run). `close` closes the
+  window as its close button does (waiting for a save being written; `quit`
+  doesn't), and `saving` says whether one is (`saving wait`: until one is).
   `--mcla_fixed_dt=N` makes every game update advance exactly 1/N s:
   uncapped, a timedemo.
 - `dev\devrun.py` runs the game with a script **on a copy of the save data**:

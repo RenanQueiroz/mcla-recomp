@@ -54,20 +54,21 @@ static class GameOptions
 sealed record LauncherSettings
 {
     // The drop-downs of launchers before 2026-10-16, which passed the game's
-    // settings on the command line: now read only to write the choices that
-    // forced a value into mcla.toml, once (SettingsMigration).
-    public int Display { get; init; }
-    public int Resolution { get; init; }
-    public int Fps { get; init; }
+    // settings on the command line: read only to move the choices that forced
+    // a value into mcla.toml, once (SettingsMigration), then dropped, and no
+    // longer written to settings.json.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Display { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Resolution { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Fps { get; init; }
     // Which list the Fps index refers to: 0 is the first one (Game setting,
     // 30, 60, 120, Uncapped), 1 added 40, 45 and 50.
-    public int FpsList { get; init; }
-    public int Intro { get; init; }
-    public int Prompts { get; init; }
-    public int AntiAliasing { get; init; }
-    public int GraphicsApi { get; init; }
-    public int HudRate { get; init; }
-    // Set once those choices are in mcla.toml.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? FpsList { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Intro { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Prompts { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? AntiAliasing { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? GraphicsApi { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? HudRate { get; init; }
+    // Set once those choices are in mcla.toml (or there were none).
     public bool SettingsInGameFile { get; init; }
 
     public string ExtraArguments { get; init; } = "";
@@ -76,35 +77,47 @@ sealed record LauncherSettings
     public bool AutoPlay { get; init; }
 
     /// The launcher's settings; the first time, the old choices also go into
-    /// the game's mcla.toml (SettingsMigration, which keeps a copy first).
+    /// the game's mcla.toml (SettingsMigration, which keeps a copy first). A
+    /// settings.json that can't be read carries none over: its old choices are
+    /// unknown, and defaults must not be written over the game's settings.
     public static LauncherSettings Load()
     {
-        var existed = File.Exists(Paths.SettingsFile);
-        var settings = new LauncherSettings();
+        LauncherSettings settings;
         try
         {
-            if (existed)
-                settings = JsonSerializer.Deserialize(File.ReadAllText(Paths.SettingsFile), SettingsJson.Default.LauncherSettings) ?? new();
+            settings = File.Exists(Paths.SettingsFile)
+                ? JsonSerializer.Deserialize(File.ReadAllText(Paths.SettingsFile), SettingsJson.Default.LauncherSettings) ?? new()
+                : new();
         }
-        catch (Exception ex) when (ex is IOException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
+            // Saving the defaults will replace it, so a copy is kept first.
             Debug.WriteLine($"settings: {ex.Message}; using defaults");
+            try { File.Copy(Paths.SettingsFile, Paths.SettingsFile + ".unreadable", overwrite: true); }
+            catch (Exception copy) when (copy is IOException or UnauthorizedAccessException) { }
+            return SettingsMigration.Retire(new LauncherSettings());
         }
-        return SettingsMigration.Run(Migrate(settings), existed, Paths.BuildDir);
+        return SettingsMigration.Run(settings, Paths.BuildDir, GameSettings.GameIsRunning);
     }
-
-    // Where each choice of the first Fps list sits in the current one.
-    static readonly int[] FpsFromList0 = [0, 1, 5, 6, 7];
-
-    static LauncherSettings Migrate(LauncherSettings s) =>
-        s.FpsList >= 1 ? s : s with { Fps = s.Fps >= 0 && s.Fps < FpsFromList0.Length ? FpsFromList0[s.Fps] : 0, FpsList = 1 };
 
     public void Save()
     {
         // Write then rename, so a crash mid-write can't leave half a file.
-        var temp = Paths.SettingsFile + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(this, SettingsJson.Default.LauncherSettings));
-        File.Move(temp, Paths.SettingsFile, overwrite: true);
+        var temp = $"{Paths.SettingsFile}.{Environment.ProcessId}.tmp";
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this, SettingsJson.Default.LauncherSettings)));
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temp, Paths.SettingsFile, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(temp); } catch (IOException) { }
+            throw;
+        }
     }
 }
 

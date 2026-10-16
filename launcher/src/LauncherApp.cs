@@ -32,21 +32,16 @@ sealed class LauncherApp : Component
         }
     }
 
-    // Started here, from its own shortcut, or again by its pause menu's
-    // RESTART GAME: any mcla.exe counts, as for the build.
-    static bool GameIsRunning()
-    {
-        var processes = Process.GetProcessesByName("mcla");
-        foreach (var process in processes) process.Dispose();
-        return processes.Length > 0;
-    }
+    static bool GameIsRunning() => GameSettings.GameIsRunning();
 
     public override Element Render()
     {
         // Loading the settings also moves an older launcher's choices into
         // mcla.toml, once, so it comes before the file is read.
         var initialSettings = UseMemo(LauncherSettings.Load, Array.Empty<object>());
-        var (settings, updateSettings) = UseReducer(initialSettings);
+        var (settings, updateSettings) = UseReducer(initialSettings, threadSafe: true);
+        var settingsRef = UseRef(initialSettings);
+        settingsRef.Current = settings;
         var initialGameSettings = UseMemo(ReadGameSettings, Array.Empty<object>());
         var (gameSettings, setGameSettings) = UseState(initialGameSettings, threadSafe: true);
         var (status, setStatus) = UseState<RepoStatus?>(null);
@@ -60,6 +55,8 @@ sealed class LauncherApp : Component
         var (activity, setActivity) = UseState<Activity?>(null);
         var initialRunning = UseMemo(GameIsRunning, Array.Empty<object>());
         var (gameRunning, setGameRunning) = UseState(initialRunning, threadSafe: true);
+        var runningRef = UseRef(initialRunning);
+        runningRef.Current = gameRunning;
         var (countdown, setCountdown) = UseState<int?>(null);
         var (confirmExit, setConfirmExit) = UseState(false);
         var buildRef = UseRef<BuildRun?>(null);
@@ -169,6 +166,9 @@ sealed class LauncherApp : Component
                 Directory.CreateDirectory(Paths.BuildDir);
                 GameSettingsFile.Set(GameSettingsPath, new Dictionary<string, object> { [setting.Key] = value });
                 setGameSettings(ReadGameSettings());
+                // A setting chosen here is the user's now: an older launcher's
+                // choices that weren't moved yet must never come over it.
+                if (!settingsRef.Current.SettingsInGameFile) updateSettings(SettingsMigration.Retire);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             {
@@ -233,7 +233,10 @@ sealed class LauncherApp : Component
         UseEffect(() =>
         {
             try { settings.Save(); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Debug.WriteLine($"settings: {ex.Message}"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                setNotice($"Couldn't save the launcher's settings in {Paths.SettingsFile}: {ex.Message}");
+            }
         }, settings);
 
         // Closing the window mid-build asks first; quitting stops the build.
@@ -259,17 +262,24 @@ sealed class LauncherApp : Component
             var cts = new CancellationTokenSource();
             _ = Task.Run(async () =>
             {
-                var last = GameIsRunning();
                 using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
                 try
                 {
                     while (await timer.WaitForNextTickAsync(cts.Token))
                     {
+                        // Against what is shown, so that a game that started and
+                        // closed between two checks doesn't leave it greyed out.
                         var running = GameIsRunning();
-                        if (running == last) continue;
-                        last = running;
+                        if (running == runningRef.Current) continue;
+                        runningRef.Current = running;
                         setGameRunning(running);
-                        if (!running) setGameSettings(ReadGameSettings());
+                        if (running) continue;
+                        // An older launcher's choices are moved into mcla.toml
+                        // only while no game runs (LauncherSettings.Load).
+                        if (!settingsRef.Current.SettingsInGameFile &&
+                            SettingsMigration.Run(settingsRef.Current, Paths.BuildDir, GameIsRunning).SettingsInGameFile)
+                            updateSettings(SettingsMigration.Retire);
+                        setGameSettings(ReadGameSettings());
                     }
                 }
                 catch (OperationCanceledException) { }
