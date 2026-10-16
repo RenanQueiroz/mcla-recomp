@@ -505,7 +505,7 @@ index 947817f..69aaf70 100644
  #include <rex/ui/vulkan/functions/device_1_1_khr_get_memory_requirements2.inc>
      // VK_KHR_bind_memory2 (#158, promoted to 1.1)
 diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
-index d9d6ed3..9922fd0 100644
+index d9d6ed3..6a98c47 100644
 --- a/include/rex/ui/vulkan/functions/device_1_0.inc
 +++ b/include/rex/ui/vulkan/functions/device_1_0.inc
 @@ -14,6 +14,7 @@ XE_UI_VULKAN_FUNCTION(vkCmdClearAttachments)
@@ -516,6 +516,14 @@ index d9d6ed3..9922fd0 100644
  XE_UI_VULKAN_FUNCTION(vkCmdCopyImageToBuffer)
  XE_UI_VULKAN_FUNCTION(vkCmdCopyQueryPoolResults)
  XE_UI_VULKAN_FUNCTION(vkCmdDispatch)
+@@ -82,6 +83,7 @@ XE_UI_VULKAN_FUNCTION(vkResetDescriptorPool)
+ XE_UI_VULKAN_FUNCTION(vkResetFences)
+ XE_UI_VULKAN_FUNCTION(vkQueueBindSparse)
+ XE_UI_VULKAN_FUNCTION(vkQueueSubmit)
++XE_UI_VULKAN_FUNCTION(vkQueueWaitIdle)
+ XE_UI_VULKAN_FUNCTION(vkUnmapMemory)
+ XE_UI_VULKAN_FUNCTION(vkUpdateDescriptorSets)
+ XE_UI_VULKAN_FUNCTION(vkWaitForFences)
 diff --git a/include/rex/ui/vulkan/functions/device_ext_hdr_metadata.inc b/include/rex/ui/vulkan/functions/device_ext_hdr_metadata.inc
 new file mode 100644
 index 0000000..dcc6aa2
@@ -3836,7 +3844,7 @@ index fa574c4..d202bbb 100644
    color_blend_attachment_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
                                                  VK_COLOR_COMPONENT_G_BIT |
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 9935419..390e90e 100644
+index 9935419..6726f53 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -859,7 +859,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
@@ -3848,7 +3856,26 @@ index 9935419..390e90e 100644
    bool hdr = false;
  
    // ConnectOrReconnectToSurfaceFromUIThread may be called only for the
-@@ -1007,6 +1007,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -878,8 +878,17 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+         old_swapchain, paint_context_.present_queue_family, new_swapchain_format,
+         paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable,
+         hdr_wanted, hdr);
+-    // Destroy the old swapchain that may be retired now.
++    // Destroy the old swapchain that may be retired now, once its last
++    // presentation is done (rexglue-hdr-ui-layer.patch: the paint submissions
++    // were awaited, but not the present, which is invalid -
++    // VUID-vkDestroySwapchainKHR-swapchain-01282; HDR output switches make
++    // recreation common).
+     if (old_swapchain != VK_NULL_HANDLE) {
++      {
++        const VulkanDevice::Queue::Acquisition queue_acquisition =
++            vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
++        dfn.vkQueueWaitIdle(queue_acquisition.queue());
++      }
+       dfn.vkDestroySwapchainKHR(device, old_swapchain, nullptr);
+     }
+     if (paint_context_.swapchain == VK_NULL_HANDLE) {
+@@ -1007,6 +1016,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
  
    paint_context_.swapchain_hdr_wanted = hdr_wanted;
    paint_context_.swapchain_hdr = hdr;
@@ -3856,7 +3883,7 @@ index 9935419..390e90e 100644
    SetHdrOutputActive(hdr);
  
    // Update the render pass to the new format.
-@@ -1162,7 +1163,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -1162,7 +1172,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
  
  void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
    paint_context_.DestroySwapchainAndVulkanSurface();
@@ -3865,7 +3892,7 @@ index 9935419..390e90e 100644
    paint_context_.swapchain_hdr = false;
    SetHdrOutputActive(false);
  }
-@@ -1748,6 +1749,25 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1748,6 +1758,25 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    if (IsHdrOutputWanted() != paint_context_.swapchain_hdr_wanted) {
      return PaintResult::kNotPresentedConnectionOutdated;
    }

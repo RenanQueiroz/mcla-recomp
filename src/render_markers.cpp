@@ -20,6 +20,18 @@
 // only on the thread that draws frames and only between whole Direct3D calls
 // (these function boundaries); a development version that also marked a
 // render-state setter called inside other code corrupted the stream.
+//
+// Why making room here is safe: sub_82412710 is what every Direct3D packet
+// writer calls first when the pointer is past the limit, before writing a word
+// of its packet, so it runs whenever the device is between packets. The
+// markers' call sites are such points: the frame function (sub_822C0980,
+// called by the game loop sub_82131008), the phase loop (sub_822E6408, called
+// by the frame function) and the phase start (sub_822E55D0, called by the
+// phase loop and by sub_82360AE8) are renderer functions, never called from
+// inside Direct3D, and none of them or their callers keeps the write pointer
+// or limit (device +48, +56) across these calls (they only make Direct3D
+// calls, which check and make room themselves). The game's next Direct3D call
+// on this thread would make the same call in the same state.
 
 #include "generated/default/mcla_init.h"
 
