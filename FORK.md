@@ -4,14 +4,15 @@
 [holdmysocks/mcla-recomp](https://github.com/holdmysocks/mcla-recomp). It adds two
 kinds of changes on top of upstream's `main`:
 
-- **Changes meant for upstream**, one commit each, described where upstream
-  describes such things. Each is a candidate for a pull request to
+- **Changes meant for upstream**, one commit each, described in
+  `KNOWN-ISSUES.md` (game and results) and `patches/README.md` (SDK patches).
+  Each is a candidate for a pull request to
   holdmysocks/mcla-recomp, made from its own branch off upstream's `main`.
   - Game: frame pacing at the swap, the 1 ms timer kept while the window is
     hidden, the achievement toast registered only while it shows, the
     motorcycle lean filter by elapsed time, the mouse pointer hidden during
     play, loading-screen pacing that no longer stutters uncapped, and menus (and,
-    optionally, the HUD's animations) at the console's pace above 30 FPS (`docs/known-issues.md`,
+    optionally, the HUD's animations) at the console's pace above 30 FPS (`KNOWN-ISSUES.md`,
     2026-10-14 sections).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
@@ -61,9 +62,50 @@ testing there before anyone relies on it.
 On Windows, the first time: clone this fork, put the disc image (Midnight Club:
 Los Angeles Complete Edition, USA/Europe) next to the repository folder, and run
 `launcher\build-game.ps1` (or `scripts\make_pc.ps1 -Iso <path>`; see
-`docs/pc-build-guide.md` for the tools). Then `launcher\build-launcher.ps1`
+README.md, "Windows", for the tools). Then `launcher\build-launcher.ps1`
 builds the launcher and puts a shortcut to it on the desktop, which updates,
 builds and plays from then on.
+
+## Building by hand, or on Linux
+
+`scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply the fork's SDK patches
+themselves. To patch the SDK by hand, first apply the patches upstream's build
+applies: on Windows the ones `scripts\make_pc.ps1` applies
+(`rexglue-v0.10.0-mcla.patch`, `rexglue-minmax-blend-factor.patch`, and
+`rexglue-ffmpeg-ps5-config.patch` in `thirdparty/FFmpeg`); on Linux the
+`git apply` lines in README.md, "Linux", which include the two Linux patches.
+Then, still in `third_party/rexglue-sdk`, apply the fork's patches in this
+order, as several change neighbouring lines (the patch table in
+`scripts\make_pc.ps1` is the reference for the order):
+
+```
+git apply ../../patches/rexglue-gpu-regwrite-bulk.patch
+git apply ../../patches/rexglue-imgui-dialog-repaint-on-demand.patch
+git apply ../../patches/rexglue-inline-bit-helpers.patch
+git apply ../../patches/rexglue-perf-counters-batched.patch
+git apply ../../patches/rexglue-shared-memory-request-fast-path.patch
+git apply ../../patches/rexglue-threaded-submission-d3d12.patch
+git apply ../../patches/rexglue-timer-queue-blocking-wait.patch
+git apply ../../patches/rexglue-shared-memory-fast-path-hot-pages.patch
+git apply ../../patches/rexglue-hot-pages-watched-ranges.patch
+git apply ../../patches/rexglue-cursor-auto-hide.patch
+git apply ../../patches/rexglue-vulkan-memexport-check-order.patch
+git apply ../../patches/rexglue-vulkan-hoist-shared-memory-uploads.patch
+git apply ../../patches/rexglue-threaded-submission-vulkan.patch
+git apply ../../patches/rexglue-d3d12-placed-texture-heaps.patch
+git apply ../../patches/rexglue-vulkan-texture-load-storage-copy.patch
+git apply ../../patches/rexglue-clear-rectangle-draws.patch
+git apply ../../patches/rexglue-texture-load-direct.patch
+git apply ../../patches/rexglue-async-pipelines-no-frame-wait.patch
+git apply ../../patches/rexglue-vulkan-pipeline-storage-parallel-translation.patch
+git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
+git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
+git apply ../../patches/rexglue-direct-resolve.patch
+```
+
+The fork's SDK patches are built and tested on Windows only. On Linux they
+apply in this order on top of the two Linux patches, but have not been built
+or run there.
 
 ## Keeping up with upstream
 

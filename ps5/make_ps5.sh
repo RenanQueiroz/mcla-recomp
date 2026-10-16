@@ -4,7 +4,7 @@
 #   sudo bash ps5/make_ps5.sh --iso /path/to/your.iso [--console 192.168.1.50]
 #
 # Host: Arch Linux, as root (a fresh Arch under WSL2 on Windows is the tested
-# setup; docs/ps5-build-guide.md walks through it). Everything is built on
+# setup; README.md, 'PS5', walks through it). Everything is built on
 # your machine from your own copy of the game: nothing of the game is in this
 # repository, and what this script produces from it is yours to keep, not to
 # share.
@@ -75,7 +75,7 @@ logged() {
 }
 
 [ "$(id -u)" -eq 0 ] || fail "run as root (the driver project's build installs packages and writes under /root)"
-command -v pacman > /dev/null || fail "this script needs Arch Linux (pacman); see docs/ps5-build-guide.md"
+command -v pacman > /dev/null || fail "this script needs Arch Linux (pacman); see README.md, 'PS5'"
 
 # ---------------------------------------------------------------------------
 step "1/9 host packages"
@@ -109,7 +109,7 @@ if [ ! -f "$rex_src/.mcla-patched" ]; then
 else
     echo "already patched: $rex_src"
 fi
-# The car reflection fix (REFLECTION_FIX.md) came later than the patches above:
+# The car reflection fix came later than the patches above:
 # an SDK patched before it gets it here, and step 6 builds what changed.
 if ! grep -q kSysFlag_MinMaxColor0TimesSrcAlpha "$rex_src/include/rex/graphics/pipeline/shader/spirv_translator.h"; then
     git -C "$rex_src" apply "$repo/patches/rexglue-minmax-blend-factor.patch" || fail "the reflection fix does not apply (is the checkout clean?)"
@@ -192,7 +192,7 @@ echo "generated sources: $(ls "$repo"/generated/default/*.cpp | wc -l)"
 # ---------------------------------------------------------------------------
 step "6/9 the runtime, for PS5"
 if [ ! -f "$rex_build/build.ninja" ]; then
-    # -flto=thin: 5-8% more draws a second on the console (docs/ps5-port-plan.md).
+    # -flto=thin: 5-8% more draws a second on the console.
     logged ps5-configure cmake -S "$rex_src" -B "$rex_build" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$sdk/toolchain/prospero.cmake" \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23 \
@@ -258,7 +258,7 @@ if [ -z "$console" ]; then
 No --console given, so nothing was uploaded. To install by hand, copy
   $out            ->  /data/homebrew/$title_id   on the console
   $repo/game      ->  /data/mcla/game            on the console
-and see docs/ps5-build-guide.md, "On the console".
+and see README.md, 'PS5'.
 EOF
     exit 0
 fi
@@ -302,5 +302,5 @@ cat <<EOF
 
 Done. On the console, "Midnight Club: Los Angeles" appears on the home screen
 once your homebrew mounter has picked up /data/homebrew/$title_id (see
-docs/ps5-build-guide.md, "On the console").
+README.md, 'PS5').
 EOF

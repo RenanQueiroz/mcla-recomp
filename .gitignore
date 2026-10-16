@@ -37,3 +37,21 @@ keys.*
 
 # The play shortcut scripts/make_pc.ps1 makes
 *.lnk
+
+# Working notes and developer tools: kept on the maintainer's machine, not
+# published. The README is the public documentation.
+/docs/*.md
+/REFLECTION_FIX.md
+/ps5/probes/
+/ps5/results/
+/ps5/symdump.py
+/ps5/profile_report.py
+/ps5/title_log_client.py
+/scripts/analyze_perf.py
+/scripts/fps_sweep.ps1
+/scripts/play_loop.ps1
+/scripts/profile_report.py
+/scripts/recover_loop.ps1
+/scripts/smoke_run.ps1
+/scripts/sweep_stats.py
+/scripts/thread_profile.ps1

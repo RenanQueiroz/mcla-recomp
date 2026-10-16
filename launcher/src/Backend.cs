@@ -43,9 +43,10 @@ static class Paths
 /// One choice in a game option drop-down: what it shows and the mcla.exe flag it adds.
 sealed record Choice(string Label, string? Argument);
 
-/// The game's command-line options (docs\pc-build-guide.md). The first choice
-/// of each passes nothing, which leaves the value from the in-game pause menu
-/// (saved in mcla.toml next to mcla.exe) or the game's default.
+/// The game's command-line options (README.md, "Windows"; the fork's own in
+/// KNOWN-ISSUES.md). The first choice of each passes nothing, which leaves the
+/// value from the in-game pause menu (saved in mcla.toml next to mcla.exe) or
+/// the game's default.
 static class GameOptions
 {
     const string Unset = "Game setting";

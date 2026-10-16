@@ -13,8 +13,18 @@ try {
         if ($LASTEXITCODE -ne 0) { Get-Content "$root\out\codegen.log" | Select-Object -Last 20; throw "codegen failed" }
         Select-String -Path "$root\out\codegen.log" -Pattern "Codegen summary" | ForEach-Object { $_.Line }
     }
-    if (-not (Test-Path "$root\out\build\$Preset\build.ninja")) {
-        cmake --preset $Preset "-DCMAKE_PREFIX_PATH=$env:REXSDK" 2>&1 | ForEach-Object { "$_" } > "$root\out\configure.log"
+    # Configure when there is no build yet, or when it was configured with
+    # another compiler than the project's Clang (CMake then starts afresh).
+    $configured = Test-Path "$root\out\build\$Preset\build.ninja"
+    if ($configured -and $env:MCLA_CXX) {
+        $found = Get-ChildItem "$root\out\build\$Preset\CMakeFiles" -Recurse -Filter CMakeCXXCompiler.cmake -ErrorAction SilentlyContinue |
+            Select-String -Quiet -SimpleMatch "set(CMAKE_CXX_COMPILER `"$($env:MCLA_CXX.Replace('\', '/'))`")"
+        $configured = [bool]$found
+    }
+    if (-not $configured) {
+        $compilers = @()
+        if ($env:MCLA_CC) { $compilers = @("-DCMAKE_C_COMPILER=$env:MCLA_CC", "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX") }
+        cmake --preset $Preset "-DCMAKE_PREFIX_PATH=$env:REXSDK" @compilers 2>&1 | ForEach-Object { "$_" } > "$root\out\configure.log"
         if ($LASTEXITCODE -ne 0) { Get-Content "$root\out\configure.log" | Select-Object -Last 20; throw "configure failed" }
     }
     cmake --build --preset $Preset 2>&1 | ForEach-Object { "$_" } > "$root\out\build.log"

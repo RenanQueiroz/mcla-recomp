@@ -1,79 +1,136 @@
 # MCLA
 
-Static recompilation of *Midnight Club: Los Angeles Complete Edition* (Xbox 360, title 545407F8) to native code, for PC and for jailbroken PS5 consoles.
+Static recompilation of *Midnight Club: Los Angeles Complete Edition* (Xbox 360, title 545407F8) to native code, for Windows, Linux and jailbroken PS5 consoles.
 
 ![The game installed on a PS5 home screen](docs/images/ps5-home-screen.webp)
 
 *Installed on a jailbroken PS5. The tile here is one the user supplied at build time; the background is made from the art on their own disc.*
 
-> **Fixed, 2026-10-12: the car reflection bug.** Cars no longer come out white with a glow around them at night; the paint mirrors the street again. The Xbox 360's GPU and the PC graphics interfaces treat one blend mode differently, which turned every light glow in the cars' reflection map into a solid square. The fix is in the SDK patches for both renderers: Direct3D 12, and Vulkan, which the PS5 version uses. It is confirmed in game on Windows with Direct3D 12 and on a PS5. To get it, update and run your build command again. Cause and details: [`REFLECTION_FIX.md`](REFLECTION_FIX.md).
-
-![The same spot before and after the fix, at night and at noon](docs/images/reflection-fix-before-after.webp)
-
-*Before (left) and after (right), at 23:30 and at noon, on Windows with Direct3D 12.*
-
-**This repository contains no game code, assets or keys.** You supply your own legally obtained copy; a script extracts what is needed on your machine, and the recompiled code is generated locally and never committed.
+**This repository contains no game code, assets or keys.** You supply your own legally obtained copy; a script extracts what is needed on your machine, and the recompiled code is generated locally and never committed. What you build is for you, not for sharing.
 
 ## Status
 
 | Target | State |
 |---|---|
-| Windows, D3D12 | Boots; menus, races, garage and upgrades work with audio and controller. 30 FPS with occasional texture-load hitches. Car reflections fixed. |
-| Windows, Vulkan | Reaches the title screen. Not tested further. Has the car reflection fix. |
-| Linux | Builds and plays natively on Vulkan: free roam holds 30 FPS on an Intel Core Ultra 5 238V laptop (Lunar Lake, Mesa ANV) with two Linux patches to the SDK. Tested by one user; the recovery loop is not ported. Build guide: [`docs/linux-build-guide.md`](docs/linux-build-guide.md). |
-| PS5 (jailbroken) | Plays: career, races, garage, saves, audio and controller, at a steady 30 FPS on a PS5 Pro (firmware 13.42), where the zoomed-out map runs at 20 to 25. Also tested on a PS5 Slim (firmware 12.70), installed from scratch with the one-command build, where it runs well; frame rates were measured on the Pro only. Car reflections fixed, confirmed on a console. Build and install with one command: `docs/ps5-build-guide.md`. |
+| Windows, Direct3D 12 | Plays: career, races, garage and upgrades, with audio and a controller, at 30 FPS by default. |
+| Windows, Vulkan | Reaches the title screen; not tested further. |
+| Linux, Vulkan | Builds and plays natively: free roam holds 30 FPS on an Intel Core Ultra 5 238V laptop (Mesa ANV). Tested by one user. |
+| PS5 (jailbroken) | Plays at a steady 30 FPS on a PS5 Pro (firmware 13.42); the zoomed-out map runs at 20 to 25. Also installed from scratch and played on a PS5 Slim (firmware 12.70). |
 
-Details and open problems: `docs/known-issues.md`.
+Car reflections are fixed on every renderer (cars no longer come out white with a glow at night):
+
+![The same spot before and after the fix, at night and at noon](docs/images/reflection-fix-before-after.webp)
 
 ## Which release of the game
 
-Everything here was made with, and is only known to work with, **Midnight Club: Los Angeles Complete Edition, USA/Europe, for Xbox 360** (title id `545407F8`). The hooks and function hints in `config/` are addresses in that release's executable; another region or revision would need them checked again.
+Only **Midnight Club: Los Angeles Complete Edition, USA/Europe, for Xbox 360** (title id `545407F8`), as a disc image (`.iso`). The fixes in `config/` are addresses in that release's executable; another region or revision would need them checked again.
 
 ## How it works
 
-The game's PowerPC code is translated to C++ ahead of time by the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) (BSD-3, derived from Xenia), which also provides the Xbox 360 kernel, GPU and audio reimplementation. This repository holds the project manifest, function-recovery hints, a small host application, SDK patches, scripts and notes. See `docs/architecture.md`.
+The game's PowerPC code is translated to C++ ahead of time by the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) (BSD-3, derived from Xenia), which also provides the Xbox 360 kernel, GPU and audio reimplementation. This repository holds the project manifest, function hints, a small host application, patches to the SDK and the build scripts.
 
-## Building and running (Windows)
+## Windows
+
+You need Windows 10 or 11 (x86-64) with a Direct3D 12 graphics card, and about 20 GB of disk. In PowerShell:
 
 ```powershell
+git clone https://github.com/holdmysocks/mcla-recomp.git
+cd mcla-recomp
 .\scripts\make_pc.ps1 -Iso C:\path\to\your.iso
 ```
 
-It clones and patches the ReXGlue SDK, builds it, extracts your game, recompiles its code and builds `mcla.exe`. Then double-click the **Midnight Club Los Angeles** shortcut it leaves in the repository folder (or `mcla.exe` itself); no options are needed. Requirements (Git, CMake, Ninja, Clang 20, Visual Studio Build Tools, Python 3), every step by hand, options and troubleshooting are in [`docs/pc-build-guide.md`](docs/pc-build-guide.md).
+The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++ workload) and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. It then clones and patches the ReXGlue SDK v0.10.0, builds it (the long step, once), extracts your game into `game\`, recompiles it and builds `out\build\win-amd64-release\mcla.exe`. Each step is skipped when its result is already there, so after a failure or an update you run the same command again. Logs are in `out\logs`.
 
-## Building and running (Linux)
+**Play:** double-click the **Midnight Club Los Angeles** shortcut the build leaves in the repository folder, or `mcla.exe` itself. Keep the folder where it was built; the game data is read from `game\`. An Xbox or PlayStation controller works.
 
-There is no one-command script yet. [`docs/linux-build-guide.md`](docs/linux-build-guide.md) has the steps (the same as on Windows, by hand, with the `linux-amd64` presets and two extra SDK patches), then:
+Options go after the program name, for example `mcla.exe --fullscreen=true --mcla_fps=60` (30, 60, 120, or 0 for uncapped). The pause menu has three extra entries: DISPLAY (frame-rate target, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`.
+
+**Update:** `git pull`, then `.\scripts\make_pc.ps1` again.
+
+| If | Then |
+|---|---|
+| The SDK build fails with `'crtversion.h' file not found` | Another Clang on your path was used. Update and run `make_pc.ps1` again: it now uses only its own. |
+| `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
+| The game closes by itself | Start it with `--log_file=run.log --log_level=info` and open an issue with the end of that file. |
+
+## Linux
+
+Tested on Ubuntu 26.04. You need Clang 20 and LLD (`clang-20`, `clang++-20`, `lld-20`), CMake 3.25+, Ninja, Python 3, Git, a Vulkan 1.3 driver, and these packages (Debian/Ubuntu names): `libgtk-3-dev libx11-xcb-dev libxss-dev libvulkan-dev libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libdecor-0-dev libasound2-dev libpulse-dev libpipewire-0.3-dev`. Linux 6.11 or newer is recommended.
 
 ```bash
+git clone https://github.com/holdmysocks/mcla-recomp.git
+cd mcla-recomp
+git clone --recursive --branch v0.10.0 https://github.com/rexglue/rexglue-sdk.git third_party/rexglue-sdk
+cd third_party/rexglue-sdk
+git apply ../../patches/rexglue-v0.10.0-mcla.patch
+git apply ../../patches/rexglue-minmax-blend-factor.patch
+git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.patch
+git apply ../../patches/rexglue-linux-procmap-query.patch
+git apply ../../patches/rexglue-linux-wait-sleep.patch
+CC=clang-20 CXX=clang++-20 cmake --preset linux-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF
+cmake --build out/build/linux-amd64 --config Release
+cmake --install out/build/linux-amd64 --config Release
+cd ../..
+python3 scripts/extract_game.py /path/to/your.iso
+SDK=$PWD/third_party/rexglue-sdk/out/install/linux-amd64
+"$SDK/bin/rexglue" codegen mcla_manifest.toml
+CC=clang-20 CXX=clang++-20 cmake --preset linux-amd64-release -DCMAKE_PREFIX_PATH="$SDK"
+cmake --build --preset linux-amd64-release
 ./scripts/play_linux.sh
 ```
 
-## Building and installing (PS5)
+On Wayland, put `vulkan_allow_present_mode_immediate = false` and `vulkan_allow_present_mode_mailbox = false` in `out/build/linux-amd64-release/mcla.toml`; without them the game presents about 1,000 times a second and keeps the GPU busy.
 
-```bash
-bash ps5/make_ps5.sh --iso /path/to/your.iso --console <console address>
+## PS5
+
+You need a jailbroken PS5 that runs homebrew, with an FTP server payload (port 2121 by default) and a homebrew mounter that shows folders under `/data/homebrew` on the home screen (ShadowMountPlus was used). The build runs on **Arch Linux as root**: on Windows, an Arch distribution under WSL2. Allow about 30 GB of disk, 16 GB of memory, and about 45 minutes the first time.
+
+On Windows, in PowerShell as administrator:
+
+```powershell
+wsl --install --no-distribution
+wsl --update
+wsl --install -d archlinux
+wsl -d archlinux -u root
 ```
 
-on Arch Linux as root (a few commands to set up under WSL2 on Windows). It builds the toolchain, the Vulkan driver, the recompiler and the game from your own disc image, and uploads the result to the console. The whole procedure, requirements and troubleshooting are in [`docs/ps5-build-guide.md`](docs/ps5-build-guide.md), written so that it can also be handed to an AI coding agent.
+Then, in that Linux shell (your Windows drives are under `/mnt`, so `C:\Games\mcla.iso` is `/mnt/c/Games/mcla.iso`):
 
-## Layout
+```bash
+pacman -Sy --noconfirm git
+cd /root
+git clone https://github.com/holdmysocks/mcla-recomp.git
+cd mcla-recomp
+bash ps5/make_ps5.sh --iso /mnt/c/path/to/your.iso --console 192.168.1.50
+```
 
-| Path | Contents |
+Use your console's address, and start the FTP payload first. Without `--console` it only builds and prints what to copy where. Keep the repository under `/root`, not `/mnt/c`. The script installs its packages, builds the PS5 toolchain and Vulkan driver ([mihawk-99/PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan)), patches and builds the SDK, extracts and recompiles your game, packages the title and uploads it. Each step is skipped when its result exists, so you run the same command again after a failure or an update (`git pull` first). Logs are in `/root/mcla/logs`.
+
+After the upload, let the mounter pick up `/data/homebrew/PPSA99779`; "Midnight Club: Los Angeles" appears on the home screen. On the console, `/data/mcla/game` holds the game data, `/data/mcla/mcla.toml` the settings and `/data/mcla/mcla-play.log` the log of the last start.
+
+**Your own tile and theme (optional).** No artwork or music ships here. `--tile IMAGE` takes any common image (for example the [official cover art](https://assets-prd.ignimgs.com/2022/04/17/midnightcomplete-1650239367276.jpg)); `--theme FILE.at9` takes an ATRAC9 file. For a theme, turn the audio down first (`ffmpeg -i in.m4a -af loudnorm=I=-28:TP=-2 -ar 48000 -ac 2 quiet.wav`), then convert it with [AT9-AT3 Converter](https://github.com/BMK-Studio/AT9-AT3_Converter/releases) (AT9, PS4, bitrate 72). The console keeps a title's tile and sound from when it was first registered.
+
+| If | Then |
 |---|---|
-| `config/` | Function-entry hints, each file documenting how its entries were found |
-| `src/` | Host application: audio fallback, crash tracer, function-pointer scan |
-| `patches/` | Changes to the ReXGlue SDK, among them the car reflection fix |
-| `scripts/` | Extraction, build, run and analysis scripts |
-| `ps5/` | The PS5 host, the one-command build (`make_ps5.sh`), title packaging and console probes |
-| `docs/` | Build guides for PC and PS5, recon report, architecture, function recovery, known issues, PS5 port notes |
+| `this script needs Arch Linux` | Install Arch under WSL2 as above. |
+| `SDK patch does not apply` | Remove `/root/mcla/rexglue-sdk` and run again. |
+| `no FTP server at ...` | Start the FTP payload; check the address and `--ftp-port`. |
+| A bar with frame rate and temperatures over the game | That is your homebrew enabler's overlay (with OnionHEN, `[overlay] enabled=false` in `/data/OnionHEN/config.ini`). |
+| The game stops or closes | Fetch `/data/mcla/mcla-play.log` over FTP before starting it again and open an issue with it, your console model and firmware. |
+
+If you hand this to an AI agent: it needs your disc image's path and the console's address from you, must not look for or download a disc image, and writes to the console only with `--console`.
+
+## Missed functions
+
+If the game stops with `Call to invalid or unregistered function at guest address ...`, the recompiler missed a function that is only reached through a pointer. Please open an issue with that line; the fix is one entry in `config/runtime_discovered.toml`.
 
 ## Credits
 
 - ReXGlue SDK by Tom Clay and contributors; Xenia by Ben Vanik and contributors.
-- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors. The `t:` drive mapping and the diagnosis of the SDK vblank timer problem come from that project's notes.
+- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from, with permission.
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by mihawk-99 (GPL-3): the RADV port and toolchain the PS5 version is built on.
 - XenonRecomp by hedge-dev, on which ReXGlue's analysis builds.
+- The Linux build by [@MoonFuji](https://github.com/MoonFuji).
 
 ## Licence
 

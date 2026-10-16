@@ -50,7 +50,7 @@ rebuild.
   where the Python install manager puts its working one; the wrapper hands that one over.
 
 The fork's changes to the game and the SDK are ordinary commits, each described
-in `docs\known-issues.md` (game) or `patches\README.md` (SDK).
+in `KNOWN-ISSUES.md` (game) or `patches\README.md` (SDK).
 
 ## Options the launcher always passes
 
@@ -81,7 +81,7 @@ which was 30 a second on the console. *Match frame rate* (the default) keeps the
 gauges smooth, but above 30 FPS the song ticker scrolls faster (4× at 120).
 *Match console* steps them 30 times a second: the ticker scrolls at its original
 speed and the needles move in 30 Hz steps. Menus, pop-ups and the GPS panels keep
-the console's pace either way (`mcla_ui_timing_fix`, `docs\known-issues.md`).
+the console's pace either way (`mcla_ui_timing_fix`, `KNOWN-ISSUES.md`).
 Not in the game's menu, so there is no "Game setting" choice; left out when *More
 mcla.exe options* sets `mcla_ui_timing_hud`.
 
@@ -117,7 +117,7 @@ frame in four took 33 ms. mcla-recomp holds loops that never reach the frame
 timer (start-up logos, loading screens) to 30 FPS, and took any single swap
 without a timer pass for one; uncapped, the game's update and presenting threads
 drift against each other and produce such swaps in normal play. The hold now
-needs two in a row (`docs\known-issues.md`, "Loading-screen pacing"). The
+needs two in a row (`KNOWN-ISSUES.md`, "Loading-screen pacing"). The
 "Fast" and "Skip" intros now speed up only the start-up logos, not loading
 screens later.
 

@@ -4,6 +4,10 @@ $llvm = Get-ChildItem "$root\tools" -Directory -Filter "clang+llvm-*" -ErrorActi
 $ninja = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter ninja.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 $paths = @()
 if ($llvm) { $paths += "$($llvm.FullName)\bin" }
+# The compilers CMake is given by full path, so that another Clang on the path
+# (from some other toolchain) is never picked up instead.
+$env:MCLA_CC = if ($llvm) { "$($llvm.FullName)\bin\clang.exe" } else { "" }
+$env:MCLA_CXX = if ($llvm) { "$($llvm.FullName)\bin\clang++.exe" } else { "" }
 if ($ninja) { $paths += $ninja.DirectoryName }
 $paths += "C:\Program Files\CMake\bin"
 $env:PATH = ($paths -join ";") + ";" + $env:PATH
