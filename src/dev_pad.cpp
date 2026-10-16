@@ -13,6 +13,7 @@
 //   wait_until <condition> [timeout]
 //   press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
 //   pos   peek <addr> [bytes]   peeku <addr> [count]   peekf <addr> [count]
+//   poke <addr> <u32> (a big-endian word, for experiments)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
 //   state   log <text>   include <script>   quit   set <option> <value>
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
@@ -1428,6 +1429,27 @@ std::string Execute(const std::string& line) {
       reply += text;
     }
     return reply;
+  }
+  if (cmd == "poke") {
+    // poke <addr> <u32>: writes one big-endian word, for experiments such as
+    // changing a game setting where the game keeps it.
+    uint32_t address;
+    double value;
+    if (!EvalAddress(arg(1), address) || !ParseNumber(arg(2), value)) {
+      return "err poke <addr> <u32>";
+    }
+    uint8_t* p = const_cast<uint8_t*>(GuestPointer(address, 4));
+    if (!p) {
+      return "err unwritable";
+    }
+    const uint32_t word = uint32_t(int64_t(value));
+    p[0] = uint8_t(word >> 24);
+    p[1] = uint8_t(word >> 16);
+    p[2] = uint8_t(word >> 8);
+    p[3] = uint8_t(word);
+    char text[48];
+    std::snprintf(text, sizeof text, "ok %08X = %08X", address, word);
+    return text;
   }
   if (cmd == "dump") {
     // dump <addr> <bytes> <file>: raw guest memory, for finding state variables.

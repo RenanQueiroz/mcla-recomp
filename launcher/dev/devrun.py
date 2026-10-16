@@ -52,14 +52,6 @@ WORK = DEV / "work"
 CACHE = DEV / "cache"
 RUNS = DEV / "runs"
 
-# The launcher's always-on settings (launcher/src/Backend.cs, Tuning).
-TUNING = [
-    "--clear_memory_page_state=false",
-    "--execute_unclipped_draw_vs_on_cpu=true",
-    "--shared_memory_hot_page_faults=4",
-    "--shared_memory_hot_page_ms=10000",
-]
-
 
 def real_files():
     # The shader cache too: runs use their own (--cache_root), so it must not change either.
@@ -252,6 +244,11 @@ kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
 kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = ctypes.c_void_p
+kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, wintypes.UINT]
 
 
 def process_table():
@@ -270,6 +267,34 @@ def process_table():
     finally:
         kernel32.CloseHandle(snap)
     return table
+
+
+def follow_restarts(pid, deadline):
+    """The pause menu's RESTART GAME starts mcla.exe again, as a child of the
+    one that then quits. Follow each restart until the last one exits, so the
+    run's checks and the restore of mcla.toml come after it; one still running
+    at the deadline is closed. Returns the restarted processes' pids."""
+    restarts = []
+    while True:
+        kids = [child for child, (parent, name) in process_table().items()
+                if parent == pid and name.lower() == "mcla.exe"]
+        if not kids:
+            return restarts
+        pid = kids[0]
+        restarts.append(pid)
+        print(f"the game started again as process {pid} (RESTART GAME); following it")
+        handle = kernel32.OpenProcess(0x00100000 | 0x0001, False, pid)  # SYNCHRONIZE | TERMINATE
+        if not handle:
+            continue
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            if kernel32.WaitForSingleObject(handle, int(remaining * 1000)) != 0:
+                print(f"timeout; closing process {pid}")
+                close_windows(pid)
+                if kernel32.WaitForSingleObject(handle, 30_000) != 0:
+                    kernel32.TerminateProcess(handle, 1)
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 def game_pids(root, parents, before=()):
@@ -519,9 +544,6 @@ def game_args(a, out):
         f"--fullscreen={'true' if a.fullscreen else 'false'}",
         f"--mcla_intro={a.intro}",
         f"--mcla_pad_frames_csv={out / 'frames.csv'}",
-        # As the launcher: a default the extra options set is left out (CLI11
-        # rejects a repeated option, and a boolean given twice adds up).
-        *[t for t in TUNING if not any(t.split("=")[0] == e.split("=")[0] for e in a.extra)],
     ]
     if a.script:
         args.append(f"--mcla_pad_script={Path(a.script).resolve()}")
@@ -582,6 +604,7 @@ def run(a, tag=None):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+    restarts = follow_restarts(proc.pid, start + a.timeout)
     elapsed = time.monotonic() - start
     gpu = guard.finish(out) if guard else None
     # What the game saved (the pause menu's settings), before the real file
@@ -596,7 +619,8 @@ def run(a, tag=None):
     if before != after:
         changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
         raise SystemExit(f"REAL DATA CHANGED during the run: {changed}")
-    print(f"{out.name}: exit {proc.returncode} after {elapsed:.0f} s; real save data unchanged")
+    restarted = f", restarted {len(restarts)} time(s)" if restarts else ""
+    print(f"{out.name}: exit {proc.returncode} after {elapsed:.0f} s{restarted}; real save data unchanged")
     print(f"{out.name}: {gpu_summary(gpu)}")
     # A script line that failed ends the script (and the game): the run is not
     # what the script describes.
@@ -615,6 +639,8 @@ def load_segments(path):
     segments = [("start", [], 0)]
     for line in path.read_text(encoding="utf-8").splitlines()[1:]:
         kind, *rest = line.split(",")
+        if len(rest) < 3 or not all(field.strip("-").isdigit() for field in rest[1:3]):
+            continue  # the last line of a game that was killed mid-write
         if kind == "mark":
             segments.append((rest[0], [], int(rest[2])))
         elif kind == "s" and int(rest[1]) > 0:
