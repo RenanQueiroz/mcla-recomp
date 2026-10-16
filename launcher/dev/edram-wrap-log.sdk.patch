@@ -1,0 +1,60 @@
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 4adf7ba..c87d679 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -60,6 +60,23 @@ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+ 
+ namespace rex::graphics {
+ 
++namespace {  // TMPWRAP
++std::mutex g_tmpwrap_mutex;
++std::map<std::pair<uint64_t, uint64_t>, uint64_t> g_tmpwrap_kinds;
++uint64_t g_tmpwrap_events = 0;
++void TmpWrapNote(const char* what, uint64_t a, uint64_t b, const std::string& text) {
++  std::lock_guard<std::mutex> lock(g_tmpwrap_mutex);
++  uint64_t key_a = a ^ (uint64_t(what[0]) << 56);
++  if (g_tmpwrap_kinds[{key_a, b}]++ == 0) {
++    REXGPU_INFO("TMPWRAP new {} {}", what, text);
++  }
++  if (++g_tmpwrap_events % 5000 == 0) {
++    REXGPU_INFO("TMPWRAP total {} crossings of tile 2048, {} kinds", g_tmpwrap_events,
++                g_tmpwrap_kinds.size());
++  }
++}
++}  // namespace
++
+ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,
+                                               uint32_t write_mask, float& clamp_rgb_low,
+                                               float& clamp_alpha_low, float& clamp_rgb_high,
+@@ -1399,6 +1416,12 @@ void RenderTargetCache::GetResolveCopyRectanglesToDump(
+     uint32_t base, uint32_t row_length, uint32_t rows, uint32_t pitch,
+     std::vector<ResolveCopyDumpRectangle>& rectangles_out) const {
+   rectangles_out.clear();
++  if (base + (rows ? rows - 1 : 0) * pitch + row_length > xenos::kEdramTileCountConsole) {
++    TmpWrapNote("resolve", (uint64_t(base) << 32) | pitch, (uint64_t(rows) << 32) | row_length,
++                fmt::format("base={} rows={} pitch={} row_length={} end={} edram={}", base, rows,
++                            pitch, row_length, base + (rows ? rows - 1 : 0) * pitch + row_length,
++                            edram_tile_count_));
++  }
+   assert_true(row_length <= pitch);
+   row_length = std::min(row_length, pitch);
+   if (!row_length || !rows) {
+@@ -1875,6 +1898,18 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+   if (length_tiles == 0) {
+     return;
+   }
++  {
++    uint32_t tmp_start = (dest.base_tiles + start_tiles_base_relative) & (edram_tile_count_ - 1);
++    if (tmp_start + length_tiles > xenos::kEdramTileCountConsole) {
++      TmpWrapNote("ownership", dest.key, (uint64_t(start_tiles_base_relative) << 32) | length_tiles,
++                  fmt::format("base={} pitch={} msaa={} depth={} format={} start=+{} length={} "
++                              "end={} edram={}",
++                              uint32_t(dest.base_tiles), dest.GetPitchTiles(),
++                              1u << uint32_t(dest.msaa_samples), uint32_t(dest.is_depth),
++                              uint32_t(dest.resource_format), start_tiles_base_relative,
++                              length_tiles, tmp_start + length_tiles, edram_tile_count_));
++    }
++  }
+   uint32_t dest_pitch_tiles = dest.GetPitchTiles();
+   bool dest_is_64bpp = dest.Is64bpp();
+   bool host_depth_encoding_different = dest.is_depth && GetPath() == Path::kHostRenderTargets &&

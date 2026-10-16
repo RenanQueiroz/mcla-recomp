@@ -431,7 +431,7 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
 +          uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
 +          uint32_t(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32) * 32,
 +          uint32_t(resolve_info.copy_dest_coordinate_info.height_aligned_div_32) * 32,
-+          uint32_t(resolve_info.IsCopyingDepth()), uint32_t(tmp_ei.base_tiles),
++          uint32_t(resolve_info.IsCopyingDepth()), tmp_ei.GetBaseTiles(),
 +          uint32_t(tmp_ei.pitch_tiles), uint32_t(tmp_ei.msaa_samples), uint32_t(tmp_ei.format),
 +          uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
 +          uint32_t(resolve_info.IsClearingDepth()), uint32_t(resolve_info.IsClearingColor()),

@@ -1,5 +1,10 @@
 # Why `mcla_single_tile` does nothing, and what one tile is worth (2026-10-16)
 
+**Since then:** single-tile rendering works, in a 4,096-tile EDRAM that the
+game asks the SDK for on PC (`patches/rexglue-edram-size.patch`, the hook aimed
+at the main scene): `single-tile-edram-2026-10-16.md`. What follows is the
+investigation as it was, on the console-sized EDRAM.
+
 `frame-structure-2026-10-16.md` found the main scene still drawn as two
 predicated tiles (1280x512 and 1280x208 at 1x, about 1,370 draws replayed per
 tile in the city) whatever `mcla_single_tile` is set to. This note finds out
@@ -257,10 +262,10 @@ saving, but only after the SDK project above.
 
 ## Reproducing
 
-- **The game side.** `git apply launcher/dev/single-tile-diag.patch` (game,
-  `src/render_perf.cpp`): the `TMPTILE` log lines and
-  `mcla_dev_tile_force` (1 = the main scene at 2x, 2 = every call). Then
-  `scripts\build.ps1 -NoCodegen`.
+- **The game side.** `single-tile-diag.patch` (game, `src/render_perf.cpp`):
+  the `TMPTILE` log lines and `mcla_dev_tile_force` (1 = the main scene at 2x,
+  2 = every call), then `scripts\build.ps1 -NoCodegen`. It was written for the
+  old hook and no longer applies; it is in the history at commit `1600751`.
 - **GPU timestamps by phase and tile.** On D3D12, apply `gpu-timestamps.sdk.patch`
   and `frame-log.sdk.patch` with `render-markers.patch`, as in
   `frame-structure-2026-10-16.md`. On Vulkan, apply
