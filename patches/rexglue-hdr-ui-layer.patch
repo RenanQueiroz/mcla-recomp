@@ -1,8 +1,8 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index ec99380..7f7f0b6 100644
+index ec99380..fa73f0c 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
-@@ -190,7 +190,108 @@ class CommandProcessor {
+@@ -190,7 +190,131 @@ class CommandProcessor {
      kRenderEnd = 6,     // the title's render loop returned (UI drawn after it)
      kPhase = 0x100,     // diagnostics: value = a title-specific phase
    };
@@ -54,6 +54,9 @@ index ec99380..7f7f0b6 100644
 +    bool failed = false;      // separation ended for this frame
 +    bool ui_layer_cleared = false;
 +    uint64_t captured_area = 0;  // screen pixels copied to the textures
++    // The output size the textures were filled at (hdr_output_width_ then).
++    uint32_t width = 0;
++    uint32_t height = 0;
 +  };
 +  HdrFrame hdr_frame_;
 +  // The last two swaps' front buffers (physical addresses): only resolves to
@@ -63,8 +66,8 @@ index ec99380..7f7f0b6 100644
 +  // (set by the backends' IssueSwap).
 +  uint32_t hdr_output_width_ = 0;
 +  uint32_t hdr_output_height_ = 0;
-+  // Logs when it changes.
-+  HdrComposite HdrGetComposite();
++  // For the refresher, at the guest output's size. Logs when it changes.
++  HdrComposite HdrGetComposite(uint32_t output_width, uint32_t output_height);
 +  HdrComposite hdr_last_composite_ = HdrComposite::kWholeFrame;
 +  // The refresher's flag bits 3:8 (hdr_refresh.cs.xesl) for a composite and
 +  // the hdr_debug_ui view.
@@ -96,15 +99,35 @@ index ec99380..7f7f0b6 100644
 +    return false;
 +  }
 +  virtual bool HdrClearTexture([[maybe_unused]] HdrTexture texture) { return false; }
-+  virtual uint32_t HdrDrawResolutionScale() const { return 1; }
++  virtual void HdrDrawResolutionScale(uint32_t& x, uint32_t& y) const { x = y = 1; }
 +  virtual uint32_t HdrEdramTileCount() const { return 2048; }
 +
 + private:
 +  uint32_t HdrColorTargetKey(uint32_t rt_index) const;
 +  bool HdrBeforeDraw();
 +  void HdrBeforeResolve();
-+  void HdrFail(const char* reason);
-+  enum class HdrPending { kNone, kStart, kSnapshot, kAbort };
++  enum class HdrFailure {
++    kFormat,             // the UI's target isn't 8_8_8_8 at 1x or 4x
++    kBlend,              // a blend other than SrcAlpha or One / InvSrcAlpha
++    kCopy,               // copying or clearing the target failed (or no host target)
++    kResolvedElsewhere,  // the target was resolved to something else mid-UI
++    kResolveArea,        // the resolve's place in the front buffer wasn't found
++    kTexture,            // the UI layer's texture
++    kRestore,            // putting the target back failed
++    kCount,
++  };
++  void HdrFail(HdrFailure failure);
++  uint32_t hdr_failures_logged_ = 0;
++  // Where a resolve destination's base lands in a front buffer (tiled
++  // 32bpp), by searching the tile-aligned positions; the last few found.
++  bool HdrFrontBufferPosition(uint32_t offset, uint32_t pitch, uint32_t height, uint32_t& x,
++                              uint32_t& y);
++  struct HdrPositionCacheEntry {
++    uint32_t offset, pitch, x, y;
++  };
++  HdrPositionCacheEntry hdr_position_cache_[8] = {};
++  uint32_t hdr_position_cache_next_ = 0;
++  enum class HdrPending { kNone, kStart, kSnapshot };
 +  HdrPending hdr_pending_ = HdrPending::kNone;
 +  uint32_t hdr_saved_blend_control_ = 0;
 +
@@ -113,7 +136,7 @@ index ec99380..7f7f0b6 100644
    virtual void MakeCoherent();
    virtual void PrepareForWait();
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
-index ab32381..a40dc9b 100644
+index ab32381..bea29e2 100644
 --- a/include/rex/graphics/d3d12/command_processor.h
 +++ b/include/rex/graphics/d3d12/command_processor.h
 @@ -646,6 +646,24 @@ class D3D12CommandProcessor : public CommandProcessor {
@@ -132,7 +155,7 @@ index ab32381..a40dc9b 100644
 +  bool HdrCopyTexture(HdrTexture source, HdrTexture dest, const HdrRect& source_rect,
 +                      uint32_t dest_x, uint32_t dest_y) override;
 +  bool HdrClearTexture(HdrTexture texture) override;
-+  uint32_t HdrDrawResolutionScale() const override;
++  void HdrDrawResolutionScale(uint32_t& x, uint32_t& y) const override;
 +  uint32_t HdrEdramTileCount() const override;
 +  ID3D12Resource* HdrGetTexture(HdrTexture texture);
 +  void HdrWriteTextureSRV(HdrTexture texture, D3D12_CPU_DESCRIPTOR_HANDLE handle);
@@ -255,7 +278,7 @@ index 4d1f60a..688fcb6 100644
      assert_true(GetPath() == Path::kHostRenderTargets);
      return last_update_accumulated_render_targets_;
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 1790c87..ca8bc19 100644
+index 1790c87..d890ae6 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -781,6 +781,32 @@ class VulkanCommandProcessor : public CommandProcessor {
@@ -272,7 +295,7 @@ index 1790c87..ca8bc19 100644
 +  bool HdrCopyTexture(HdrTexture source, HdrTexture dest, const HdrRect& source_rect,
 +                      uint32_t dest_x, uint32_t dest_y) override;
 +  bool HdrClearTexture(HdrTexture texture) override;
-+  uint32_t HdrDrawResolutionScale() const override;
++  void HdrDrawResolutionScale(uint32_t& x, uint32_t& y) const override;
 +  uint32_t HdrEdramTileCount() const override;
 +  struct HdrImage {
 +    VkImage image = VK_NULL_HANDLE;
@@ -292,10 +315,10 @@ index 1790c87..ca8bc19 100644
    // Has no dependencies on specific pipeline stages on both ends to simplify
    // use in different scenarios with different pipelines - use explicit barriers
 diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
-index b9a9687..9fba6c1 100644
+index b9a9687..0a5ea7a 100644
 --- a/include/rex/graphics/vulkan/deferred_command_buffer.h
 +++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
-@@ -250,6 +250,29 @@ class DeferredCommandBuffer {
+@@ -250,6 +250,17 @@ class DeferredCommandBuffer {
                  regions, sizeof(VkBufferImageCopy) * region_count);
    }
  
@@ -309,32 +332,19 @@ index b9a9687..9fba6c1 100644
 +    args.dst_image_layout = dst_image_layout;
 +    args.region = region;
 +  }
-+  // The region's offsets and extent as in VkImageCopy, resolving multisampled
-+  // src_image (vkCmdResolveImage).
-+  void CmdVkResolveImage(VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image,
-+                         VkImageLayout dst_image_layout, const VkImageCopy& region) {
-+    auto& args = *reinterpret_cast<ArgsVkCopyImage*>(
-+        WriteCommand(Command::kVkResolveImage, sizeof(ArgsVkCopyImage)));
-+    args.src_image = src_image;
-+    args.src_image_layout = src_image_layout;
-+    args.dst_image = dst_image;
-+    args.dst_image_layout = dst_image_layout;
-+    args.region = region;
-+  }
 +
    void CmdVkCopyQueryPoolResults(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count,
                                   VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
                                   VkQueryResultFlags flags) {
-@@ -403,6 +426,8 @@ class DeferredCommandBuffer {
+@@ -403,6 +414,7 @@ class DeferredCommandBuffer {
      kVkClearColorImage,
      kVkCopyBuffer,
      kVkCopyBufferToImage,
 +    kVkCopyImage,
-+    kVkResolveImage,
      kVkCopyQueryPoolResults,
      kVkDispatch,
      kVkDraw,
-@@ -525,6 +550,14 @@ class DeferredCommandBuffer {
+@@ -525,6 +537,14 @@ class DeferredCommandBuffer {
      static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
    };
  
@@ -350,19 +360,20 @@ index b9a9687..9fba6c1 100644
      VkQueryPool query_pool;
      uint32_t first_query;
 diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
-index a3d77fb..c6c2b51 100644
+index a3d77fb..489dab4 100644
 --- a/include/rex/graphics/vulkan/render_target_cache.h
 +++ b/include/rex/graphics/vulkan/render_target_cache.h
-@@ -102,6 +102,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -102,6 +102,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
  
    VkBuffer edram_buffer() const { return edram_buffer_; }
  
 +  // HDR output (rexglue-hdr-ui-layer.patch), on the UI's render target
-+  // (HdrFindColorTarget): copies an area to dest
-+  // (R8G8B8A8_UNORM in VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; MSAA samples
-+  // averaged; the render pass must have been ended), clears an area to 0, or
-+  // blends an underlay (R8G8B8A8_UNORM, shader-readable) under it.
-+  bool HdrCopyColorTarget(uint32_t key, VkImage dest, VkRect2D source, int32_t dest_x,
++  // (HdrFindColorTarget): copies an area to dest (an R8G8B8A8_UNORM storage
++  // image in VK_IMAGE_LAYOUT_GENERAL) with a compute shader through the
++  // target's sampled view, MSAA samples averaged (the render pass must have
++  // been ended); clears an area to 0; or blends an underlay (R8G8B8A8_UNORM,
++  // shader-readable) under it.
++  bool HdrCopyColorTarget(uint32_t key, VkImageView dest, VkRect2D source, int32_t dest_x,
 +                          int32_t dest_y);
 +  bool HdrClearColorTarget(uint32_t key, VkRect2D rect);
 +  bool HdrRestoreColorTarget(uint32_t key, VkImageView underlay_view, VkRect2D rect);
@@ -370,7 +381,7 @@ index a3d77fb..c6c2b51 100644
    // Performs the resolve to a shared memory area according to the current
    // register values, and also clears the render targets if needed. Must be in a
    // frame for calling.
-@@ -851,6 +861,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -851,6 +862,19 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
  
    std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> transfer_vertex_buffer_pool_;
    VkShaderModule transfer_passthrough_vertex_shader_ = VK_NULL_HANDLE;
@@ -383,11 +394,44 @@ index a3d77fb..c6c2b51 100644
 +  VkPipeline hdr_restore_pipelines_[2] = {};
 +  VkImageView hdr_restore_underlay_view_ = VK_NULL_HANDLE;
 +  size_t hdr_restore_descriptor_set_ = SIZE_MAX;
++  // Replaced sets, freed once the submission that last used them completes.
++  std::vector<std::pair<uint64_t, size_t>> hdr_restore_descriptor_sets_retired_;
++  VkPipelineLayout hdr_copy_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipeline hdr_copy_pipelines_[2] = {};
    VkPipelineLayout transfer_pipeline_layouts_[size_t(TransferPipelineLayoutIndex::kCount)] = {};
    // VK_NULL_HANDLE if failed to create.
    std::unordered_map<TransferShaderKey, VkShaderModule, TransferShaderKey::Hasher>
+diff --git a/include/rex/system/gpu_plugin.h b/include/rex/system/gpu_plugin.h
+index 07969d6..1d68527 100644
+--- a/include/rex/system/gpu_plugin.h
++++ b/include/rex/system/gpu_plugin.h
+@@ -30,7 +30,7 @@ namespace rex::system {
+ 
+ // Bump on any change to GpuCreateInfo or to the IGraphicsSystem interface.
+ // 3: HDR output (rexglue-hdr-output.patch) changed the presenter the plugin uses.
+-inline constexpr uint32_t kGpuPluginAbiVersion = 3;
++inline constexpr uint32_t kGpuPluginAbiVersion = 4;
+ 
+ inline constexpr const char* kGpuCreateSymbol = "rex_gpu_create";
+ inline constexpr const char* kGpuAbiVersionSymbol = "rex_gpu_abi_version";
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index a2b71b8..835a8f8 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -265,8 +265,10 @@ class D3D12Presenter final : public Presenter {
+     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSwapChainBufferCount> swap_chain_buffers;
+     // HDR output: what the connection was made for (IsHdrOutputWanted), and
+     // whether the swap chain is HDR10 (kSwapChainFormatHdr10, PQ BT.2020).
+-    bool swap_chain_hdr_wanted = false;
++    uint32_t swap_chain_hdr_wanted = 0;
+     bool swap_chain_hdr = false;
++    // The levels last given to SetHDRMetaData.
++    HdrMetadataLevels hdr_metadata_levels = {};
+     // The presenter's own UI over HDR10 output, swap chain sized, in
+     // D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE while not drawn into.
+     Microsoft::WRL::ComPtr<ID3D12Resource> hdr_ui_layer;
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index bf8eafa..80fc197 100644
+index bf8eafa..8e99a0c 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
 @@ -217,6 +217,8 @@ class Presenter {
@@ -399,32 +443,117 @@ index bf8eafa..80fc197 100644
    };
  
    class GuestOutputRefreshContext {
+@@ -406,6 +408,9 @@ class Presenter {
+   // settings screens (any thread).
+   static HdrDisplayInfo GetLastHdrDisplayInfo();
+   static bool IsHdrOutputActive();
++  // For the guest output refresher: whether it can write HDR10 now (for
++  // instance not with a PWL gamma ramp); if not, the swap chain stays SDR.
++  static void SetGuestOutputHdrAvailable(bool available);
+   const GuestOutputPaintConfig& GetGuestOutputPaintConfigFromUIThread() const {
+     return guest_output_paint_config_;
+   }
+@@ -735,9 +740,26 @@ class Presenter {
+       GuestOutputHdr& hdr_out_ref) = 0;
+ 
+   // HDR output, for the backends: whether the swap chain should be HDR10 now
+-  // (the `hdr` setting, and the display's state, which is refreshed about once
+-  // a second while `hdr` isn't off), and publishing what it is.
+-  static bool IsHdrOutputWanted();
++  // (the `hdr` setting, and the display's state, which a thread of its own
++  // refreshes about once a second while `hdr` isn't off), and publishing what
++  // it is. 0: no; otherwise 1 (wanted, the display not in HDR mode) or 2 (in
++  // HDR mode), so that a change of the display's state reconnects.
++  static uint32_t IsHdrOutputWanted();
++  class HdrDisplayWorker;
++  // For HDR10 metadata (BT.2020 primaries, D65): the peak (as content light
++  // level and mastering maximum), the frame average and the black level, in
++  // nits, valid (finite, 0...10000).
++  struct HdrMetadataLevels {
++    float max_nits;
++    float max_frame_average_nits;
++    float min_nits;
++    bool operator==(const HdrMetadataLevels& other) const {
++      return max_nits == other.max_nits &&
++             max_frame_average_nits == other.max_frame_average_nits &&
++             min_nits == other.min_nits;
++    }
++  };
++  static HdrMetadataLevels GetHdrMetadataLevels();
+   static void SetHdrOutputActive(bool active);
+ 
+   // For capturing: guest output pixels (R10G10B10A2 words) to 8bpc ones as
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+index 947817f..69aaf70 100644
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -182,6 +182,7 @@ class VulkanDevice {
+   // `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
+     bool ext_KHR_swapchain = false;                     // #2
++    bool ext_EXT_hdr_metadata = false;                  // #106
+     bool ext_1_1_KHR_dedicated_allocation = false;      // #128
+     bool ext_EXT_shader_stencil_export = false;         // #141
+     bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
+@@ -212,6 +213,8 @@ class VulkanDevice {
+ #include <rex/ui/vulkan/functions/device_1_0.inc>
+     // VK_KHR_swapchain (#2)
+ #include <rex/ui/vulkan/functions/device_khr_swapchain.inc>
++    // VK_EXT_hdr_metadata (#106)
++#include <rex/ui/vulkan/functions/device_ext_hdr_metadata.inc>
+     // VK_KHR_get_memory_requirements2 (#147, promoted to 1.1)
+ #include <rex/ui/vulkan/functions/device_1_1_khr_get_memory_requirements2.inc>
+     // VK_KHR_bind_memory2 (#158, promoted to 1.1)
 diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
-index d9d6ed3..ddef152 100644
+index d9d6ed3..9922fd0 100644
 --- a/include/rex/ui/vulkan/functions/device_1_0.inc
 +++ b/include/rex/ui/vulkan/functions/device_1_0.inc
-@@ -14,6 +14,8 @@ XE_UI_VULKAN_FUNCTION(vkCmdClearAttachments)
+@@ -14,6 +14,7 @@ XE_UI_VULKAN_FUNCTION(vkCmdClearAttachments)
  XE_UI_VULKAN_FUNCTION(vkCmdClearColorImage)
  XE_UI_VULKAN_FUNCTION(vkCmdCopyBuffer)
  XE_UI_VULKAN_FUNCTION(vkCmdCopyBufferToImage)
 +XE_UI_VULKAN_FUNCTION(vkCmdCopyImage)
-+XE_UI_VULKAN_FUNCTION(vkCmdResolveImage)
  XE_UI_VULKAN_FUNCTION(vkCmdCopyImageToBuffer)
  XE_UI_VULKAN_FUNCTION(vkCmdCopyQueryPoolResults)
  XE_UI_VULKAN_FUNCTION(vkCmdDispatch)
+diff --git a/include/rex/ui/vulkan/functions/device_ext_hdr_metadata.inc b/include/rex/ui/vulkan/functions/device_ext_hdr_metadata.inc
+new file mode 100644
+index 0000000..dcc6aa2
+--- /dev/null
++++ b/include/rex/ui/vulkan/functions/device_ext_hdr_metadata.inc
+@@ -0,0 +1,2 @@
++// VK_EXT_hdr_metadata functions used in Xenia.
++XE_UI_VULKAN_FUNCTION(vkSetHdrMetadataEXT)
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index 255e040..d5305bf 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -427,8 +427,10 @@ class VulkanPresenter final : public Presenter {
+     std::vector<SwapchainFramebuffer> swapchain_framebuffers;
+     // HDR output: what the connection was made for (IsHdrOutputWanted), and
+     // whether the swapchain is HDR10 (PQ, BT.2020).
+-    bool swapchain_hdr_wanted = false;
++    uint32_t swapchain_hdr_wanted = 0;
+     bool swapchain_hdr = false;
++    // The levels last given to vkSetHdrMetadataEXT.
++    HdrMetadataLevels hdr_metadata_levels = {};
+     // The presenter's UI over HDR10 output (kHdrUiLayerFormat, swapchain
+     // sized), in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL after drawing.
+     VkImage hdr_ui_layer_image = VK_NULL_HANDLE;
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index 069c000..8883ba7 100644
+index 069c000..36c90d4 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
-@@ -25,6 +25,7 @@
+@@ -25,6 +25,8 @@
  #include <rex/graphics/flags.h>
  #include <rex/graphics/graphics_system.h>
  #include <rex/graphics/pipeline/texture/info.h>
++#include <rex/graphics/pipeline/texture/util.h>
 +#include <rex/graphics/util/draw.h>
  #include <rex/graphics/sampler_info.h>
  #include <rex/graphics/xenos.h>
  #include <rex/logging.h>
-@@ -34,8 +35,12 @@
+@@ -34,8 +36,12 @@
  #include <rex/stream.h>
  #include <rex/system/kernel_state.h>
  #include <rex/system/user_module.h>
@@ -437,7 +566,7 @@ index 069c000..8883ba7 100644
  
  REXCVAR_DEFINE_BOOL(gpu_regwrite_bulk, true, "GPU",
                      "Write blocks of registers in bulk and test for the few registers with side "
-@@ -1015,12 +1020,277 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -1015,12 +1021,335 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
    uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
    reader->AdvanceRead((count - 4) * sizeof(uint32_t));
  
@@ -468,6 +597,8 @@ index 069c000..8883ba7 100644
 +                       ui::Presenter::IsHdrOutputActive();
 +      if (hdr_frame_.ui && !hdr_frame_.ui_target) {
 +        hdr_frame_.ui_target = HdrColorTargetKey(0);
++        hdr_frame_.width = hdr_output_width_;
++        hdr_frame_.height = hdr_output_height_;
 +      }
 +      break;
 +    default:
@@ -475,10 +606,11 @@ index 069c000..8883ba7 100644
 +  }
 +}
 +
-+CommandProcessor::HdrComposite CommandProcessor::HdrGetComposite() {
++CommandProcessor::HdrComposite CommandProcessor::HdrGetComposite(uint32_t output_width,
++                                                                 uint32_t output_height) {
 +  HdrComposite composite = HdrComposite::kWholeFrame;
-+  if (hdr_frame_.ui &&
-+      hdr_frame_.captured_area >= uint64_t(hdr_output_width_) * hdr_output_height_) {
++  if (hdr_frame_.ui && hdr_frame_.width == output_width && hdr_frame_.height == output_height &&
++      hdr_frame_.captured_area >= uint64_t(output_width) * output_height) {
 +    composite = hdr_frame_.failed ? HdrComposite::kMask : HdrComposite::kLayer;
 +  } else if (hdr_frame_.tonemap && !hdr_frame_.ui_begin && REXCVAR_GET(hdr_ui_layer) &&
 +             ui::Presenter::IsHdrOutputActive()) {
@@ -519,15 +651,49 @@ index 069c000..8883ba7 100644
 +         (uint32_t(color_info.color_format) << 14) | (surface_info.surface_pitch << 18);
 +}
 +
-+void CommandProcessor::HdrFail(const char* reason) {
-+  if (!hdr_frame_.failed) {
-+    hdr_frame_.failed = true;
-+    static std::atomic<uint32_t> logged_reasons{0};
-+    uint32_t reason_bit = uint32_t(1) << (std::hash<std::string_view>{}(reason) & 31);
-+    if (!(logged_reasons.fetch_or(reason_bit) & reason_bit)) {
-+      REXGPU_INFO("HDR: the UI layer fell back to the difference mask ({})", reason);
++void CommandProcessor::HdrFail(HdrFailure failure) {
++  if (hdr_frame_.failed) {
++    return;
++  }
++  hdr_frame_.failed = true;
++  uint32_t failure_bit = uint32_t(1) << uint32_t(failure);
++  if (!(hdr_failures_logged_ & failure_bit)) {
++    hdr_failures_logged_ |= failure_bit;
++    static const char* const kReasons[] = {
++        "the UI's render target format", "a blend mode", "a render target copy",
++        "the UI's target resolved elsewhere", "a resolve's place in the front buffer",
++        "the UI layer's texture", "putting the render target back"};
++    static_assert(std::size(kReasons) == size_t(HdrFailure::kCount));
++    REXGPU_INFO(
++        "HDR: separating the UI ended for a frame ({}); frames like it fall back to the "
++        "difference with the underlay, or to the whole frame as SDR",
++        kReasons[uint32_t(failure)]);
++  }
++}
++
++bool CommandProcessor::HdrFrontBufferPosition(uint32_t offset, uint32_t pitch, uint32_t height,
++                                              uint32_t& x, uint32_t& y) {
++  for (const HdrPositionCacheEntry& entry : hdr_position_cache_) {
++    if (entry.pitch == pitch && entry.offset == offset) {
++      x = entry.x;
++      y = entry.y;
++      return true;
 +    }
 +  }
++  // 32bpp 2D: bases are aligned to 32x32 (xenos::GetTextureTiled*BaseGranularityLog2).
++  for (uint32_t base_y = 0; base_y < height; base_y += 32) {
++    for (uint32_t base_x = 0; base_x < pitch; base_x += 32) {
++      if (uint32_t(texture_util::GetTiledOffset2D(int32_t(base_x), int32_t(base_y), pitch, 2)) ==
++          offset) {
++        hdr_position_cache_[hdr_position_cache_next_++ % std::size(hdr_position_cache_)] = {
++            offset, pitch, base_x, base_y};
++        x = base_x;
++        y = base_y;
++        return true;
++      }
++    }
++  }
++  return false;
 +}
 +
 +bool CommandProcessor::HdrBeforeDraw() {
@@ -553,7 +719,7 @@ index 069c000..8883ba7 100644
 +    auto format = xenos::ColorRenderTargetFormat((key >> 14) & 0xF);
 +    auto msaa = xenos::MsaaSamples((key >> 12) & 3);
 +    if (format != xenos::ColorRenderTargetFormat::k_8_8_8_8 || msaa == xenos::MsaaSamples::k2X) {
-+      HdrFail("render target format");
++      HdrFail(HdrFailure::kFormat);
 +    }
 +  }
 +  if (key != hdr_frame_.ui_target) {
@@ -572,11 +738,16 @@ index 069c000..8883ba7 100644
 +    if (over) {
 +      hdr_pending_ = HdrPending::kStart;
 +    } else {
-+      HdrFail("blend");
++      HdrFail(HdrFailure::kBlend);
 +    }
 +  } else if (!hdr_frame_.failed && hdr_frame_.started && !over) {
-+    HdrFail("blend");
-+    hdr_pending_ = HdrPending::kAbort;
++    // Put the target back now, before this draw: a draw may still return
++    // before its render target update.
++    HdrFail(HdrFailure::kBlend);
++    if (!HdrRestoreColorTarget(key, {0, 0, hdr_output_width_, hdr_output_height_})) {
++      hdr_frame_.snapshot = false;
++    }
++    hdr_frame_.started = false;
 +    return false;
 +  }
 +  if (hdr_frame_.failed) {
@@ -607,19 +778,15 @@ index 069c000..8883ba7 100644
 +  // The underlay and the clear cover what the output can show.
 +  uint32_t key = hdr_frame_.ui_target;
 +  HdrRect rect = {0, 0, hdr_output_width_, hdr_output_height_};
-+  if (pending == HdrPending::kAbort) {
-+    if (!HdrRestoreColorTarget(key, rect)) {
-+      hdr_frame_.snapshot = false;
-+    }
-+    hdr_frame_.started = false;
-+    return;
-+  }
 +  hdr_frame_.snapshot = HdrCopyFromColorTarget(key, kHdrTextureUnderlayRt, rect, 0, 0);
 +  if (pending == HdrPending::kStart) {
 +    if (hdr_frame_.snapshot && HdrClearColorTarget(key, rect)) {
 +      hdr_frame_.started = true;
 +    } else {
-+      HdrFail("render target copy");
++      // No host render target (ROV, FSI) or the copy failed: this draw keeps
++      // the guest's blend (the pipeline isn't configured yet).
++      HdrFail(HdrFailure::kCopy);
++      (*register_file_)[reg::RB_BLENDCONTROL::rt_register_indices[0]] = hdr_saved_blend_control_;
 +    }
 +  }
 +}
@@ -631,28 +798,50 @@ index 069c000..8883ba7 100644
 +      HdrColorTargetKey(copy_control.copy_src_select) != hdr_frame_.ui_target) {
 +    return;
 +  }
-+  // Where the resolved area is in the render target, and on the screen (the
-+  // window offset moves a tile's screen area to the render target's origin).
-+  uint32_t scale = HdrDrawResolutionScale();
++  // Where the resolved area is in the render target and in the front buffer.
++  uint32_t scale_x, scale_y;
++  HdrDrawResolutionScale(scale_x, scale_y);
 +  draw_util::ResolveInfo info;
-+  if (!draw_util::GetResolveInfo(regs, *memory_, scale, scale, HdrEdramTileCount(), false, false,
-+                                 info) ||
++  if (!draw_util::GetResolveInfo(regs, *memory_, scale_x, scale_y, HdrEdramTileCount(), false,
++                                 false, info) ||
 +      !info.coordinate_info.width_div_8 || !info.height_div_8) {
 +    return;
 +  }
 +  uint32_t key = hdr_frame_.ui_target;
-+  // Only a resolve to a front buffer is the picture; another is put back first.
-+  uint32_t front_buffer_size = hdr_output_width_ * hdr_output_height_ * 4 / (scale * scale);
-+  bool to_front_buffer = !hdr_front_buffers_[0];
-+  for (uint32_t front_buffer : hdr_front_buffers_) {
-+    to_front_buffer |= front_buffer && info.copy_dest_base - front_buffer < front_buffer_size;
++  // Only a resolve to a front buffer is the picture. Another one mid-UI ends
++  // the separation (the target is put back first); before the UI, it's the
++  // scene going somewhere else, and doesn't matter.
++  uint32_t front_buffer_height = hdr_output_height_ / scale_y;
++  uint32_t front_buffer_size = hdr_output_width_ / scale_x * front_buffer_height * 4;
++  uint32_t front_buffer = 0;
++  for (uint32_t buffer : hdr_front_buffers_) {
++    if (buffer && info.copy_dest_base - buffer < front_buffer_size) {
++      front_buffer = buffer;
++    }
 +  }
-+  if (!to_front_buffer) {
++  uint32_t dest_pitch = info.copy_dest_coordinate_info.pitch_aligned_div_32 << 5;
++  uint32_t screen_x = 0, screen_y = 0;
++  HdrFailure failure = HdrFailure::kResolvedElsewhere;
++  if (front_buffer &&
++      xenos::TextureFormat(info.copy_dest_info.copy_dest_format) ==
++          xenos::TextureFormat::k_8_8_8_8 &&
++      !info.copy_dest_info.copy_dest_array) {
++    failure = HdrFailure::kResolveArea;
++    if (HdrFrontBufferPosition(info.copy_dest_base - front_buffer, dest_pitch,
++                               front_buffer_height, screen_x, screen_y)) {
++      screen_x += info.copy_dest_coordinate_info.offset_x_div_8 * 8;
++      screen_y += info.copy_dest_coordinate_info.offset_y_div_8 * 8;
++      failure = HdrFailure::kCount;
++    }
++  }
++  if (failure != HdrFailure::kCount) {
 +    if (hdr_frame_.started) {
 +      HdrRestoreColorTarget(key, {0, 0, hdr_output_width_, hdr_output_height_});
 +      hdr_frame_.started = false;
++      HdrFail(failure);
++    } else if (hdr_frame_.snapshot && failure == HdrFailure::kResolveArea) {
++      HdrFail(failure);
 +    }
-+    HdrFail("UI target resolved elsewhere");
 +    return;
 +  }
 +  bool msaa_4x = info.color_edram_info.msaa_samples >= xenos::MsaaSamples::k4X;
@@ -663,32 +852,30 @@ index 069c000..8883ba7 100644
 +  uint32_t base_offset = (info.color_edram_info.GetBaseTiles() - (key & 0xFFF)) &
 +                         (HdrEdramTileCount() - 1);
 +  uint32_t pitch_tiles = std::max(info.color_edram_info.pitch_tiles, uint32_t(1));
-+  int32_t rt_x = int32_t((base_offset % pitch_tiles) * tile_width +
-+                         info.coordinate_info.edram_offset_x_div_8 * 8);
-+  int32_t rt_y = int32_t((base_offset / pitch_tiles) * tile_height +
-+                         info.coordinate_info.edram_offset_y_div_8 * 8);
-+  int32_t screen_x = rt_x, screen_y = rt_y;
-+  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
-+    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
-+    screen_x -= window_offset.window_x_offset;
-+    screen_y -= window_offset.window_y_offset;
-+  }
-+  HdrRect rect = {uint32_t(rt_x) * scale, uint32_t(rt_y) * scale,
-+                  info.coordinate_info.width_div_8 * 8 * scale, info.height_div_8 * 8 * scale};
-+  if (screen_x < 0 || screen_y < 0) {
-+    HdrFail("resolve area");
-+    return;
-+  }
-+  uint32_t dest_x = uint32_t(screen_x) * scale, dest_y = uint32_t(screen_y) * scale;
-+  rect.width = std::min(rect.width, hdr_output_width_ - std::min(dest_x, hdr_output_width_));
-+  rect.height = std::min(rect.height, hdr_output_height_ - std::min(dest_y, hdr_output_height_));
++  uint32_t rt_x = (base_offset % pitch_tiles) * tile_width +
++                  info.coordinate_info.edram_offset_x_div_8 * 8;
++  uint32_t rt_y = (base_offset / pitch_tiles) * tile_height +
++                  info.coordinate_info.edram_offset_y_div_8 * 8;
++  // Both clipped to the textures (the output's size).
++  HdrRect rect = {rt_x * scale_x, rt_y * scale_y, info.coordinate_info.width_div_8 * 8 * scale_x,
++                  info.height_div_8 * 8 * scale_y};
++  uint32_t dest_x = screen_x * scale_x, dest_y = screen_y * scale_y;
++  rect.width = std::min({rect.width, hdr_output_width_ - std::min(dest_x, hdr_output_width_),
++                         hdr_output_width_ - std::min(rect.x, hdr_output_width_)});
++  rect.height = std::min({rect.height, hdr_output_height_ - std::min(dest_y, hdr_output_height_),
++                          hdr_output_height_ - std::min(rect.y, hdr_output_height_)});
 +  if (!rect.width || !rect.height) {
++    if (hdr_frame_.started) {
++      HdrRestoreColorTarget(key, {0, 0, hdr_output_width_, hdr_output_height_});
++      hdr_frame_.started = false;
++    }
++    hdr_frame_.snapshot = false;
 +    return;
 +  }
 +  if (!hdr_frame_.ui_layer_cleared) {
 +    hdr_frame_.ui_layer_cleared = true;
 +    if (!HdrClearTexture(kHdrTextureUiLayer)) {
-+      HdrFail("texture clear");
++      HdrFail(HdrFailure::kTexture);
 +    }
 +  }
 +  bool copied;
@@ -697,7 +884,7 @@ index 069c000..8883ba7 100644
 +    copied = HdrCopyFromColorTarget(key, kHdrTextureUiLayer, rect, dest_x, dest_y) &&
 +             HdrCopyTexture(kHdrTextureUnderlayRt, kHdrTextureUnderlay, rect, dest_x, dest_y);
 +    if (!HdrRestoreColorTarget(key, {0, 0, hdr_output_width_, hdr_output_height_})) {
-+      HdrFail("render target restore");
++      HdrFail(HdrFailure::kRestore);
 +    }
 +  } else if (hdr_frame_.snapshot) {
 +    copied = HdrCopyTexture(kHdrTextureUnderlayRt, kHdrTextureUnderlay, rect, dest_x, dest_y);
@@ -715,7 +902,7 @@ index 069c000..8883ba7 100644
  bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* reader,
                                                            uint32_t packet, uint32_t count) {
    // indirect buffer dispatch
-@@ -1435,8 +1705,15 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1435,8 +1764,15 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
  
        bool major_mode_explicit =
            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
@@ -732,7 +919,7 @@ index 069c000..8883ba7 100644
          auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
          auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 732c161..a529618 100644
+index 732c161..9c5583e 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -1361,9 +1361,24 @@ bool D3D12CommandProcessor::SetupContext() {
@@ -761,7 +948,7 @@ index 732c161..a529618 100644
    *(hdr_refresh_root_signature_.ReleaseAndGetAddressOf()) =
        ui::d3d12::util::CreateRootSignature(provider, apply_gamma_root_signature_desc);
    if (hdr_refresh_root_signature_) {
-@@ -2135,6 +2150,137 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2135,6 +2150,138 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
    gamma_ramp_pwl_up_to_date_ = false;
  }
  
@@ -817,8 +1004,9 @@ index 732c161..a529618 100644
 +                                                           &srv_desc, handle);
 +}
 +
-+uint32_t D3D12CommandProcessor::HdrDrawResolutionScale() const {
-+  return render_target_cache_->draw_resolution_scale_x();
++void D3D12CommandProcessor::HdrDrawResolutionScale(uint32_t& x, uint32_t& y) const {
++  x = render_target_cache_->draw_resolution_scale_x();
++  y = render_target_cache_->draw_resolution_scale_y();
 +}
 +
 +uint32_t D3D12CommandProcessor::HdrEdramTileCount() const {
@@ -899,7 +1087,7 @@ index 732c161..a529618 100644
  void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
-@@ -2229,6 +2375,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2229,6 +2376,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
    uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
    uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
  
@@ -909,35 +1097,48 @@ index 732c161..a529618 100644
    presenter->RefreshGuestOutput(
        guest_output_width, guest_output_height, display_width, display_height,
        [this, &swap_texture_srv_desc, frontbuffer_format, swap_texture_resource, guest_output_width,
-@@ -2341,11 +2490,14 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2240,9 +2390,12 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+         // HDR output: while the presenter's swap chain is HDR10, HDR10 code
+         // values from the 256-entry table path (hdr_refresh.cs).
+         ui::Presenter::HdrOutputState hdr_state = ui::Presenter::GetHdrOutputState();
+-        bool use_hdr = hdr_state.active && hdr_refresh_pipeline_ &&
+-                       frontbuffer_format != xenos::TextureFormat::k_2_10_10_10 &&
+-                       frontbuffer_format != xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16;
++        // Otherwise the swap chain must not be HDR10 (SDR in it would be lost).
++        bool hdr_possible = hdr_refresh_pipeline_ &&
++                            frontbuffer_format != xenos::TextureFormat::k_2_10_10_10 &&
++                            frontbuffer_format != xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16;
++        ui::Presenter::SetGuestOutputHdrAvailable(hdr_possible);
++        bool use_hdr = hdr_state.active && hdr_possible;
+         if (use_hdr) {
+           swap_post_effect = SwapPostEffect::kNone;
+         }
+@@ -2341,10 +2494,15 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
                                : gamma_ramp_256_entry_table_up_to_date_) = true;
          }
  
 -        // Destination, source, and if bindful, gamma ramp.
+-        ui::d3d12::util::DescriptorCpuGpuHandlePair apply_gamma_descriptors[3];
 +        // Destination, source, and if bindful, gamma ramp; for HDR, the
 +        // underlay and the UI layer (adjacent, one table).
-         ui::d3d12::util::DescriptorCpuGpuHandlePair apply_gamma_descriptors[3];
++        // One request, so that a bindful heap switch can't separate them.
++        ui::d3d12::util::DescriptorCpuGpuHandlePair apply_gamma_descriptors[5];
          ui::d3d12::util::DescriptorCpuGpuHandlePair apply_gamma_descriptor_gamma_ramp;
-+        ui::d3d12::util::DescriptorCpuGpuHandlePair hdr_layer_descriptors[2];
-         if (!RequestOneUseSingleViewDescriptors(bindless_resources_used_ ? 2 : 3,
--                                                apply_gamma_descriptors)) {
-+                                                apply_gamma_descriptors) ||
-+            (use_hdr && !RequestOneUseSingleViewDescriptors(2, hdr_layer_descriptors))) {
+-        if (!RequestOneUseSingleViewDescriptors(bindless_resources_used_ ? 2 : 3,
++        uint32_t apply_gamma_descriptor_count = bindless_resources_used_ ? 2 : 3;
++        const ui::d3d12::util::DescriptorCpuGpuHandlePair* hdr_layer_descriptors =
++            apply_gamma_descriptors + apply_gamma_descriptor_count;
++        if (!RequestOneUseSingleViewDescriptors(apply_gamma_descriptor_count + (use_hdr ? 2 : 0),
+                                                 apply_gamma_descriptors)) {
            return false;
          }
-         // Must not call anything that can change the descriptor heap from now
-@@ -2395,10 +2547,25 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2395,10 +2553,20 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          gamma_ramp_buffer_state_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
  
          if (use_hdr) {
 +          // The UI layer and its underlay, if this frame has them at the
 +          // output's size.
-+          HdrComposite composite = HdrGetComposite();
-+          if ((composite == HdrComposite::kMask || composite == HdrComposite::kLayer) &&
-+              (guest_output_width != hdr_output_width_ ||
-+               guest_output_height != hdr_output_height_)) {
-+            composite = HdrComposite::kWholeFrame;
-+          }
++          HdrComposite composite = HdrGetComposite(guest_output_width, guest_output_height);
            deferred_command_list_.D3DSetComputeRootSignature(hdr_refresh_root_signature_.Get());
 +          for (uint32_t i = 0; i < 2; ++i) {
 +            HdrWriteTextureSRV(i ? kHdrTextureUiLayer : kHdrTextureUnderlay,
@@ -953,7 +1154,7 @@ index 732c161..a529618 100644
                 0},
                {hdr_state.sdr_white_nits, hdr_state.paper_white_nits, hdr_state.rolloff_start_nits,
                 hdr_state.peak_nits}};
-@@ -2662,6 +2829,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2662,6 +2830,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
                                      normalized_color_mask, *vertex_shader)) {
      return false;
    }
@@ -982,7 +1183,7 @@ index 987fb1a..13b49a2 100644
          if (current_pipeline_state != nullptr) {
            auto& args = *reinterpret_cast<const D3DDispatchArguments*>(stream);
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index 8ec5c10..9d8219a 100644
+index 8ec5c10..e3851c0 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
 @@ -53,6 +53,8 @@ namespace rex::graphics::d3d12 {
@@ -1109,8 +1310,8 @@ index 8ec5c10..9d8219a 100644
 +    blend.SrcBlend = D3D12_BLEND_INV_DEST_ALPHA;
 +    blend.DestBlend = D3D12_BLEND_ONE;
 +    blend.BlendOp = D3D12_BLEND_OP_ADD;
-+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
-+    blend.DestBlendAlpha = D3D12_BLEND_ZERO;
++    blend.SrcBlendAlpha = D3D12_BLEND_INV_DEST_ALPHA;
++    blend.DestBlendAlpha = D3D12_BLEND_ONE;
 +    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
 +    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 +    pipeline_desc.SampleMask = UINT_MAX;
@@ -1489,25 +1690,23 @@ index b848f09..901d0e6 100644
  };
 diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h
 new file mode 100644
-index 0000000..8f04e18
+index 0000000..f3847bc
 --- /dev/null
 +++ b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_underlay_restore_ps.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,14 @@
 +// Generated from hdr_underlay_restore.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
 +// sources (see patches/README.md). Not disassembled to keep the patch small.
 +const uint32_t hdr_underlay_restore_ps[] = {
-+    0x43425844, 0x3932B6B2, 0x54B95642, 0x35DC9570, 0x79C3532E, 0x00000001, 0x00000168, 0x00000003,
++    0x43425844, 0x4B0B6F27, 0x4891953E, 0x34CAF05A, 0xD972A2CC, 0x00000001, 0x00000140, 0x00000003,
 +    0x0000002C, 0x00000060, 0x00000094, 0x4E475349, 0x0000002C, 0x00000001, 0x00000008, 0x00000020,
 +    0x00000000, 0x00000001, 0x00000003, 0x00000000, 0x0000030F, 0x505F5653, 0x7469736F, 0x006E6F69,
 +    0x4E47534F, 0x0000002C, 0x00000001, 0x00000008, 0x00000020, 0x00000000, 0x00000000, 0x00000003,
-+    0x00000000, 0x0000000F, 0x545F5653, 0x65677261, 0xABAB0074, 0x58454853, 0x000000CC, 0x00000051,
-+    0x00000033, 0x0100086A, 0x07001858, 0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555,
++    0x00000000, 0x0000000F, 0x545F5653, 0x65677261, 0xABAB0074, 0x58454853, 0x000000A4, 0x00000051,
++    0x00000029, 0x0100086A, 0x07001858, 0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555,
 +    0x00000000, 0x04002064, 0x00101032, 0x00000000, 0x00000001, 0x03000065, 0x001020F2, 0x00000000,
 +    0x02000068, 0x00000001, 0x0500001B, 0x00100032, 0x00000000, 0x00101046, 0x00000000, 0x08000036,
 +    0x001000C2, 0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D,
-+    0x00100072, 0x00000000, 0x00100E46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x05000036,
-+    0x00102072, 0x00000000, 0x00100246, 0x00000000, 0x05000036, 0x00102082, 0x00000000, 0x00004001,
-+    0x3F800000, 0x0100003E,
++    0x001020F2, 0x00000000, 0x00100E46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x0100003E,
 +};
 diff --git a/src/graphics/shaders/hdr_fullscreen.vs.xesl b/src/graphics/shaders/hdr_fullscreen.vs.xesl
 new file mode 100644
@@ -1693,18 +1892,92 @@ index 137dbd2..54e54bd 100644
  
    dont_flatten_xe if ((flags & 2u) != 0u) {
      // Test pattern. Top half: 24 bars from 100 nits doubling every 4 bars
+diff --git a/src/graphics/shaders/hdr_rt_copy.cs.xesl b/src/graphics/shaders/hdr_rt_copy.cs.xesl
+new file mode 100644
+index 0000000..6b66799
+--- /dev/null
++++ b/src/graphics/shaders/hdr_rt_copy.cs.xesl
+@@ -0,0 +1,58 @@
++// HDR output (rexglue-hdr-ui-layer.patch), Vulkan: copies a rectangle of an
++// 8_8_8_8 host render target through its sampled view into one of the HDR
++// output's textures (a storage image), averaging the samples of a 4x MSAA
++// target, so that render targets need no transfer source usage.
++
++#include "../../ui/shaders/xesl.xesli"
++
++#ifndef image_format_rgba8_xe
++  #if SHADING_LANGUAGE_GLSL_XE
++    #define image_format_rgba8_xe rgba8
++  #else
++    #define image_format_rgba8_xe unorm float4
++  #endif
++#endif
++
++push_const_begin_xe(b0, space0)
++  // x: the source's origin, y: the destination's, z: the size (16 bits each,
++  // x in the low half).
++  uint4_xe xe_hdr_rt_copy_rect;
++push_const_end_xe
++
++#define LOCAL_SIZE_X_XE 8
++#define LOCAL_SIZE_Y_XE 8
++#define LOCAL_SIZE_Z_XE 1
++entry_bindings_begin_compute_xe
++  push_const_binding_xe(buffer(0))
++  entry_binding_next_xe
++#if XE_HDR_RT_COPY_4XMSAA
++  texture_xe(texture_2d_ms_xe, xe_hdr_rt_copy_source, set=0, binding=0, t0,
++             space0, texture(0))
++#else
++  texture_xe(texture_2d_xe, xe_hdr_rt_copy_source, set=0, binding=0, t0,
++             space0, texture(0))
++#endif
++  entry_binding_next_xe
++  image_wo_xe(image_2d_xe, image_format_rgba8_xe, xe_hdr_rt_copy_dest, set=1,
++              binding=0, u0, space0, texture(1))
++entry_bindings_end_inputs_begin_compute_xe
++  entry_in_global_thread_id_xe
++entry_inputs_end_code_begin_compute_xe
++  uint4_xe rect = push_const_xe(xe_hdr_rt_copy_rect);
++  uint2_xe pixel_index = in_global_thread_id_xe.xy;
++  dont_flatten_xe
++  if (any(greater_than_equal_xe(pixel_index, uint2_xe(rect.z & 0xFFFFu, rect.z >> 16u)))) {
++    return;
++  }
++  int2_xe source = int2_xe(uint2_xe(rect.x & 0xFFFFu, rect.x >> 16u) + pixel_index);
++#if XE_HDR_RT_COPY_4XMSAA
++  float4_xe color = (texel_fetch_2d_ms_xe(xe_hdr_rt_copy_source, source, 0) +
++                     texel_fetch_2d_ms_xe(xe_hdr_rt_copy_source, source, 1) +
++                     texel_fetch_2d_ms_xe(xe_hdr_rt_copy_source, source, 2) +
++                     texel_fetch_2d_ms_xe(xe_hdr_rt_copy_source, source, 3)) * 0.25f;
++#else
++  float4_xe color = texel_fetch_2d_xe(xe_hdr_rt_copy_source, source, 0);
++#endif
++  image_store_2d_rgba_xe(xe_hdr_rt_copy_dest,
++                         uint2_xe(rect.y & 0xFFFFu, rect.y >> 16u) + pixel_index, color);
++entry_code_end_compute_xe
+diff --git a/src/graphics/shaders/hdr_rt_copy_4xmsaa.cs.xesl b/src/graphics/shaders/hdr_rt_copy_4xmsaa.cs.xesl
+new file mode 100644
+index 0000000..59bc4e3
+--- /dev/null
++++ b/src/graphics/shaders/hdr_rt_copy_4xmsaa.cs.xesl
+@@ -0,0 +1,5 @@
++// HDR output (rexglue-hdr-ui-layer.patch): hdr_rt_copy.cs.xesl for 4x MSAA
++// render targets.
++
++#define XE_HDR_RT_COPY_4XMSAA 1
++#include "hdr_rt_copy.cs.xesl"
 diff --git a/src/graphics/shaders/hdr_underlay_restore.ps.xesl b/src/graphics/shaders/hdr_underlay_restore.ps.xesl
 new file mode 100644
-index 0000000..fe4b37c
+index 0000000..fd8fe9a
 --- /dev/null
 +++ b/src/graphics/shaders/hdr_underlay_restore.ps.xesl
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,22 @@
 +// HDR output (rexglue-hdr-ui-layer.patch): puts the guest's own frame back
 +// together after its UI was drawn on a cleared target: drawn over the target
-+// with the colour blend INV_DEST_ALPHA / ONE and the alpha blend ONE / ZERO, so
-+// target = UI + underlay x (1 - UI alpha), per sample (the menus' target is 4x
-+// MSAA). The underlay is the copy taken before the UI, in render target
-+// pixels.
++// with INV_DEST_ALPHA / ONE for colour and alpha, so target = UI + underlay x
++// (1 - UI alpha), alpha included, per sample (the menus' target is 4x MSAA).
++// The underlay is the copy taken before the UI, in render target pixels.
 +
 +#include "../../ui/shaders/xesl.xesli"
 +
@@ -1718,9 +1991,8 @@ index 0000000..fe4b37c
 +  entry_in_pixel_coord_xe
 +entry_inputs_end_code_begin_xe
 +{
-+  out_xe(xe_underlay_color) = float4_xe(
-+      texel_fetch_2d_xe(xe_underlay_source, int2_xe(in_pixel_coord_xe.xy), 0).rgb,
-+      1.0f);
++  out_xe(xe_underlay_color) =
++      texel_fetch_2d_xe(xe_underlay_source, int2_xe(in_pixel_coord_xe.xy), 0);
 +}
 +entry_code_end_xe
 diff --git a/src/graphics/shaders/vulkan_spirv/hdr_fullscreen_vs.h b/src/graphics/shaders/vulkan_spirv/hdr_fullscreen_vs.h
@@ -2291,16 +2563,133 @@ index 3fedeb4..b06a8d3 100644
 +    0x0000594F, 0x00001FEF, 0x0000008A, 0x00040063, 0x00005DDC, 0x00001A8B, 0x00003E3B, 0x000200F9,
 +    0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
  };
+diff --git a/src/graphics/shaders/vulkan_spirv/hdr_rt_copy_4xmsaa_cs.h b/src/graphics/shaders/vulkan_spirv/hdr_rt_copy_4xmsaa_cs.h
+new file mode 100644
+index 0000000..67195f6
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/hdr_rt_copy_4xmsaa_cs.h
+@@ -0,0 +1,57 @@
++// Generated from hdr_rt_copy_4xmsaa.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_rt_copy_4xmsaa_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x000060F2, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000F48, 0x00060010, 0x0000161F,
++    0x00000011, 0x00000008, 0x00000008, 0x00000001, 0x00030047, 0x000003ED, 0x00000002, 0x00050048,
++    0x000003ED, 0x00000000, 0x00000023, 0x00000000, 0x00040047, 0x00000F48, 0x0000000B, 0x0000001C,
++    0x00040047, 0x00001689, 0x00000021, 0x00000000, 0x00040047, 0x00001689, 0x00000022, 0x00000000,
++    0x00030047, 0x00000CDA, 0x00000019, 0x00040047, 0x00000CDA, 0x00000021, 0x00000000, 0x00040047,
++    0x00000CDA, 0x00000022, 0x00000001, 0x00040047, 0x00000AC7, 0x0000000B, 0x00000019, 0x00020013,
++    0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00040015, 0x0000000B, 0x00000020, 0x00000000,
++    0x00040017, 0x00000017, 0x0000000B, 0x00000004, 0x0003001E, 0x000003ED, 0x00000017, 0x00040020,
++    0x0000066A, 0x00000009, 0x000003ED, 0x0004003B, 0x0000066A, 0x00000CE9, 0x00000009, 0x00040015,
++    0x0000000C, 0x00000020, 0x00000001, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x00040020,
++    0x00000294, 0x00000009, 0x00000017, 0x00040017, 0x00000011, 0x0000000B, 0x00000002, 0x00040017,
++    0x00000014, 0x0000000B, 0x00000003, 0x00040020, 0x00000291, 0x00000001, 0x00000014, 0x0004003B,
++    0x00000291, 0x00000F48, 0x00000001, 0x0004002B, 0x0000000B, 0x000001C1, 0x0000FFFF, 0x0004002B,
++    0x0000000B, 0x00000A3A, 0x00000010, 0x00020014, 0x00000009, 0x00040017, 0x0000000F, 0x00000009,
++    0x00000002, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000B, 0x00000A0A,
++    0x00000000, 0x00030016, 0x0000000D, 0x00000020, 0x00040017, 0x0000001D, 0x0000000D, 0x00000004,
++    0x00090019, 0x000000B6, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000001, 0x00000001,
++    0x00000000, 0x00040020, 0x00000333, 0x00000000, 0x000000B6, 0x0004003B, 0x00000333, 0x00001689,
++    0x00000000, 0x0004002B, 0x0000000C, 0x00000A0E, 0x00000001, 0x0004002B, 0x0000000C, 0x00000A11,
++    0x00000002, 0x0004002B, 0x0000000C, 0x00000A14, 0x00000003, 0x0004002B, 0x0000000D, 0x0000016E,
++    0x3E800000, 0x00090019, 0x000000A6, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000,
++    0x00000002, 0x00000004, 0x00040020, 0x00000323, 0x00000000, 0x000000A6, 0x0004003B, 0x00000323,
++    0x00000CDA, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B, 0x0000000B,
++    0x00000A22, 0x00000008, 0x0006002C, 0x00000014, 0x00000AC7, 0x00000A22, 0x00000A22, 0x00000A0D,
++    0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x00003B06, 0x000300F7,
++    0x00005445, 0x00000000, 0x000300FB, 0x00000A0A, 0x00002E68, 0x000200F8, 0x00002E68, 0x00050041,
++    0x00000294, 0x00005699, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000017, 0x00004115, 0x00005699,
++    0x0004003D, 0x00000014, 0x00002EC6, 0x00000F48, 0x0007004F, 0x00000011, 0x00003D7A, 0x00002EC6,
++    0x00002EC6, 0x00000000, 0x00000001, 0x00050051, 0x0000000B, 0x000060F1, 0x00004115, 0x00000002,
++    0x000500C7, 0x0000000B, 0x00005DCB, 0x000060F1, 0x000001C1, 0x000500C2, 0x0000000B, 0x00005F0A,
++    0x000060F1, 0x00000A3A, 0x00050050, 0x00000011, 0x00004E0E, 0x00005DCB, 0x00005F0A, 0x000500AE,
++    0x0000000F, 0x00002613, 0x00003D7A, 0x00004E0E, 0x0004009A, 0x00000009, 0x000056F1, 0x00002613,
++    0x000300F7, 0x00003F8B, 0x00000002, 0x000400FA, 0x000056F1, 0x000055E8, 0x00003F8B, 0x000200F8,
++    0x000055E8, 0x000200F9, 0x00005445, 0x000200F8, 0x00003F8B, 0x00050051, 0x0000000B, 0x000050D1,
++    0x00004115, 0x00000000, 0x000500C7, 0x0000000B, 0x000023D2, 0x000050D1, 0x000001C1, 0x000500C2,
++    0x0000000B, 0x00005BA0, 0x000050D1, 0x00000A3A, 0x00050050, 0x00000011, 0x0000206B, 0x000023D2,
++    0x00005BA0, 0x00050080, 0x00000011, 0x00001ACD, 0x0000206B, 0x00003D7A, 0x0004007C, 0x00000012,
++    0x00004404, 0x00001ACD, 0x0004003D, 0x000000B6, 0x00001B17, 0x00001689, 0x0007005F, 0x0000001D,
++    0x000024B7, 0x00001B17, 0x00004404, 0x00000040, 0x00000A0B, 0x0004003D, 0x000000B6, 0x000028C8,
++    0x00001689, 0x0007005F, 0x0000001D, 0x00003BA7, 0x000028C8, 0x00004404, 0x00000040, 0x00000A0E,
++    0x00050081, 0x0000001D, 0x00005EA1, 0x000024B7, 0x00003BA7, 0x0004003D, 0x000000B6, 0x00003CDD,
++    0x00001689, 0x0007005F, 0x0000001D, 0x000041E0, 0x00003CDD, 0x00004404, 0x00000040, 0x00000A11,
++    0x00050081, 0x0000001D, 0x00005EA2, 0x00005EA1, 0x000041E0, 0x0004003D, 0x000000B6, 0x00003CDE,
++    0x00001689, 0x0007005F, 0x0000001D, 0x000047E3, 0x00003CDE, 0x00004404, 0x00000040, 0x00000A14,
++    0x00050081, 0x0000001D, 0x0000255E, 0x00005EA2, 0x000047E3, 0x0005008E, 0x0000001D, 0x0000461A,
++    0x0000255E, 0x0000016E, 0x0004003D, 0x000000A6, 0x00005D26, 0x00000CDA, 0x00050051, 0x0000000B,
++    0x000020A4, 0x00004115, 0x00000001, 0x000500C7, 0x0000000B, 0x00005788, 0x000020A4, 0x000001C1,
++    0x000500C2, 0x0000000B, 0x00005BA1, 0x000020A4, 0x00000A3A, 0x00050050, 0x00000011, 0x0000206C,
++    0x00005788, 0x00005BA1, 0x00050080, 0x00000011, 0x00001D9F, 0x0000206C, 0x00003D7A, 0x0004007C,
++    0x00000012, 0x000035C4, 0x00001D9F, 0x00040063, 0x00005D26, 0x000035C4, 0x0000461A, 0x000200F9,
++    0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/shaders/vulkan_spirv/hdr_rt_copy_cs.h b/src/graphics/shaders/vulkan_spirv/hdr_rt_copy_cs.h
+new file mode 100644
+index 0000000..442b978
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/hdr_rt_copy_cs.h
+@@ -0,0 +1,48 @@
++// Generated from hdr_rt_copy.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_rt_copy_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x000061CC, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000F48, 0x00060010, 0x0000161F,
++    0x00000011, 0x00000008, 0x00000008, 0x00000001, 0x00030047, 0x000003ED, 0x00000002, 0x00050048,
++    0x000003ED, 0x00000000, 0x00000023, 0x00000000, 0x00040047, 0x00000F48, 0x0000000B, 0x0000001C,
++    0x00040047, 0x00001689, 0x00000021, 0x00000000, 0x00040047, 0x00001689, 0x00000022, 0x00000000,
++    0x00030047, 0x00000CDA, 0x00000019, 0x00040047, 0x00000CDA, 0x00000021, 0x00000000, 0x00040047,
++    0x00000CDA, 0x00000022, 0x00000001, 0x00040047, 0x00000AC7, 0x0000000B, 0x00000019, 0x00020013,
++    0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00040015, 0x0000000B, 0x00000020, 0x00000000,
++    0x00040017, 0x00000017, 0x0000000B, 0x00000004, 0x0003001E, 0x000003ED, 0x00000017, 0x00040020,
++    0x0000066A, 0x00000009, 0x000003ED, 0x0004003B, 0x0000066A, 0x00000CE9, 0x00000009, 0x00040015,
++    0x0000000C, 0x00000020, 0x00000001, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x00040020,
++    0x00000294, 0x00000009, 0x00000017, 0x00040017, 0x00000011, 0x0000000B, 0x00000002, 0x00040017,
++    0x00000014, 0x0000000B, 0x00000003, 0x00040020, 0x00000291, 0x00000001, 0x00000014, 0x0004003B,
++    0x00000291, 0x00000F48, 0x00000001, 0x0004002B, 0x0000000B, 0x000001C1, 0x0000FFFF, 0x0004002B,
++    0x0000000B, 0x00000A3A, 0x00000010, 0x00020014, 0x00000009, 0x00040017, 0x0000000F, 0x00000009,
++    0x00000002, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000B, 0x00000A0A,
++    0x00000000, 0x00030016, 0x0000000D, 0x00000020, 0x00040017, 0x0000001D, 0x0000000D, 0x00000004,
++    0x00090019, 0x00000096, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000001,
++    0x00000000, 0x00040020, 0x00000313, 0x00000000, 0x00000096, 0x0004003B, 0x00000313, 0x00001689,
++    0x00000000, 0x00090019, 0x000000A6, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000,
++    0x00000002, 0x00000004, 0x00040020, 0x00000323, 0x00000000, 0x000000A6, 0x0004003B, 0x00000323,
++    0x00000CDA, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B, 0x0000000B,
++    0x00000A22, 0x00000008, 0x0006002C, 0x00000014, 0x00000AC7, 0x00000A22, 0x00000A22, 0x00000A0D,
++    0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x00003B06, 0x000300F7,
++    0x00005445, 0x00000000, 0x000300FB, 0x00000A0A, 0x00002E68, 0x000200F8, 0x00002E68, 0x00050041,
++    0x00000294, 0x00005699, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000017, 0x00004115, 0x00005699,
++    0x0004003D, 0x00000014, 0x00002EC6, 0x00000F48, 0x0007004F, 0x00000011, 0x00003D7A, 0x00002EC6,
++    0x00002EC6, 0x00000000, 0x00000001, 0x00050051, 0x0000000B, 0x000060F1, 0x00004115, 0x00000002,
++    0x000500C7, 0x0000000B, 0x00005DCB, 0x000060F1, 0x000001C1, 0x000500C2, 0x0000000B, 0x00005F0A,
++    0x000060F1, 0x00000A3A, 0x00050050, 0x00000011, 0x00004E0E, 0x00005DCB, 0x00005F0A, 0x000500AE,
++    0x0000000F, 0x00002613, 0x00003D7A, 0x00004E0E, 0x0004009A, 0x00000009, 0x000056F1, 0x00002613,
++    0x000300F7, 0x00003F8B, 0x00000002, 0x000400FA, 0x000056F1, 0x000055E8, 0x00003F8B, 0x000200F8,
++    0x000055E8, 0x000200F9, 0x00005445, 0x000200F8, 0x00003F8B, 0x00050051, 0x0000000B, 0x000050D1,
++    0x00004115, 0x00000000, 0x000500C7, 0x0000000B, 0x000023D2, 0x000050D1, 0x000001C1, 0x000500C2,
++    0x0000000B, 0x00005BA0, 0x000050D1, 0x00000A3A, 0x00050050, 0x00000011, 0x0000206B, 0x000023D2,
++    0x00005BA0, 0x00050080, 0x00000011, 0x00001ACD, 0x0000206B, 0x00003D7A, 0x0004007C, 0x00000012,
++    0x00004404, 0x00001ACD, 0x0004003D, 0x00000096, 0x00001B17, 0x00001689, 0x0007005F, 0x0000001D,
++    0x000023AD, 0x00001B17, 0x00004404, 0x00000002, 0x00000A0B, 0x0004003D, 0x000000A6, 0x00003770,
++    0x00000CDA, 0x00050051, 0x0000000B, 0x000061CB, 0x00004115, 0x00000001, 0x000500C7, 0x0000000B,
++    0x00005788, 0x000061CB, 0x000001C1, 0x000500C2, 0x0000000B, 0x00005BA1, 0x000061CB, 0x00000A3A,
++    0x00050050, 0x00000011, 0x0000206C, 0x00005788, 0x00005BA1, 0x00050080, 0x00000011, 0x00001D9F,
++    0x0000206C, 0x00003D7A, 0x0004007C, 0x00000012, 0x000035C4, 0x00001D9F, 0x00040063, 0x00003770,
++    0x000035C4, 0x000023AD, 0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++};
 diff --git a/src/graphics/shaders/vulkan_spirv/hdr_underlay_restore_ps.h b/src/graphics/shaders/vulkan_spirv/hdr_underlay_restore_ps.h
 new file mode 100644
-index 0000000..9c55f63
+index 0000000..b966c73
 --- /dev/null
 +++ b/src/graphics/shaders/vulkan_spirv/hdr_underlay_restore_ps.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,22 @@
 +// Generated from hdr_underlay_restore.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
 +// sources (see patches/README.md). Not disassembled to keep the patch small.
 +const uint32_t hdr_underlay_restore_ps[] = {
-+    0x07230203, 0x00010000, 0x0008000B, 0x00006202, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x07230203, 0x00010000, 0x0008000B, 0x00006020, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
 +    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
 +    0x0007000F, 0x00000004, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000BF2, 0x00000C93, 0x00030010,
 +    0x0000161F, 0x00000007, 0x00040047, 0x00000BF2, 0x0000001E, 0x00000000, 0x00040047, 0x000015AB,
@@ -2312,18 +2701,15 @@ index 0000000..9c55f63
 +    0x00000313, 0x00000000, 0x00000096, 0x0004003B, 0x00000313, 0x000015AB, 0x00000000, 0x00040020,
 +    0x0000029B, 0x00000001, 0x0000001D, 0x0004003B, 0x0000029B, 0x00000C93, 0x00000001, 0x00040017,
 +    0x00000013, 0x0000000D, 0x00000002, 0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x00040017,
-+    0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x0004002B,
-+    0x0000000D, 0x0000008A, 0x3F800000, 0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502,
-+    0x000200F8, 0x0000601F, 0x0004003D, 0x00000096, 0x00005268, 0x000015AB, 0x0004003D, 0x0000001D,
-+    0x00005455, 0x00000C93, 0x0007004F, 0x00000013, 0x00002229, 0x00005455, 0x00005455, 0x00000000,
-+    0x00000001, 0x0004006E, 0x00000012, 0x0000322E, 0x00002229, 0x0007005F, 0x0000001D, 0x00002944,
-+    0x00005268, 0x0000322E, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x00005CB6, 0x00002944,
-+    0x00000000, 0x00050051, 0x0000000D, 0x00006201, 0x00002944, 0x00000001, 0x00050051, 0x0000000D,
-+    0x00001D30, 0x00002944, 0x00000002, 0x00070050, 0x0000001D, 0x00005788, 0x00005CB6, 0x00006201,
-+    0x00001D30, 0x0000008A, 0x0003003E, 0x00000BF2, 0x00005788, 0x000100FD, 0x00010038,
++    0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x00050036,
++    0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x0000601F, 0x0004003D, 0x00000096,
++    0x00005268, 0x000015AB, 0x0004003D, 0x0000001D, 0x00005455, 0x00000C93, 0x0007004F, 0x00000013,
++    0x00002229, 0x00005455, 0x00005455, 0x00000000, 0x00000001, 0x0004006E, 0x00000012, 0x000030C5,
++    0x00002229, 0x0007005F, 0x0000001D, 0x000042DF, 0x00005268, 0x000030C5, 0x00000002, 0x00000A0B,
++    0x0003003E, 0x00000BF2, 0x000042DF, 0x000100FD, 0x00010038,
 +};
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 8291267..3ba5977 100644
+index 8291267..acafac1 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -1387,9 +1387,9 @@ bool VulkanCommandProcessor::SetupContext() {
@@ -2379,7 +2765,7 @@ index 8291267..3ba5977 100644
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                           hdr_refresh_pipeline_layout_);
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
-@@ -2505,6 +2522,176 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2505,6 +2522,181 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
    gamma_ramp_pwl_current_frame_ = UINT32_MAX;
  }
  
@@ -2409,7 +2795,7 @@ index 8291267..3ba5977 100644
 +    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
 +    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
 +    image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-+                              VK_IMAGE_USAGE_SAMPLED_BIT;
++                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
 +    image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 +    image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 +    if (!ui::vulkan::util::CreateDedicatedAllocationImage(
@@ -2458,6 +2844,10 @@ index 8291267..3ba5977 100644
 +        stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
 +        access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
 +        break;
++      case VK_IMAGE_LAYOUT_GENERAL:
++        stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++        access_mask = VK_ACCESS_SHADER_WRITE_BIT;
++        break;
 +      default:
 +        stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 +        access_mask = 0;
@@ -2474,8 +2864,9 @@ index 8291267..3ba5977 100644
 +  image.layout = layout;
 +}
 +
-+uint32_t VulkanCommandProcessor::HdrDrawResolutionScale() const {
-+  return render_target_cache_->draw_resolution_scale_x();
++void VulkanCommandProcessor::HdrDrawResolutionScale(uint32_t& x, uint32_t& y) const {
++  x = render_target_cache_->draw_resolution_scale_x();
++  y = render_target_cache_->draw_resolution_scale_y();
 +}
 +
 +uint32_t VulkanCommandProcessor::HdrEdramTileCount() const {
@@ -2490,9 +2881,9 @@ index 8291267..3ba5977 100644
 +    return false;
 +  }
 +  EndRenderPass();
-+  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_GENERAL);
 +  bool copied = render_target_cache_->HdrCopyColorTarget(
-+      key, image->image,
++      key, image->view,
 +      {{int32_t(source.x), int32_t(source.y)}, {source.width, source.height}}, int32_t(dest_x),
 +      int32_t(dest_y));
 +  HdrTransitionImage(*image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -2556,7 +2947,7 @@ index 8291267..3ba5977 100644
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
-@@ -2658,6 +2845,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2658,6 +2850,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
    uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
  
@@ -2566,20 +2957,32 @@ index 8291267..3ba5977 100644
    presenter->RefreshGuestOutput(
        guest_output_width, guest_output_height, display_width, display_height,
        [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
-@@ -2932,12 +3122,44 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2715,8 +2910,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+         // HDR output: while the presenter's swapchain is HDR10, HDR10 code
+         // values from the 256-entry table path (hdr_refresh.cs).
+         ui::Presenter::HdrOutputState hdr_state = ui::Presenter::GetHdrOutputState();
+-        bool use_hdr =
+-            hdr_state.active && hdr_refresh_pipeline_ != VK_NULL_HANDLE && !use_pwl_gamma_ramp;
++        // Otherwise the swapchain must not be HDR10 (SDR in it would be lost).
++        bool hdr_possible = hdr_refresh_pipeline_ != VK_NULL_HANDLE && !use_pwl_gamma_ramp;
++        ui::Presenter::SetGuestOutputHdrAvailable(hdr_possible);
++        bool use_hdr = hdr_state.active && hdr_possible;
+         if (use_hdr) {
+           use_fxaa = false;
+         }
+@@ -2932,12 +3129,43 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                use_hdr ? hdr_refresh_pipeline_layout_ : swap_apply_gamma_compute_pipeline_layout_,
                0, uint32_t(swap_apply_gamma_compute_descriptor_sets.size()),
                swap_apply_gamma_compute_descriptor_sets.data(), 0, nullptr);
 +          // HDR output: the UI layer and its underlay, if this frame has
 +          // them at the output's size (otherwise the source again, unused).
-+          HdrComposite composite = use_hdr ? HdrGetComposite() : HdrComposite::kWholeFrame;
++          HdrComposite composite = use_hdr
++                                       ? HdrGetComposite(guest_output_width, guest_output_height)
++                                       : HdrComposite::kWholeFrame;
 +          bool hdr_textures_used =
 +              composite == HdrComposite::kMask || composite == HdrComposite::kLayer;
-+          if (hdr_textures_used &&
-+              (guest_output_width != hdr_output_width_ ||
-+               guest_output_height != hdr_output_height_ ||
-+               hdr_images_[kHdrTextureUnderlay].view == VK_NULL_HANDLE ||
-+               hdr_images_[kHdrTextureUiLayer].view == VK_NULL_HANDLE)) {
++          if (hdr_textures_used && (hdr_images_[kHdrTextureUnderlay].view == VK_NULL_HANDLE ||
++                                    hdr_images_[kHdrTextureUiLayer].view == VK_NULL_HANDLE)) {
 +            composite = HdrComposite::kWholeFrame;
 +            hdr_textures_used = false;
 +          }
@@ -2612,7 +3015,7 @@ index 8291267..3ba5977 100644
                   0},
                  {hdr_state.sdr_white_nits, hdr_state.paper_white_nits,
                   hdr_state.rolloff_start_nits, hdr_state.peak_nits}};
-@@ -4219,6 +4441,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4219,6 +4447,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
                                      normalized_color_mask, *vertex_shader)) {
      return draw_fail("render_target_update");
    }
@@ -2622,10 +3025,10 @@ index 8291267..3ba5977 100644
    // Create the pipeline (for this, need the render pass from the render target
    // cache), translating the shaders - doing this now to obtain the used
 diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
-index a180b7c..6b3c9d5 100644
+index a180b7c..d4e7d09 100644
 --- a/src/graphics/vulkan/deferred_command_buffer.cpp
 +++ b/src/graphics/vulkan/deferred_command_buffer.cpp
-@@ -179,6 +179,24 @@ void DeferredCommandBuffer::ExecuteCommands(VkCommandBuffer command_buffer,
+@@ -179,6 +179,12 @@ void DeferredCommandBuffer::ExecuteCommands(VkCommandBuffer command_buffer,
                  rex::align(sizeof(ArgsVkCopyBufferToImage), alignof(VkBufferImageCopy))));
        } break;
  
@@ -2635,39 +3038,30 @@ index a180b7c..6b3c9d5 100644
 +                           args.dst_image_layout, 1, &args.region);
 +      } break;
 +
-+      case Command::kVkResolveImage: {
-+        auto& args = *reinterpret_cast<const ArgsVkCopyImage*>(stream);
-+        VkImageResolve region;
-+        region.srcSubresource = args.region.srcSubresource;
-+        region.srcOffset = args.region.srcOffset;
-+        region.dstSubresource = args.region.dstSubresource;
-+        region.dstOffset = args.region.dstOffset;
-+        region.extent = args.region.extent;
-+        dfn.vkCmdResolveImage(command_buffer, args.src_image, args.src_image_layout,
-+                              args.dst_image, args.dst_image_layout, 1, &region);
-+      } break;
-+
        case Command::kVkCopyQueryPoolResults: {
          auto& args = *reinterpret_cast<const ArgsVkCopyQueryPoolResults*>(stream);
          dfn.vkCmdCopyQueryPoolResults(command_buffer, args.query_pool, args.first_query,
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index e8d1997..1b027e6 100644
+index e8d1997..fc91bb7 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
-@@ -70,6 +70,8 @@ namespace shaders {
+@@ -70,6 +70,10 @@ namespace shaders {
  #include "../shaders/vulkan_spirv/host_depth_store_2xmsaa_cs.h"
  #include "../shaders/vulkan_spirv/host_depth_store_4xmsaa_cs.h"
  #include "../shaders/vulkan_spirv/passthrough_position_xy_vs.h"
 +#include "../shaders/vulkan_spirv/hdr_fullscreen_vs.h"
 +#include "../shaders/vulkan_spirv/hdr_underlay_restore_ps.h"
++#include "../shaders/vulkan_spirv/hdr_rt_copy_cs.h"
++#include "../shaders/vulkan_spirv/hdr_rt_copy_4xmsaa_cs.h"
  #include "../shaders/vulkan_spirv/resolve_clear_32bpp_cs.h"
  #include "../shaders/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_edram4096_cs.h"
  #include "../shaders/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_scaled_edram4096_cs.h"
-@@ -1241,6 +1243,15 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+@@ -1241,6 +1245,18 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
    // already too late.
    DestroyAllRenderTargets(true);
  
 +  for (size_t i = 0; i < 2; ++i) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, hdr_copy_pipelines_[i]);
 +    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
 +                                           hdr_restore_pipelines_[i]);
 +    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
@@ -2675,11 +3069,13 @@ index e8d1997..1b027e6 100644
 +  }
 +  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
 +                                         hdr_restore_pipeline_layout_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
++                                         hdr_copy_pipeline_layout_);
 +
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
                                           resolve_fsi_clear_64bpp_pipeline_);
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
-@@ -1714,6 +1725,248 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1714,6 +1730,310 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    return copied && cleared;
  }
  
@@ -2700,43 +3096,91 @@ index e8d1997..1b027e6 100644
 +  return rect.extent.width && rect.extent.height ? rt : nullptr;
 +}
 +
-+bool VulkanRenderTargetCache::HdrCopyColorTarget(uint32_t key, VkImage dest, VkRect2D source,
-+                                                 int32_t dest_x, int32_t dest_y) {
++bool VulkanRenderTargetCache::HdrCopyColorTarget(uint32_t key, VkImageView dest,
++                                                 VkRect2D source, int32_t dest_x,
++                                                 int32_t dest_y) {
 +  VulkanRenderTarget* rt = HdrColorTarget(key, source);
 +  if (!rt) {
 +    return false;
 +  }
++  const ui::vulkan::VulkanDevice* vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  if (hdr_copy_pipeline_layout_ == VK_NULL_HANDLE) {
++    VkDescriptorSetLayout set_layouts[] = {
++        descriptor_set_layout_sampled_image_,
++        command_processor_.GetSingleTransientDescriptorLayout(
++            VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute)};
++    VkPushConstantRange push_constant_range = {VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                                               sizeof(uint32_t) * 4};
++    VkPipelineLayoutCreateInfo layout_create_info = {};
++    layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
++    layout_create_info.setLayoutCount = 2;
++    layout_create_info.pSetLayouts = set_layouts;
++    layout_create_info.pushConstantRangeCount = 1;
++    layout_create_info.pPushConstantRanges = &push_constant_range;
++    if (dfn.vkCreatePipelineLayout(device, &layout_create_info, nullptr,
++                                   &hdr_copy_pipeline_layout_) != VK_SUCCESS) {
++      return false;
++    }
++  }
++  bool msaa = rt->key().msaa_samples != xenos::MsaaSamples::k1X;
++  VkPipeline& pipeline = hdr_copy_pipelines_[msaa];
++  if (pipeline == VK_NULL_HANDLE) {
++    pipeline = msaa ? ui::vulkan::util::CreateComputePipeline(
++                          vulkan_device, hdr_copy_pipeline_layout_, shaders::hdr_rt_copy_4xmsaa_cs,
++                          sizeof(shaders::hdr_rt_copy_4xmsaa_cs))
++                    : ui::vulkan::util::CreateComputePipeline(
++                          vulkan_device, hdr_copy_pipeline_layout_, shaders::hdr_rt_copy_cs,
++                          sizeof(shaders::hdr_rt_copy_cs));
++    if (pipeline == VK_NULL_HANDLE) {
++      return false;
++    }
++  }
++  VkDescriptorSet dest_set = command_processor_.AllocateSingleTransientDescriptor(
++      VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute);
++  if (dest_set == VK_NULL_HANDLE) {
++    return false;
++  }
++  VkDescriptorImageInfo dest_info = {VK_NULL_HANDLE, dest, VK_IMAGE_LAYOUT_GENERAL};
++  VkWriteDescriptorSet write = {};
++  write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++  write.dstSet = dest_set;
++  write.descriptorCount = 1;
++  write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
++  write.pImageInfo = &dest_info;
++  dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
++  // The target as a sampled image (its transfer source view, R8G8B8A8_UNORM
++  // for 8_8_8_8).
 +  command_processor_.PushImageMemoryBarrier(
 +      rt->image(), ui::vulkan::util::InitializeSubresourceRange(), rt->current_stage_mask(),
-+      VK_PIPELINE_STAGE_TRANSFER_BIT, rt->current_access_mask(), VK_ACCESS_TRANSFER_READ_BIT,
-+      rt->current_layout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-+  rt->SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, rt->current_access_mask(), VK_ACCESS_SHADER_READ_BIT,
++      rt->current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  rt->SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
++               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 +  command_processor_.SubmitBarriers(true);
-+  VkImageCopy region = {};
-+  region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-+  region.srcSubresource.layerCount = 1;
-+  region.srcOffset = {source.offset.x, source.offset.y, 0};
-+  region.dstSubresource = region.srcSubresource;
-+  region.dstOffset = {dest_x, dest_y, 0};
-+  region.extent = {source.extent.width, source.extent.height, 1};
 +  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
-+  if (rt->key().msaa_samples != xenos::MsaaSamples::k1X) {
-+    command_buffer.CmdVkResolveImage(rt->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest,
-+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
-+  } else {
-+    command_buffer.CmdVkCopyImage(rt->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest,
-+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
-+  }
++  command_processor_.BindExternalComputePipeline(pipeline);
++  VkDescriptorSet descriptor_sets[] = {rt->GetDescriptorSetTransferSource(), dest_set};
++  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
++                                         hdr_copy_pipeline_layout_, 0, 2, descriptor_sets, 0,
++                                         nullptr);
++  uint32_t constants[4] = {
++      uint32_t(source.offset.x) | (uint32_t(source.offset.y) << 16),
++      uint32_t(dest_x) | (uint32_t(dest_y) << 16),
++      source.extent.width | (source.extent.height << 16), 0};
++  command_buffer.CmdVkPushConstants(hdr_copy_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                                    sizeof(constants), constants);
++  command_buffer.CmdVkDispatch((source.extent.width + 7) / 8, (source.extent.height + 7) / 8, 1);
 +  // The draw that may follow needs it as an attachment.
 +  VkPipelineStageFlags stage_mask;
 +  VkAccessFlags access_mask;
 +  VkImageLayout layout;
 +  rt->GetDrawUsage(&stage_mask, &access_mask, &layout);
 +  command_processor_.PushImageMemoryBarrier(
-+      rt->image(), ui::vulkan::util::InitializeSubresourceRange(), VK_PIPELINE_STAGE_TRANSFER_BIT,
-+      stage_mask, VK_ACCESS_TRANSFER_READ_BIT, access_mask, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-+      layout);
++      rt->image(), ui::vulkan::util::InitializeSubresourceRange(),
++      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, stage_mask, VK_ACCESS_SHADER_READ_BIT, access_mask,
++      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layout);
 +  rt->SetUsage(stage_mask, access_mask, layout);
 +  return true;
 +}
@@ -2839,8 +3283,8 @@ index e8d1997..1b027e6 100644
 +    blend_attachment.blendEnable = VK_TRUE;
 +    blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
 +    blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-+    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-+    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
++    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
++    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
 +    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
 +                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 +    VkPipelineColorBlendStateCreateInfo blend = {};
@@ -2884,8 +3328,22 @@ index e8d1997..1b027e6 100644
 +    }
 +  }
 +  // A descriptor set per underlay image (they change only with the output
-+  // size), so none is rewritten while in use.
++  // size), so none is rewritten while in use; replaced ones are freed once
++  // their last submission has completed.
++  uint64_t completed_submission = command_processor_.GetCompletedSubmission();
++  std::erase_if(hdr_restore_descriptor_sets_retired_,
++                [this, completed_submission](const std::pair<uint64_t, size_t>& retired) {
++                  if (retired.first > completed_submission) {
++                    return false;
++                  }
++                  descriptor_set_pool_sampled_image_->Free(retired.second);
++                  return true;
++                });
 +  if (hdr_restore_underlay_view_ != underlay_view) {
++    if (hdr_restore_descriptor_set_ != SIZE_MAX) {
++      hdr_restore_descriptor_sets_retired_.emplace_back(command_processor_.GetCurrentSubmission(),
++                                                        hdr_restore_descriptor_set_);
++    }
 +    hdr_restore_descriptor_set_ = descriptor_set_pool_sampled_image_->Allocate();
 +    if (hdr_restore_descriptor_set_ == SIZE_MAX) {
 +      return false;
@@ -2928,23 +3386,94 @@ index e8d1997..1b027e6 100644
  bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
                                       reg::RB_DEPTHCONTROL normalized_depth_control,
                                       uint32_t normalized_color_mask, const Shader& vertex_shader) {
-@@ -2241,6 +2494,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
-       image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-     }
-     image_create_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-+    // HDR output (rexglue-hdr-ui-layer.patch): 8_8_8_8 targets can be copied
-+    // from (HdrCopyColorTarget).
-+    if (color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8) {
-+      image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-+    }
+diff --git a/src/ui/d3d12/d3d12_immediate_drawer.cpp b/src/ui/d3d12/d3d12_immediate_drawer.cpp
+index ce654c8..9fe248d 100644
+--- a/src/ui/d3d12/d3d12_immediate_drawer.cpp
++++ b/src/ui/d3d12/d3d12_immediate_drawer.cpp
+@@ -130,8 +130,10 @@ bool D3D12ImmediateDrawer::Initialize() {
+   pipeline_blend_desc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+   pipeline_blend_desc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+   pipeline_blend_desc.BlendOp = D3D12_BLEND_OP_ADD;
++  // Coverage in alpha (the HDR output's UI layer is premultiplied; the swap
++  // chain's alpha is ignored otherwise).
+   pipeline_blend_desc.SrcBlendAlpha = D3D12_BLEND_ONE;
+-  pipeline_blend_desc.DestBlendAlpha = D3D12_BLEND_ONE;
++  pipeline_blend_desc.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+   pipeline_blend_desc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+   pipeline_blend_desc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+   pipeline_desc.SampleMask = UINT_MAX;
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index af19948..b422ef4 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -348,7 +348,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+       std::min(new_surface_height, uint32_t(D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+ 
+   // HDR output: HDR10 when wanted (the `hdr` setting and the display's state).
+-  bool hdr_wanted = IsHdrOutputWanted();
++  uint32_t hdr_wanted = IsHdrOutputWanted();
+ 
+   // ConnectOrReconnectPaintingToSurfaceFromUIThread may be called only for the
+   // surface of the current swap chain or when the old swap chain has already
+@@ -469,7 +469,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     paint_context_.swap_chain_height = new_swap_chain_height;
+     paint_context_.swap_chain_allows_tearing =
+         (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+-    paint_context_.swap_chain_hdr = hdr_wanted;
++    paint_context_.swap_chain_hdr = hdr_wanted != 0;
+     for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+       if (FAILED(paint_context_.swap_chain->GetBuffer(
+               i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
+@@ -608,8 +608,9 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+   swap_chain_allows_tearing = false;
+   swap_chain_height = 0;
+   swap_chain_width = 0;
+-  swap_chain_hdr_wanted = false;
++  swap_chain_hdr_wanted = 0;
+   swap_chain_hdr = false;
++  hdr_metadata_levels = {};
+   hdr_ui_layer.Reset();
+ }
+ 
+@@ -618,6 +619,24 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   if (IsHdrOutputWanted() != paint_context_.swap_chain_hdr_wanted) {
+     return PaintResult::kNotPresentedConnectionOutdated;
    }
-   if (image_create_info.format == VK_FORMAT_UNDEFINED) {
-     REXGPU_ERROR("VulkanRenderTargetCache: Unknown {} render target format {}",
++  // HDR10 metadata: the peak setting and the display (BT.2020, D65).
++  if (paint_context_.swap_chain_hdr) {
++    HdrMetadataLevels levels = GetHdrMetadataLevels();
++    Microsoft::WRL::ComPtr<IDXGISwapChain4> swap_chain_4;
++    if (!(levels == paint_context_.hdr_metadata_levels) &&
++        SUCCEEDED(paint_context_.swap_chain.As(&swap_chain_4))) {
++      paint_context_.hdr_metadata_levels = levels;
++      DXGI_HDR_METADATA_HDR10 metadata = {};
++      static constexpr UINT16 kPrimaries[8] = {35400, 14600, 8500, 39850,
++                                               6550,  2300,  15635, 16450};
++      std::memcpy(metadata.RedPrimary, kPrimaries, sizeof(kPrimaries));
++      metadata.MaxMasteringLuminance = UINT(levels.max_nits + 0.5f);
++      metadata.MinMasteringLuminance = UINT(levels.min_nits * 10000.0f + 0.5f);
++      metadata.MaxContentLightLevel = UINT16(levels.max_nits + 0.5f);
++      metadata.MaxFrameAverageLightLevel = UINT16(levels.max_frame_average_nits + 0.5f);
++      swap_chain_4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
++    }
++  }
+ 
+   // Begin the command list with the command allocator not currently potentially
+   // used on the GPU.
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 78af997..e7562a0 100644
+index 78af997..676b5c2 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -113,6 +113,11 @@ REXCVAR_DEFINE_STRING(hdr_sdr_eotf, "srgb", "UI/Presenter",
+@@ -14,6 +14,8 @@
+ #include <cctype>
+ #include <chrono>
+ #include <cmath>
++#include <condition_variable>
++#include <thread>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -113,6 +115,11 @@ REXCVAR_DEFINE_STRING(hdr_sdr_eotf, "srgb", "UI/Presenter",
  REXCVAR_DEFINE_BOOL(hdr_test_pattern, false, "UI/Presenter",
                      "HDR: show a test pattern instead of the game (bars from 100 nits, doubling "
                      "every 4 bars; paper white at the bottom left)");
@@ -2956,7 +3485,23 @@ index 78af997..e7562a0 100644
  
  namespace {
  using GuestOutputPaintConfig = rex::ui::Presenter::GuestOutputPaintConfig;
-@@ -1761,6 +1766,7 @@ Presenter::HdrOutputState Presenter::GetHdrOutputState() {
+@@ -306,12 +313,13 @@ GuestOutputPaintConfig BuildGuestOutputPaintConfigFromCVar() {
+ // HDR output state. One display and one swap chain matter per process, so it's
+ // kept here rather than per presenter.
+ namespace {
++// Held only to copy hdr_display_info.
+ std::mutex hdr_display_mutex;
+-rex::ui::Presenter::HdrDisplayInfo hdr_display_info;          // hdr_display_mutex
+-std::chrono::steady_clock::time_point hdr_display_info_time;  // hdr_display_mutex
++rex::ui::Presenter::HdrDisplayInfo hdr_display_info;  // hdr_display_mutex
+ std::atomic<bool> hdr_display_info_stale{true};
+ std::atomic<void*> hdr_monitor{nullptr};
+ std::atomic<bool> hdr_output_active{false};
++std::atomic<bool> hdr_guest_output_available{true};
+ // The string settings, parsed on change (the painting threads read these).
+ std::atomic<int> hdr_mode{0};  // 0 off, 1 auto, 2 on
+ std::atomic<bool> hdr_sdr_pure_gamma_2_2{false};
+@@ -1761,6 +1769,7 @@ Presenter::HdrOutputState Presenter::GetHdrOutputState() {
    state.rolloff_start_nits = 0.75f * peak;
    state.sdr_pure_gamma_2_2 = hdr_sdr_pure_gamma_2_2.load(std::memory_order_relaxed);
    state.test_pattern = REXCVAR_GET(hdr_test_pattern);
@@ -2964,3 +3509,385 @@ index 78af997..e7562a0 100644
    return state;
  }
  
+@@ -1777,107 +1786,195 @@ void Presenter::SetHdrOutputActive(bool active) {
+   }
+ }
+ 
+-bool Presenter::IsHdrOutputWanted() {
+-  HdrRegisterSettingCallbacks();
+-  int mode = hdr_mode.load(std::memory_order_relaxed);
+-  if (!mode) {
+-    return false;
++// What the display reports, on a thread of its own (QueryDisplayConfig and
++// DXGI can take milliseconds), about once a second while `hdr` isn't off
++// (Windows doesn't reliably announce SDR brightness changes) and when woken
++// (another display, the platform's HDR or display events, the setting).
++class Presenter::HdrDisplayWorker {
++ public:
++  static HdrDisplayWorker& Get() {
++    static HdrDisplayWorker worker;
++    return worker;
++  }
++  void Wake() {
++    {
++      std::lock_guard<std::mutex> lock(mutex_);
++      wake_ = true;
++    }
++    condition_.notify_all();
+   }
+-  {
+-    // Refresh what the display reports about once a second (Windows doesn't
+-    // reliably announce SDR brightness changes), or when the window moved to
+-    // another display or the platform reported a change. If another thread is
+-    // doing it, use what's there.
+-    std::unique_lock<std::mutex> lock(hdr_display_mutex, std::try_to_lock);
+-    auto now = std::chrono::steady_clock::now();
+-    if (lock.owns_lock() && (hdr_display_info_stale.exchange(false) ||
+-                             now - hdr_display_info_time >= std::chrono::seconds(1))) {
+-      hdr_display_info_time = now;
+-      HdrDisplayInfo info;
+-#if REX_PLATFORM_WIN32
+-      // DXGI (the HDR switch, and the peak including the Windows HDR
+-      // Calibration profile) and DisplayConfig (the SDR content brightness).
+-      HMONITOR monitor = static_cast<HMONITOR>(hdr_monitor.load());
+-      static Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+-      static Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
+-      static HMONITOR output6_monitor = nullptr;
+-      if (factory && !factory->IsCurrent()) {
+-        factory.Reset();
+-        output6.Reset();
+-      }
+-      if (!factory) {
+-        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+-      }
+-      if (output6 && output6_monitor != monitor) {
+-        output6.Reset();
+-      }
+-      if (!output6 && factory && monitor) {
+-        if (Microsoft::WRL::ComPtr<IDXGIOutput> output =
+-                GetDXGIOutputForMonitor(factory.Get(), monitor)) {
+-          output.As(&output6);
+-          output6_monitor = monitor;
+-        }
++  // So that the first connection already has the display's state (rather
++  // than going SDR and then switching).
++  void AwaitFirstQuery() {
++    std::unique_lock<std::mutex> lock(mutex_);
++    queried_condition_.wait_for(lock, std::chrono::seconds(1), [this] { return queried_; });
++  }
++  ~HdrDisplayWorker() {
++    {
++      std::lock_guard<std::mutex> lock(mutex_);
++      quit_ = true;
++    }
++    condition_.notify_one();
++    if (thread_.joinable()) {
++      thread_.join();
++    }
++  }
++
++ private:
++  HdrDisplayWorker() : thread_([this] { Run(); }) {}
++  void Run() {
++    std::unique_lock<std::mutex> lock(mutex_);
++    while (!quit_) {
++      if (wake_ || hdr_mode.load(std::memory_order_relaxed)) {
++        wake_ = false;
++        lock.unlock();
++        Query();
++        lock.lock();
++        queried_ = true;
++        queried_condition_.notify_all();
+       }
+-      DXGI_OUTPUT_DESC1 desc;
+-      if (output6 && SUCCEEDED(output6->GetDesc1(&desc))) {
+-        info.known = true;
+-        info.hdr_enabled = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+-        info.peak_nits = desc.MaxLuminance;
+-        info.full_frame_nits = desc.MaxFullFrameLuminance;
+-        info.min_nits = desc.MinLuminance;
+-        UINT32 path_count = 0, mode_count = 0;
+-        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) ==
+-            ERROR_SUCCESS) {
+-          std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+-          std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+-          if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count,
+-                                 modes.data(), nullptr) == ERROR_SUCCESS) {
+-            for (UINT32 i = 0; i < path_count; ++i) {
+-              DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+-              source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+-              source.header.size = sizeof(source);
+-              source.header.adapterId = paths[i].sourceInfo.adapterId;
+-              source.header.id = paths[i].sourceInfo.id;
+-              if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
+-                  wcscmp(source.viewGdiDeviceName, desc.DeviceName)) {
+-                continue;
+-              }
+-              DISPLAYCONFIG_SDR_WHITE_LEVEL white = {};
+-              white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+-              white.header.size = sizeof(white);
+-              white.header.adapterId = paths[i].targetInfo.adapterId;
+-              white.header.id = paths[i].targetInfo.id;
+-              if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS) {
+-                info.sdr_white_nits = float(white.SDRWhiteLevel) * (80.0f / 1000.0f);
+-              }
+-              break;
+-            }
++      condition_.wait_for(lock, std::chrono::seconds(1), [this] { return quit_ || wake_; });
++    }
++  }
++  void Query();
++
++  std::mutex mutex_;
++  std::condition_variable condition_;
++  std::condition_variable queried_condition_;
++  bool wake_ = true;
++  bool quit_ = false;
++  bool queried_ = false;
++#if REX_PLATFORM_WIN32
++  Microsoft::WRL::ComPtr<IDXGIFactory1> factory_;
++  Microsoft::WRL::ComPtr<IDXGIOutput6> output6_;
++  HMONITOR output6_monitor_ = nullptr;
++#endif
++  // Last: started once the rest is constructed.
++  std::thread thread_;
++};
++
++void Presenter::HdrDisplayWorker::Query() {
++  HdrDisplayInfo info;
++#if REX_PLATFORM_WIN32
++  // DXGI (the HDR switch, and the peak including the Windows HDR Calibration
++  // profile) and DisplayConfig (the SDR content brightness).
++  HMONITOR monitor = static_cast<HMONITOR>(hdr_monitor.load());
++  if (factory_ && !factory_->IsCurrent()) {
++    factory_.Reset();
++    output6_.Reset();
++  }
++  if (!factory_) {
++    CreateDXGIFactory1(IID_PPV_ARGS(&factory_));
++  }
++  if (output6_ && output6_monitor_ != monitor) {
++    output6_.Reset();
++  }
++  if (!output6_ && factory_ && monitor) {
++    if (Microsoft::WRL::ComPtr<IDXGIOutput> output =
++            GetDXGIOutputForMonitor(factory_.Get(), monitor)) {
++      output.As(&output6_);
++      output6_monitor_ = monitor;
++    }
++  }
++  DXGI_OUTPUT_DESC1 desc;
++  if (output6_ && SUCCEEDED(output6_->GetDesc1(&desc))) {
++    info.known = true;
++    info.hdr_enabled = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
++    info.peak_nits = desc.MaxLuminance;
++    info.full_frame_nits = desc.MaxFullFrameLuminance;
++    info.min_nits = desc.MinLuminance;
++    UINT32 path_count = 0, mode_count = 0;
++    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) ==
++        ERROR_SUCCESS) {
++      std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
++      std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
++      if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count,
++                             modes.data(), nullptr) == ERROR_SUCCESS) {
++        for (UINT32 i = 0; i < path_count; ++i) {
++          DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
++          source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
++          source.header.size = sizeof(source);
++          source.header.adapterId = paths[i].sourceInfo.adapterId;
++          source.header.id = paths[i].sourceInfo.id;
++          if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
++              wcscmp(source.viewGdiDeviceName, desc.DeviceName)) {
++            continue;
+           }
++          DISPLAYCONFIG_SDR_WHITE_LEVEL white = {};
++          white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
++          white.header.size = sizeof(white);
++          white.header.adapterId = paths[i].targetInfo.adapterId;
++          white.header.id = paths[i].targetInfo.id;
++          if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS) {
++            info.sdr_white_nits = float(white.SDRWhiteLevel) * (80.0f / 1000.0f);
++          }
++          break;
+         }
+       }
++    }
++  }
+ #endif  // REX_PLATFORM_WIN32
+-      if (info.known != hdr_display_info.known ||
+-          info.hdr_enabled != hdr_display_info.hdr_enabled ||
+-          info.peak_nits != hdr_display_info.peak_nits ||
+-          info.sdr_white_nits != hdr_display_info.sdr_white_nits) {
+-        if (info.known) {
+-          REXLOG_INFO(
+-              "Presenter: display HDR {}, peak {} nits, full frame {} nits, black {} nits, SDR "
+-              "white {} nits",
+-              info.hdr_enabled ? "on" : "off", info.peak_nits, info.full_frame_nits,
+-              info.min_nits, info.sdr_white_nits);
+-        } else {
+-          REXLOG_INFO("Presenter: the display's HDR state is unknown");
+-        }
+-      }
+-      hdr_display_info = info;
++  bool changed;
++  {
++    std::lock_guard<std::mutex> lock(hdr_display_mutex);
++    changed = info.known != hdr_display_info.known ||
++              info.hdr_enabled != hdr_display_info.hdr_enabled ||
++              info.peak_nits != hdr_display_info.peak_nits ||
++              info.sdr_white_nits != hdr_display_info.sdr_white_nits;
++    hdr_display_info = info;
++  }
++  if (changed) {
++    if (info.known) {
++      REXLOG_INFO(
++          "Presenter: display HDR {}, peak {} nits, full frame {} nits, black {} nits, SDR "
++          "white {} nits",
++          info.hdr_enabled ? "on" : "off", info.peak_nits, info.full_frame_nits,
++          info.min_nits, info.sdr_white_nits);
++    } else {
++      REXLOG_INFO("Presenter: the display's HDR state is unknown");
+     }
+   }
+-  if (mode == 2) {
+-    return true;
++}
++
++uint32_t Presenter::IsHdrOutputWanted() {
++  HdrRegisterSettingCallbacks();
++  int mode = hdr_mode.load(std::memory_order_relaxed);
++  if (!mode) {
++    return 0;
++  }
++  HdrDisplayWorker& worker = HdrDisplayWorker::Get();
++  if (hdr_display_info_stale.exchange(false)) {
++    worker.Wake();
++  }
++  static std::atomic<bool> first_query_awaited{false};
++  if (!first_query_awaited.exchange(true, std::memory_order_relaxed)) {
++    worker.AwaitFirstQuery();
++  }
++  if (!hdr_guest_output_available.load(std::memory_order_relaxed)) {
++    return 0;
+   }
+   HdrDisplayInfo info = GetLastHdrDisplayInfo();
+-  return info.known && info.hdr_enabled;
++  bool display_hdr = info.known && info.hdr_enabled;
++  return display_hdr ? 2 : (mode == 2 ? 1 : 0);
++}
++
++Presenter::HdrMetadataLevels Presenter::GetHdrMetadataLevels() {
++  auto valid = [](float nits) { return std::isfinite(nits) ? std::clamp(nits, 0.0f, 10000.0f) : 0.0f; };
++  HdrOutputState state = GetHdrOutputState();
++  HdrDisplayInfo info = GetLastHdrDisplayInfo();
++  HdrMetadataLevels levels;
++  levels.max_nits = valid(state.peak_nits);
++  levels.max_frame_average_nits =
++      std::min(info.full_frame_nits > 0.0f ? valid(info.full_frame_nits) : levels.max_nits,
++               levels.max_nits);
++  levels.min_nits = std::min(valid(info.min_nits), levels.max_nits);
++  return levels;
++}
++
++void Presenter::SetGuestOutputHdrAvailable(bool available) {
++  if (hdr_guest_output_available.exchange(available, std::memory_order_relaxed) != available) {
++    REXLOG_INFO("Presenter: the guest output {} be HDR10 now", available ? "can" : "can't");
++  }
+ }
+ 
+ Presenter::GuestOutputCaptureConverter::GuestOutputCaptureConverter(const GuestOutputHdr& hdr)
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 8197bb4..3fdcf75 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -201,6 +201,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   if (with_swapchain) {
+     // #2.
+     XE_UI_VULKAN_STRUCT_EXTENSION(KHR_swapchain)
++    // #106 (HDR output).
++    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_hdr_metadata)
+   }
+ 
+   bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;
+@@ -802,6 +804,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   if (device->extensions_.ext_KHR_swapchain) {
+ #include <rex/ui/vulkan/functions/device_khr_swapchain.inc>
+   }
++  if (device->extensions_.ext_EXT_hdr_metadata) {
++#include <rex/ui/vulkan/functions/device_ext_hdr_metadata.inc>
++  }
+ #undef XE_UI_VULKAN_FUNCTION_PROMOTED
+ 
+ #undef XE_UI_VULKAN_FUNCTION
+diff --git a/src/ui/vulkan/vulkan_immediate_drawer.cpp b/src/ui/vulkan/vulkan_immediate_drawer.cpp
+index fa574c4..d202bbb 100644
+--- a/src/ui/vulkan/vulkan_immediate_drawer.cpp
++++ b/src/ui/vulkan/vulkan_immediate_drawer.cpp
+@@ -630,8 +630,10 @@ bool VulkanImmediateDrawer::EnsurePipelinesCreatedForCurrentRenderPass() {
+   color_blend_attachment_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+   color_blend_attachment_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+   color_blend_attachment_state.colorBlendOp = VK_BLEND_OP_ADD;
++  // Coverage in alpha (the HDR output's UI layer is premultiplied; the
++  // swapchain's alpha is ignored otherwise).
+   color_blend_attachment_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+-  color_blend_attachment_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++  color_blend_attachment_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+   color_blend_attachment_state.alphaBlendOp = VK_BLEND_OP_ADD;
+   color_blend_attachment_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                                                 VK_COLOR_COMPONENT_G_BIT |
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 9935419..390e90e 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -859,7 +859,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+ 
+   VkFormat new_swapchain_format;
+   // HDR output: HDR10 when wanted (the `hdr` setting and the display's state).
+-  bool hdr_wanted = IsHdrOutputWanted();
++  uint32_t hdr_wanted = IsHdrOutputWanted();
+   bool hdr = false;
+ 
+   // ConnectOrReconnectToSurfaceFromUIThread may be called only for the
+@@ -1007,6 +1007,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+ 
+   paint_context_.swapchain_hdr_wanted = hdr_wanted;
+   paint_context_.swapchain_hdr = hdr;
++  paint_context_.hdr_metadata_levels = {};
+   SetHdrOutputActive(hdr);
+ 
+   // Update the render pass to the new format.
+@@ -1162,7 +1163,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+ 
+ void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+   paint_context_.DestroySwapchainAndVulkanSurface();
+-  paint_context_.swapchain_hdr_wanted = false;
++  paint_context_.swapchain_hdr_wanted = 0;
+   paint_context_.swapchain_hdr = false;
+   SetHdrOutputActive(false);
+ }
+@@ -1748,6 +1749,25 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   if (IsHdrOutputWanted() != paint_context_.swapchain_hdr_wanted) {
+     return PaintResult::kNotPresentedConnectionOutdated;
+   }
++  // HDR10 metadata: the peak setting and the display (BT.2020, D65).
++  if (paint_context_.swapchain_hdr && vulkan_device_->extensions().ext_EXT_hdr_metadata) {
++    HdrMetadataLevels levels = GetHdrMetadataLevels();
++    if (!(levels == paint_context_.hdr_metadata_levels)) {
++      paint_context_.hdr_metadata_levels = levels;
++      VkHdrMetadataEXT metadata = {};
++      metadata.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
++      metadata.displayPrimaryRed = {0.708f, 0.292f};
++      metadata.displayPrimaryGreen = {0.170f, 0.797f};
++      metadata.displayPrimaryBlue = {0.131f, 0.046f};
++      metadata.whitePoint = {0.3127f, 0.3290f};
++      metadata.maxLuminance = levels.max_nits;
++      metadata.minLuminance = levels.min_nits;
++      metadata.maxContentLightLevel = levels.max_nits;
++      metadata.maxFrameAverageLightLevel = levels.max_frame_average_nits;
++      vulkan_device_->functions().vkSetHdrMetadataEXT(vulkan_device_->device(), 1,
++                                                       &paint_context_.swapchain, &metadata);
++    }
++  }
+ #if REX_PLATFORM_PS5
+   // Nothing can be seen of presentation on the console except the screen, so
+   // the first few paints and then one in every 300 are logged: that it was
