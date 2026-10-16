@@ -21,7 +21,8 @@ kinds of changes on top of upstream's `main`:
     console's TV ramp or sRGB for PC monitors, switched during play; and
     single-tile rendering that takes effect: the main scene with 2x MSAA drawn
     as one tile instead of two, in a 4,096-tile EDRAM the game asks the SDK
-    for on PC, switched during play (`KNOWN-ISSUES.md`).
+    for on PC and on the PS5 (untested on the console), switched during play
+    (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,

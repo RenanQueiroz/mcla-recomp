@@ -234,6 +234,8 @@ during a build:
   the A/B side, which `cyc-ab.py` compares per draw between neighbouring
   windows. Thread cycles measure the GPU command thread's own cost even when
   the frame rate is held by another thread.
+  Stale: it no longer applies to the patched SDK, whose Vulkan submission code
+  it changes has moved since.
 - `draw-cost.py`: fits frame time = fixed + per draw x draws over a run's
   `REX_PERF_LOG_CSV` output.
 - `dropped-patches\`: patches that were measured and not kept: specialized

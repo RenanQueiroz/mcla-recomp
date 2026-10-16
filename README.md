@@ -17,7 +17,7 @@ Everything this fork adds was built and measured on **Windows only**, with an **
 | Linux, Vulkan | Upstream's build plays: free roam holds 30 FPS on an Intel Core Ultra 5 238V laptop (Mesa ANV), tested by one user. The fork's SDK patches apply on top, but have not been built or run there. |
 | PS5 (jailbroken) | Upstream's build plays at a steady 30 FPS on a PS5 Pro (firmware 13.42), 20 to 25 in the zoomed-out map, and was installed and played on a PS5 Slim (firmware 12.70). The fork's `make_ps5.sh` also applies the fork's SDK patches, which have not been built or run on a console. |
 
-On the test machine, with the launcher's settings: at native resolution the game's own thread sets the pace, at about 6.8 ms a frame (about 145 FPS uncapped in free roam). At 3× (4K) a 120 FPS cap holds in free roam and while driving in the city, with 93% of frames within 1 ms of the target on D3D12 and 97% on Vulkan (99% on both standing in the city by day since single-tile rendering). Races at 3× run at a median of 8.1 ms a frame on D3D12 and 9.3 ms on Vulkan in the race benchmark, uncapped (10.1 and 10.9 ms with the scene in two tiles). Method and per-change figures: [patches/README.md](patches/README.md) and `launcher/dev/single-tile-edram-2026-10-16.md`.
+On the test machine, with the launcher's settings: at native resolution the game's own thread sets the pace, at about 6.8 ms a frame (about 145 FPS uncapped in free roam). At 3× (4K) a 120 FPS cap holds in free roam and while driving in the city, with 93% of frames within 1 ms of the target on D3D12 and 97% on Vulkan (99% on both standing in the city by day since single-tile rendering). Races at 3× run at a median of 8.1 to 8.5 ms a frame on D3D12 and 9.3 to 9.6 ms on Vulkan in the race benchmark (`launcher/dev/scripts/race.pad`, uncapped, the release build, two runs each); with the scene in two tiles 9.7 to 10.1 and 10.9 to 11.1 ms, where the runs of 2026-10-15 gave 9.3 and 10.8 (the benchmark's runs spread by up to 8%). Method and per-change figures: [patches/README.md](patches/README.md) and `launcher/dev/single-tile-edram-2026-10-16.md`.
 
 Car reflections are fixed on every renderer (upstream's fix: cars no longer come out white with a glow at night):
 
@@ -186,7 +186,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Clear rectangles as host clears | `--clear_rectangle_draws=false` | |
 | Direct resolves | `--direct_host_resolve=false` | |
 | Single-tile rendering | `--mcla_single_tile=false` | Or the launcher's *Single tile rendering*, or PERFORMANCE › SINGLE TILE RENDERING in the pause menu, which takes effect at once. |
-| The 4,096-tile EDRAM (PC default) | `--edram_tiles=2048` | The SDK's default, the console's size; single-tile rendering then has no room and is off (its pause menu row says UNAVAILABLE). |
+| The 4,096-tile EDRAM (PC and PS5 default) | `--edram_tiles=2048` | The SDK's default, the console's size; single-tile rendering then has no room and is off (its pause menu row says UNAVAILABLE). On the PS5, `edram_tiles = 2048` in `/data/mcla/mcla.toml`. |
 | Resolved textures decoded straight in | `--texture_load_direct=false` | Takes effect at once; turning it back on needs a restart. |
 | No frame wait for new pipelines | `--async_pipeline_end_of_frame_wait=true` | Restores the wait. The old behaviour in full also needs `--async_pipeline_wait_budget_ms=0 --vulkan_async_skip_incomplete_frames_max_ms=0 --vulkan_async_placeholder_pipelines=true`. |
 | Register writes in bulk | `--gpu_regwrite_bulk=false` | |
@@ -246,7 +246,7 @@ On Wayland, put `vulkan_allow_present_mode_immediate = false` and `vulkan_allow_
 
 *Installed on a jailbroken PS5 with upstream's build. The tile here is one the user supplied at build time; the background is made from the art on their own disc.*
 
-This is upstream's PS5 build. The fork's `ps5/make_ps5.sh` also applies the fork's SDK patches, after upstream's; **they have not been built or run on a console.** For the tested PS5 build, use [upstream's repository](https://github.com/holdmysocks/mcla-recomp): the same steps with `https://github.com/holdmysocks/mcla-recomp.git`.
+This is upstream's PS5 build. The fork's `ps5/make_ps5.sh` also applies the fork's SDK patches, after upstream's, and the fork's PS5 host asks for a 4,096-tile EDRAM, so the scene is drawn as one tile (single-tile rendering); **none of it has been built or run on a console.** To keep the console's 2,048 tiles, add `edram_tiles = 2048` to `/data/mcla/mcla.toml`, or build with `-DMCLA_EDRAM_TILES=2048`. For the tested PS5 build, use [upstream's repository](https://github.com/holdmysocks/mcla-recomp): the same steps with `https://github.com/holdmysocks/mcla-recomp.git`.
 
 You need a jailbroken PS5 that runs homebrew, with an FTP server payload (port 2121 by default) and a homebrew mounter that shows folders under `/data/homebrew` on the home screen (ShadowMountPlus was used). The build runs on **Arch Linux as root**: on Windows, an Arch distribution under WSL2. Allow about 30 GB of disk, 16 GB of memory, and about 45 minutes the first time.
 

@@ -709,7 +709,7 @@ Checked with a small program against the built `rexruntime.dll` (21 checks): a p
 
 **Why.** The Xbox 360's EDRAM is 2,048 tiles (10 MiB), and the SDK emulates exactly that, with addresses wrapping around at its end. A title drawing 720p with 2x MSAA has to split the scene into predicated tiles and submit it once per tile; this game draws two (1280x512 and 1280x208), each replaying about 1,370 draws in the city. Patched to draw one tile, it needs 1,472 tiles for the colour and as many for the depth, more than the console had (`launcher/dev/single-tile-2026-10-16.md`).
 
-**What it does.** A setting, `edram_tiles` (GPU options, 2048 or 4096, read at start-up), sets the size of the EDRAM emulated. 2048, the console's, is the default, and with it everything is as before. With 4096:
+**What it does.** A setting, `edram_tiles` (GPU options, 2048 or 4096, read at start-up), sets the size of the EDRAM emulated. 2048, the console's, is the default. With 4096:
 - EDRAM addresses wrap at 4,096 tiles, and render target bases are 12 bits (`RB_COLOR_INFO` and `RB_DEPTH_INFO` through `GetBaseTiles(edram_tile_count)`, `RenderTargetKey`, Vulkan's framebuffer keys). The ownership map, its wrap-around, the transfers and the resolve areas use the size in effect (`RenderTargetCache::edram_tile_count`).
 - The EDRAM buffer is twice the size: 20 MiB at 1x, 80 MiB at 2x, 180 MiB at 3x. A backend that can't bind that much whole (D3D12: 2^27 32-bit elements, 512 MiB; Vulkan: `maxStorageBufferRange`) gets the console's 2,048 tiles, with a warning in the log.
 - Host render targets stay as tall as the console's EDRAM from their base, as before, so they take no more memory.
@@ -720,16 +720,20 @@ Checked with a small program against the built `rexruntime.dll` (21 checks): a p
 
 `xenos::kEdramTileCount` and `kEdramSizeBytes` are gone, so that every use had to be looked at: `kEdramTileCountConsole` (2,048), `kEdramTileCountMax` (4,096) and `GetEdramSizeBytes(count)` replace them.
 
-A title that relied on the console's wrap-around at 2,048 tiles would draw differently with 4,096, which is why it is a setting, off by default. This game sets it on PC (`MclaApp::ApplyPcDefaults`) for its single-tile hook (`src/render_perf.cpp`); the PS5 build keeps 2,048.
+**At 2,048 tiles too,** two changes apply, though this game reaches neither (with 2,048 tiles nothing in it crosses tile 2,048, `launcher/dev/edram-wrap-log.sdk.patch`):
+- a resolve clear whose area wraps round the end of the EDRAM was dropped: `PrepareHostRenderTargetsResolveClear` subtracted the render target's base from the resolve's without the wrap-around, so the offset underflowed. It is now taken modulo the EDRAM size. The same bug is in xenia;
+- the transfer shaders made at run time pack their pitches in 9 bits, at either size.
+
+A title that relied on the console's wrap-around at 2,048 tiles would draw differently with 4,096, which is why it is a setting, off by default. This game sets it on PC (`MclaApp::ApplyPcDefaults`) and on the PS5 (`ps5/game/main_ps5.cpp`, untested there) for its single-tile hook (`src/render_perf.cpp`).
 
 Checked on Windows, RTX 5080, with the game's single tile (`launcher/dev/single-tile-edram-2026-10-16.md`):
 - **Resolves:** `launcher/dev/direct-resolve-validate.sdk.patch` compared direct resolves with the same resolves through the EDRAM buffer and the 4,096-tile shaders (the one-tile scene's colour crosses tile 2,048): 33,700 at native and 3x, city and race, both APIs, none different.
 - **Wrap-around:** `launcher/dev/edram-wrap-log.sdk.patch` logged every EDRAM range crossing tile 2,048. With 4,096 tiles, only the one-tile scene's colour and its resolve; with 2,048 tiles, none in this game.
 - **The picture,** one tile against two within one run, at 1x, 2x and 3x on both APIs, and on the EDRAM buffer, ROV and FSI paths: the same within frame-to-frame noise.
 - **D3D12 debug layer:** no errors, the usual warnings. **Vulkan synchronization validation:** the same write-after-write hazards between compute dispatches as with 2,048 tiles.
-- **With 2,048 tiles** (`--edram_tiles=2048`): the game keeps two tiles whatever its option says, and a switching run (50 switches each way, menus, the GPS map) behaved as before; with this size the SDK uses the console's shaders and limits.
+- **With 2,048 tiles** (`--edram_tiles=2048`): the game keeps two tiles whatever its option says, and a switching run (50 switches each way, menus, the GPS map) behaved as before; with this size the SDK uses the console's resolve shaders and limits.
 
-Built and run on Windows only, with an NVIDIA RTX 5080. The PS5 build applies the patch and keeps 2,048 tiles.
+Built and run on Windows only, with an NVIDIA RTX 5080. The PS5 build applies the patch and asks for 4,096 tiles, untested on the console (both changes above that apply at 2,048 tiles run there too).
 
 | Change | Files | Affects |
 |---|---|---|
