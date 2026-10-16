@@ -51,9 +51,10 @@ static class GameOptions
 {
     const string Unset = "Game setting";
     public static readonly Choice[] Display = [new(Unset, null), new("Fullscreen", "--fullscreen=true"), new("Windowed", "--fullscreen=false")];
-    // Every value is passed explicitly, defaults included: the in-game menu saves
-    // what is in effect to mcla.toml, and a value left off the command line would
-    // fall back to that file instead of the choice shown here.
+    // Every value is passed explicitly, defaults included: a value left off the
+    // command line would fall back to mcla.toml (what was changed in the pause
+    // menu, or what older builds saved of an earlier run's options) instead of
+    // the choice shown here.
     //
     // The recomp paces frames with its own limiter and means vsync to be off:
     // with it on, the GPU plugin's emulated 60 Hz vblank (driven by a 1 ms

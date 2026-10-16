@@ -55,8 +55,9 @@ in `KNOWN-ISSUES.md` (game) or `patches\README.md` (SDK).
 ## Options the launcher always passes
 
 The launcher passes every game option explicitly (`--resolution_scale=1` for Native,
-`--vsync=false` with every frame rate): the in-game menu saves what is in effect to
-`mcla.toml`, which would otherwise win over an option left off the command line.
+`--vsync=false` with every frame rate), so the choice shown here applies whatever
+`mcla.toml` holds: what was changed in the game's pause menu, and, from builds
+before 2026-10-16, which saved every value in effect, an earlier run's options.
 With vsync on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and
 paces it unevenly; the game also turns it off by itself when nothing sets it.
 (An earlier note here said vsync set from the game never reached the GPU plugin;
