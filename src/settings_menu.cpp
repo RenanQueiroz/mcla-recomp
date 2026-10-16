@@ -409,6 +409,10 @@ constexpr const char* kPromptValues[] = {"auto", "xbox", "playstation"};
 constexpr const char* kPromptLabels[] = {"AUTO", "XBOX", "PLAYSTATION"};
 constexpr const char* kIntroValues[] = {"normal", "fast", "skip"};
 constexpr const char* kIntroLabels[] = {"NORMAL", "FAST", "SKIP (NO LOGO)"};
+// mcla_display_gamma (src/display_gamma.cpp): the console's ramp for an HDTV,
+// or sRGB for a PC monitor; applied at the next swap.
+constexpr const char* kGammaValues[] = {"tv", "pc"};
+constexpr const char* kGammaLabels[] = {"TV", "PC MONITOR"};
 
 const ItemDef kDisplayItems[] = {
     {"PM_MxFps", ItemKind::kNumberChoice, "mcla_fps", "FPS TARGET", nullptr, nullptr, kFpsTargets,
@@ -427,6 +431,8 @@ const ItemDef kDisplayItems[] = {
     {"PM_MxBackend", ItemKind::kStringChoice, "mcla_gpu_backend", "GRAPHICS API", kBackendValues,
      kBackendLabels, nullptr, 3},
 #endif
+    {"PM_MxGamma", ItemKind::kStringChoice, "mcla_display_gamma", "DISPLAY GAMMA", kGammaValues,
+     kGammaLabels, nullptr, 2},
     {"PM_MxMotionBlur", ItemKind::kToggle, "mcla_motion_blur", "MOTION BLUR"},
     {"PM_MxDof", ItemKind::kToggle, "mcla_depth_of_field", "DEPTH OF FIELD"},
 };

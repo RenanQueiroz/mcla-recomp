@@ -1,5 +1,6 @@
-# In-game settings menu, plus the two display options it controls that are
-# implemented as hooks. Implemented in src/settings_menu.cpp.
+# In-game settings menu, plus the display options it controls that are
+# implemented as hooks. Implemented in src/settings_menu.cpp, except the
+# display gamma (src/display_gamma.cpp).
 #
 # Ported from LARecomp's pause menu (src/mc_engine/pause_menu.cpp), with its
 # author's permission. The reverse engineering of the game's menu system that
@@ -119,3 +120,12 @@ jump_address_on_true = 0x8260D0D8
 address = 0x8260EBB8
 name = "mcla_dof_composite"
 registers = ["r3"]
+
+# Display gamma: 0x82426B98 in sub_82426B68 (the XDK helper that builds the
+# table SetGammaRamp adjusts the ramp with), right after its call to
+# VdGetCurrentDisplayGamma; the display type is at r1+84 (1 sRGB, 2 TV). The
+# hook puts the type mcla_display_gamma asks for there.
+[[midasm_hook]]
+address = 0x82426B98
+name = "mcla_display_gamma_type"
+registers = ["r1"]
