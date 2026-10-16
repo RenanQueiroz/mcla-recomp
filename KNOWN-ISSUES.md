@@ -40,7 +40,7 @@ Cause: a texture loaded from a hot page was never reloaded while the page stayed
 
 ## Mouse pointer over the game during play (2026-10-14)
 
-Playing with a controller, the mouse pointer stayed in the middle of the picture until it was moved off the screen. The game now hides it the way PC games do. It goes as soon as a controller is used, or once the mouse has been still for about 3 seconds, and comes back as soon as the mouse moves or is clicked. It is hidden only over the game's picture while the game has focus. With another window in front, over the title bar or borders in windowed mode, or while the SDK's console, settings or achievements overlay is open, it stays. `mcla_hide_cursor` (default on; `--mcla_hide_cursor=false` keeps the pointer) selects the SDK's auto-hidden cursor, which `patches/rexglue-cursor-auto-hide.patch` makes focus-aware and lets the pads hide (details and checks there). Verified by the user with a controller on 2026-10-16: the pointer goes as soon as the controller is used.
+Playing with a controller, the mouse pointer stayed in the middle of the picture until it was moved off the screen. The game now hides it the way PC games do. It goes as soon as a controller is used, or once the mouse has been still for about 3 seconds, and comes back as soon as the mouse moves or is clicked. It is hidden only over the game's picture while the game has focus. With another window in front, over the title bar or borders in windowed mode, or while the SDK's console, settings or achievements overlay is open, it stays. `mcla_hide_cursor` (default on; `--mcla_hide_cursor=false` keeps the pointer) selects the SDK's auto-hidden cursor, which `patches/rexglue-cursor-auto-hide.patch` makes focus-aware and lets the pads hide (details and checks there). Verified by the user with a controller on 2026-10-16: the pointer goes as soon as the controller is used. The pause menu's CONTROLS › HIDE MOUSE POINTER switches it during play.
 
 ## Vulkan on Windows (2026-10-14)
 
@@ -176,7 +176,7 @@ The submenus upstream added to the Settings tab of the pause menu (DISPLAY, PERF
   - A double-quoted value whose backslashes are not TOML escapes, as old saves wrote paths, is rewritten as a literal string with the same text.
   - The SDK's own save (the F4 overlay) now writes valid strings too. An SDK file that still fails to parse is read line by line, so one bad line no longer costs the rest (`patches/rexglue-cvar-toml-strings.patch`).
 - **The launcher's 40, 45 and 50 FPS showed as 30, 30 and 60** in FPS TARGET, which only offered 30, 60, 120 and uncapped; stepping the row then lost the value. The list now has 40, 45 and 50 on PC, and they display and save as themselves. The PS5 keeps 30 and 60.
-- **Restart-only rows are marked from the options themselves.** The options the game reads once, at start-up, are declared `kRequiresRestart`, and their rows add "(NEXT START)" to their names. That covers RACE SHADOWS, SIMPLE CAR SHADOWS, DISTANT TREES, FULLSCREEN BLUR, ANTI ALIASING and INTRO; the SDK's F4 overlay shows them as `[restart]` too, as it does `mcla_gpu_backend`.
+- **Restart-only rows are marked from the options themselves.** The options the game reads once, at start-up, are declared `kRequiresRestart`, and their rows add "(NEXT START)" to their names. That covers RACE SHADOWS, SIMPLE CAR SHADOWS, DISTANT TREES, FULLSCREEN BLUR and INTRO (ANTI ALIASING was one until it was made to switch during play, below); the SDK's F4 overlay shows them as `[restart]` too, as it does `mcla_gpu_backend`.
   - DISTANT TREES said "(NEXT LOAD)". But the game creates the impostor targets with the world, once, at start-up (sub_82305230 → sub_8230C388 → sub_8230B778, where its switch is read). A temporary log in both showed one world setup and 53 impostor setups at start-up, and none when an arcade race started or was quit back to free roam. So it is "(NEXT START)" now.
 - **After a submenu, the Settings list kept the submenu's title and had no tab strip** until the pause menu closed. Entering a submenu hides the strip (`tabs_count = 0`) and retitles the menu. Leaving it now calls the strip's own render (sub_82630E40, captured by a mid-asm hook at 0x82630E50), which sets the tabs again and renders the selected tab, title included. Leaving with B and with Start goes through the same path; both save.
 
@@ -187,3 +187,35 @@ Checked on Windows, D3D12, on copies of the settings file through `devrun.py --t
 - no file at all: a file with a heading comment and the one key changed.
 
 The real `mcla.toml` stayed byte for byte the same throughout.
+
+## One settings file for the launcher and the pause menu; more settings in the game (2026-10-16)
+
+The launcher passed its choices on the command line at every start, and the command line beats `mcla.toml`, so a setting changed in the pause menu went back at the next start. Some settings were only in the launcher, and several only took effect after a restart.
+
+**The launcher edits `mcla.toml`** (`launcher\src\GameSettings.cs`), with the rules the game uses when it saves: a key's line is replaced where it is or added before the first `[table]`, everything else is kept, and the file is written beside the old one and renamed over it.
+- **Shared values.** Its drop-downs show the file's values, or the game's defaults where the file has none, and a change is written at once. There is no "Game setting" choice any more: the launcher and the pause menu change the same values.
+- **The command line.** Only *More mcla.exe options* is still passed, and it still wins.
+- **While the game runs,** the drop-downs are greyed out with a note to use the pause menu: the game reads the file only when it starts, and writes it itself. Once the game has closed, the file is read again.
+- **Migration.** The first time the new launcher opens, the choices that were forcing a value go into `mcla.toml`, after a copy of it is kept as `mcla.toml.before-launcher-settings` (README.md).
+- **Tests.** Checked on copies of a real `settings.json` and `mcla.toml` with a console program that compiles the launcher's code (a test copy, not the real files):
+  - the migration: the copy made first and kept, the right values written, CRLF and the other lines kept, a second run changing nothing;
+  - what each drop-down shows, including a value set by hand;
+  - a file with an old-style path, a line that is not TOML and a table;
+  - a new file.
+
+**The launcher's four SDK settings are the game's own PC defaults** (`MclaApp::ApplyPcDefaults`, `src/mcla_app.cpp`): `clear_memory_page_state=false`, `execute_unclipped_draw_vs_on_cpu=true`, `shared_memory_hot_page_faults=4` and `shared_memory_hot_page_ms=10000`, each used unless the command line, an environment variable or `mcla.toml` sets it, and never written to the file. The log says which were set by the user. The PS5 host keeps its own (`ps5/game/main_ps5.cpp`). The launcher also stopped passing `--vsync=false`, which the game does by itself (section "Frame pacing" above).
+
+**In the pause menu:**
+- **DISPLAY › RESOLUTION and GRAPHICS API (Windows), (NEXT START).** The resolution scale is built into the render targets, caches and translated shaders when the GPU emulation starts, and the backend is chosen before the window opens. A restart-only row whose value differs from the one the game started with says "(RESTART NEEDED)" instead, relabelled through the game's own row-label call (0x8263B860).
+- **CONTROLS › HIDE MOUSE POINTER (PC)** takes effect at once: the option now has a change callback.
+- **PERFORMANCE › ANTI ALIASING switches during play.** The game keeps the multisample mode in its renderer (+384: 2 for its 2x MSAA, 1 for none). It reads that mode as it renders, so `src/perf_options.cpp` writes it when the option changes. Checked by writing it about 15 times at 3x, standing in the city, driving and in the pause menu:
+  - **D3D12:** with the debug layer, no errors; the warnings are the usual ones (initial states ignored, MIN/MAX blend factors, live objects at exit, one duplicate barrier at start-up before any switch).
+  - **Vulkan:** with validation, only the `vkCmdEndQuery` messages it gives anyway.
+  - **Screenshots:** with MSAA off the dithered edges lose their pattern, as when it is off from the start; no corruption.
+- **RESTART GAME (Windows).** The first press relabels it "RESTART GAME (PRESS AGAIN)" for 5 seconds; a second press saves, starts `mcla.exe` again with the same command line (plus `--mcla_restart_wait_pid`, which the new process reads from its command line and waits on before it loads its settings, its window or the GPU plugin), and closes this one. As with QUIT GAME, progress since the last save is lost.
+- **QUIT GAME closes the game.** It used `RequestDeferredQuit`, which left the UI loop. The app then waited for the game's main thread, which doesn't end, so the game played on behind a window that no longer answered (seen in a test run). QUIT GAME and RESTART GAME now close the window on the UI thread, as its close button does, which ends the title and the process (`ReXApp::OnClosing`).
+- **Closing the window saves too.** A change made in a submenu that is still open is saved when the window is closed (`MclaApp::OnWindowCloseRequested`).
+
+**devrun** (`launcher\dev\devrun.py`) follows a RESTART GAME: it waits for the restarted game too, then puts `mcla.toml` back and checks the real data. It no longer passes the four SDK settings, which are the game's defaults now.
+
+**Not verified:** Linux, where RESTART GAME isn't offered, and the PS5, whose menus have none of the Windows rows. The PC defaults apply on Linux too, where the fork's patches have not been built or run.

@@ -11,9 +11,12 @@ kinds of changes on top of upstream's `main`:
   - Game: frame pacing at the swap, the 1 ms timer kept while the window is
     hidden, the achievement toast registered only while it shows, the
     motorcycle lean filter by elapsed time, the mouse pointer hidden during
-    play, loading-screen pacing that no longer stutters uncapped, and menus (and,
-    optionally, the HUD's animations) at the console's pace above 30 FPS (`KNOWN-ISSUES.md`,
-    2026-10-14 sections).
+    play, loading-screen pacing that no longer stutters uncapped, menus at the
+    console's pace above 30 FPS with the HUD at a rate of its own, and the pause
+    menu's settings: saved as changed, merged into `mcla.toml`, with more rows
+    (resolution, graphics API, the pointer, anti-aliasing during play), restart-only
+    rows marked, RESTART GAME, and a QUIT GAME that closes the game; plus the
+    launcher's four SDK settings as the game's PC defaults (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,
@@ -42,10 +45,12 @@ kinds of changes on top of upstream's `main`:
     at every resolution scale (7 to 12% shorter frames at 3x in the city on
     both APIs, 4 to 9% in a race; at native and 2x the resolve time saved
     matters on GPU-bound systems), with a fix for the 4x MSAA depth samples
-    the EDRAM buffer path misread at odd resolution scales.
+    the EDRAM buffer path misread at odd resolution scales, and settings files
+    saved as valid TOML and loaded line by line when one line is bad.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
-  launcher that checks this fork for updates, builds with `make_pc.ps1` and
-  starts the game with chosen options, the measurement tools in
+  launcher that checks this fork for updates, builds with `make_pc.ps1`,
+  edits the game's settings in `mcla.toml` (shared with the pause menu) and
+  starts the game, the measurement tools in
   `launcher/dev/` (`launcher/README.md`), and scripted controller input for
   unattended runs and benchmarks (`src/dev_pad.cpp`, off unless its options
   are set; `launcher/README.md`, "Scripted controller input").

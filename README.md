@@ -48,24 +48,28 @@ cd mcla-recomp
 
 `build-game.ps1` runs `scripts\make_pc.ps1`, which clones the ReXGlue SDK v0.10.0 and applies upstream's and the fork's patches, builds it (the long step, once), extracts your game into `game\`, recompiles it and builds `out\build\win-amd64-release\mcla.exe`. Without `-Iso` it takes the first `.iso` in the folder that holds `mcla-recomp`. Each step is skipped when its result is already there, so after a failure you run the same command again. Logs are in `out\logs`. `build-launcher.ps1` builds the launcher into `launcher\app` and puts a **Midnight Club Los Angeles** shortcut on the desktop.
 
-From then on the shortcut is the way in. The launcher opens on the game's settings, and **Play** starts `mcla.exe` with them. When it opens it checks this fork on GitHub; if there are new commits it lists them under *What's new* and offers **Update and rebuild**. Commits that change only the launcher or the documentation don't need a game rebuild; when an update changed the launcher itself, it offers **Restart to update the launcher**. The **More** menu has *Rebuild the game*, *Re-patch and rebuild the SDK*, *Run the build in a terminal*, the game folder and the build logs, and says how many of upstream's commits the fork hasn't taken yet. Keep the repository where it was built: the game data is read from `game\`.
+From then on the shortcut is the way in. The launcher opens on the game's settings, and **Play** starts `mcla.exe`. When it opens it checks this fork on GitHub; if there are new commits it lists them under *What's new* and offers **Update and rebuild**. Commits that change only the launcher or the documentation don't need a game rebuild; when an update changed the launcher itself, it offers **Restart to update the launcher**. The **More** menu has *Rebuild the game*, *Re-patch and rebuild the SDK*, *Run the build in a terminal*, the game folder and the build logs, and says how many of upstream's commits the fork hasn't taken yet. Keep the repository where it was built: the game data is read from `game\`.
 
-| Setting | Choices | Passes to `mcla.exe` |
-|---|---|---|
-| Resolution | Native (720p), 2× (1440p), 3× (2160p, 4K) | `--resolution_scale=1`, `2` or `3` |
-| Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `--mcla_fps=N --vsync=false` (0 for uncapped) |
-| Display | Fullscreen, Windowed | `--fullscreen=true` or `false` |
-| Anti-aliasing | On (2× MSAA), Off (about 20% faster at 3×) | `--mcla_msaa=true` or `false` |
-| HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `--mcla_ui_hud_rate=30`, `60`, `120` or `0` |
-| Graphics API | Direct3D 12, Vulkan | `--mcla_gpu_backend=d3d12` or `vulkan` |
-| Intro | Normal, Fast, Skip (hides the title logo) | `--mcla_intro=normal`, `fast` or `skip` |
-| Button prompts | Follow the controller, Xbox, PlayStation | `--mcla_button_prompts=auto`, `xbox` or `playstation` |
+The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.exe`. The Settings tab of the game's pause menu changes the same ones, so each shows what the other set. A change in the launcher is written to the file at once. While the game runs, the launcher's settings are greyed out: change them in the pause menu then, and the launcher shows them again once the game has closed.
 
-Every setting except Resolution and HUD updates also offers *Game setting*, which passes nothing and keeps what you chose in the game's pause menu (or the game's default); any other choice replaces it every time the game starts. With Graphics API at *Game setting* the game tries Direct3D 12 first. The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. A frame rate always comes with `--vsync=false`: with vsync on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly. The game also turns vsync off by itself unless `mcla.toml` or the pause menu's VSYNC turns it on.
+| Setting | Choices | In `mcla.toml` | In the pause menu |
+|---|---|---|---|
+| Resolution | Native (720p), 2× (1440p), 3× (2160p, 4K) | `resolution_scale` = `1`, `2` or `3` | DISPLAY › RESOLUTION (next start) |
+| Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `mcla_fps` (0 for uncapped) | DISPLAY › FPS TARGET |
+| Display | Fullscreen, Windowed | `fullscreen` = `true` or `false` | DISPLAY › FULLSCREEN |
+| Anti-aliasing | On (2× MSAA), Off (about 20% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
+| HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `mcla_ui_hud_rate` = `30`, `60`, `120` or `0` | DISPLAY › HUD UPDATES |
+| Graphics API | Automatic (Direct3D 12 first), Direct3D 12, Vulkan | `mcla_gpu_backend` = `any`, `d3d12` or `vulkan` | DISPLAY › GRAPHICS API (next start) |
+| Intro | Normal, Fast, Skip (hides the title logo) | `mcla_intro` = `normal`, `fast` or `skip` | CONTROLS › INTRO (next start) |
+| Button prompts | Follow the controller, Xbox, PlayStation | `mcla_button_prompts` = `auto`, `xbox` or `playstation` | CONTROLS › BUTTON PROMPTS |
 
-Under *Advanced* are **More mcla.exe options** (any other options, for example `--log_file=run.log`) and three checkboxes: check for updates when the launcher opens (on), close the launcher when the game starts (on), and start the game right away when there's nothing to update (off; a short countdown you can cancel).
+The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. The game turns vsync off by itself (the pause menu's DISPLAY › VSYNC turns it on): with it on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly.
 
-The launcher also always passes four SDK settings that measured faster on this game ([launcher/README.md](launcher/README.md#options-the-launcher-always-passes)): `--clear_memory_page_state=false`, `--execute_unclipped_draw_vs_on_cpu=true`, and hot pages, `--shared_memory_hot_page_faults=4 --shared_memory_hot_page_ms=10000`, as upstream's PS5 build runs. An option typed under *More mcla.exe options* replaces the launcher's default of the same name instead of adding to it, and so does one that *Anti-aliasing*, *Graphics API* or *HUD updates* would set. `mcla.exe` doesn't take an option twice, so change the other settings with their drop-downs rather than in the box.
+Under *Advanced* are **More mcla.exe options** (any other options, for example `--log_file=run.log`; they are the only options the launcher passes, and one set there wins over `mcla.toml` and the pause menu at every start) and three checkboxes: check for updates when the launcher opens (on), close the launcher when the game starts (on), and start the game right away when there's nothing to update (off; a short countdown you can cancel).
+
+Launchers before this one passed their choices on the command line at every start, which beat what the pause menu saved. The first time this one opens, it writes the choices that were forcing a value into `mcla.toml`, so nothing changes for you, after keeping a copy of the file as `mcla.toml.before-launcher-settings` next to it ([launcher/README.md](launcher/README.md#the-games-settings)).
+
+On PC the game also uses four SDK settings that measured faster on this game as its own defaults (`src/mcla_app.cpp`): `clear_memory_page_state=false`, `execute_unclipped_draw_vs_on_cpu=true`, and hot pages, `shared_memory_hot_page_faults=4` with `shared_memory_hot_page_ms=10000`, as upstream's PS5 build runs. The launcher used to pass them. An option on the command line or a line in `mcla.toml` replaces each of them.
 
 ### Without the launcher
 
@@ -77,7 +81,11 @@ cd mcla-recomp
 
 This is upstream's one command, with the fork's patches. It leaves a **Midnight Club Los Angeles** shortcut in the repository folder; double-click it, or `mcla.exe` itself. An Xbox or PlayStation controller works.
 
-Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120 --vsync=false`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on. The launcher's four SDK settings are not passed for you; add them for the same results. The pause menu has three extra entries: DISPLAY (frame-rate target, HUD updates, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); what you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds. Rows marked *(NEXT START)* take effect when the game next starts.
+Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120`; they win over `mcla.toml`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on.
+
+The pause menu's Settings tab has three extra submenus. DISPLAY has the frame-rate target, HUD updates, vsync, fullscreen, resolution, graphics API, motion blur and depth of field; PERFORMANCE has the detail options and anti-aliasing; CONTROLS has button prompts, intro speed and hiding the mouse pointer. What you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds; it is also saved when the window is closed with a submenu open.
+
+Rows marked *(NEXT START)* take effect when the game next starts, and say *(RESTART NEEDED)* once changed. **RESTART GAME** (Windows; press it twice) saves, starts the game again with the same options and closes this one; as with **QUIT GAME**, progress since the last save is lost.
 
 ### Updating
 
@@ -94,8 +102,8 @@ By hand: `git pull`, then `.\scripts\make_pc.ps1` again. It adds new SDK patches
 | `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
 | After an update, the build says a patch has changed since it was applied, is in the SDK without a record, or does not apply | `.\launcher\build-game.ps1 -ResetSdk`, or the launcher's **More** → *Re-patch and rebuild the SDK*. |
 | `no .NET 10 SDK found` | `winget install Microsoft.DotNet.SDK.10`, then `.\launcher\build-launcher.ps1` again. |
-| Started without the launcher, the game stays at 60 FPS or paces unevenly | Turn VSYNC off in the pause menu's DISPLAY, or add `--vsync=false` to its options. |
-| The game doesn't start after you added options under *More mcla.exe options* | Check that none of them is also set by a drop-down: an option given twice is an error. |
+| The game stays at 60 FPS or paces unevenly | Turn VSYNC off in the pause menu's DISPLAY (or remove `vsync = true` from `mcla.toml`). |
+| The game doesn't start after you added options under *More mcla.exe options* | Check that none is given twice: an option given twice is an error. |
 | Geometry or textures look stale | Try `--clear_memory_page_state=true`, then the switches in [Turning a change off](#turning-a-change-off), and report what made the difference. |
 | The game closes by itself | Start it with `--log_file=run.log --log_level=info` (the file is written next to `mcla.exe`; **More** → *Open the game folder*) and open an issue with the end of that file (see [Missed functions](#missed-functions) for where). |
 
@@ -114,8 +122,8 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | Frames no longer held while new pipelines compile | with nothing cached, worst frame 0.4 to 0.19 s on D3D12, 1.9 to 0.25 s on Vulkan |
 | GPU register writes in bulk | about 10% less GPU command thread time per draw at native |
 | Shared-memory requests whose pages are valid return at once, also with hot pages | 2.4% less GPU command thread time per draw; about 17% with hot pages |
-| Hot pages on in the launcher, with watched pages kept out of the hot set | about 9% shorter frames on the title screen at native; the attract movie's colours stay right |
-| Launcher defaults `clear_memory_page_state=false` and `execute_unclipped_draw_vs_on_cpu=true` | 10 to 21% less GPU command thread time at native; about 11% faster at 3× |
+| Hot pages on by default on PC, with watched pages kept out of the hot set | about 9% shorter frames on the title screen at native; the attract movie's colours stay right |
+| PC defaults `clear_memory_page_state=false` and `execute_unclipped_draw_vs_on_cpu=true` (the launcher passed them before) | 10 to 21% less GPU command thread time at native; about 11% faster at 3× |
 | Batched GPU counters; inline bit helpers | fewer calls across DLLs on the GPU command thread |
 | The timer queue thread sleeps instead of spinning | about half a core less CPU; no change in frame rate |
 
@@ -148,7 +156,8 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | The motorcycle's lean eased by elapsed time | matches the console at any frame rate (not verified by riding) |
 | The mouse pointer hidden during play | goes on controller input or after about 3 s still; back when the mouse moves |
 | Loading-screen pacing | uncapped free roam at native: mean 81 to 145 FPS; the fast intro speeds up only the start-up logos |
-| The pause menu's settings: only what you change is saved, merged into `mcla.toml`; the FPS list has 40, 45 and 50; restart-only rows say so; the tabs come back after a submenu | command-line options and paths no longer end up in the file, and a file with an old-style path loads again (`patches/rexglue-cvar-toml-strings.patch`) |
+| The pause menu's settings: only what you change is saved, merged into `mcla.toml`, also when the window is closed; the FPS list has 40, 45 and 50; resolution, graphics API and hiding the pointer added; anti-aliasing switches during play; restart-only rows say so, and *(RESTART NEEDED)* once changed; RESTART GAME; the tabs come back after a submenu | command-line options and paths no longer end up in the file, and a file with an old-style path loads again (`patches/rexglue-cvar-toml-strings.patch`); QUIT GAME closes the game (it left it running behind a window that no longer answered) |
+| The launcher edits `mcla.toml` instead of passing options | the launcher and the pause menu show and change the same settings; a choice made in the game sticks |
 | Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD at 30 a second by default, or 60, 120 or every frame | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before); the song title under the speedometer scrolls at its original speed |
 
 Upstream's own fixes, such as the car reflections and the camera-flight warp that never ended, are in the fork too.
@@ -165,9 +174,9 @@ Every change with a setting can be turned off without rebuilding: type the optio
 
 | Change | Option | Notes |
 |---|---|---|
-| Hot pages (launcher default) | `--shared_memory_hot_page_faults=0` | The launcher passes 4, with `--shared_memory_hot_page_ms=10000`; the SDK's default is 0. |
-| Uploaded memory kept valid across frames (launcher default) | `--clear_memory_page_state=true` | The SDK's default. |
-| Unclipped draws' vertex shaders on the CPU (launcher default) | `--execute_unclipped_draw_vs_on_cpu=false` | The SDK's default. |
+| Hot pages (PC default) | `--shared_memory_hot_page_faults=0` | The game's PC default is 4, with `shared_memory_hot_page_ms=10000`; the SDK's is 0. |
+| Uploaded memory kept valid across frames (PC default) | `--clear_memory_page_state=true` | The SDK's default. |
+| Unclipped draws' vertex shaders on the CPU (PC default) | `--execute_unclipped_draw_vs_on_cpu=false` | The SDK's default. |
 | Clear rectangles as host clears | `--clear_rectangle_draws=false` | |
 | Direct resolves | `--direct_host_resolve=false` | |
 | Resolved textures decoded straight in | `--texture_load_direct=false` | Takes effect at once; turning it back on needs a restart. |
@@ -187,7 +196,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Motorcycle lean | `--mcla_bike_gyro_fix=false` | |
 | Menus at the console's pace | `--mcla_ui_timing_fix=false` | |
 | HUD at the console's pace | `--mcla_ui_hud_rate=0` advances it with every frame | Default 30 a second; also 60 or 120. The launcher's *HUD updates*, and DISPLAY › HUD UPDATES in the pause menu. |
-| Mouse pointer hidden during play | `--mcla_hide_cursor=false` | |
+| Mouse pointer hidden during play | `--mcla_hide_cursor=false` | Or CONTROLS › HIDE MOUSE POINTER in the pause menu, which takes effect at once. |
 | Camera-flight warp fix (upstream's) | `--mcla_warp_fix=false` | |
 
 Without a setting: the timer kept at 1 ms while the window is hidden, the achievement toast and its repaints, the loading-screen pacing, the inline bit helpers, Vulkan's memory export check and per-frame counters, watched pages kept out of the hot set (it matters only with hot pages on), and the 4x MSAA depth fix, which replaces the EDRAM path's shaders.
