@@ -69,6 +69,7 @@
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/interfaces/graphics.h>
+#include <rex/ui/keybinds.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/virtual_key.h>
 #include <rex/ui/window.h>
@@ -1542,6 +1543,21 @@ std::string Execute(const std::string& line) {
       return "err cannot set " + args[1];
     }
     return "ok " + args[1] + "=" + rex::cvar::GetFlagByName(args[1]);
+  }
+  if (cmd == "key") {
+    // key <name>: a key press for the window's key binds (F3 the debug
+    // overlay, F7 the achievements), for checking the host UI over the game.
+    const rex::ui::VirtualKey key = args.size() == 2 ? rex::ui::ParseVirtualKey(args[1])
+                                                     : rex::ui::VirtualKey::kNone;
+    if (key == rex::ui::VirtualKey::kNone || !g_window) {
+      return "err usage: key <name>";
+    }
+    rex::ui::Window* window = g_window;
+    window->app_context().CallInUIThread([window, key] {
+      rex::ui::KeyEvent e(window, key, 0, false, false, false, false, false);
+      rex::ui::ProcessKeyEvent(e);
+    });
+    return "ok";
   }
   if (cmd == "log") {
     REXLOG_INFO("dev pad: {}", line.substr(line.find("log") + 3));

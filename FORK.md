@@ -118,6 +118,8 @@ git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
 git apply ../../patches/rexglue-cvar-toml-strings.patch
 git apply ../../patches/rexglue-edram-size.patch
+git apply ../../patches/rexglue-guest-markers.patch
+git apply ../../patches/rexglue-hdr-output.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they

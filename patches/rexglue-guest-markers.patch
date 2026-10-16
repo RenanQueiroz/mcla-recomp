@@ -1,5 +1,5 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 3f31f72..01ba10e 100644
+index 3f31f72..ec99380 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -176,6 +176,22 @@ class CommandProcessor {
@@ -20,7 +20,7 @@ index 3f31f72..01ba10e 100644
 +    kRenderEnd = 6,     // the title's render loop returned (UI drawn after it)
 +    kPhase = 0x100,     // diagnostics: value = a title-specific phase
 +  };
-+  virtual void OnGuestMarker(uint32_t kind, uint32_t value) {}
++  virtual void OnGuestMarker([[maybe_unused]] uint32_t kind, [[maybe_unused]] uint32_t value) {}
 +
    virtual void MakeCoherent();
    virtual void PrepareForWait();

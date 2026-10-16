@@ -1,0 +1,2345 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index f51bbbd..ab32381 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -637,6 +637,15 @@ class D3D12CommandProcessor : public CommandProcessor {
+   Microsoft::WRL::ComPtr<ID3D12PipelineState> apply_gamma_table_fxaa_luma_pipeline_;
+   Microsoft::WRL::ComPtr<ID3D12PipelineState> apply_gamma_pwl_pipeline_;
+   Microsoft::WRL::ComPtr<ID3D12PipelineState> apply_gamma_pwl_fxaa_luma_pipeline_;
++  // HDR output (rexglue-hdr-output.patch): hdr_refresh.cs, the apply-gamma
++  // bindings with HdrRefreshConstants.
++  struct HdrRefreshConstants {
++    uint32_t size[2];
++    uint32_t flags[2];
++    float levels[4];
++  };
++  Microsoft::WRL::ComPtr<ID3D12RootSignature> hdr_refresh_root_signature_;
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> hdr_refresh_pipeline_;
+ 
+   struct FxaaConstants {
+     uint32_t size[2];
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 29ef707..1790c87 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -416,6 +416,13 @@ class VulkanCommandProcessor : public CommandProcessor {
+   struct SwapApplyGammaConstants {
+     uint32_t size[2];
+   };
++  // HDR output (rexglue-hdr-output.patch): hdr_refresh.cs, the compute
++  // apply-gamma bindings with these constants.
++  struct HdrRefreshConstants {
++    uint32_t size[2];
++    uint32_t flags[2];
++    float levels[4];
++  };
+   enum SwapFxaaDescriptorSet : uint32_t {
+     kSwapFxaaDescriptorSetSource,
+     kSwapFxaaDescriptorSetDestination,
+@@ -772,6 +779,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+ 
+   VkPipelineLayout swap_apply_gamma_pipeline_layout_ = VK_NULL_HANDLE;
+   VkPipelineLayout swap_apply_gamma_compute_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipelineLayout hdr_refresh_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipeline hdr_refresh_pipeline_ = VK_NULL_HANDLE;
+   VkPipelineLayout swap_fxaa_pipeline_layout_ = VK_NULL_HANDLE;
+   // Has no dependencies on specific pipeline stages on both ends to simplify
+   // use in different scenarios with different pipelines - use explicit barriers
+diff --git a/include/rex/system/gpu_plugin.h b/include/rex/system/gpu_plugin.h
+index b910179..07969d6 100644
+--- a/include/rex/system/gpu_plugin.h
++++ b/include/rex/system/gpu_plugin.h
+@@ -29,7 +29,8 @@
+ namespace rex::system {
+ 
+ // Bump on any change to GpuCreateInfo or to the IGraphicsSystem interface.
+-inline constexpr uint32_t kGpuPluginAbiVersion = 2;
++// 3: HDR output (rexglue-hdr-output.patch) changed the presenter the plugin uses.
++inline constexpr uint32_t kGpuPluginAbiVersion = 3;
+ 
+ inline constexpr const char* kGpuCreateSymbol = "rex_gpu_create";
+ inline constexpr const char* kGpuAbiVersionSymbol = "rex_gpu_abi_version";
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index 83d09f7..a2b71b8 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -53,12 +53,16 @@ class D3D12Presenter final : public Presenter {
+ 
+   // The format used internally by Windows composition.
+   static constexpr DXGI_FORMAT kSwapChainFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
++  // HDR output (rexglue-hdr-output.patch): HDR10, with the guest output
++  // holding HDR10 code values in the same format.
++  static constexpr DXGI_FORMAT kSwapChainFormatHdr10 = DXGI_FORMAT_R10G10B10A2_UNORM;
+ 
+   // The callback must use the main direct queue of the provider.
+   class D3D12GuestOutputRefreshContext final : public GuestOutputRefreshContext {
+    public:
+-    D3D12GuestOutputRefreshContext(bool& is_8bpc_out_ref, ID3D12Resource* resource)
+-        : GuestOutputRefreshContext(is_8bpc_out_ref), resource_(resource) {}
++    D3D12GuestOutputRefreshContext(bool& is_8bpc_out_ref, GuestOutputHdr& hdr_out_ref,
++                                   ID3D12Resource* resource)
++        : GuestOutputRefreshContext(is_8bpc_out_ref, hdr_out_ref), resource_(resource) {}
+ 
+     // kGuestOutputFormat, supports UAV. The initial state in the callback is
+     // kGuestOutputInternalState, and the callback must also transition it back
+@@ -100,7 +104,7 @@ class D3D12Presenter final : public Presenter {
+   bool RefreshGuestOutputImpl(uint32_t mailbox_index, uint32_t frontbuffer_width,
+                               uint32_t frontbuffer_height,
+                               std::function<bool(GuestOutputRefreshContext& context)> refresher,
+-                              bool& is_8bpc_out) override;
++                              bool& is_8bpc_out, GuestOutputHdr& hdr_out) override;
+ 
+   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
+ 
+@@ -183,7 +187,10 @@ class D3D12Presenter final : public Presenter {
+       // guest_output_intermediate_texture_paint_last_usage_.
+       kRTVIndexGuestOutputIntermediate0 = kRTVIndexSwapChainBuffer0 + kSwapChainBufferCount,
+ 
+-      kRTVCount = kRTVIndexGuestOutputIntermediate0 + kGuestOutputMailboxSize - 1,
++      // HDR output: the layer the presenter's own UI is drawn into.
++      kRTVIndexHdrUiLayer = kRTVIndexGuestOutputIntermediate0 + kGuestOutputMailboxSize - 1,
++
++      kRTVCount,
+     };
+ 
+     enum ViewIndex : UINT {
+@@ -195,7 +202,10 @@ class D3D12Presenter final : public Presenter {
+       // guest_output_intermediate_texture_paint_last_usage_.
+       kViewIndexGuestOutputIntermediate0Srv = kViewIndexGuestOutput0Srv + kGuestOutputMailboxSize,
+ 
+-      kViewCount = kViewIndexGuestOutputIntermediate0Srv + kMaxGuestOutputPaintEffects - 1,
++      kViewIndexHdrUiLayerSrv =
++          kViewIndexGuestOutputIntermediate0Srv + kMaxGuestOutputPaintEffects - 1,
++
++      kViewCount,
+     };
+ 
+     void AwaitSwapChainUsageCompletion() {
+@@ -253,6 +263,13 @@ class D3D12Presenter final : public Presenter {
+     bool swap_chain_allows_tearing = false;
+     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain;
+     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSwapChainBufferCount> swap_chain_buffers;
++    // HDR output: what the connection was made for (IsHdrOutputWanted), and
++    // whether the swap chain is HDR10 (kSwapChainFormatHdr10, PQ BT.2020).
++    bool swap_chain_hdr_wanted = false;
++    bool swap_chain_hdr = false;
++    // The presenter's own UI over HDR10 output, swap chain sized, in
++    // D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE while not drawn into.
++    Microsoft::WRL::ComPtr<ID3D12Resource> hdr_ui_layer;
+   };
+ 
+   explicit D3D12Presenter(HostGpuLossCallback host_gpu_loss_callback, const D3D12Provider& provider)
+@@ -289,6 +306,10 @@ class D3D12Presenter final : public Presenter {
+       guest_output_paint_intermediate_pipelines_;
+   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, size_t(GuestOutputPaintEffect::kCount)>
+       guest_output_paint_final_pipelines_;
++  // HDR output: bilinear guest output and the presenter's UI layer to the
++  // HDR10 swap chain.
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> guest_output_paint_final_hdr10_pipeline_;
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> hdr_ui_composite_pipeline_;
+ 
+   // The first is the refresher submission tracker fence value at which the
+   // guest output texture was last refreshed, the second is the reference to the
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index afb4a30..bf8eafa 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -188,6 +188,37 @@ class Presenter {
+       std::function<void(bool is_responsible, bool statically_from_ui_thread)>;
+   static void FatalErrorHostGpuLossCallback(bool is_responsible, bool statically_from_ui_thread);
+ 
++  // HDR output (rexglue-hdr-output.patch).
++  // How a guest output image is encoded: SDR code values, as the guest's display
++  // table gives them, or, while the swap chain is HDR10, HDR10 code values
++  // (BT.2020 primaries, SMPTE ST 2084).
++  struct GuestOutputHdr {
++    bool is_pq = false;
++    // For turning an HDR10 image back into SDR (captures): the level SDR content
++    // was placed at, and how it was decoded.
++    float sdr_white_nits = 0.0f;
++    bool sdr_pure_gamma_2_2 = false;
++  };
++  // What the platform reports about the display the window is on.
++  struct HdrDisplayInfo {
++    bool known = false;        // the platform reported the display's state
++    bool hdr_enabled = false;  // the display is in HDR mode (Windows: Use HDR)
++    float peak_nits = 0.0f;    // 0 = not reported
++    float full_frame_nits = 0.0f;
++    float min_nits = 0.0f;
++    float sdr_white_nits = 0.0f;  // the system's level for SDR content, 0 = not reported
++  };
++  // What a guest output refresher needs to write HDR10.
++  struct HdrOutputState {
++    bool active = false;             // the swap chain is HDR10 now
++    float sdr_white_nits = 200.0f;   // SDR content: the guest's UI, movies, whole frames
++    float paper_white_nits = 200.0f; // the guest's scene white
++    float rolloff_start_nits = 750.0f;
++    float peak_nits = 1000.0f;
++    bool sdr_pure_gamma_2_2 = false;  // decode SDR with a 2.2 power, else piecewise sRGB
++    bool test_pattern = false;
++  };
++
+   class GuestOutputRefreshContext {
+    public:
+     GuestOutputRefreshContext(const GuestOutputRefreshContext& context) = delete;
+@@ -198,14 +229,19 @@ class Presenter {
+     // (though the image provided by the refresher may still have a higher
+     // storage precision). If never called, assuming it's false.
+     void SetIs8bpc(bool is_8bpc) { is_8bpc_out_ref_ = is_8bpc; }
++    // For a refresher that wrote HDR10 code values (see GetHdrOutputState).
++    void SetHdr(const GuestOutputHdr& hdr) { hdr_out_ref_ = hdr; }
+ 
+    protected:
+-    GuestOutputRefreshContext(bool& is_8bpc_out_ref) : is_8bpc_out_ref_(is_8bpc_out_ref) {
++    GuestOutputRefreshContext(bool& is_8bpc_out_ref, GuestOutputHdr& hdr_out_ref)
++        : is_8bpc_out_ref_(is_8bpc_out_ref), hdr_out_ref_(hdr_out_ref) {
+       is_8bpc_out_ref = false;
++      hdr_out_ref = GuestOutputHdr();
+     }
+ 
+    private:
+     bool& is_8bpc_out_ref_;
++    GuestOutputHdr& hdr_out_ref_;
+   };
+ 
+   class GuestOutputPaintConfig {
+@@ -362,6 +398,14 @@ class Presenter {
+   // multiple at the same time, and it should acquire the latest guest output
+   // image via ConsumeGuestOutput.
+   virtual bool CaptureGuestOutput(RawImage& image_out) = 0;
++
++  // HDR output: whether the swap chain is HDR10 now, and the levels, for a
++  // guest output refresher (any thread).
++  static HdrOutputState GetHdrOutputState();
++  // What the display reported last, and whether the swap chain is HDR10, for
++  // settings screens (any thread).
++  static HdrDisplayInfo GetLastHdrDisplayInfo();
++  static bool IsHdrOutputActive();
+   const GuestOutputPaintConfig& GetGuestOutputPaintConfigFromUIThread() const {
+     return guest_output_paint_config_;
+   }
+@@ -407,6 +451,7 @@ class Presenter {
+     uint32_t display_aspect_ratio_x;
+     uint32_t display_aspect_ratio_y;
+     bool is_8bpc;
++    GuestOutputHdr hdr;
+ 
+     GuestOutputProperties() { SetToInactive(); }
+ 
+@@ -421,6 +466,7 @@ class Presenter {
+       display_aspect_ratio_x = 0;
+       display_aspect_ratio_y = 0;
+       is_8bpc = false;
++      hdr = GuestOutputHdr();
+     }
+   };
+ 
+@@ -685,7 +731,29 @@ class Presenter {
+   // will be assumed to be false.
+   virtual bool RefreshGuestOutputImpl(
+       uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
+-      std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) = 0;
++      std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref,
++      GuestOutputHdr& hdr_out_ref) = 0;
++
++  // HDR output, for the backends: whether the swap chain should be HDR10 now
++  // (the `hdr` setting, and the display's state, which is refreshed about once
++  // a second while `hdr` isn't off), and publishing what it is.
++  static bool IsHdrOutputWanted();
++  static void SetHdrOutputActive(bool active);
++
++  // For capturing: guest output pixels (R10G10B10A2 words) to 8bpc ones as
++  // Packed10bpcRGBTo8bpcBytes does; HDR10 images are turned back into SDR, with
++  // SDR content coming back as it went in (to about one code) and light above
++  // SDR white clipped keeping its hue.
++  class GuestOutputCaptureConverter {
++   public:
++    explicit GuestOutputCaptureConverter(const GuestOutputHdr& hdr);
++    uint32_t operator()(uint32_t rgb10) const;
++
++   private:
++    bool is_pq_;
++    std::vector<float> pq_to_relative_;
++    std::vector<uint8_t> relative_sqrt_to_code_;
++  };
+ 
+   // For guest output capturing (for debugging use thus - shouldn't be adding
+   // any noise like dithering that's not present in the original image),
+diff --git a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+index 81f8d34..2bd13ec 100644
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -111,6 +111,8 @@ class VulkanInstance {
+ #endif
+     bool ext_1_1_KHR_get_physical_device_properties2 = false;  // #60
+     bool ext_EXT_debug_utils = false;                          // #129
++    // HDR output (rexglue-hdr-output.patch): HDR10 swapchains.
++    bool ext_EXT_swapchain_colorspace = false;  // #105
+     bool ext_KHR_portability_enumeration = false;              // #395
+   };
+ 
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index 56ee43b..255e040 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -69,6 +69,9 @@ class VulkanPresenter final : public Presenter {
+   static constexpr size_t kMaxActiveGuestOutputImageVersions = kGuestOutputMailboxSize;
+ 
+   static constexpr VkFormat kGuestOutputFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
++  // HDR output (rexglue-hdr-output.patch): the layer the presenter's own UI is
++  // drawn into before going over an HDR10 swap chain image.
++  static constexpr VkFormat kHdrUiLayerFormat = VK_FORMAT_R8G8B8A8_UNORM;
+   // The guest output is expected to be acquired and released in this state by
+   // the refresher. The exception is the first write to the current guest output
+   // image - in this case, a barrier is only needed from
+@@ -85,9 +88,10 @@ class VulkanPresenter final : public Presenter {
+   // The callback must use the graphics and compute queue 0 of the device.
+   class VulkanGuestOutputRefreshContext final : public GuestOutputRefreshContext {
+    public:
+-    VulkanGuestOutputRefreshContext(bool& is_8bpc_out_ref, VkImage image, VkImageView image_view,
+-                                    uint64_t image_version, bool image_ever_written_previously)
+-        : GuestOutputRefreshContext(is_8bpc_out_ref),
++    VulkanGuestOutputRefreshContext(bool& is_8bpc_out_ref, GuestOutputHdr& hdr_out_ref,
++                                    VkImage image, VkImageView image_view, uint64_t image_version,
++                                    bool image_ever_written_previously)
++        : GuestOutputRefreshContext(is_8bpc_out_ref, hdr_out_ref),
+           image_(image),
+           image_view_(image_view),
+           image_version_(image_version),
+@@ -144,7 +148,7 @@ class VulkanPresenter final : public Presenter {
+   bool RefreshGuestOutputImpl(uint32_t mailbox_index, uint32_t frontbuffer_width,
+                               uint32_t frontbuffer_height,
+                               std::function<bool(GuestOutputRefreshContext& context)> refresher,
+-                              bool& is_8bpc_out_ref) override;
++                              bool& is_8bpc_out_ref, GuestOutputHdr& hdr_out_ref) override;
+ 
+   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
+ 
+@@ -316,8 +320,11 @@ class VulkanPresenter final : public Presenter {
+       kGuestOutputDescriptorSetIntermediate0Sampled =
+           kGuestOutputDescriptorSetGuestOutput0Sampled + kGuestOutputMailboxSize,
+ 
+-      kGuestOutputDescriptorSetCount =
++      // HDR output: the presenter's UI layer.
++      kGuestOutputDescriptorSetHdrUiLayerSampled =
+           kGuestOutputDescriptorSetIntermediate0Sampled + kMaxGuestOutputPaintEffects - 1,
++
++      kGuestOutputDescriptorSetCount,
+     };
+ 
+     struct UISetupCommandBuffer {
+@@ -353,7 +360,7 @@ class VulkanPresenter final : public Presenter {
+         const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+         VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out,
+         VkFormat& image_format_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
+-        bool& ui_surface_unusable_out);
++        bool& ui_surface_unusable_out, bool hdr_wanted, bool& hdr_out);
+ 
+     // Destroys the swapchain and its derivatives, nulls `swapchain` and returns
+     // the original swapchain object, if it existed, for use as oldSwapchain if
+@@ -361,6 +368,8 @@ class VulkanPresenter final : public Presenter {
+     VkSwapchainKHR PrepareForSwapchainRetirement();
+     // May be called from the destructor of the presenter.
+     void DestroySwapchainAndVulkanSurface();
++    // After awaiting the usage of the layer.
++    void DestroyHdrUiLayer();
+ 
+     // Connection-indepedent.
+ 
+@@ -416,6 +425,16 @@ class VulkanPresenter final : public Presenter {
+     bool swapchain_is_fifo = false;
+     std::vector<VkImage> swapchain_images;
+     std::vector<SwapchainFramebuffer> swapchain_framebuffers;
++    // HDR output: what the connection was made for (IsHdrOutputWanted), and
++    // whether the swapchain is HDR10 (PQ, BT.2020).
++    bool swapchain_hdr_wanted = false;
++    bool swapchain_hdr = false;
++    // The presenter's UI over HDR10 output (kHdrUiLayerFormat, swapchain
++    // sized), in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL after drawing.
++    VkImage hdr_ui_layer_image = VK_NULL_HANDLE;
++    VkDeviceMemory hdr_ui_layer_memory = VK_NULL_HANDLE;
++    VkImageView hdr_ui_layer_view = VK_NULL_HANDLE;
++    VkFramebuffer hdr_ui_layer_framebuffer = VK_NULL_HANDLE;
+   };
+ 
+   explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
+@@ -432,8 +451,13 @@ class VulkanPresenter final : public Presenter {
+ 
+   bool InitializeSurfaceIndependent();
+ 
+-  [[nodiscard]] VkPipeline CreateGuestOutputPaintPipeline(GuestOutputPaintEffect effect,
+-                                                          VkRenderPass render_pass);
++  // With fragment_shader, that shader with the effect's layout and, with
++  // premultiplied_blend, ONE / INV_SRC_ALPHA blending (HDR output's UI layer).
++  [[nodiscard]] VkPipeline CreateGuestOutputPaintPipeline(
++      GuestOutputPaintEffect effect, VkRenderPass render_pass,
++      VkShaderModule fragment_shader = VK_NULL_HANDLE, bool premultiplied_blend = false);
++  // HDR output: the UI layer for the current swapchain, created if needed.
++  bool EnsureHdrUiLayer();
+ 
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+   bool EnsureTemporalUpscalerContext(uint32_t render_width, uint32_t render_height,
+@@ -460,6 +484,12 @@ class VulkanPresenter final : public Presenter {
+   // same due to different dependencies (this is shader read > color
+   // attachment > shader read).
+   VkRenderPass guest_output_intermediate_render_pass_ = VK_NULL_HANDLE;
++  // HDR output: drawing the presenter's UI into its layer, and the layer over
++  // an HDR10 swapchain image (for the swapchain render pass's format).
++  VkShaderModule hdr_ui_composite_fs_ = VK_NULL_HANDLE;
++  VkRenderPass hdr_ui_layer_render_pass_ = VK_NULL_HANDLE;
++  VkPipeline hdr_ui_composite_pipeline_ = VK_NULL_HANDLE;
++  VkFormat hdr_ui_composite_pipeline_format_ = VK_FORMAT_UNDEFINED;
+ 
+   // Value monotonically increased every time a new guest output image is
+   // initialized, for recreation of dependent objects such as framebuffers in
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index b3aa842..732c161 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -70,6 +70,7 @@ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/apply_gamma_pwl_fxaa_luma_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/apply_gamma_table_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/apply_gamma_table_fxaa_luma_cs.h"
++#include "../shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/fxaa_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/fxaa_extreme_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h"
+@@ -1360,6 +1361,19 @@ bool D3D12CommandProcessor::SetupContext() {
+         "perceptual luma output");
+     return false;
+   }
++  // HDR output: the same bindings with more constants.
++  apply_gamma_root_parameters[UINT(ApplyGammaRootParameter::kConstants)]
++      .Constants.Num32BitValues = sizeof(HdrRefreshConstants) / sizeof(uint32_t);
++  *(hdr_refresh_root_signature_.ReleaseAndGetAddressOf()) =
++      ui::d3d12::util::CreateRootSignature(provider, apply_gamma_root_signature_desc);
++  if (hdr_refresh_root_signature_) {
++    *(hdr_refresh_pipeline_.ReleaseAndGetAddressOf()) = ui::d3d12::util::CreateComputePipeline(
++        device, shaders::hdr_refresh_cs, sizeof(shaders::hdr_refresh_cs),
++        hdr_refresh_root_signature_.Get());
++  }
++  if (!hdr_refresh_pipeline_) {
++    REXGPU_ERROR("Failed to create the HDR output refresh pipeline");
++  }
+ 
+   // Initialize compute pipelines for post-processing anti-aliasing.
+   D3D12_ROOT_PARAMETER fxaa_root_parameters[UINT(FxaaRootParameter::kCount)];
+@@ -2223,6 +2237,15 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+         ID3D12Device* device = provider.GetDevice();
+ 
+         SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
++        // HDR output: while the presenter's swap chain is HDR10, HDR10 code
++        // values from the 256-entry table path (hdr_refresh.cs).
++        ui::Presenter::HdrOutputState hdr_state = ui::Presenter::GetHdrOutputState();
++        bool use_hdr = hdr_state.active && hdr_refresh_pipeline_ &&
++                       frontbuffer_format != xenos::TextureFormat::k_2_10_10_10 &&
++                       frontbuffer_format != xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16;
++        if (use_hdr) {
++          swap_post_effect = SwapPostEffect::kNone;
++        }
+         bool use_fxaa = swap_post_effect == SwapPostEffect::kFxaa ||
+                         swap_post_effect == SwapPostEffect::kFxaaExtreme;
+         if (use_fxaa) {
+@@ -2371,13 +2394,27 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+         gamma_ramp_buffer_state_ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+ 
+-        deferred_command_list_.D3DSetComputeRootSignature(apply_gamma_root_signature_.Get());
+-        ApplyGammaConstants apply_gamma_constants;
+-        apply_gamma_constants.size[0] = guest_output_width;
+-        apply_gamma_constants.size[1] = guest_output_height;
+-        deferred_command_list_.D3DSetComputeRoot32BitConstants(
+-            UINT(ApplyGammaRootParameter::kConstants),
+-            sizeof(apply_gamma_constants) / sizeof(uint32_t), &apply_gamma_constants, 0);
++        if (use_hdr) {
++          deferred_command_list_.D3DSetComputeRootSignature(hdr_refresh_root_signature_.Get());
++          HdrRefreshConstants hdr_refresh_constants = {
++              {guest_output_width, guest_output_height},
++              {uint32_t(hdr_state.sdr_pure_gamma_2_2) | (uint32_t(hdr_state.test_pattern) << 1),
++               0},
++              {hdr_state.sdr_white_nits, hdr_state.paper_white_nits, hdr_state.rolloff_start_nits,
++               hdr_state.peak_nits}};
++          deferred_command_list_.D3DSetComputeRoot32BitConstants(
++              UINT(ApplyGammaRootParameter::kConstants),
++              sizeof(hdr_refresh_constants) / sizeof(uint32_t), &hdr_refresh_constants, 0);
++          context.SetHdr({true, hdr_state.sdr_white_nits, hdr_state.sdr_pure_gamma_2_2});
++        } else {
++          deferred_command_list_.D3DSetComputeRootSignature(apply_gamma_root_signature_.Get());
++          ApplyGammaConstants apply_gamma_constants;
++          apply_gamma_constants.size[0] = guest_output_width;
++          apply_gamma_constants.size[1] = guest_output_height;
++          deferred_command_list_.D3DSetComputeRoot32BitConstants(
++              UINT(ApplyGammaRootParameter::kConstants),
++              sizeof(apply_gamma_constants) / sizeof(uint32_t), &apply_gamma_constants, 0);
++        }
+         deferred_command_list_.D3DSetComputeRootDescriptorTable(
+             UINT(ApplyGammaRootParameter::kDestination), apply_gamma_descriptors[0].second);
+         deferred_command_list_.D3DSetComputeRootDescriptorTable(
+@@ -2385,7 +2422,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+         deferred_command_list_.D3DSetComputeRootDescriptorTable(
+             UINT(ApplyGammaRootParameter::kRamp), apply_gamma_descriptor_gamma_ramp.second);
+         ID3D12PipelineState* apply_gamma_pipeline;
+-        if (use_pwl_gamma_ramp) {
++        if (use_hdr) {
++          apply_gamma_pipeline = hdr_refresh_pipeline_.Get();
++        } else if (use_pwl_gamma_ramp) {
+           apply_gamma_pipeline = use_fxaa ? apply_gamma_pwl_fxaa_luma_pipeline_.Get()
+                                           : apply_gamma_pwl_pipeline_.Get();
+         } else {
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h
+new file mode 100644
+index 0000000..b848f09
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/hdr_refresh_cs.h
+@@ -0,0 +1,87 @@
++// Generated from hdr_refresh.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_refresh_cs[] = {
++    0x43425844, 0x59F5498E, 0x9476E848, 0xD6C5792C, 0x09A6A199, 0x00000001, 0x00000A44, 0x00000003,
++    0x0000002C, 0x0000003C, 0x0000004C, 0x4E475349, 0x00000008, 0x00000000, 0x00000008, 0x4E47534F,
++    0x00000008, 0x00000000, 0x00000008, 0x58454853, 0x000009F0, 0x00050051, 0x0000027C, 0x0100086A,
++    0x07000059, 0x00308E46, 0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x00000000, 0x07000858,
++    0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000, 0x07001858, 0x00307E46,
++    0x00000001, 0x00000001, 0x00000001, 0x00005555, 0x00000000, 0x0700189C, 0x0031EE46, 0x00000000,
++    0x00000000, 0x00000000, 0x00001111, 0x00000000, 0x0200005F, 0x00020032, 0x02000068, 0x00000004,
++    0x0400009B, 0x00000010, 0x00000008, 0x00000001, 0x08000050, 0x00100032, 0x00000000, 0x00020046,
++    0x00308046, 0x00000000, 0x00000000, 0x00000000, 0x0700003C, 0x00100012, 0x00000000, 0x0010001A,
++    0x00000000, 0x0010000A, 0x00000000, 0x0304001F, 0x0010000A, 0x00000000, 0x0100003E, 0x01000015,
++    0x04000036, 0x00100032, 0x00000000, 0x00020046, 0x08000036, 0x001000C2, 0x00000000, 0x00004002,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x00100072, 0x00000000, 0x00100E46,
++    0x00000000, 0x00207D86, 0x00000001, 0x00000001, 0x0C000001, 0x00100072, 0x00000001, 0x00308AA6,
++    0x00000000, 0x00000000, 0x00000000, 0x00004002, 0x00000004, 0x00000001, 0x00000002, 0x00000000,
++    0x0304001F, 0x0010000A, 0x00000001, 0x05000036, 0x00100032, 0x00000000, 0x00100516, 0x00000000,
++    0x01000015, 0x0F000032, 0x00100072, 0x00000000, 0x00100186, 0x00000000, 0x00004002, 0x437F0000,
++    0x437F0000, 0x437F0000, 0x00000000, 0x00004002, 0x3F000000, 0x3F000000, 0x3F000000, 0x00000000,
++    0x0500001C, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0800002D, 0x00100012, 0x00000002,
++    0x00100006, 0x00000000, 0x00207D26, 0x00000000, 0x00000000, 0x0800002D, 0x00100022, 0x00000002,
++    0x00100556, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x0800002D, 0x00100042, 0x00000002,
++    0x00100AA6, 0x00000000, 0x00207C96, 0x00000000, 0x00000000, 0x0A000034, 0x00100072, 0x00000000,
++    0x00100246, 0x00000002, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0304001F,
++    0x0010001A, 0x00000001, 0x0500002F, 0x001000B2, 0x00000001, 0x00100846, 0x00000000, 0x0A000038,
++    0x001000B2, 0x00000001, 0x00100C46, 0x00000001, 0x00004002, 0x400CCCCD, 0x400CCCCD, 0x00000000,
++    0x400CCCCD, 0x05000019, 0x001000B2, 0x00000001, 0x00100C46, 0x00000001, 0x01000012, 0x0A000031,
++    0x00100072, 0x00000002, 0x00004002, 0x3D25AEE6, 0x3D25AEE6, 0x3D25AEE6, 0x00000000, 0x00100246,
++    0x00000000, 0x0A000000, 0x00100072, 0x00000003, 0x00100246, 0x00000000, 0x00004002, 0x3D6147AE,
++    0x3D6147AE, 0x3D6147AE, 0x00000000, 0x0A000038, 0x00100072, 0x00000003, 0x00100246, 0x00000003,
++    0x00004002, 0x3F72A76E, 0x3F72A76E, 0x3F72A76E, 0x00000000, 0x0500002F, 0x00100072, 0x00000003,
++    0x00100246, 0x00000003, 0x0A000038, 0x00100072, 0x00000003, 0x00100246, 0x00000003, 0x00004002,
++    0x4019999A, 0x4019999A, 0x4019999A, 0x00000000, 0x05000019, 0x00100072, 0x00000003, 0x00100246,
++    0x00000003, 0x0A000038, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x3D9E8391,
++    0x3D9E8391, 0x3D9E8391, 0x00000000, 0x09000037, 0x001000B2, 0x00000001, 0x00100846, 0x00000002,
++    0x00100846, 0x00000003, 0x00100846, 0x00000000, 0x01000015, 0x09000038, 0x00100072, 0x00000000,
++    0x00100346, 0x00000001, 0x00308006, 0x00000000, 0x00000000, 0x00000001, 0x0304001F, 0x0010002A,
++    0x00000001, 0x04000056, 0x00100032, 0x00000001, 0x00020046, 0x0A000000, 0x00100032, 0x00000001,
++    0x00100046, 0x00000001, 0x00004002, 0x3F000000, 0x3F000000, 0x00000000, 0x00000000, 0x07000056,
++    0x001000C2, 0x00000001, 0x00308406, 0x00000000, 0x00000000, 0x00000000, 0x0700000E, 0x00100032,
++    0x00000001, 0x00100046, 0x00000001, 0x00100AE6, 0x00000001, 0x07000031, 0x00100082, 0x00000000,
++    0x0010001A, 0x00000001, 0x00004001, 0x3F000000, 0x09000032, 0x00100022, 0x00000001, 0x0010000A,
++    0x00000001, 0x00004001, 0x40000000, 0x00004001, 0xBF800000, 0x09000037, 0x00100012, 0x00000001,
++    0x0010003A, 0x00000000, 0x0010000A, 0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100022,
++    0x00000001, 0x0010000A, 0x00000001, 0x00004001, 0x41C00000, 0x05000041, 0x00100022, 0x00000001,
++    0x0010001A, 0x00000001, 0x07000038, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x00004001,
++    0x3E800000, 0x05000019, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100022,
++    0x00000001, 0x0010001A, 0x00000001, 0x00004001, 0x42C80000, 0x07000031, 0x00100012, 0x00000001,
++    0x0010000A, 0x00000001, 0x00004001, 0x00000000, 0x0B000037, 0x00100012, 0x00000001, 0x0010000A,
++    0x00000001, 0x0030801A, 0x00000000, 0x00000000, 0x00000001, 0x0010001A, 0x00000001, 0x09000037,
++    0x00100072, 0x00000000, 0x00100FF6, 0x00000000, 0x00100556, 0x00000001, 0x00100006, 0x00000001,
++    0x0304001F, 0x0010003A, 0x00000000, 0x05000036, 0x00100082, 0x00000000, 0x00004001, 0x461C4000,
++    0x01000012, 0x07000036, 0x00100082, 0x00000000, 0x0030802A, 0x00000000, 0x00000000, 0x00000001,
++    0x01000015, 0x01000012, 0x07000036, 0x00100082, 0x00000000, 0x0030802A, 0x00000000, 0x00000000,
++    0x00000001, 0x01000015, 0x07000034, 0x00100012, 0x00000001, 0x0010002A, 0x00000000, 0x0010001A,
++    0x00000000, 0x07000034, 0x00100012, 0x00000001, 0x0010000A, 0x00000000, 0x0010000A, 0x00000001,
++    0x07000031, 0x00100022, 0x00000001, 0x0010003A, 0x00000000, 0x0010000A, 0x00000001, 0x09000031,
++    0x00100042, 0x00000001, 0x0010003A, 0x00000000, 0x0030803A, 0x00000000, 0x00000000, 0x00000001,
++    0x07000001, 0x00100022, 0x00000001, 0x0010002A, 0x00000001, 0x0010001A, 0x00000001, 0x0304001F,
++    0x0010001A, 0x00000001, 0x0A000000, 0x00100022, 0x00000001, 0x8010003A, 0x00000041, 0x00000000,
++    0x0030803A, 0x00000000, 0x00000000, 0x00000001, 0x08000000, 0x00100042, 0x00000001, 0x0010003A,
++    0x00000000, 0x8010000A, 0x00000041, 0x00000001, 0x0700000E, 0x00100042, 0x00000001, 0x0010002A,
++    0x00000001, 0x0010001A, 0x00000001, 0x07000038, 0x00100042, 0x00000001, 0x0010002A, 0x00000001,
++    0x00004001, 0x3FB8AA3B, 0x05000019, 0x00100042, 0x00000001, 0x0010002A, 0x00000001, 0x08000000,
++    0x00100042, 0x00000001, 0x8010002A, 0x00000041, 0x00000001, 0x00004001, 0x3F800000, 0x09000032,
++    0x00100082, 0x00000000, 0x0010001A, 0x00000001, 0x0010002A, 0x00000001, 0x0010003A, 0x00000000,
++    0x0700000E, 0x00100082, 0x00000000, 0x0010003A, 0x00000000, 0x0010000A, 0x00000001, 0x07000038,
++    0x00100072, 0x00000000, 0x00100FF6, 0x00000000, 0x00100246, 0x00000000, 0x01000015, 0x0A000010,
++    0x00100012, 0x00000001, 0x00100246, 0x00000000, 0x00004002, 0x3F209D8C, 0x3EA897C8, 0x3D3168F9,
++    0x00000000, 0x0A000010, 0x00100022, 0x00000001, 0x00100246, 0x00000000, 0x00004002, 0x3D8D82BA,
++    0x3F6B66F9, 0x3C3A27AF, 0x00000000, 0x0A000010, 0x00100042, 0x00000001, 0x00100246, 0x00000000,
++    0x00004002, 0x3C86466B, 0x3DB44029, 0x3F6545B7, 0x00000000, 0x0A002038, 0x00100072, 0x00000000,
++    0x00100246, 0x00000001, 0x00004002, 0x38D1B717, 0x38D1B717, 0x38D1B717, 0x00000000, 0x0500002F,
++    0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038, 0x00100072, 0x00000000, 0x00100246,
++    0x00000000, 0x00004002, 0x3E232000, 0x3E232000, 0x3E232000, 0x00000000, 0x05000019, 0x00100072,
++    0x00000000, 0x00100246, 0x00000000, 0x0F000032, 0x00100072, 0x00000001, 0x00100246, 0x00000000,
++    0x00004002, 0x4196D000, 0x4196D000, 0x4196D000, 0x00000000, 0x00004002, 0x3F560000, 0x3F560000,
++    0x3F560000, 0x00000000, 0x0F000032, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002,
++    0x41958000, 0x41958000, 0x41958000, 0x00000000, 0x00004002, 0x3F800000, 0x3F800000, 0x3F800000,
++    0x00000000, 0x0700000E, 0x00100072, 0x00000000, 0x00100246, 0x00000001, 0x00100246, 0x00000000,
++    0x0500002F, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038, 0x00100072, 0x00000000,
++    0x00100246, 0x00000000, 0x00004002, 0x429DB000, 0x429DB000, 0x429DB000, 0x00000000, 0x05000019,
++    0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x05000036, 0x00100082, 0x00000000, 0x00004001,
++    0x3F800000, 0x070000A4, 0x0021E0F2, 0x00000000, 0x00000000, 0x00020546, 0x00100E46, 0x00000000,
++    0x0100003E,
++};
+diff --git a/src/graphics/shaders/hdr_refresh.cs.xesl b/src/graphics/shaders/hdr_refresh.cs.xesl
+new file mode 100644
+index 0000000..137dbd2
+--- /dev/null
++++ b/src/graphics/shaders/hdr_refresh.cs.xesl
+@@ -0,0 +1,85 @@
++// HDR output (rexglue-hdr-output.patch): the swap's refresher when the
++// presenter's swap chain is HDR10, in place of apply_gamma_table.cs.xesl (same
++// bindings, more constants). The guest's front buffer goes through the guest's
++// own 256-entry display table, as in SDR (so a game's gamma setting, such as
++// MCLA's DISPLAY GAMMA, works the same), then is decoded as SDR content
++// (piecewise sRGB or pure 2.2) at the SDR content level in nits, and written as
++// HDR10 code values (BT.2020, PQ) into the guest output image.
++// The table is never applied to PQ values, and the presenter's scaling only
++// reads what this writes.
++
++#include "../../ui/shaders/xesl.xesli"
++#include "../../ui/shaders/hdr_output.xesli"
++
++push_const_begin_xe(b0, space0)
++  uint2_xe xe_hdr_refresh_size;
++  // x: bit 0: decode SDR with a pure 2.2 power, else the piecewise sRGB curve;
++  //    bit 1: test pattern in place of the game's frame;
++  //    bit 2: swap red and blue of the source.
++  uint2_xe xe_hdr_refresh_flags;
++  // x: SDR content white, y: paper white, z: roll-off start, w: peak (nits).
++  float4_xe xe_hdr_refresh_levels;
++push_const_end_xe
++
++#define LOCAL_SIZE_X_XE 16
++#define LOCAL_SIZE_Y_XE 8
++#define LOCAL_SIZE_Z_XE 1
++entry_bindings_begin_compute_xe
++  push_const_binding_xe(buffer(0))
++  entry_binding_next_xe
++  texture_xe(texture_buffer_xe, xe_hdr_refresh_ramp, set=0, binding=0, t0,
++             space0, texture(0))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_hdr_refresh_source, set=1, binding=0, t1,
++             space0, texture(1))
++  entry_binding_next_xe
++  image_wo_xe(image_2d_xe, image_format_rgb10_a2_xe, xe_hdr_refresh_dest,
++              set=2, binding=0, u0, space0, texture(2))
++entry_bindings_end_inputs_begin_compute_xe
++  entry_in_global_thread_id_xe
++entry_inputs_end_code_begin_compute_xe
++  uint2_xe pixel_index = in_global_thread_id_xe.xy;
++  uint2_xe size = push_const_xe(xe_hdr_refresh_size);
++  dont_flatten_xe
++  if (any(greater_than_equal_xe(pixel_index, size))) {
++    return;
++  }
++  uint flags = push_const_xe(xe_hdr_refresh_flags).x;
++  float4_xe levels = push_const_xe(xe_hdr_refresh_levels);
++
++  // UNORM conversion according to the Direct3D 10+ rules, as apply_gamma.
++  float3_xe source = texel_fetch_2d_xe(xe_hdr_refresh_source,
++                                       int2_xe(pixel_index), 0).rgb;
++  dont_flatten_xe if ((flags & 4u) != 0u) {
++    source = source.bgr;
++  }
++  uint3_xe code = uint3_xe(source * 255.0f + 0.5f);
++  // The table has blue in bits 0:9, green in 10:19, red in 20:29 - BGR passed
++  // as an R10G10B10A2 buffer.
++  float3_xe ramped = float3_xe(
++      texel_fetch_buffer_xe(xe_hdr_refresh_ramp, code.r).b,
++      texel_fetch_buffer_xe(xe_hdr_refresh_ramp, code.g).g,
++      texel_fetch_buffer_xe(xe_hdr_refresh_ramp, code.b).r);
++  float3_xe nits = XeHdrSdrToLinear(ramped, (flags & 1u) != 0u) * levels.x;
++
++  dont_flatten_xe if ((flags & 2u) != 0u) {
++    // Test pattern. Top half: 24 bars from 100 nits doubling every 4 bars
++    // (100, 200, 400, 800, 1600, 3200 nits at bars 0, 4, 8, 12, 16, 20), not
++    // rolled off, for where the display itself stops showing steps. Bottom
++    // half: paper white on the left, the same bars rolled off towards the
++    // peak setting on the right.
++    float2_xe position = (float2_xe(pixel_index) + 0.5f) / float2_xe(size);
++    bool top = position.y < 0.5f;
++    float bar_position = top ? position.x : position.x * 2.0f - 1.0f;
++    float bar_nits = 100.0f * exp2(floor(bar_position * 24.0f) * 0.25f);
++    nits = XeHdrSplat(top ? bar_nits
++                          : (bar_position < 0.0f ? levels.y : bar_nits));
++    dont_flatten_xe if (top) {
++      levels.z = 10000.0f;
++    }
++  }
++
++  nits = XeHdrRollOff(nits, levels.z, levels.w);
++  image_store_2d_rgba_xe(xe_hdr_refresh_dest, pixel_index,
++                         float4_xe(XeHdrEncodePq(nits), 1.0f));
++entry_code_end_compute_xe
+diff --git a/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h b/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h
+new file mode 100644
+index 0000000..3fedeb4
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/hdr_refresh_cs.h
+@@ -0,0 +1,160 @@
++// Generated from hdr_refresh.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_refresh_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x000061B3, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
++    0x0000002E, 0x00020011, 0x00000031, 0x0006000B, 0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E,
++    0x00000000, 0x0003000E, 0x00000000, 0x00000001, 0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D,
++    0x00000000, 0x00000F48, 0x00060010, 0x0000161F, 0x00000011, 0x00000010, 0x00000008, 0x00000001,
++    0x00040047, 0x00000F48, 0x0000000B, 0x0000001C, 0x00030047, 0x00000450, 0x00000002, 0x00050048,
++    0x00000450, 0x00000000, 0x00000023, 0x00000000, 0x00050048, 0x00000450, 0x00000001, 0x00000023,
++    0x00000008, 0x00050048, 0x00000450, 0x00000002, 0x00000023, 0x00000010, 0x00040047, 0x000014D3,
++    0x00000021, 0x00000000, 0x00040047, 0x000014D3, 0x00000022, 0x00000001, 0x00040047, 0x000010ED,
++    0x00000021, 0x00000000, 0x00040047, 0x000010ED, 0x00000022, 0x00000000, 0x00030047, 0x00000CC3,
++    0x00000019, 0x00040047, 0x00000CC3, 0x00000021, 0x00000000, 0x00040047, 0x00000CC3, 0x00000022,
++    0x00000002, 0x00040047, 0x00000B0F, 0x0000000B, 0x00000019, 0x00020013, 0x00000008, 0x00030021,
++    0x00000502, 0x00000008, 0x00030016, 0x0000000D, 0x00000020, 0x00040017, 0x00000018, 0x0000000D,
++    0x00000003, 0x00020014, 0x00000009, 0x0004002B, 0x0000000D, 0x00000A0C, 0x00000000, 0x0004002B,
++    0x0000000D, 0x00000976, 0x400CCCCD, 0x0004002B, 0x0000000D, 0x000007AD, 0x3D9E8391, 0x0004002B,
++    0x0000000D, 0x0000035E, 0x3D6147AE, 0x0004002B, 0x0000000D, 0x0000070C, 0x3F72A76E, 0x0004002B,
++    0x0000000D, 0x00000711, 0x4019999A, 0x0004002B, 0x0000000D, 0x000009A2, 0x3D25AEE6, 0x00040017,
++    0x00000010, 0x00000009, 0x00000003, 0x00040015, 0x0000000B, 0x00000020, 0x00000000, 0x0004002B,
++    0x0000000B, 0x00000A0A, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B,
++    0x0000000B, 0x00000A10, 0x00000002, 0x0004002B, 0x0000000D, 0x0000008A, 0x3F800000, 0x0004002B,
++    0x0000000D, 0x000000DF, 0x3FB8AA3B, 0x0004002B, 0x0000000D, 0x000008ED, 0x3F209D8C, 0x0004002B,
++    0x0000000D, 0x00000838, 0x3EA897C8, 0x0004002B, 0x0000000D, 0x00000661, 0x3D3168F9, 0x0006002C,
++    0x00000018, 0x00000112, 0x000008ED, 0x00000838, 0x00000661, 0x0004002B, 0x0000000D, 0x000004AA,
++    0x3D8D82BA, 0x0004002B, 0x0000000D, 0x000000F8, 0x3F6B66F9, 0x0004002B, 0x0000000D, 0x00000776,
++    0x3C3A27AF, 0x0006002C, 0x00000018, 0x00000BBE, 0x000004AA, 0x000000F8, 0x00000776, 0x0004002B,
++    0x0000000D, 0x00000029, 0x3C86466B, 0x0004002B, 0x0000000D, 0x00000B94, 0x3DB44029, 0x0004002B,
++    0x0000000D, 0x000009A5, 0x3F6545B7, 0x0006002C, 0x00000018, 0x0000048A, 0x00000029, 0x00000B94,
++    0x000009A5, 0x0004002B, 0x0000000D, 0x00000383, 0x38D1B717, 0x0004002B, 0x0000000D, 0x00000841,
++    0x3E232000, 0x0004002B, 0x0000000D, 0x000006EF, 0x3F560000, 0x0004002B, 0x0000000D, 0x0000058F,
++    0x4196D000, 0x0004002B, 0x0000000D, 0x00000911, 0x41958000, 0x0004002B, 0x0000000D, 0x000003A8,
++    0x429DB000, 0x00040017, 0x00000011, 0x0000000B, 0x00000002, 0x00040017, 0x00000014, 0x0000000B,
++    0x00000003, 0x00040020, 0x00000291, 0x00000001, 0x00000014, 0x0004003B, 0x00000291, 0x00000F48,
++    0x00000001, 0x00040017, 0x0000001D, 0x0000000D, 0x00000004, 0x0005001E, 0x00000450, 0x00000011,
++    0x00000011, 0x0000001D, 0x00040020, 0x000006CD, 0x00000009, 0x00000450, 0x0004003B, 0x000006CD,
++    0x00000CE9, 0x00000009, 0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x0004002B, 0x0000000C,
++    0x00000A0B, 0x00000000, 0x00040020, 0x0000028E, 0x00000009, 0x00000011, 0x00040017, 0x0000000F,
++    0x00000009, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A0E, 0x00000001, 0x00040020, 0x00000288,
++    0x00000009, 0x0000000B, 0x0004002B, 0x0000000C, 0x00000A11, 0x00000002, 0x00040020, 0x0000029A,
++    0x00000009, 0x0000001D, 0x00090019, 0x00000096, 0x0000000D, 0x00000001, 0x00000000, 0x00000000,
++    0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000313, 0x00000000, 0x00000096, 0x0004003B,
++    0x00000313, 0x000014D3, 0x00000000, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x0004002B,
++    0x0000000B, 0x00000A16, 0x00000004, 0x0004002B, 0x0000000D, 0x00000540, 0x437F0000, 0x0004002B,
++    0x0000000D, 0x000000FC, 0x3F000000, 0x00090019, 0x0000009A, 0x0000000D, 0x00000005, 0x00000000,
++    0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000317, 0x00000000, 0x0000009A,
++    0x0004003B, 0x00000317, 0x000010ED, 0x00000000, 0x00040017, 0x00000013, 0x0000000D, 0x00000002,
++    0x0004002B, 0x0000000D, 0x00000019, 0x40000000, 0x0004002B, 0x0000000D, 0x00000207, 0x42C80000,
++    0x0004002B, 0x0000000D, 0x00000A4C, 0x41C00000, 0x0004002B, 0x0000000D, 0x0000016E, 0x3E800000,
++    0x0004002B, 0x0000000D, 0x00000224, 0x461C4000, 0x00090019, 0x000000A6, 0x0000000D, 0x00000001,
++    0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x0000000B, 0x00040020, 0x00000323, 0x00000000,
++    0x000000A6, 0x0004003B, 0x00000323, 0x00000CC3, 0x00000000, 0x0004002B, 0x0000000B, 0x00000A3A,
++    0x00000010, 0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0006002C, 0x00000014, 0x00000B0F,
++    0x00000A3A, 0x00000A22, 0x00000A0D, 0x0006002C, 0x00000018, 0x000003AB, 0x000000FC, 0x000000FC,
++    0x000000FC, 0x0006002C, 0x00000018, 0x00000A2C, 0x00000A0C, 0x00000A0C, 0x00000A0C, 0x0006002C,
++    0x00000018, 0x000004F6, 0x00000976, 0x00000976, 0x00000976, 0x0006002C, 0x00000018, 0x000008BD,
++    0x0000035E, 0x0000035E, 0x0000035E, 0x0006002C, 0x00000018, 0x00000B83, 0x00000711, 0x00000711,
++    0x00000711, 0x0006002C, 0x00000018, 0x00000198, 0x000009A2, 0x000009A2, 0x000009A2, 0x0005002C,
++    0x00000013, 0x0000061E, 0x000000FC, 0x000000FC, 0x0006002C, 0x00000018, 0x00000A17, 0x0000008A,
++    0x0000008A, 0x0000008A, 0x0006002C, 0x00000018, 0x00000892, 0x00000841, 0x00000841, 0x00000841,
++    0x0006002C, 0x00000018, 0x0000047D, 0x000006EF, 0x000006EF, 0x000006EF, 0x0006002C, 0x00000018,
++    0x000005E0, 0x000003A8, 0x000003A8, 0x000003A8, 0x0003002E, 0x00000018, 0x000000CF, 0x00050036,
++    0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x00003B06, 0x000300F7, 0x00005445,
++    0x00000000, 0x000300FB, 0x00000A0A, 0x00003272, 0x000200F8, 0x00003272, 0x0004003D, 0x00000014,
++    0x000035C1, 0x00000F48, 0x0007004F, 0x00000011, 0x000054D5, 0x000035C1, 0x000035C1, 0x00000000,
++    0x00000001, 0x00050041, 0x0000028E, 0x00001E50, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000011,
++    0x00003442, 0x00001E50, 0x000500AE, 0x0000000F, 0x00005B8D, 0x000054D5, 0x00003442, 0x0004009A,
++    0x00000009, 0x00005A24, 0x00005B8D, 0x000300F7, 0x0000401D, 0x00000002, 0x000400FA, 0x00005A24,
++    0x000055E8, 0x0000401D, 0x000200F8, 0x000055E8, 0x000200F9, 0x00005445, 0x000200F8, 0x0000401D,
++    0x00060041, 0x00000288, 0x00005098, 0x00000CE9, 0x00000A0E, 0x00000A0A, 0x0004003D, 0x0000000B,
++    0x00003D0B, 0x00005098, 0x00050041, 0x0000029A, 0x00004E6E, 0x00000CE9, 0x00000A11, 0x0004003D,
++    0x0000001D, 0x00005EE9, 0x00004E6E, 0x0004003D, 0x00000096, 0x00005BE6, 0x000014D3, 0x0004007C,
++    0x00000012, 0x00005CDB, 0x000054D5, 0x0007005F, 0x0000001D, 0x00001E53, 0x00005BE6, 0x00005CDB,
++    0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x00001C0B, 0x00001E53, 0x00001E53, 0x00000000,
++    0x00000001, 0x00000002, 0x000500C7, 0x0000000B, 0x00004A5D, 0x00003D0B, 0x00000A16, 0x000500AB,
++    0x00000009, 0x00002F26, 0x00004A5D, 0x00000A0A, 0x000300F7, 0x000037BB, 0x00000002, 0x000400FA,
++    0x00002F26, 0x000033DF, 0x000037BB, 0x000200F8, 0x000033DF, 0x0008004F, 0x00000018, 0x00001F16,
++    0x00001E53, 0x000000CF, 0x00000002, 0x00000001, 0x00000000, 0x000200F9, 0x000037BB, 0x000200F8,
++    0x000037BB, 0x000700F5, 0x00000018, 0x00001E27, 0x00001C0B, 0x0000401D, 0x00001F16, 0x000033DF,
++    0x0005008E, 0x00000018, 0x00005DA1, 0x00001E27, 0x00000540, 0x00050081, 0x00000018, 0x000055A8,
++    0x00005DA1, 0x000003AB, 0x0004006D, 0x00000014, 0x00002B5B, 0x000055A8, 0x0004003D, 0x0000009A,
++    0x000048C0, 0x000010ED, 0x00050051, 0x0000000B, 0x00003C4B, 0x00002B5B, 0x00000000, 0x0004007C,
++    0x0000000C, 0x0000606E, 0x00003C4B, 0x0005005F, 0x0000001D, 0x00001F4B, 0x000048C0, 0x0000606E,
++    0x00050051, 0x0000000D, 0x0000329D, 0x00001F4B, 0x00000002, 0x0004003D, 0x0000009A, 0x000046E2,
++    0x000010ED, 0x00050051, 0x0000000B, 0x00002FC0, 0x00002B5B, 0x00000001, 0x0004007C, 0x0000000C,
++    0x0000606F, 0x00002FC0, 0x0005005F, 0x0000001D, 0x00001F4C, 0x000046E2, 0x0000606F, 0x00050051,
++    0x0000000D, 0x0000329E, 0x00001F4C, 0x00000001, 0x0004003D, 0x0000009A, 0x000046E3, 0x000010ED,
++    0x00050051, 0x0000000B, 0x00002FC1, 0x00002B5B, 0x00000002, 0x0004007C, 0x0000000C, 0x00006070,
++    0x00002FC1, 0x0005005F, 0x0000001D, 0x000020B4, 0x000046E3, 0x00006070, 0x00050051, 0x0000000D,
++    0x00002E88, 0x000020B4, 0x00000000, 0x00060050, 0x00000018, 0x00003905, 0x0000329D, 0x0000329E,
++    0x00002E88, 0x000500C7, 0x0000000B, 0x00002539, 0x00003D0B, 0x00000A0D, 0x000500AB, 0x00000009,
++    0x000052D8, 0x00002539, 0x00000A0A, 0x0007000C, 0x00000018, 0x00005890, 0x00000001, 0x00000028,
++    0x00003905, 0x00000A2C, 0x000300F7, 0x0000213D, 0x00000002, 0x000400FA, 0x000052D8, 0x000019A6,
++    0x00002924, 0x000200F8, 0x000019A6, 0x0007000C, 0x00000018, 0x000058FA, 0x00000001, 0x0000001A,
++    0x00005890, 0x000004F6, 0x000200F9, 0x0000213D, 0x000200F8, 0x00002924, 0x0005008E, 0x00000018,
++    0x000053B3, 0x00005890, 0x000007AD, 0x00050081, 0x00000018, 0x000038A9, 0x00005890, 0x000008BD,
++    0x0005008E, 0x00000018, 0x00004A13, 0x000038A9, 0x0000070C, 0x0007000C, 0x00000018, 0x00004888,
++    0x00000001, 0x0000001A, 0x00004A13, 0x00000B83, 0x000500BA, 0x00000010, 0x00001DC1, 0x00005890,
++    0x00000198, 0x000600A9, 0x00000018, 0x0000283E, 0x00001DC1, 0x00004888, 0x000053B3, 0x000200F9,
++    0x0000213D, 0x000200F8, 0x0000213D, 0x000700F5, 0x00000018, 0x00004857, 0x000058FA, 0x000019A6,
++    0x0000283E, 0x00002924, 0x00050051, 0x0000000D, 0x00003997, 0x00005EE9, 0x00000000, 0x0005008E,
++    0x00000018, 0x00004EAC, 0x00004857, 0x00003997, 0x000500C7, 0x0000000B, 0x00005810, 0x00003D0B,
++    0x00000A10, 0x000500AB, 0x00000009, 0x000051AD, 0x00005810, 0x00000A0A, 0x000300F7, 0x0000530F,
++    0x00000002, 0x000400FA, 0x000051AD, 0x00005F29, 0x0000530F, 0x000200F8, 0x00005F29, 0x00040070,
++    0x00000013, 0x000058E7, 0x000054D5, 0x00050081, 0x00000013, 0x00004449, 0x000058E7, 0x0000061E,
++    0x00040070, 0x00000013, 0x00001ACF, 0x00003442, 0x00050088, 0x00000013, 0x000051EB, 0x00004449,
++    0x00001ACF, 0x00050051, 0x0000000D, 0x000048D4, 0x000051EB, 0x00000001, 0x000500B8, 0x00000009,
++    0x00004607, 0x000048D4, 0x000000FC, 0x000300F7, 0x00005CC5, 0x00000000, 0x000400FA, 0x00004607,
++    0x00003285, 0x000061B2, 0x000200F8, 0x00003285, 0x00050051, 0x0000000D, 0x00002993, 0x000051EB,
++    0x00000000, 0x000200F9, 0x00005CC5, 0x000200F8, 0x000061B2, 0x00050051, 0x0000000D, 0x00002E3F,
++    0x000051EB, 0x00000000, 0x00050085, 0x0000000D, 0x00004408, 0x00002E3F, 0x00000019, 0x00050083,
++    0x0000000D, 0x00003D3B, 0x00004408, 0x0000008A, 0x000200F9, 0x00005CC5, 0x000200F8, 0x00005CC5,
++    0x000700F5, 0x0000000D, 0x00001B95, 0x00002993, 0x00003285, 0x00003D3B, 0x000061B2, 0x00050085,
++    0x0000000D, 0x00005786, 0x00001B95, 0x00000A4C, 0x0006000C, 0x0000000D, 0x00004DF9, 0x00000001,
++    0x00000008, 0x00005786, 0x00050085, 0x0000000D, 0x00003E1C, 0x00004DF9, 0x0000016E, 0x0006000C,
++    0x0000000D, 0x00003C04, 0x00000001, 0x0000001D, 0x00003E1C, 0x00050085, 0x0000000D, 0x00005BEE,
++    0x00000207, 0x00003C04, 0x000300F7, 0x000046D0, 0x00000000, 0x000400FA, 0x00004607, 0x000055E9,
++    0x000047FF, 0x000200F8, 0x000055E9, 0x000200F9, 0x000046D0, 0x000200F8, 0x000047FF, 0x000500B8,
++    0x00000009, 0x0000533C, 0x00001B95, 0x00000A0C, 0x000300F7, 0x00001EEC, 0x00000000, 0x000400FA,
++    0x0000533C, 0x00003286, 0x00004332, 0x000200F8, 0x00003286, 0x00050051, 0x0000000D, 0x00002994,
++    0x00005EE9, 0x00000001, 0x000200F9, 0x00001EEC, 0x000200F8, 0x00004332, 0x000200F9, 0x00001EEC,
++    0x000200F8, 0x00001EEC, 0x000700F5, 0x0000000D, 0x0000292C, 0x00002994, 0x00003286, 0x00005BEE,
++    0x00004332, 0x000200F9, 0x000046D0, 0x000200F8, 0x000046D0, 0x000700F5, 0x0000000D, 0x000050CF,
++    0x00005BEE, 0x000055E9, 0x0000292C, 0x00001EEC, 0x00060050, 0x00000018, 0x000060EB, 0x000050CF,
++    0x000050CF, 0x000050CF, 0x000300F7, 0x000055BC, 0x00000002, 0x000400FA, 0x00004607, 0x000031D8,
++    0x000055BC, 0x000200F8, 0x000031D8, 0x00060052, 0x0000001D, 0x00005411, 0x00000224, 0x00005EE9,
++    0x00000002, 0x000200F9, 0x000055BC, 0x000200F8, 0x000055BC, 0x000700F5, 0x0000001D, 0x0000292D,
++    0x00005EE9, 0x000046D0, 0x00005411, 0x000031D8, 0x000200F9, 0x0000530F, 0x000200F8, 0x0000530F,
++    0x000700F5, 0x0000001D, 0x00001F7B, 0x00005EE9, 0x0000213D, 0x0000292D, 0x000055BC, 0x000700F5,
++    0x00000018, 0x00001EEB, 0x00004EAC, 0x0000213D, 0x000060EB, 0x000055BC, 0x00050051, 0x0000000D,
++    0x00005D37, 0x00001F7B, 0x00000002, 0x00050051, 0x0000000D, 0x00002B4E, 0x00001F7B, 0x00000003,
++    0x00050051, 0x0000000D, 0x00001DEC, 0x00001EEB, 0x00000000, 0x00050051, 0x0000000D, 0x000018F5,
++    0x00001EEB, 0x00000001, 0x00050051, 0x0000000D, 0x000051ED, 0x00001EEB, 0x00000002, 0x0007000C,
++    0x0000000D, 0x00001EED, 0x00000001, 0x00000028, 0x000018F5, 0x000051ED, 0x0007000C, 0x0000000D,
++    0x000058F3, 0x00000001, 0x00000028, 0x00001DEC, 0x00001EED, 0x000500BA, 0x00000009, 0x000049BB,
++    0x000058F3, 0x00005D37, 0x000500BA, 0x00000009, 0x00002BC2, 0x00002B4E, 0x00005D37, 0x000500A7,
++    0x00000009, 0x000025BF, 0x000049BB, 0x00002BC2, 0x000300F7, 0x0000543F, 0x00000002, 0x000400FA,
++    0x000025BF, 0x00005278, 0x0000543F, 0x000200F8, 0x00005278, 0x00050083, 0x0000000D, 0x00004D3A,
++    0x00002B4E, 0x00005D37, 0x00050083, 0x0000000D, 0x00005BF4, 0x00005D37, 0x000058F3, 0x00050088,
++    0x0000000D, 0x0000460C, 0x00005BF4, 0x00004D3A, 0x00050085, 0x0000000D, 0x00003CC1, 0x0000460C,
++    0x000000DF, 0x0006000C, 0x0000000D, 0x00001DB6, 0x00000001, 0x0000001D, 0x00003CC1, 0x00050083,
++    0x0000000D, 0x00004B01, 0x0000008A, 0x00001DB6, 0x00050085, 0x0000000D, 0x000049D2, 0x00004D3A,
++    0x00004B01, 0x00050081, 0x0000000D, 0x00004C26, 0x00005D37, 0x000049D2, 0x00050088, 0x0000000D,
++    0x000059B0, 0x00004C26, 0x000058F3, 0x0005008E, 0x00000018, 0x00004EA2, 0x00001EEB, 0x000059B0,
++    0x000200F9, 0x0000543F, 0x000200F8, 0x0000543F, 0x000700F5, 0x00000018, 0x0000564D, 0x00001EEB,
++    0x0000530F, 0x00004EA2, 0x00005278, 0x0004003D, 0x000000A6, 0x00005DDC, 0x00000CC3, 0x00050094,
++    0x0000000D, 0x000040F9, 0x0000564D, 0x00000112, 0x00050094, 0x0000000D, 0x000028E0, 0x0000564D,
++    0x00000BBE, 0x00050094, 0x0000000D, 0x00004CA0, 0x0000564D, 0x0000048A, 0x00060050, 0x00000018,
++    0x00004259, 0x000040F9, 0x000028E0, 0x00004CA0, 0x0005008E, 0x00000018, 0x000045B3, 0x00004259,
++    0x00000383, 0x0008000C, 0x00000018, 0x00002A1C, 0x00000001, 0x0000002B, 0x000045B3, 0x00000A2C,
++    0x00000A17, 0x0007000C, 0x00000018, 0x00004E66, 0x00000001, 0x0000001A, 0x00002A1C, 0x00000892,
++    0x0005008E, 0x00000018, 0x000055B9, 0x00004E66, 0x0000058F, 0x00050081, 0x00000018, 0x000027FC,
++    0x0000047D, 0x000055B9, 0x0005008E, 0x00000018, 0x00003ECC, 0x00004E66, 0x00000911, 0x00050081,
++    0x00000018, 0x00004B99, 0x00000A17, 0x00003ECC, 0x00050088, 0x00000018, 0x000022D1, 0x000027FC,
++    0x00004B99, 0x0007000C, 0x00000018, 0x00002C3F, 0x00000001, 0x0000001A, 0x000022D1, 0x000005E0,
++    0x00050051, 0x0000000D, 0x000029E3, 0x00002C3F, 0x00000000, 0x00050051, 0x0000000D, 0x0000594F,
++    0x00002C3F, 0x00000001, 0x00050051, 0x0000000D, 0x00001FEF, 0x00002C3F, 0x00000002, 0x00070050,
++    0x0000001D, 0x00003E3B, 0x000029E3, 0x0000594F, 0x00001FEF, 0x0000008A, 0x00040063, 0x00005DDC,
++    0x00005CDB, 0x00003E3B, 0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index b351553..8291267 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -612,6 +612,7 @@ namespace shaders {
+ #include "../shaders/vulkan_spirv/apply_gamma_table_fxaa_luma_ps.h"
+ #include "../shaders/vulkan_spirv/apply_gamma_table_fxaa_luma_cs.h"
+ #include "../shaders/vulkan_spirv/apply_gamma_table_ps.h"
++#include "../shaders/vulkan_spirv/hdr_refresh_cs.h"
+ #include "../shaders/vulkan_spirv/fullscreen_cw_vs.h"
+ #include "../shaders/vulkan_spirv/resolve_downscale_cs.h"
+ }  // namespace shaders
+@@ -1566,6 +1567,17 @@ bool VulkanCommandProcessor::SetupContext() {
+     REXGPU_ERROR("Failed to create the gamma ramp application compute pipeline layout");
+     return false;
+   }
++  // HDR output: the same bindings with more constants.
++  swap_apply_gamma_compute_push_constant_range.size = sizeof(HdrRefreshConstants);
++  if (dfn.vkCreatePipelineLayout(device, &swap_apply_gamma_pipeline_layout_create_info, nullptr,
++                                 &hdr_refresh_pipeline_layout_) == VK_SUCCESS) {
++    hdr_refresh_pipeline_ = ui::vulkan::util::CreateComputePipeline(
++        vulkan_device, hdr_refresh_pipeline_layout_, shaders::hdr_refresh_cs,
++        sizeof(shaders::hdr_refresh_cs));
++  }
++  if (hdr_refresh_pipeline_ == VK_NULL_HANDLE) {
++    REXGPU_ERROR("Failed to create the HDR output refresh pipeline");
++  }
+ 
+   // FXAA compute pipeline layout.
+   std::array<VkDescriptorSetLayout, kSwapFxaaDescriptorSetCount> swap_fxaa_descriptor_set_layouts{};
+@@ -2212,6 +2224,9 @@ void VulkanCommandProcessor::ShutdownContext() {
+                                          swap_fxaa_pipeline_layout_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          swap_apply_gamma_compute_pipeline_layout_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, hdr_refresh_pipeline_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
++                                         hdr_refresh_pipeline_layout_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          swap_apply_gamma_pipeline_layout_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroySampler, device, swap_sampler_linear_clamp_);
+@@ -2697,6 +2712,14 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+                      ? swap_apply_gamma_compute_256_entry_table_rb_swap_pipeline_
+                      : swap_apply_gamma_compute_256_entry_table_pipeline_;
+         };
++        // HDR output: while the presenter's swapchain is HDR10, HDR10 code
++        // values from the 256-entry table path (hdr_refresh.cs).
++        ui::Presenter::HdrOutputState hdr_state = ui::Presenter::GetHdrOutputState();
++        bool use_hdr =
++            hdr_state.active && hdr_refresh_pipeline_ != VK_NULL_HANDLE && !use_pwl_gamma_ramp;
++        if (use_hdr) {
++          use_fxaa = false;
++        }
+         VkPipeline swap_apply_gamma_compute_pipeline =
+             select_swap_apply_gamma_compute_pipeline(use_pwl_gamma_ramp, use_fxaa);
+ 
+@@ -2746,6 +2769,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+                 "presentation path");
+           }
+         }
++        if (use_hdr) {
++          swap_apply_gamma_compute_pipeline = hdr_refresh_pipeline_;
++        }
+         bool use_compute_gamma = swap_apply_gamma_compute_pipeline != VK_NULL_HANDLE;
+ 
+         // TODO(Triang3l): FXAA can result in more than 8 bits of precision.
+@@ -2902,14 +2928,30 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           swap_apply_gamma_compute_descriptor_sets[kSwapApplyGammaComputeDescriptorSetDestination] =
+               swap_descriptor_destination_storage;
+           deferred_command_buffer_.CmdVkBindDescriptorSets(
+-              VK_PIPELINE_BIND_POINT_COMPUTE, swap_apply_gamma_compute_pipeline_layout_, 0,
+-              uint32_t(swap_apply_gamma_compute_descriptor_sets.size()),
++              VK_PIPELINE_BIND_POINT_COMPUTE,
++              use_hdr ? hdr_refresh_pipeline_layout_ : swap_apply_gamma_compute_pipeline_layout_,
++              0, uint32_t(swap_apply_gamma_compute_descriptor_sets.size()),
+               swap_apply_gamma_compute_descriptor_sets.data(), 0, nullptr);
+-          SwapApplyGammaConstants swap_apply_gamma_constants = {
+-              {guest_output_width, guest_output_height}};
+-          deferred_command_buffer_.CmdVkPushConstants(
+-              swap_apply_gamma_compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+-              sizeof(swap_apply_gamma_constants), &swap_apply_gamma_constants);
++          if (use_hdr) {
++            HdrRefreshConstants hdr_refresh_constants = {
++                {guest_output_width, guest_output_height},
++                {uint32_t(hdr_state.sdr_pure_gamma_2_2) |
++                     (uint32_t(hdr_state.test_pattern) << 1) |
++                     (uint32_t(swap_source_requires_compute_rb_swap) << 2),
++                 0},
++                {hdr_state.sdr_white_nits, hdr_state.paper_white_nits,
++                 hdr_state.rolloff_start_nits, hdr_state.peak_nits}};
++            deferred_command_buffer_.CmdVkPushConstants(
++                hdr_refresh_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                sizeof(hdr_refresh_constants), &hdr_refresh_constants);
++            context.SetHdr({true, hdr_state.sdr_white_nits, hdr_state.sdr_pure_gamma_2_2});
++          } else {
++            SwapApplyGammaConstants swap_apply_gamma_constants = {
++                {guest_output_width, guest_output_height}};
++            deferred_command_buffer_.CmdVkPushConstants(
++                swap_apply_gamma_compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                sizeof(swap_apply_gamma_constants), &swap_apply_gamma_constants);
++          }
+           BindExternalComputePipeline(swap_apply_gamma_compute_pipeline);
+           uint32_t group_count_x = (guest_output_width + 15) / 16;
+           uint32_t group_count_y = (guest_output_height + 7) / 8;
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..af19948 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -49,6 +49,7 @@ namespace shaders {
+ #include "ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_fsr_rcas_ps.h"
+ #endif
+ #include "ui/shaders/bytecode/d3d12_5_1/guest_output_triangle_strip_rect_vs.h"
++#include "ui/shaders/bytecode/d3d12_5_1/hdr_ui_composite_ps.h"
+ }  // namespace shaders
+ 
+ D3D12Presenter::~D3D12Presenter() {
+@@ -204,10 +205,11 @@ Surface::TypeFlags D3D12Presenter::GetSupportedSurfaceTypes() const {
+ 
+ bool D3D12Presenter::CaptureGuestOutput(RawImage& image_out) {
+   Microsoft::WRL::ComPtr<ID3D12Resource> guest_output_resource;
++  GuestOutputProperties guest_output_properties;
+   {
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(
+-        ConsumeGuestOutput(guest_output_mailbox_index, nullptr, nullptr));
++        ConsumeGuestOutput(guest_output_mailbox_index, &guest_output_properties, nullptr));
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       guest_output_resource = guest_output_resources_[guest_output_mailbox_index].second;
+     }
+@@ -319,13 +321,14 @@ bool D3D12Presenter::CaptureGuestOutput(RawImage& image_out) {
+   image_out.stride = sizeof(uint32_t) * image_out.width;
+   image_out.data.resize(image_out.stride * image_out.height);
+   uint32_t* image_out_pixels = reinterpret_cast<uint32_t*>(image_out.data.data());
++  GuestOutputCaptureConverter convert(guest_output_properties.hdr);
+   for (uint32_t y = 0; y < image_out.height; ++y) {
+     uint32_t* dest_row = &image_out_pixels[size_t(image_out.width) * y];
+     const uint32_t* source_row = reinterpret_cast<const uint32_t*>(
+         reinterpret_cast<const uint8_t*>(mapping) + copy_dest.PlacedFootprint.Offset +
+         size_t(copy_dest.PlacedFootprint.Footprint.RowPitch) * y);
+     for (uint32_t x = 0; x < image_out.width; ++x) {
+-      dest_row[x] = Packed10bpcRGBTo8bpcBytes(source_row[x]);
++      dest_row[x] = convert(source_row[x]);
+     }
+   }
+   // Unmapping will be done implicitly when the resource goes out of scope and
+@@ -344,16 +347,21 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+   uint32_t new_swap_chain_height =
+       std::min(new_surface_height, uint32_t(D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+ 
++  // HDR output: HDR10 when wanted (the `hdr` setting and the display's state).
++  bool hdr_wanted = IsHdrOutputWanted();
++
+   // ConnectOrReconnectPaintingToSurfaceFromUIThread may be called only for the
+   // surface of the current swap chain or when the old swap chain has already
+   // been destroyed, if the surface is the same, try resizing.
+   if (paint_context_.swap_chain) {
+     if (was_paintable && paint_context_.swap_chain_width == new_swap_chain_width &&
+-        paint_context_.swap_chain_height == new_swap_chain_height) {
++        paint_context_.swap_chain_height == new_swap_chain_height &&
++        paint_context_.swap_chain_hdr_wanted == hdr_wanted) {
+       is_vsync_implicit_out = false;
+       return SurfacePaintConnectResult::kSuccessUnchanged;
+     }
+     paint_context_.AwaitSwapChainUsageCompletion();
++    paint_context_.hdr_ui_layer.Reset();
+     // Using the current swap_chain_allows_tearing_ value that's consistent with
+     // the creation of the swap chain because ResizeBuffers can't toggle the
+     // tearing flag.
+@@ -361,8 +369,13 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+          paint_context_.swap_chain_buffers) {
+       swap_chain_buffer_ref.Reset();
+     }
++    DXGI_FORMAT new_format = DXGI_FORMAT_UNKNOWN;
++    if (paint_context_.swap_chain_hdr_wanted != hdr_wanted) {
++      new_format = hdr_wanted ? kSwapChainFormatHdr10 : kSwapChainFormat;
++      paint_context_.swap_chain_hdr = false;
++    }
+     bool swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->ResizeBuffers(
+-        0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), DXGI_FORMAT_UNKNOWN,
++        0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), new_format,
+         paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
+     if (swap_chain_resized) {
+       for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+@@ -375,6 +388,12 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+       if (swap_chain_resized) {
+         paint_context_.swap_chain_width = new_swap_chain_width;
+         paint_context_.swap_chain_height = new_swap_chain_height;
++        if (new_format != DXGI_FORMAT_UNKNOWN) {
++          paint_context_.swap_chain_hdr = new_format == kSwapChainFormatHdr10;
++          if (!paint_context_.swap_chain_hdr) {
++            paint_context_.swap_chain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
++          }
++        }
+       }
+     }
+     if (!swap_chain_resized) {
+@@ -390,7 +409,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     DXGI_SWAP_CHAIN_DESC1 swap_chain_desc;
+     swap_chain_desc.Width = UINT(new_swap_chain_width);
+     swap_chain_desc.Height = UINT(new_swap_chain_height);
+-    swap_chain_desc.Format = kSwapChainFormat;
++    swap_chain_desc.Format = hdr_wanted ? kSwapChainFormatHdr10 : kSwapChainFormat;
+     swap_chain_desc.Stereo = FALSE;
+     swap_chain_desc.SampleDesc.Count = 1;
+     swap_chain_desc.SampleDesc.Quality = 0;
+@@ -450,6 +469,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     paint_context_.swap_chain_height = new_swap_chain_height;
+     paint_context_.swap_chain_allows_tearing =
+         (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
++    paint_context_.swap_chain_hdr = hdr_wanted;
+     for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+       if (FAILED(paint_context_.swap_chain->GetBuffer(
+               i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
+@@ -461,6 +481,39 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     }
+   }
+ 
++  // HDR output: the HDR10 colour space, or back to SDR if the display can't
++  // present it now.
++  paint_context_.swap_chain_hdr_wanted = hdr_wanted;
++  if (paint_context_.swap_chain_hdr) {
++    UINT color_space_support = 0;
++    if (FAILED(paint_context_.swap_chain->CheckColorSpaceSupport(
++            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &color_space_support)) ||
++        !(color_space_support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) ||
++        FAILED(paint_context_.swap_chain->SetColorSpace1(
++            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
++      REXLOG_WARN("D3D12Presenter: The display can't show HDR10 now, using SDR");
++      paint_context_.swap_chain_hdr = false;
++      for (Microsoft::WRL::ComPtr<ID3D12Resource>& swap_chain_buffer_ref :
++           paint_context_.swap_chain_buffers) {
++        swap_chain_buffer_ref.Reset();
++      }
++      bool swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->ResizeBuffers(
++          0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), kSwapChainFormat,
++          paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
++      for (uint32_t i = 0; swap_chain_resized && i < PaintContext::kSwapChainBufferCount; ++i) {
++        swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->GetBuffer(
++            i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])));
++      }
++      paint_context_.swap_chain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
++      if (!swap_chain_resized) {
++        REXLOG_ERROR("D3D12Presenter: Failed to resize a swap chain");
++        paint_context_.DestroySwapChain();
++        return SurfacePaintConnectResult::kFailure;
++      }
++    }
++  }
++  SetHdrOutputActive(paint_context_.swap_chain_hdr);
++
+   ID3D12Device* device = provider_.GetDevice();
+ 
+   // Create the RTV descriptors.
+@@ -472,7 +525,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+   rtv_desc.Texture2D.PlaneSlice = 0;
+   for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+     ID3D12Resource* swap_chain_buffer = paint_context_.swap_chain_buffers[i].Get();
+-    rtv_desc.Format = kSwapChainFormat;
++    rtv_desc.Format = paint_context_.swap_chain_hdr ? kSwapChainFormatHdr10 : kSwapChainFormat;
+     device->CreateRenderTargetView(
+         swap_chain_buffer, &rtv_desc,
+         provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexSwapChainBuffer0 + i));
+@@ -484,11 +537,13 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+ 
+ void D3D12Presenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+   paint_context_.DestroySwapChain();
++  SetHdrOutputActive(false);
+ }
+ 
+ bool D3D12Presenter::RefreshGuestOutputImpl(
+     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
+-    std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) {
++    std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref,
++    GuestOutputHdr& hdr_out_ref) {
+   assert_not_zero(frontbuffer_width);
+   assert_not_zero(frontbuffer_height);
+   std::pair<UINT64, Microsoft::WRL::ComPtr<ID3D12Resource>>& guest_output_resource_ref =
+@@ -528,7 +583,8 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
+       return false;
+     }
+   }
+-  D3D12GuestOutputRefreshContext context(is_8bpc_out_ref, guest_output_resource_ref.second.Get());
++  D3D12GuestOutputRefreshContext context(is_8bpc_out_ref, hdr_out_ref,
++                                         guest_output_resource_ref.second.Get());
+   bool refresher_succeeded = refresher(context);
+   // Even if the refresher has returned false, it still might have submitted
+   // some commands referencing the resource. It's better to put an excessive
+@@ -552,9 +608,17 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+   swap_chain_allows_tearing = false;
+   swap_chain_height = 0;
+   swap_chain_width = 0;
++  swap_chain_hdr_wanted = false;
++  swap_chain_hdr = false;
++  hdr_ui_layer.Reset();
+ }
+ 
+ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
++  // HDR output: switching between SDR and HDR10 needs a new connection.
++  if (IsHdrOutputWanted() != paint_context_.swap_chain_hdr_wanted) {
++    return PaintResult::kNotPresentedConnectionOutdated;
++  }
++
+   // Begin the command list with the command allocator not currently potentially
+   // used on the GPU.
+   UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
+@@ -601,6 +665,17 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+     // (and multiple threads can't paint the main target at the same time).
+   }
+ 
++  // HDR output: the guest output holds HDR10 code values, scaled with plain
++  // bilinear filtering (the other effects work on SDR values). An image
++  // refreshed for the other mode, while switching, is not drawn.
++  if (guest_output_properties.hdr.is_pq != paint_context_.swap_chain_hdr) {
++    guest_output_resource.Reset();
++  }
++  if (paint_context_.swap_chain_hdr) {
++    guest_output_paint_config.SetEffect(GuestOutputPaintConfig::Effect::kBilinear);
++    guest_output_paint_config.SetDither(false);
++  }
++
+   if (guest_output_resource) {
+     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
+         guest_output_properties, paint_context_.swap_chain_width, paint_context_.swap_chain_height,
+@@ -915,8 +990,11 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+           command_list->RSSetScissorRects(1, &scissor);
+ 
+           command_list->SetPipelineState(
+-              is_final_effect ? guest_output_paint_final_pipelines_[size_t(effect)].Get()
+-                              : guest_output_paint_intermediate_pipelines_[size_t(effect)].Get());
++              is_final_effect
++                  ? (paint_context_.swap_chain_hdr
++                         ? guest_output_paint_final_hdr10_pipeline_.Get()
++                         : guest_output_paint_final_pipelines_[size_t(effect)].Get())
++                  : guest_output_paint_intermediate_pipelines_[size_t(effect)].Get());
+           GuestOutputPaintRootSignatureIndex guest_output_paint_root_signature_index =
+               GetGuestOutputPaintRootSignatureIndex(effect);
+           command_list->SetGraphicsRootSignature(
+@@ -1116,7 +1194,97 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+     back_buffer_clear_needed = false;
+   }
+ 
+-  if (execute_ui_drawers) {
++  if (execute_ui_drawers && paint_context_.swap_chain_hdr) {
++    // HDR output: the UI is drawn as over SDR, into a layer cleared to 0, which
++    // is then put over the image as SDR content.
++    if (!paint_context_.hdr_ui_layer) {
++      D3D12_RESOURCE_DESC layer_desc;
++      layer_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++      layer_desc.Alignment = 0;
++      layer_desc.Width = paint_context_.swap_chain_width;
++      layer_desc.Height = paint_context_.swap_chain_height;
++      layer_desc.DepthOrArraySize = 1;
++      layer_desc.MipLevels = 1;
++      layer_desc.Format = kSwapChainFormat;
++      layer_desc.SampleDesc.Count = 1;
++      layer_desc.SampleDesc.Quality = 0;
++      layer_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++      layer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++      D3D12_CLEAR_VALUE layer_clear_value = {};
++      layer_clear_value.Format = kSwapChainFormat;
++      if (SUCCEEDED(device->CreateCommittedResource(
++              &util::kHeapPropertiesDefault, provider_.GetHeapFlagCreateNotZeroed(), &layer_desc,
++              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &layer_clear_value,
++              IID_PPV_ARGS(&paint_context_.hdr_ui_layer)))) {
++        device->CreateRenderTargetView(
++            paint_context_.hdr_ui_layer.Get(), nullptr,
++            provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexHdrUiLayer));
++        device->CreateShaderResourceView(
++            paint_context_.hdr_ui_layer.Get(), nullptr,
++            provider_.OffsetViewDescriptor(
++                paint_context_.view_heap->GetCPUDescriptorHandleForHeapStart(),
++                PaintContext::kViewIndexHdrUiLayerSrv));
++      } else {
++        REXLOG_ERROR("D3D12Presenter: Failed to create the HDR UI layer");
++      }
++    }
++    if (ID3D12Resource* layer = paint_context_.hdr_ui_layer.Get()) {
++      D3D12_RESOURCE_BARRIER layer_barrier;
++      layer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++      layer_barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
++      layer_barrier.Transition.pResource = layer;
++      layer_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++      layer_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++      layer_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++      command_list->ResourceBarrier(1, &layer_barrier);
++      D3D12_CPU_DESCRIPTOR_HANDLE layer_rtv =
++          provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexHdrUiLayer);
++      const float kLayerClearColor[] = {0.0f, 0.0f, 0.0f, 0.0f};
++      command_list->ClearRenderTargetView(layer_rtv, kLayerClearColor, 0, nullptr);
++      command_list->OMSetRenderTargets(1, &layer_rtv, TRUE, nullptr);
++      {
++        D3D12UIDrawContext ui_draw_context(*this, paint_context_.swap_chain_width,
++                                           paint_context_.swap_chain_height, command_list,
++                                           ui_submission_tracker_.GetCurrentSubmission(),
++                                           ui_submission_tracker_.GetCompletedSubmission());
++        ExecuteUIDrawersFromUIThread(ui_draw_context);
++      }
++      std::swap(layer_barrier.Transition.StateBefore, layer_barrier.Transition.StateAfter);
++      command_list->ResourceBarrier(1, &layer_barrier);
++      command_list->OMSetRenderTargets(1, &back_buffer_rtv, TRUE, nullptr);
++      back_buffer_bound = true;
++      D3D12_VIEWPORT viewport = {0.0f, 0.0f, float(paint_context_.swap_chain_width),
++                                 float(paint_context_.swap_chain_height), 0.0f, 1.0f};
++      command_list->RSSetViewports(1, &viewport);
++      D3D12_RECT scissor = {0, 0, LONG(paint_context_.swap_chain_width),
++                            LONG(paint_context_.swap_chain_height)};
++      command_list->RSSetScissorRects(1, &scissor);
++      ID3D12DescriptorHeap* view_heap = paint_context_.view_heap.Get();
++      command_list->SetDescriptorHeaps(1, &view_heap);
++      command_list->SetPipelineState(hdr_ui_composite_pipeline_.Get());
++      command_list->SetGraphicsRootSignature(
++          guest_output_paint_root_signatures_[kGuestOutputPaintRootSignatureIndexBilinear].Get());
++      command_list->SetGraphicsRootDescriptorTable(
++          UINT(GuestOutputPaintRootParameter::kSource),
++          provider_.OffsetViewDescriptor(view_heap->GetGPUDescriptorHandleForHeapStart(),
++                                         PaintContext::kViewIndexHdrUiLayerSrv));
++      GuestOutputPaintRectangleConstants whole_image;
++      whole_image.x = -1.0f;
++      whole_image.y = 1.0f;
++      whole_image.width = 2.0f;
++      whole_image.height = -2.0f;
++      command_list->SetGraphicsRoot32BitConstants(
++          UINT(GuestOutputPaintRootParameter::kRectangle),
++          sizeof(whole_image) / sizeof(uint32_t), &whole_image, 0);
++      HdrOutputState hdr_state = GetHdrOutputState();
++      const float ui_levels[] = {hdr_state.sdr_white_nits,
++                                 hdr_state.sdr_pure_gamma_2_2 ? 1.0f : 0.0f, 0.0f, 0.0f};
++      command_list->SetGraphicsRoot32BitConstants(
++          UINT(GuestOutputPaintRootParameter::kEffectConstants), 4, ui_levels, 0);
++      command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++      command_list->DrawInstanced(4, 1, 0, 0);
++    }
++  } else if (execute_ui_drawers) {
+     // Draw the UI.
+     if (!back_buffer_bound) {
+       command_list->OMSetRenderTargets(1, &back_buffer_rtv, TRUE, nullptr);
+@@ -1439,6 +1607,40 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+     }
+   }
+ 
++  // HDR output: bilinear guest output (HDR10 code values, no dithering) and
++  // the presenter's UI layer, blended as premultiplied, to the HDR10 swap chain.
++  guest_output_paint_pipeline_desc.PS.pShaderBytecode = shaders::guest_output_bilinear_ps;
++  guest_output_paint_pipeline_desc.PS.BytecodeLength = sizeof(shaders::guest_output_bilinear_ps);
++  guest_output_paint_pipeline_desc.pRootSignature =
++      guest_output_paint_root_signatures_[kGuestOutputPaintRootSignatureIndexBilinear].Get();
++  guest_output_paint_pipeline_desc.RTVFormats[0] = kSwapChainFormatHdr10;
++  if (FAILED(device->CreateGraphicsPipelineState(
++          &guest_output_paint_pipeline_desc,
++          IID_PPV_ARGS(&guest_output_paint_final_hdr10_pipeline_)))) {
++    REXLOG_ERROR("D3D12Presenter: Failed to create the HDR10 guest output painting pipeline");
++    return false;
++  }
++  guest_output_paint_pipeline_desc.PS.pShaderBytecode = shaders::hdr_ui_composite_ps;
++  guest_output_paint_pipeline_desc.PS.BytecodeLength = sizeof(shaders::hdr_ui_composite_ps);
++  guest_output_paint_pipeline_desc.pRootSignature =
++      guest_output_paint_root_signatures_[kGuestOutputPaintRootSignatureIndexBilinear].Get();
++  guest_output_paint_pipeline_desc.RTVFormats[0] = kSwapChainFormatHdr10;
++  {
++    D3D12_RENDER_TARGET_BLEND_DESC& blend = guest_output_paint_pipeline_desc.BlendState.RenderTarget[0];
++    blend.BlendEnable = TRUE;
++    blend.SrcBlend = D3D12_BLEND_ONE;
++    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
++    blend.BlendOp = D3D12_BLEND_OP_ADD;
++    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
++    blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
++    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
++  }
++  if (FAILED(device->CreateGraphicsPipelineState(&guest_output_paint_pipeline_desc,
++                                                 IID_PPV_ARGS(&hdr_ui_composite_pipeline_)))) {
++    REXLOG_ERROR("D3D12Presenter: Failed to create the HDR UI composite pipeline");
++    return false;
++  }
++
+   // Initialize connection-independent parts of the painting context.
+ 
+   ID3D12CommandQueue* direct_queue = provider_.GetDirectQueue();
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..78af997 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -12,6 +12,8 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <cctype>
++#include <chrono>
++#include <cmath>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -26,6 +28,10 @@
+ #include <ffx_api/ffx_upscale.h>
+ #endif
+ 
++#if REX_PLATFORM_WIN32
++#include <dxgi1_6.h>
++#endif
++
+ REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
+                     "Allow presentation from non-UI thread");
+ 
+@@ -85,6 +91,29 @@ REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
+                     "Allow overscan cutoff based on safe area settings")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// HDR output (rexglue-hdr-output.patch).
++REXCVAR_DEFINE_STRING(hdr, "off", "UI/Presenter",
++                      "HDR output (HDR10): off, auto (when the display is in HDR mode) or on")
++    .allowed({"off", "auto", "on"});
++REXCVAR_DEFINE_DOUBLE(hdr_peak_nits, 0.0, "UI/Presenter",
++                      "HDR peak brightness in nits; 0 = what the display reports (1000 if it "
++                      "reports nothing)")
++    .range(0.0, 10000.0);
++REXCVAR_DEFINE_DOUBLE(hdr_paper_white_nits, 0.0, "UI/Presenter",
++                      "HDR brightness of the game's white in nits; 0 = the system's SDR content "
++                      "brightness (200 if it reports nothing)")
++    .range(0.0, 10000.0);
++REXCVAR_DEFINE_DOUBLE(hdr_ui_nits, 0.0, "UI/Presenter",
++                      "HDR brightness of SDR content (HUD, menus, movies) in nits; 0 = paper white")
++    .range(0.0, 10000.0);
++REXCVAR_DEFINE_STRING(hdr_sdr_eotf, "srgb", "UI/Presenter",
++                      "How SDR content is decoded in HDR: srgb (the piecewise curve, as Windows "
++                      "shows SDR on an HDR desktop) or gamma22")
++    .allowed({"srgb", "gamma22"});
++REXCVAR_DEFINE_BOOL(hdr_test_pattern, false, "UI/Presenter",
++                    "HDR: show a test pattern instead of the game (bars from 100 nits, doubling "
++                    "every 4 bars; paper white at the bottom left)");
++
+ namespace {
+ using GuestOutputPaintConfig = rex::ui::Presenter::GuestOutputPaintConfig;
+ 
+@@ -274,6 +303,47 @@ GuestOutputPaintConfig BuildGuestOutputPaintConfigFromCVar() {
+ 
+ }  // namespace
+ 
++// HDR output state. One display and one swap chain matter per process, so it's
++// kept here rather than per presenter.
++namespace {
++std::mutex hdr_display_mutex;
++rex::ui::Presenter::HdrDisplayInfo hdr_display_info;          // hdr_display_mutex
++std::chrono::steady_clock::time_point hdr_display_info_time;  // hdr_display_mutex
++std::atomic<bool> hdr_display_info_stale{true};
++std::atomic<void*> hdr_monitor{nullptr};
++std::atomic<bool> hdr_output_active{false};
++// The string settings, parsed on change (the painting threads read these).
++std::atomic<int> hdr_mode{0};  // 0 off, 1 auto, 2 on
++std::atomic<bool> hdr_sdr_pure_gamma_2_2{false};
++std::once_flag hdr_callbacks_once;
++
++void HdrRegisterSettingCallbacks() {
++  std::call_once(hdr_callbacks_once, [] {
++    auto parse_mode = [](std::string_view value) {
++      hdr_mode.store(value == "on" ? 2 : (value == "auto" ? 1 : 0));
++      hdr_display_info_stale.store(true);
++    };
++    auto parse_eotf = [](std::string_view value) {
++      hdr_sdr_pure_gamma_2_2.store(value == "gamma22");
++    };
++    parse_mode(REXCVAR_GET(hdr));
++    parse_eotf(REXCVAR_GET(hdr_sdr_eotf));
++    rex::cvar::RegisterChangeCallback(
++        "hdr", [parse_mode](std::string_view, std::string_view value) { parse_mode(value); });
++    rex::cvar::RegisterChangeCallback("hdr_sdr_eotf",
++                                      [parse_eotf](std::string_view, std::string_view value) {
++                                        parse_eotf(value);
++                                      });
++  });
++}
++
++void HdrSetMonitor(void* monitor, bool force_refresh) {
++  if (hdr_monitor.exchange(monitor) != monitor || force_refresh) {
++    hdr_display_info_stale.store(true);
++  }
++}
++}  // namespace
++
+ namespace rex {
+ namespace ui {
+ 
+@@ -560,7 +630,8 @@ bool Presenter::RefreshGuestOutput(
+   bool is_active = writable_properties.IsActive();
+   if (is_active) {
+     if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_, frontbuffer_width,
+-                                frontbuffer_height, refresher, writable_properties.is_8bpc)) {
++                                frontbuffer_height, refresher, writable_properties.is_8bpc,
++                                writable_properties.hdr)) {
+       // If failed to refresh, don't send the currently writable image to the
+       // mailbox as it may be in an undefined state. Don't disable the guest
+       // output either though because the failure may be something transient.
+@@ -786,6 +857,7 @@ void Presenter::RequestUIPaintFromUIThread() {
+ }
+ 
+ bool Presenter::InitializeCommonSurfaceIndependent() {
++  HdrRegisterSettingCallbacks();
+   {
+     std::lock_guard<std::mutex> config_lock(guest_output_paint_config_mutex_);
+     guest_output_paint_config_ = BuildGuestOutputPaintConfigFromCVar();
+@@ -1440,6 +1512,7 @@ void Presenter::UpdateSurfaceMonitorFromUIThread(bool old_monitor_potentially_di
+       surface_new_win32_monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+     }
+   }
++  HdrSetMonitor(surface_new_win32_monitor, old_monitor_potentially_disconnected);
+   if (old_monitor_potentially_disconnected || surface_win32_monitor_ != surface_new_win32_monitor) {
+     surface_win32_monitor_ = surface_new_win32_monitor;
+     if (dxgi_ui_tick_factory_ && !dxgi_ui_tick_factory_->IsCurrent()) {
+@@ -1480,6 +1553,8 @@ void Presenter::UpdateSurfaceMonitorFromUIThread(bool old_monitor_potentially_di
+       dxgi_ui_tick_control_condition_.notify_all();
+     }
+   }
++#else
++  HdrSetMonitor(surface_ ? this : nullptr, old_monitor_potentially_disconnected);
+ #endif  // XE_PLATFORM
+ }
+ 
+@@ -1663,5 +1738,197 @@ void Presenter::DXGIUITickThread() {
+ }
+ #endif  // XE_PLATFORM
+ 
++Presenter::HdrOutputState Presenter::GetHdrOutputState() {
++  HdrOutputState state;
++  state.active = hdr_output_active.load(std::memory_order_acquire);
++  if (!state.active) {
++    return state;
++  }
++  HdrDisplayInfo info = GetLastHdrDisplayInfo();
++  float peak = float(REXCVAR_GET(hdr_peak_nits));
++  if (peak <= 0.0f) {
++    peak = info.peak_nits >= 80.0f ? info.peak_nits : 1000.0f;
++  }
++  float paper_white = float(REXCVAR_GET(hdr_paper_white_nits));
++  if (paper_white <= 0.0f) {
++    paper_white = info.sdr_white_nits >= 40.0f ? info.sdr_white_nits : 200.0f;
++  }
++  paper_white = std::min(paper_white, peak);
++  float sdr_white = float(REXCVAR_GET(hdr_ui_nits));
++  state.sdr_white_nits = sdr_white > 0.0f ? std::min(sdr_white, peak) : paper_white;
++  state.paper_white_nits = paper_white;
++  state.peak_nits = peak;
++  state.rolloff_start_nits = 0.75f * peak;
++  state.sdr_pure_gamma_2_2 = hdr_sdr_pure_gamma_2_2.load(std::memory_order_relaxed);
++  state.test_pattern = REXCVAR_GET(hdr_test_pattern);
++  return state;
++}
++
++Presenter::HdrDisplayInfo Presenter::GetLastHdrDisplayInfo() {
++  std::lock_guard<std::mutex> lock(hdr_display_mutex);
++  return hdr_display_info;
++}
++
++bool Presenter::IsHdrOutputActive() { return hdr_output_active.load(std::memory_order_acquire); }
++
++void Presenter::SetHdrOutputActive(bool active) {
++  if (hdr_output_active.exchange(active, std::memory_order_acq_rel) != active) {
++    REXLOG_INFO("Presenter: HDR output (HDR10) {}", active ? "on" : "off");
++  }
++}
++
++bool Presenter::IsHdrOutputWanted() {
++  HdrRegisterSettingCallbacks();
++  int mode = hdr_mode.load(std::memory_order_relaxed);
++  if (!mode) {
++    return false;
++  }
++  {
++    // Refresh what the display reports about once a second (Windows doesn't
++    // reliably announce SDR brightness changes), or when the window moved to
++    // another display or the platform reported a change. If another thread is
++    // doing it, use what's there.
++    std::unique_lock<std::mutex> lock(hdr_display_mutex, std::try_to_lock);
++    auto now = std::chrono::steady_clock::now();
++    if (lock.owns_lock() && (hdr_display_info_stale.exchange(false) ||
++                             now - hdr_display_info_time >= std::chrono::seconds(1))) {
++      hdr_display_info_time = now;
++      HdrDisplayInfo info;
++#if REX_PLATFORM_WIN32
++      // DXGI (the HDR switch, and the peak including the Windows HDR
++      // Calibration profile) and DisplayConfig (the SDR content brightness).
++      HMONITOR monitor = static_cast<HMONITOR>(hdr_monitor.load());
++      static Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
++      static Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
++      static HMONITOR output6_monitor = nullptr;
++      if (factory && !factory->IsCurrent()) {
++        factory.Reset();
++        output6.Reset();
++      }
++      if (!factory) {
++        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
++      }
++      if (output6 && output6_monitor != monitor) {
++        output6.Reset();
++      }
++      if (!output6 && factory && monitor) {
++        if (Microsoft::WRL::ComPtr<IDXGIOutput> output =
++                GetDXGIOutputForMonitor(factory.Get(), monitor)) {
++          output.As(&output6);
++          output6_monitor = monitor;
++        }
++      }
++      DXGI_OUTPUT_DESC1 desc;
++      if (output6 && SUCCEEDED(output6->GetDesc1(&desc))) {
++        info.known = true;
++        info.hdr_enabled = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
++        info.peak_nits = desc.MaxLuminance;
++        info.full_frame_nits = desc.MaxFullFrameLuminance;
++        info.min_nits = desc.MinLuminance;
++        UINT32 path_count = 0, mode_count = 0;
++        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) ==
++            ERROR_SUCCESS) {
++          std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
++          std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
++          if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count,
++                                 modes.data(), nullptr) == ERROR_SUCCESS) {
++            for (UINT32 i = 0; i < path_count; ++i) {
++              DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
++              source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
++              source.header.size = sizeof(source);
++              source.header.adapterId = paths[i].sourceInfo.adapterId;
++              source.header.id = paths[i].sourceInfo.id;
++              if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
++                  wcscmp(source.viewGdiDeviceName, desc.DeviceName)) {
++                continue;
++              }
++              DISPLAYCONFIG_SDR_WHITE_LEVEL white = {};
++              white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
++              white.header.size = sizeof(white);
++              white.header.adapterId = paths[i].targetInfo.adapterId;
++              white.header.id = paths[i].targetInfo.id;
++              if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS) {
++                info.sdr_white_nits = float(white.SDRWhiteLevel) * (80.0f / 1000.0f);
++              }
++              break;
++            }
++          }
++        }
++      }
++#endif  // REX_PLATFORM_WIN32
++      if (info.known != hdr_display_info.known ||
++          info.hdr_enabled != hdr_display_info.hdr_enabled ||
++          info.peak_nits != hdr_display_info.peak_nits ||
++          info.sdr_white_nits != hdr_display_info.sdr_white_nits) {
++        if (info.known) {
++          REXLOG_INFO(
++              "Presenter: display HDR {}, peak {} nits, full frame {} nits, black {} nits, SDR "
++              "white {} nits",
++              info.hdr_enabled ? "on" : "off", info.peak_nits, info.full_frame_nits,
++              info.min_nits, info.sdr_white_nits);
++        } else {
++          REXLOG_INFO("Presenter: the display's HDR state is unknown");
++        }
++      }
++      hdr_display_info = info;
++    }
++  }
++  if (mode == 2) {
++    return true;
++  }
++  HdrDisplayInfo info = GetLastHdrDisplayInfo();
++  return info.known && info.hdr_enabled;
++}
++
++Presenter::GuestOutputCaptureConverter::GuestOutputCaptureConverter(const GuestOutputHdr& hdr)
++    : is_pq_(hdr.is_pq) {
++  if (!is_pq_) {
++    return;
++  }
++  // HDR10 code values to light relative to the SDR white level.
++  pq_to_relative_.resize(1024);
++  double white = std::max(double(hdr.sdr_white_nits), 1.0);
++  for (uint32_t i = 0; i < 1024; ++i) {
++    double e = std::pow(double(i) / 1023.0, 1.0 / 78.84375);
++    double y = std::max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
++    pq_to_relative_[i] = float(10000.0 * std::pow(y, 1.0 / 0.1593017578125) / white);
++  }
++  // Relative light to the SDR code value, inverting the curve SDR content was
++  // decoded with, indexed by the square root of the light.
++  relative_sqrt_to_code_.resize(16384);
++  for (uint32_t i = 0; i < 16384; ++i) {
++    double x = double(i) / 16383.0;
++    x *= x;
++    double code = hdr.sdr_pure_gamma_2_2
++                      ? std::pow(x, 1.0 / 2.2)
++                      : (x > 0.0031308 ? 1.055 * std::pow(x, 1.0 / 2.4) - 0.055 : 12.92 * x);
++    relative_sqrt_to_code_[i] = uint8_t(std::clamp(code * 255.0 + 0.5, 0.0, 255.0));
++  }
++}
++
++uint32_t Presenter::GuestOutputCaptureConverter::operator()(uint32_t rgb10) const {
++  if (!is_pq_) {
++    return Packed10bpcRGBTo8bpcBytes(rgb10);
++  }
++  // BT.2020 to Rec.709.
++  float r2020 = pq_to_relative_[rgb10 & 0x3FF];
++  float g2020 = pq_to_relative_[(rgb10 >> 10) & 0x3FF];
++  float b2020 = pq_to_relative_[(rgb10 >> 20) & 0x3FF];
++  float rgb[3] = {
++      std::max(1.660491f * r2020 - 0.587641f * g2020 - 0.072850f * b2020, 0.0f),
++      std::max(-0.124550f * r2020 + 1.132900f * g2020 - 0.008349f * b2020, 0.0f),
++      std::max(-0.018151f * r2020 - 0.100579f * g2020 + 1.118730f * b2020, 0.0f)};
++  float largest = std::max(rgb[0], std::max(rgb[1], rgb[2]));
++  float scale = largest > 1.0f ? 1.0f / largest : 1.0f;
++  uint32_t code[3];
++  for (uint32_t i = 0; i < 3; ++i) {
++    code[i] = relative_sqrt_to_code_[uint32_t(std::sqrt(rgb[i] * scale) * 16383.0f + 0.5f)];
++  }
++  if constexpr (std::endian::native == std::endian::big) {
++    return (code[0] << 24) | (code[1] << 16) | (code[2] << 8) | 0xFF;
++  }
++  return code[0] | (code[1] << 8) | (code[2] << 16) | (uint32_t(0xFF) << 24);
++}
++
+ }  // namespace ui
+ }  // namespace rex
+diff --git a/src/ui/shaders/bytecode/d3d12_5_1/hdr_ui_composite_ps.h b/src/ui/shaders/bytecode/d3d12_5_1/hdr_ui_composite_ps.h
+new file mode 100644
+index 0000000..80e7154
+--- /dev/null
++++ b/src/ui/shaders/bytecode/d3d12_5_1/hdr_ui_composite_ps.h
+@@ -0,0 +1,50 @@
++// Generated from hdr_ui_composite.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_ui_composite_ps[] = {
++    0x43425844, 0xF502C88E, 0x45D46C97, 0xA764BD76, 0x44C0D152, 0x00000001, 0x000005B4, 0x00000003,
++    0x0000002C, 0x00000060, 0x00000094, 0x4E475349, 0x0000002C, 0x00000001, 0x00000008, 0x00000020,
++    0x00000000, 0x00000001, 0x00000003, 0x00000000, 0x0000030F, 0x505F5653, 0x7469736F, 0x006E6F69,
++    0x4E47534F, 0x0000002C, 0x00000001, 0x00000008, 0x00000020, 0x00000000, 0x00000000, 0x00000003,
++    0x00000000, 0x0000000F, 0x545F5653, 0x65677261, 0xABAB0074, 0x58454853, 0x00000518, 0x00000051,
++    0x00000146, 0x0100086A, 0x07000059, 0x00308E46, 0x00000000, 0x00000000, 0x00000000, 0x00000001,
++    0x00000000, 0x07001858, 0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000,
++    0x04002064, 0x00101032, 0x00000000, 0x00000001, 0x03000065, 0x001020F2, 0x00000000, 0x02000068,
++    0x00000004, 0x0500001B, 0x00100032, 0x00000000, 0x00101046, 0x00000000, 0x08000036, 0x001000C2,
++    0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x001000F2,
++    0x00000000, 0x00100E46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x07000031, 0x00100012,
++    0x00000001, 0x00004001, 0x00000000, 0x0010003A, 0x00000000, 0x0304001F, 0x0010000A, 0x00000001,
++    0x0700000E, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00100FF6, 0x00000000, 0x09000031,
++    0x00100012, 0x00000001, 0x00004001, 0x3F000000, 0x0030801A, 0x00000000, 0x00000000, 0x00000000,
++    0x0A000034, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x0304001F, 0x0010000A, 0x00000001, 0x0500002F, 0x00100072, 0x00000001,
++    0x00100246, 0x00000000, 0x0A000038, 0x00100072, 0x00000001, 0x00100246, 0x00000001, 0x00004002,
++    0x400CCCCD, 0x400CCCCD, 0x400CCCCD, 0x00000000, 0x05000019, 0x00100072, 0x00000001, 0x00100246,
++    0x00000001, 0x01000012, 0x0A000031, 0x00100072, 0x00000002, 0x00004002, 0x3D25AEE6, 0x3D25AEE6,
++    0x3D25AEE6, 0x00000000, 0x00100246, 0x00000000, 0x0A000000, 0x00100072, 0x00000003, 0x00100246,
++    0x00000000, 0x00004002, 0x3D6147AE, 0x3D6147AE, 0x3D6147AE, 0x00000000, 0x0A000038, 0x00100072,
++    0x00000003, 0x00100246, 0x00000003, 0x00004002, 0x3F72A76E, 0x3F72A76E, 0x3F72A76E, 0x00000000,
++    0x0500002F, 0x00100072, 0x00000003, 0x00100246, 0x00000003, 0x0A000038, 0x00100072, 0x00000003,
++    0x00100246, 0x00000003, 0x00004002, 0x4019999A, 0x4019999A, 0x4019999A, 0x00000000, 0x05000019,
++    0x00100072, 0x00000003, 0x00100246, 0x00000003, 0x0A000038, 0x00100072, 0x00000000, 0x00100246,
++    0x00000000, 0x00004002, 0x3D9E8391, 0x3D9E8391, 0x3D9E8391, 0x00000000, 0x09000037, 0x00100072,
++    0x00000001, 0x00100246, 0x00000002, 0x00100246, 0x00000003, 0x00100246, 0x00000000, 0x01000015,
++    0x09000038, 0x00100072, 0x00000000, 0x00100246, 0x00000001, 0x00308006, 0x00000000, 0x00000000,
++    0x00000000, 0x0A000010, 0x00100012, 0x00000001, 0x00100246, 0x00000000, 0x00004002, 0x3F209D8C,
++    0x3EA897C8, 0x3D3168F9, 0x00000000, 0x0A000010, 0x00100022, 0x00000001, 0x00100246, 0x00000000,
++    0x00004002, 0x3D8D82BA, 0x3F6B66F9, 0x3C3A27AF, 0x00000000, 0x0A000010, 0x00100042, 0x00000001,
++    0x00100246, 0x00000000, 0x00004002, 0x3C86466B, 0x3DB44029, 0x3F6545B7, 0x00000000, 0x0A002038,
++    0x00100072, 0x00000000, 0x00100246, 0x00000001, 0x00004002, 0x38D1B717, 0x38D1B717, 0x38D1B717,
++    0x00000000, 0x0500002F, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038, 0x00100072,
++    0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x3E232000, 0x3E232000, 0x3E232000, 0x00000000,
++    0x05000019, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0F000032, 0x00100072, 0x00000001,
++    0x00100246, 0x00000000, 0x00004002, 0x4196D000, 0x4196D000, 0x4196D000, 0x00000000, 0x00004002,
++    0x3F560000, 0x3F560000, 0x3F560000, 0x00000000, 0x0F000032, 0x00100072, 0x00000000, 0x00100246,
++    0x00000000, 0x00004002, 0x41958000, 0x41958000, 0x41958000, 0x00000000, 0x00004002, 0x3F800000,
++    0x3F800000, 0x3F800000, 0x00000000, 0x0700000E, 0x00100072, 0x00000000, 0x00100246, 0x00000001,
++    0x00100246, 0x00000000, 0x0500002F, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x0A000038,
++    0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x00004002, 0x429DB000, 0x429DB000, 0x429DB000,
++    0x00000000, 0x05000019, 0x00100072, 0x00000000, 0x00100246, 0x00000000, 0x07000038, 0x00102072,
++    0x00000000, 0x00100FF6, 0x00000000, 0x00100246, 0x00000000, 0x05000036, 0x00102082, 0x00000000,
++    0x0010003A, 0x00000000, 0x01000012, 0x08000036, 0x001020F2, 0x00000000, 0x00004002, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x01000015, 0x0100003E,
++};
+diff --git a/src/ui/shaders/hdr_output.xesli b/src/ui/shaders/hdr_output.xesli
+new file mode 100644
+index 0000000..4416f52
+--- /dev/null
++++ b/src/ui/shaders/hdr_output.xesli
+@@ -0,0 +1,51 @@
++// HDR output (rexglue-hdr-output.patch): the encoding shared by the guest
++// output refresher (hdr_refresh.cs.xesl) and the presenter's composite of its
++// own UI (hdr_ui_composite.ps.xesl). Include after xesl.xesli.
++
++#ifndef XE_HDR_OUTPUT_XESLI_
++#define XE_HDR_OUTPUT_XESLI_
++
++float3_xe XeHdrSplat(float value) { return float3_xe(value, value, value); }
++
++// An SDR code value (0...1) to linear light relative to SDR white, as an SDR
++// display shows it: the piecewise sRGB curve (what Windows uses for SDR content
++// on an HDR desktop) or a pure 2.2 power.
++float3_xe XeHdrSdrToLinear(float3_xe code, bool pure_gamma_2_2) {
++  code = max(code, XeHdrSplat(0.0f));
++  float3_xe result;
++  dont_flatten_xe if (pure_gamma_2_2) {
++    result = pow(code, XeHdrSplat(2.2f));
++  } else {
++    result = select_xe(greater_than_xe(code, XeHdrSplat(0.04045f)),
++                       pow((code + 0.055f) * (1.0f / 1.055f), XeHdrSplat(2.4f)),
++                       code * (1.0f / 12.92f));
++  }
++  return result;
++}
++
++// Brings the largest component above `knee` nits smoothly towards `peak` nits,
++// scaling all three so the hue holds.
++float3_xe XeHdrRollOff(float3_xe nits, float knee, float peak) {
++  float largest = max(nits.r, max(nits.g, nits.b));
++  dont_flatten_xe if (largest > knee && peak > knee) {
++    float span = peak - knee;
++    nits *= (knee + span * (1.0f - exp2((knee - largest) / span * 1.44269504f))) /
++            largest;
++  }
++  return nits;
++}
++
++// Rec.709 light in nits to HDR10 code values (BT.2020 primaries, SMPTE ST 2084).
++float3_xe XeHdrEncodePq(float3_xe nits) {
++  float3_xe bt2020 = float3_xe(
++      dot(nits, float3_xe(0.627404f, 0.329283f, 0.043313f)),
++      dot(nits, float3_xe(0.069097f, 0.919540f, 0.011362f)),
++      dot(nits, float3_xe(0.016391f, 0.088013f, 0.895595f)));
++  float3_xe y = pow(clamp(bt2020 * (1.0f / 10000.0f), XeHdrSplat(0.0f),
++                          XeHdrSplat(1.0f)),
++                    XeHdrSplat(0.1593017578125f));
++  return pow((0.8359375f + 18.8515625f * y) / (1.0f + 18.6875f * y),
++             XeHdrSplat(78.84375f));
++}
++
++#endif  // XE_HDR_OUTPUT_XESLI_
+diff --git a/src/ui/shaders/hdr_ui_composite.ps.xesl b/src/ui/shaders/hdr_ui_composite.ps.xesl
+new file mode 100644
+index 0000000..3130371
+--- /dev/null
++++ b/src/ui/shaders/hdr_ui_composite.ps.xesl
+@@ -0,0 +1,47 @@
++// HDR output (rexglue-hdr-output.patch): the presenter's own UI (ImGui, the
++// achievement toasts), drawn into an 8-bit layer cleared to 0 the way it is
++// drawn over SDR output, put over the HDR10 swap chain image. The layer holds
++// the UI's sRGB-encoded colour premultiplied by its coverage; it is decoded as
++// SDR content at the UI level and blended with ONE / INV_SRC_ALPHA (in PQ
++// values, as SDR UI blends in gamma-encoded values).
++// Built with guest_output_triangle_strip_rect.vs.xesl over the whole image, with
++// the bilinear guest output effect's root signature / pipeline layout.
++
++#include "xesl.xesli"
++#include "hdr_output.xesli"
++
++push_const_begin_xe(b0, space0)
++  // 16 used by the vertex shader (GLSL push constant offsets are across
++  // stages).
++  // x: UI white in nits, y: 1 to decode with a pure 2.2 power, else sRGB.
++  block_offset_member_xe(16, c0.x, float2_xe, xe_hdr_ui_composite_levels)
++  block_offset_member_xe(24, c0.z, float2_xe, xe_hdr_ui_composite_unused)
++push_const_end_xe
++
++entry_outputs_begin_xe
++  entry_out_target_xe(float4_xe, xe_hdr_ui_composite_color, 0)
++entry_outputs_end_stage_inputs_begin_xe
++entry_stage_inputs_end_bindings_begin_pixel_xe
++  push_const_binding_xe(buffer(0))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_hdr_ui_composite_layer, set=0, binding=0, t0,
++             space0, texture(0))
++  entry_binding_next_xe
++  sampler_state_xe(xe_hdr_ui_composite_sampler, set=0, binding=1, s0, space0,
++                   sampler(0))
++entry_bindings_end_inputs_begin_xe
++  entry_in_pixel_coord_xe
++entry_inputs_end_code_begin_xe
++{
++  float4_xe layer = texel_fetch_2d_xe(xe_hdr_ui_composite_layer,
++                                      int2_xe(in_pixel_coord_xe.xy), 0);
++  float4_xe color = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
++  dont_flatten_xe if (layer.a > 0.0f) {
++    float2_xe levels = push_const_xe(xe_hdr_ui_composite_levels);
++    float3_xe nits = XeHdrSdrToLinear(layer.rgb / layer.a, levels.y > 0.5f) *
++                     levels.x;
++    color = float4_xe(XeHdrEncodePq(nits) * layer.a, layer.a);
++  }
++  out_xe(xe_hdr_ui_composite_color) = color;
++}
++entry_code_end_xe
+diff --git a/src/ui/shaders/vulkan_spirv/hdr_ui_composite_ps.h b/src/ui/shaders/vulkan_spirv/hdr_ui_composite_ps.h
+new file mode 100644
+index 0000000..724ae30
+--- /dev/null
++++ b/src/ui/shaders/vulkan_spirv/hdr_ui_composite_ps.h
+@@ -0,0 +1,80 @@
++// Generated from hdr_ui_composite.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t hdr_ui_composite_ps[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00006020, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0007000F, 0x00000004, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000C93, 0x00000D97, 0x00030010,
++    0x0000161F, 0x00000007, 0x00040047, 0x00001203, 0x00000021, 0x00000000, 0x00040047, 0x00001203,
++    0x00000022, 0x00000000, 0x00040047, 0x00000C93, 0x0000000B, 0x0000000F, 0x00030047, 0x00000406,
++    0x00000002, 0x00050048, 0x00000406, 0x00000000, 0x00000023, 0x00000010, 0x00050048, 0x00000406,
++    0x00000001, 0x00000023, 0x00000018, 0x00040047, 0x00000D97, 0x0000001E, 0x00000000, 0x00020013,
++    0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00030016, 0x0000000D, 0x00000020, 0x00040017,
++    0x00000018, 0x0000000D, 0x00000003, 0x00020014, 0x00000009, 0x0004002B, 0x0000000D, 0x00000A0C,
++    0x00000000, 0x0004002B, 0x0000000D, 0x00000976, 0x400CCCCD, 0x0004002B, 0x0000000D, 0x000007AD,
++    0x3D9E8391, 0x0004002B, 0x0000000D, 0x0000035E, 0x3D6147AE, 0x0004002B, 0x0000000D, 0x0000070C,
++    0x3F72A76E, 0x0004002B, 0x0000000D, 0x00000711, 0x4019999A, 0x0004002B, 0x0000000D, 0x000009A2,
++    0x3D25AEE6, 0x00040017, 0x00000010, 0x00000009, 0x00000003, 0x0004002B, 0x0000000D, 0x000008ED,
++    0x3F209D8C, 0x0004002B, 0x0000000D, 0x00000838, 0x3EA897C8, 0x0004002B, 0x0000000D, 0x00000661,
++    0x3D3168F9, 0x0006002C, 0x00000018, 0x00000112, 0x000008ED, 0x00000838, 0x00000661, 0x0004002B,
++    0x0000000D, 0x000004AA, 0x3D8D82BA, 0x0004002B, 0x0000000D, 0x000000F8, 0x3F6B66F9, 0x0004002B,
++    0x0000000D, 0x00000776, 0x3C3A27AF, 0x0006002C, 0x00000018, 0x00000BBE, 0x000004AA, 0x000000F8,
++    0x00000776, 0x0004002B, 0x0000000D, 0x00000029, 0x3C86466B, 0x0004002B, 0x0000000D, 0x00000B94,
++    0x3DB44029, 0x0004002B, 0x0000000D, 0x000009A5, 0x3F6545B7, 0x0006002C, 0x00000018, 0x0000048A,
++    0x00000029, 0x00000B94, 0x000009A5, 0x0004002B, 0x0000000D, 0x00000383, 0x38D1B717, 0x0004002B,
++    0x0000000D, 0x0000008A, 0x3F800000, 0x0004002B, 0x0000000D, 0x00000841, 0x3E232000, 0x0004002B,
++    0x0000000D, 0x000006EF, 0x3F560000, 0x0004002B, 0x0000000D, 0x0000058F, 0x4196D000, 0x0004002B,
++    0x0000000D, 0x00000911, 0x41958000, 0x0004002B, 0x0000000D, 0x000003A8, 0x429DB000, 0x00040017,
++    0x0000001D, 0x0000000D, 0x00000004, 0x00090019, 0x00000096, 0x0000000D, 0x00000001, 0x00000000,
++    0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000313, 0x00000000, 0x00000096,
++    0x0004003B, 0x00000313, 0x00001203, 0x00000000, 0x00040020, 0x0000029A, 0x00000001, 0x0000001D,
++    0x0004003B, 0x0000029A, 0x00000C93, 0x00000001, 0x00040017, 0x00000013, 0x0000000D, 0x00000002,
++    0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x00040017, 0x00000012, 0x0000000C, 0x00000002,
++    0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x0007002C, 0x0000001D, 0x00000B7A, 0x00000A0C,
++    0x00000A0C, 0x00000A0C, 0x00000A0C, 0x0004001E, 0x00000406, 0x00000013, 0x00000013, 0x00040020,
++    0x00000683, 0x00000009, 0x00000406, 0x0004003B, 0x00000683, 0x00000CE9, 0x00000009, 0x00040020,
++    0x00000290, 0x00000009, 0x00000013, 0x0004002B, 0x0000000D, 0x000000FC, 0x3F000000, 0x00040020,
++    0x0000029B, 0x00000003, 0x0000001D, 0x0004003B, 0x0000029B, 0x00000D97, 0x00000003, 0x0006002C,
++    0x00000018, 0x00000A2C, 0x00000A0C, 0x00000A0C, 0x00000A0C, 0x0006002C, 0x00000018, 0x000004F6,
++    0x00000976, 0x00000976, 0x00000976, 0x0006002C, 0x00000018, 0x000008BD, 0x0000035E, 0x0000035E,
++    0x0000035E, 0x0006002C, 0x00000018, 0x00000B83, 0x00000711, 0x00000711, 0x00000711, 0x0006002C,
++    0x00000018, 0x00000198, 0x000009A2, 0x000009A2, 0x000009A2, 0x0006002C, 0x00000018, 0x00000A16,
++    0x0000008A, 0x0000008A, 0x0000008A, 0x0006002C, 0x00000018, 0x00000892, 0x00000841, 0x00000841,
++    0x00000841, 0x0006002C, 0x00000018, 0x0000047D, 0x000006EF, 0x000006EF, 0x000006EF, 0x0006002C,
++    0x00000018, 0x000005E0, 0x000003A8, 0x000003A8, 0x000003A8, 0x00050036, 0x00000008, 0x0000161F,
++    0x00000000, 0x00000502, 0x000200F8, 0x0000601F, 0x0004003D, 0x00000096, 0x00005268, 0x00001203,
++    0x0004003D, 0x0000001D, 0x00005455, 0x00000C93, 0x0007004F, 0x00000013, 0x00002229, 0x00005455,
++    0x00005455, 0x00000000, 0x00000001, 0x0004006E, 0x00000012, 0x0000322E, 0x00002229, 0x0007005F,
++    0x0000001D, 0x0000310F, 0x00005268, 0x0000322E, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D,
++    0x00002213, 0x0000310F, 0x00000003, 0x000500BA, 0x00000009, 0x000027A1, 0x00002213, 0x00000A0C,
++    0x000300F7, 0x0000418E, 0x00000002, 0x000400FA, 0x000027A1, 0x00002F61, 0x0000418E, 0x000200F8,
++    0x00002F61, 0x00050041, 0x00000290, 0x0000482C, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000013,
++    0x000034FE, 0x0000482C, 0x0008004F, 0x00000018, 0x00004614, 0x0000310F, 0x0000310F, 0x00000000,
++    0x00000001, 0x00000002, 0x00060050, 0x00000018, 0x000058A3, 0x00002213, 0x00002213, 0x00002213,
++    0x00050088, 0x00000018, 0x00003C14, 0x00004614, 0x000058A3, 0x00050051, 0x0000000D, 0x00001D0C,
++    0x000034FE, 0x00000001, 0x000500BA, 0x00000009, 0x000019F4, 0x00001D0C, 0x000000FC, 0x0007000C,
++    0x00000018, 0x00004E39, 0x00000001, 0x00000028, 0x00003C14, 0x00000A2C, 0x000300F7, 0x0000213D,
++    0x00000002, 0x000400FA, 0x000019F4, 0x000019A6, 0x00002924, 0x000200F8, 0x000019A6, 0x0007000C,
++    0x00000018, 0x000058FA, 0x00000001, 0x0000001A, 0x00004E39, 0x000004F6, 0x000200F9, 0x0000213D,
++    0x000200F8, 0x00002924, 0x0005008E, 0x00000018, 0x000053B3, 0x00004E39, 0x000007AD, 0x00050081,
++    0x00000018, 0x000038A9, 0x00004E39, 0x000008BD, 0x0005008E, 0x00000018, 0x00004A13, 0x000038A9,
++    0x0000070C, 0x0007000C, 0x00000018, 0x00004888, 0x00000001, 0x0000001A, 0x00004A13, 0x00000B83,
++    0x000500BA, 0x00000010, 0x00001DC1, 0x00004E39, 0x00000198, 0x000600A9, 0x00000018, 0x0000283E,
++    0x00001DC1, 0x00004888, 0x000053B3, 0x000200F9, 0x0000213D, 0x000200F8, 0x0000213D, 0x000700F5,
++    0x00000018, 0x00004857, 0x000058FA, 0x000019A6, 0x0000283E, 0x00002924, 0x00050051, 0x0000000D,
++    0x000035CE, 0x000034FE, 0x00000000, 0x0005008E, 0x00000018, 0x000024EF, 0x00004857, 0x000035CE,
++    0x00050094, 0x0000000D, 0x00002845, 0x000024EF, 0x00000112, 0x00050094, 0x0000000D, 0x00002064,
++    0x000024EF, 0x00000BBE, 0x00050094, 0x0000000D, 0x00004CA0, 0x000024EF, 0x0000048A, 0x00060050,
++    0x00000018, 0x00004259, 0x00002845, 0x00002064, 0x00004CA0, 0x0005008E, 0x00000018, 0x000045B3,
++    0x00004259, 0x00000383, 0x0008000C, 0x00000018, 0x00002A1C, 0x00000001, 0x0000002B, 0x000045B3,
++    0x00000A2C, 0x00000A16, 0x0007000C, 0x00000018, 0x00004E66, 0x00000001, 0x0000001A, 0x00002A1C,
++    0x00000892, 0x0005008E, 0x00000018, 0x000055B9, 0x00004E66, 0x0000058F, 0x00050081, 0x00000018,
++    0x000027FC, 0x0000047D, 0x000055B9, 0x0005008E, 0x00000018, 0x00003ECC, 0x00004E66, 0x00000911,
++    0x00050081, 0x00000018, 0x00004B99, 0x00000A16, 0x00003ECC, 0x00050088, 0x00000018, 0x00002758,
++    0x000027FC, 0x00004B99, 0x0007000C, 0x00000018, 0x00004D85, 0x00000001, 0x0000001A, 0x00002758,
++    0x000005E0, 0x0005008E, 0x00000018, 0x00004BD2, 0x00004D85, 0x00002213, 0x00050051, 0x0000000D,
++    0x0000316A, 0x00004BD2, 0x00000000, 0x00050051, 0x0000000D, 0x00003A13, 0x00004BD2, 0x00000001,
++    0x00050051, 0x0000000D, 0x00002B11, 0x00004BD2, 0x00000002, 0x00070050, 0x0000001D, 0x00002349,
++    0x0000316A, 0x00003A13, 0x00002B11, 0x00002213, 0x000200F9, 0x0000418E, 0x000200F8, 0x0000418E,
++    0x000700F5, 0x0000001D, 0x00005D6B, 0x00000B7A, 0x0000601F, 0x00002349, 0x0000213D, 0x0003003E,
++    0x00000D97, 0x00005D6B, 0x000100FD, 0x00010038,
++};
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index cfa4e0e..bb00582 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -166,6 +166,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   if (with_surface) {
+     // #1.
+     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
++    // #105. HDR output (rexglue-hdr-output.patch): HDR10 swapchains.
++    requested_extensions.emplace("VK_EXT_swapchain_colorspace",
++                                 &vulkan_instance->extensions_.ext_EXT_swapchain_colorspace);
+ #if REX_PLATFORM_PS5
+     // #3. The console has no window system; the driver presents to the
+     // display itself.
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index c96636e..9935419 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -202,6 +202,7 @@ VkResult CreatePs5DisplaySurface(PFN_vkGetInstanceProcAddr get_instance_proc_add
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_ps.h"
++#include "../shaders/vulkan_spirv/hdr_ui_composite_ps.h"
+ #if defined(REX_HAS_FIDELITYFX_SDK)
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_ps.h"
+@@ -331,6 +332,9 @@ VulkanPresenter::~VulkanPresenter() {
+ 
+   util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device,
+                              guest_output_intermediate_render_pass_);
++  util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, hdr_ui_composite_pipeline_);
++  util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device, hdr_ui_layer_render_pass_);
++  util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, hdr_ui_composite_fs_);
+   for (VkShaderModule& shader_module : guest_output_paint_fs_) {
+     util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, shader_module);
+   }
+@@ -556,10 +560,11 @@ Surface::TypeFlags VulkanPresenter::GetSupportedSurfaceTypes() const {
+ 
+ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
+   std::shared_ptr<GuestOutputImage> guest_output_image;
++  GuestOutputProperties guest_output_properties;
+   {
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(
+-        ConsumeGuestOutput(guest_output_mailbox_index, nullptr, nullptr));
++        ConsumeGuestOutput(guest_output_mailbox_index, &guest_output_properties, nullptr));
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       assert_true(guest_output_images_[guest_output_mailbox_index].ever_successfully_refreshed);
+       guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
+@@ -749,8 +754,9 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
+   image_out.stride = sizeof(uint32_t) * image_extent.width;
+   image_out.data.resize(size_t(buffer_size));
+   uint32_t* image_out_pixels = reinterpret_cast<uint32_t*>(image_out.data.data());
++  GuestOutputCaptureConverter convert(guest_output_properties.hdr);
+   for (size_t i = 0; i < pixel_count; ++i) {
+-    image_out_pixels[i] = Packed10bpcRGBTo8bpcBytes(reinterpret_cast<const uint32_t*>(mapping)[i]);
++    image_out_pixels[i] = convert(reinterpret_cast<const uint32_t*>(mapping)[i]);
+   }
+ 
+   // Unmapping will be done by freeing.
+@@ -852,6 +858,9 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+   const VkDevice device = vulkan_device_->device();
+ 
+   VkFormat new_swapchain_format;
++  // HDR output: HDR10 when wanted (the `hdr` setting and the display's state).
++  bool hdr_wanted = IsHdrOutputWanted();
++  bool hdr = false;
+ 
+   // ConnectOrReconnectToSurfaceFromUIThread may be called only for the
+   // ui::Surface of the current swapchain or when the old swapchain and
+@@ -867,7 +876,8 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+     paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
+         vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
+         old_swapchain, paint_context_.present_queue_family, new_swapchain_format,
+-        paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable);
++        paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable,
++        hdr_wanted, hdr);
+     // Destroy the old swapchain that may be retired now.
+     if (old_swapchain != VK_NULL_HANDLE) {
+       dfn.vkDestroySwapchainKHR(device, old_swapchain, nullptr);
+@@ -978,7 +988,8 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+     paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
+         vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
+         VK_NULL_HANDLE, paint_context_.present_queue_family, new_swapchain_format,
+-        paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable);
++        paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable,
++        hdr_wanted, hdr);
+     if (paint_context_.swapchain == VK_NULL_HANDLE) {
+       // Failed to create the swapchain for the new Vulkan surface - destroy the
+       // Vulkan surface.
+@@ -994,6 +1005,10 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+   // paint_context_.DestroySwapchainAndVulkanSurface must be called before
+   // returning.
+ 
++  paint_context_.swapchain_hdr_wanted = hdr_wanted;
++  paint_context_.swapchain_hdr = hdr;
++  SetHdrOutputActive(hdr);
++
+   // Update the render pass to the new format.
+   if (paint_context_.swapchain_render_pass_format != new_swapchain_format) {
+     util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device,
+@@ -1147,11 +1162,15 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+ 
+ void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+   paint_context_.DestroySwapchainAndVulkanSurface();
++  paint_context_.swapchain_hdr_wanted = false;
++  paint_context_.swapchain_hdr = false;
++  SetHdrOutputActive(false);
+ }
+ 
+ bool VulkanPresenter::RefreshGuestOutputImpl(
+     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
+-    std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) {
++    std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref,
++    GuestOutputHdr& hdr_out_ref) {
+   assert_not_zero(frontbuffer_width);
+   assert_not_zero(frontbuffer_height);
+   VkExtent2D max_framebuffer_extent = util::GetMax2DFramebufferExtent(vulkan_device_->properties());
+@@ -1178,7 +1197,8 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+     image_instance.SetToNewImage(std::move(new_image), guest_output_image_next_version_++);
+   }
+ 
+-  VulkanGuestOutputRefreshContext context(is_8bpc_out_ref, image_instance.image->image(),
++  VulkanGuestOutputRefreshContext context(is_8bpc_out_ref, hdr_out_ref,
++                                          image_instance.image->image(),
+                                           image_instance.image->view(), image_instance.version,
+                                           image_instance.ever_successfully_refreshed);
+   bool refresher_succeeded = refresher(context);
+@@ -1214,8 +1234,10 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+     const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+     VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out, VkFormat& image_format_out,
+-    VkExtent2D& image_extent_out, bool& is_fifo_out, bool& ui_surface_unusable_out) {
++    VkExtent2D& image_extent_out, bool& is_fifo_out, bool& ui_surface_unusable_out,
++    bool hdr_wanted, bool& hdr_out) {
+   ui_surface_unusable_out = false;
++  hdr_out = false;
+ 
+   const VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
+   const VkPhysicalDevice physical_device = vulkan_device->physical_device();
+@@ -1336,7 +1358,20 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+   static const VkFormat kFormat8888Secondary = VK_FORMAT_R8G8B8A8_UNORM;
+ #endif
+   VkSurfaceFormatKHR image_format;
+-  if (surface_formats.empty() ||
++  // HDR output: HDR10 (PQ, BT.2020; listed with VK_EXT_swapchain_colorspace).
++  for (size_t i = 0; hdr_wanted && !hdr_out && i < surface_formats.size(); ++i) {
++    if (surface_formats[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
++        (surface_formats[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
++         surface_formats[i].format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) {
++      image_format = surface_formats[i];
++      hdr_out = true;
++    }
++  }
++  if (hdr_wanted && !hdr_out) {
++    REXLOG_WARN("VulkanPresenter: The surface doesn't offer HDR10, using SDR");
++  }
++  if (hdr_out) {
++  } else if (surface_formats.empty() ||
+       (surface_formats.size() == 1 || surface_formats[0].format == VK_FORMAT_UNDEFINED)) {
+     // Can choose any format if the implementation specifies only UNDEFINED.
+     image_format.format = kFormat8888Primary;
+@@ -1544,12 +1579,87 @@ VkSwapchainKHR VulkanPresenter::PaintContext::PrepareForSwapchainRetirement() {
+   swapchain_images.clear();
+   swapchain_extent.width = 0;
+   swapchain_extent.height = 0;
++  DestroyHdrUiLayer();
+   // The old swapchain must be destroyed externally.
+   VkSwapchainKHR old_swapchain = swapchain;
+   swapchain = nullptr;
+   return old_swapchain;
+ }
+ 
++void VulkanPresenter::PaintContext::DestroyHdrUiLayer() {
++  const VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  util::DestroyAndNullHandle(dfn.vkDestroyFramebuffer, device, hdr_ui_layer_framebuffer);
++  util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, hdr_ui_layer_view);
++  util::DestroyAndNullHandle(dfn.vkDestroyImage, device, hdr_ui_layer_image);
++  util::DestroyAndNullHandle(dfn.vkFreeMemory, device, hdr_ui_layer_memory);
++}
++
++bool VulkanPresenter::EnsureHdrUiLayer() {
++  if (paint_context_.hdr_ui_layer_framebuffer != VK_NULL_HANDLE) {
++    return true;
++  }
++  paint_context_.DestroyHdrUiLayer();
++  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
++  const VkDevice device = vulkan_device_->device();
++  VkImageCreateInfo image_create_info = {};
++  image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++  image_create_info.imageType = VK_IMAGE_TYPE_2D;
++  image_create_info.format = kHdrUiLayerFormat;
++  image_create_info.extent.width = paint_context_.swapchain_extent.width;
++  image_create_info.extent.height = paint_context_.swapchain_extent.height;
++  image_create_info.extent.depth = 1;
++  image_create_info.mipLevels = 1;
++  image_create_info.arrayLayers = 1;
++  image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++  image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++  image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++  image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++  image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++  if (!util::CreateDedicatedAllocationImage(vulkan_device_, image_create_info,
++                                            util::MemoryPurpose::kDeviceLocal,
++                                            paint_context_.hdr_ui_layer_image,
++                                            paint_context_.hdr_ui_layer_memory)) {
++    REXLOG_ERROR("VulkanPresenter: Failed to create the HDR UI layer");
++    return false;
++  }
++  VkImageViewCreateInfo view_create_info = {};
++  view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++  view_create_info.image = paint_context_.hdr_ui_layer_image;
++  view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++  view_create_info.format = kHdrUiLayerFormat;
++  view_create_info.subresourceRange = util::InitializeSubresourceRange();
++  VkFramebufferCreateInfo framebuffer_create_info = {};
++  framebuffer_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
++  framebuffer_create_info.renderPass = hdr_ui_layer_render_pass_;
++  framebuffer_create_info.attachmentCount = 1;
++  framebuffer_create_info.pAttachments = &paint_context_.hdr_ui_layer_view;
++  framebuffer_create_info.width = image_create_info.extent.width;
++  framebuffer_create_info.height = image_create_info.extent.height;
++  framebuffer_create_info.layers = 1;
++  if (dfn.vkCreateImageView(device, &view_create_info, nullptr,
++                            &paint_context_.hdr_ui_layer_view) != VK_SUCCESS ||
++      dfn.vkCreateFramebuffer(device, &framebuffer_create_info, nullptr,
++                              &paint_context_.hdr_ui_layer_framebuffer) != VK_SUCCESS) {
++    REXLOG_ERROR("VulkanPresenter: Failed to create the HDR UI layer");
++    paint_context_.DestroyHdrUiLayer();
++    return false;
++  }
++  // Created after the last use of the previous layer, if any, was awaited (on
++  // swapchain retirement).
++  VkDescriptorImageInfo image_info = {VK_NULL_HANDLE, paint_context_.hdr_ui_layer_view,
++                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
++  VkWriteDescriptorSet write = {};
++  write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++  write.dstSet = paint_context_.guest_output_descriptor_sets
++                     [PaintContext::kGuestOutputDescriptorSetHdrUiLayerSampled];
++  write.descriptorCount = 1;
++  write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++  write.pImageInfo = &image_info;
++  dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
++  return true;
++}
++
+ void VulkanPresenter::PaintContext::DestroySwapchainAndVulkanSurface() {
+   VkSwapchainKHR old_swapchain = PrepareForSwapchainRetirement();
+   if (old_swapchain != VK_NULL_HANDLE) {
+@@ -1634,6 +1744,10 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
+ }
+ 
+ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
++  // HDR output: switching between SDR and HDR10 needs a new connection.
++  if (IsHdrOutputWanted() != paint_context_.swapchain_hdr_wanted) {
++    return PaintResult::kNotPresentedConnectionOutdated;
++  }
+ #if REX_PLATFORM_PS5
+   // Nothing can be seen of presentation on the console except the screen, so
+   // the first few paints and then one in every 300 are logged: that it was
+@@ -1750,6 +1864,30 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+ 
+   bool swapchain_image_pass_begun = false;
+ 
++  // HDR output: the UI is drawn as over SDR, into a layer cleared to 0, put
++  // over the image as SDR content in the swapchain pass.
++  bool hdr_ui_layer_drawn = false;
++  if (execute_ui_drawers && paint_context_.swapchain_hdr && EnsureHdrUiLayer()) {
++    VkClearValue layer_clear_value = {};
++    VkRenderPassBeginInfo layer_pass_begin_info = {};
++    layer_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
++    layer_pass_begin_info.renderPass = hdr_ui_layer_render_pass_;
++    layer_pass_begin_info.framebuffer = paint_context_.hdr_ui_layer_framebuffer;
++    layer_pass_begin_info.renderArea.extent = paint_context_.swapchain_extent;
++    layer_pass_begin_info.clearValueCount = 1;
++    layer_pass_begin_info.pClearValues = &layer_clear_value;
++    dfn.vkCmdBeginRenderPass(draw_command_buffer, &layer_pass_begin_info,
++                             VK_SUBPASS_CONTENTS_INLINE);
++    VulkanUIDrawContext ui_draw_context(
++        *this, paint_context_.swapchain_extent.width, paint_context_.swapchain_extent.height,
++        draw_command_buffer, ui_submission_tracker_.GetCurrentSubmission(),
++        ui_submission_tracker_.UpdateAndGetCompletedSubmission(), hdr_ui_layer_render_pass_,
++        kHdrUiLayerFormat);
++    ExecuteUIDrawersFromUIThread(ui_draw_context);
++    dfn.vkCmdEndRenderPass(draw_command_buffer);
++    hdr_ui_layer_drawn = true;
++  }
++
+   GuestOutputProperties guest_output_properties;
+   GuestOutputPaintConfig guest_output_paint_config;
+   std::shared_ptr<GuestOutputImage> guest_output_image;
+@@ -1767,6 +1905,17 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     // multiple threads can't paint the main target at the same time).
+   }
+ 
++  // HDR output: the guest output holds HDR10 code values, scaled with plain
++  // bilinear filtering (the other effects work on SDR values). An image
++  // refreshed for the other mode, while switching, is not drawn.
++  if (guest_output_properties.hdr.is_pq != paint_context_.swapchain_hdr) {
++    guest_output_image.reset();
++  }
++  if (paint_context_.swapchain_hdr) {
++    guest_output_paint_config.SetEffect(GuestOutputPaintConfig::Effect::kBilinear);
++    guest_output_paint_config.SetDither(false);
++  }
++
+   if (guest_output_image) {
+     VkExtent2D max_framebuffer_extent =
+         util::GetMax2DFramebufferExtent(vulkan_device_->properties());
+@@ -2263,7 +2412,48 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     swapchain_image_clear_needed = false;
+   }
+ 
+-  if (execute_ui_drawers) {
++  if (hdr_ui_layer_drawn) {
++    if (hdr_ui_composite_pipeline_format_ != paint_context_.swapchain_render_pass_format) {
++      if (hdr_ui_composite_pipeline_ != VK_NULL_HANDLE) {
++        paint_context_.submission_tracker.AwaitAllSubmissionsCompletion();
++        util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, hdr_ui_composite_pipeline_);
++      }
++      hdr_ui_composite_pipeline_ =
++          CreateGuestOutputPaintPipeline(GuestOutputPaintEffect::kBilinear,
++                                         paint_context_.swapchain_render_pass,
++                                         hdr_ui_composite_fs_, true);
++      hdr_ui_composite_pipeline_format_ = paint_context_.swapchain_render_pass_format;
++    }
++    if (hdr_ui_composite_pipeline_ != VK_NULL_HANDLE) {
++      VkPipelineLayout layout =
++          guest_output_paint_pipeline_layouts_[kGuestOutputPaintPipelineLayoutIndexBilinear];
++      dfn.vkCmdBindPipeline(draw_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
++                            hdr_ui_composite_pipeline_);
++      dfn.vkCmdBindDescriptorSets(
++          draw_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1,
++          &paint_context_.guest_output_descriptor_sets
++               [PaintContext::kGuestOutputDescriptorSetHdrUiLayerSampled],
++          0, nullptr);
++      VkViewport viewport = {0.0f, 0.0f, float(paint_context_.swapchain_extent.width),
++                             float(paint_context_.swapchain_extent.height), 0.0f, 1.0f};
++      dfn.vkCmdSetViewport(draw_command_buffer, 0, 1, &viewport);
++      VkRect2D scissor = {{0, 0}, paint_context_.swapchain_extent};
++      dfn.vkCmdSetScissor(draw_command_buffer, 0, 1, &scissor);
++      GuestOutputPaintRectangleConstants whole_image;
++      whole_image.x = -1.0f;
++      whole_image.y = -1.0f;
++      whole_image.width = 2.0f;
++      whole_image.height = 2.0f;
++      dfn.vkCmdPushConstants(draw_command_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
++                             sizeof(whole_image), &whole_image);
++      HdrOutputState hdr_state = GetHdrOutputState();
++      const float ui_levels[] = {hdr_state.sdr_white_nits,
++                                 hdr_state.sdr_pure_gamma_2_2 ? 1.0f : 0.0f, 0.0f, 0.0f};
++      dfn.vkCmdPushConstants(draw_command_buffer, layout, VK_SHADER_STAGE_FRAGMENT_BIT,
++                             sizeof(whole_image), sizeof(ui_levels), ui_levels);
++      dfn.vkCmdDraw(draw_command_buffer, 4, 1, 0, 0);
++    }
++  } else if (execute_ui_drawers && !paint_context_.swapchain_hdr) {
+     // Draw the UI.
+     VulkanUIDrawContext ui_draw_context(
+         *this, paint_context_.swapchain_extent.width, paint_context_.swapchain_extent.height,
+@@ -2563,6 +2753,15 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+     }
+   }
+ 
++  // HDR output.
++  shader_module_create_info.codeSize = sizeof(shaders::hdr_ui_composite_ps);
++  shader_module_create_info.pCode = shaders::hdr_ui_composite_ps;
++  if (dfn.vkCreateShaderModule(device, &shader_module_create_info, nullptr,
++                               &hdr_ui_composite_fs_) != VK_SUCCESS) {
++    REXLOG_ERROR("VulkanPresenter: Failed to create the HDR UI composite shader module");
++    return false;
++  }
++
+   VkAttachmentDescription intermediate_render_pass_attachment;
+   intermediate_render_pass_attachment.flags = 0;
+   intermediate_render_pass_attachment.format = kGuestOutputFormat;
+@@ -2615,6 +2814,14 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+         "render pass");
+     return false;
+   }
++  // HDR output: the same for the UI layer, cleared when drawing begins.
++  intermediate_render_pass_attachment.format = kHdrUiLayerFormat;
++  intermediate_render_pass_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++  if (dfn.vkCreateRenderPass(device, &intermediate_render_pass_create_info, nullptr,
++                             &hdr_ui_layer_render_pass_) != VK_SUCCESS) {
++    REXLOG_ERROR("VulkanPresenter: Failed to create the HDR UI layer render pass");
++    return false;
++  }
+ 
+   // Initialize connection-independent parts of the painting context.
+ 
+@@ -2699,7 +2906,9 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+ }
+ 
+ VkPipeline VulkanPresenter::CreateGuestOutputPaintPipeline(GuestOutputPaintEffect effect,
+-                                                           VkRenderPass render_pass) {
++                                                           VkRenderPass render_pass,
++                                                           VkShaderModule fragment_shader,
++                                                           bool premultiplied_blend) {
+   VkPipelineShaderStageCreateInfo stages[2] = {};
+   for (uint32_t i = 0; i < 2; ++i) {
+     VkPipelineShaderStageCreateInfo& stage = stages[i];
+@@ -2708,7 +2917,8 @@ VkPipeline VulkanPresenter::CreateGuestOutputPaintPipeline(GuestOutputPaintEffec
+     stage.pName = "main";
+   }
+   stages[0].module = guest_output_paint_vs_;
+-  stages[1].module = guest_output_paint_fs_[size_t(effect)];
++  stages[1].module =
++      fragment_shader != VK_NULL_HANDLE ? fragment_shader : guest_output_paint_fs_[size_t(effect)];
+   assert_true(stages[1].module != VK_NULL_HANDLE);
+ 
+   VkPipelineVertexInputStateCreateInfo vertex_input_state = {};
+@@ -2738,6 +2948,15 @@ VkPipeline VulkanPresenter::CreateGuestOutputPaintPipeline(GuestOutputPaintEffec
+   color_blend_attachment_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                                                 VK_COLOR_COMPONENT_G_BIT |
+                                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
++  if (premultiplied_blend) {
++    color_blend_attachment_state.blendEnable = VK_TRUE;
++    color_blend_attachment_state.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
++    color_blend_attachment_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    color_blend_attachment_state.colorBlendOp = VK_BLEND_OP_ADD;
++    color_blend_attachment_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++    color_blend_attachment_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    color_blend_attachment_state.alphaBlendOp = VK_BLEND_OP_ADD;
++  }
+   VkPipelineColorBlendStateCreateInfo color_blend_state = {};
+   color_blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+   color_blend_state.attachmentCount = 1;
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 540cc94..10abf03 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -509,7 +509,10 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+       OnDpiChanged(e, destruction_receiver);
+       break;
+     }
+-    case SDL_EVENT_WINDOW_DISPLAY_CHANGED: {
++    case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
++    // HDR output (rexglue-hdr-output.patch): the presenter re-reads the
++    // display's HDR state.
++    case SDL_EVENT_WINDOW_HDR_STATE_CHANGED: {
+       MonitorUpdateEvent e(this, true);
+       OnMonitorUpdate(e);
+       break;

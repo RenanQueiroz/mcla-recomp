@@ -190,6 +190,7 @@ rexglue-direct-resolve.patch src/graphics/pipeline/render_target/cache.cpp GetDi
 rexglue-cvar-toml-strings.patch src/core/cvar.cpp LoadConfigByLine
 rexglue-edram-size.patch src/graphics/pipeline/render_target/cache.cpp edram_tiles
 rexglue-guest-markers.patch include/rex/graphics/command_processor.h OnGuestMarker
+rexglue-hdr-output.patch src/ui/presenter.cpp IsHdrOutputWanted
 LATER
 
 # ---------------------------------------------------------------------------

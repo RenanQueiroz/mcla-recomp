@@ -30,6 +30,8 @@ git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
 git apply ../../patches/rexglue-cvar-toml-strings.patch
 git apply ../../patches/rexglue-edram-size.patch
+git apply ../../patches/rexglue-guest-markers.patch
+git apply ../../patches/rexglue-hdr-output.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).

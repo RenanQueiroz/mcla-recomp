@@ -217,6 +217,7 @@ try {
         @{ Patch = "rexglue-cvar-toml-strings.patch"; File = "src\core\cvar.cpp"; Adds = "LoadConfigByLine" }
         @{ Patch = "rexglue-edram-size.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "edram_tiles" }
         @{ Patch = "rexglue-guest-markers.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "OnGuestMarker" }
+        @{ Patch = "rexglue-hdr-output.patch"; File = "src\ui\presenter.cpp"; Adds = "IsHdrOutputWanted" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
