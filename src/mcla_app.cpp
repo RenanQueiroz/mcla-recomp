@@ -188,6 +188,10 @@ static bool SaveInProgress() {
   return false;
 }
 
+bool MclaSaveInProgress() {  // for the dev pad's `saving`
+  return SaveInProgress();
+}
+
 // Before the game ends (QUIT GAME, RESTART GAME, the window's close button):
 // a career save that is being written is let finish first, for up to ten
 // seconds. Ending the title gives the game's threads only 200 ms, which could

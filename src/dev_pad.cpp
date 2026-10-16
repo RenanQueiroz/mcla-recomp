@@ -14,6 +14,9 @@
 //   press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
 //   pos   peek <addr> [bytes]   peeku <addr> [count]   peekf <addr> [count]
 //   poke <addr> <u32> (a big-endian word, for experiments)
+//   saving [wait] (whether a career save is being written, as closing sees
+//     it; with wait, until one is, for up to 10 s)
+//   close (as the window's close button: unlike quit, it waits for a save)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
 //   state   log <text>   include <script>   quit   set <option> <value>
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
@@ -89,6 +92,8 @@ REXCVAR_DEFINE_INT32(mcla_fixed_dt, 0, "MCLA",
                      "Development: every game update advances exactly 1/N s (0 = measured "
                      "time). Uncapped this is a timedemo; for A/B measurements only")
     .range(0, 1000);
+
+bool MclaSaveInProgress();  // src/mcla_app.cpp
 
 namespace {
 
@@ -1429,6 +1434,36 @@ std::string Execute(const std::string& line) {
       reply += text;
     }
     return reply;
+  }
+  if (cmd == "saving") {
+    if (arg(1) == "wait") {
+      const auto start = std::chrono::steady_clock::now();
+      while (!MclaSaveInProgress()) {
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(10)) {
+          return "error no save began within 10 s";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    }
+    return MclaSaveInProgress() ? "ok saving" : "ok idle";
+  }
+  if (cmd == "close") {
+#if defined(_WIN32)
+    // The close button's WM_CLOSE, to each of this process's windows.
+    EnumWindows(
+        [](HWND hwnd, LPARAM) -> BOOL {
+          DWORD pid = 0;
+          GetWindowThreadProcessId(hwnd, &pid);
+          if (pid == GetCurrentProcessId() && IsWindowVisible(hwnd)) {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+          }
+          return TRUE;
+        },
+        0);
+    return "ok";
+#else
+    return "error close is for Windows; use quit";
+#endif
   }
   if (cmd == "poke") {
     // poke <addr> <u32>: writes one big-endian word, for experiments such as

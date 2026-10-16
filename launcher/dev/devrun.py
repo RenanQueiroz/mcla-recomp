@@ -297,6 +297,30 @@ def follow_restarts(pid, deadline):
             kernel32.CloseHandle(handle)
 
 
+def end_games(proc):
+    """Closes whatever of this run's games still runs (the one started, and
+    any it started again), as the window's close button does, then by force."""
+    pids = []
+    if proc.poll() is None:
+        pids.append(proc.pid)
+    table = process_table()
+    family = game_pids(proc.pid, {pid: info[0] for pid, info in table.items()})
+    pids += [pid for pid in family if pid != proc.pid and table.get(pid, (0, ""))[1].lower() == "mcla.exe"]
+    for pid in pids:
+        handle = kernel32.OpenProcess(0x00100000 | 0x0001, False, pid)  # SYNCHRONIZE | TERMINATE
+        if not handle:
+            continue
+        try:
+            if kernel32.WaitForSingleObject(handle, 0) != 0:
+                print(f"closing process {pid} of this run")
+                close_windows(pid)
+                if kernel32.WaitForSingleObject(handle, 30_000) != 0:
+                    kernel32.TerminateProcess(handle, 1)
+                    kernel32.WaitForSingleObject(handle, 10_000)
+        finally:
+            kernel32.CloseHandle(handle)
+
+
 def game_pids(root, parents, before=()):
     """root and every process whose chain of parents ({pid: parent pid}) leads
     to it. A process already there before the game started (`before`) is not
@@ -579,42 +603,56 @@ def run(a, tag=None):
     (out / "gpu-guard.json").unlink(missing_ok=True)
     before = fingerprint()
     toml_backup = TOML.read_bytes() if TOML.exists() else None
-    if a.toml:
-        # The settings file the run starts with, instead of the real one
-        # (which is put back afterwards either way); "none" for no file.
-        if a.toml == "none":
-            TOML.unlink(missing_ok=True)
-        else:
-            shutil.copyfile(a.toml, TOML)
     env = dict(os.environ, REX_PERF_LOG_CSV=str(out / "perf.csv"))
     env.update(kv.split("=", 1) for kv in a.env)
     args = game_args(a, out)
     (out / "args.txt").write_text(" ".join(args), encoding="utf-8")
     start = time.monotonic()
-    proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env)
-    if guard:
-        guard.start(proc.pid)
+    proc = None
+    restarts = []
+    gpu = None
+    # Whatever happens from here (Ctrl+C, an exception), the games of this run
+    # are closed and the real mcla.toml is put back before anything else.
     try:
-        proc.wait(timeout=a.timeout)
-    except subprocess.TimeoutExpired:
-        print(f"timeout after {a.timeout} s; closing the game")
-        close_windows(proc.pid)
+        if a.toml:
+            # The settings file the run starts with, instead of the real one;
+            # "none" for no file.
+            if a.toml == "none":
+                TOML.unlink(missing_ok=True)
+            else:
+                shutil.copyfile(a.toml, TOML)
+        proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env)
+        if guard:
+            guard.start(proc.pid)
         try:
-            proc.wait(timeout=30)
+            proc.wait(timeout=a.timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-    restarts = follow_restarts(proc.pid, start + a.timeout)
+            print(f"timeout after {a.timeout} s; closing the game")
+            close_windows(proc.pid)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        restarts = follow_restarts(proc.pid, start + a.timeout)
+    finally:
+        if proc is not None:
+            end_games(proc)
+        if guard:
+            try:
+                gpu = guard.finish(out)
+            except Exception as e:  # the restore below must happen regardless
+                print(f"GPU guard: {e}")
+        try:
+            # What the game saved (the pause menu's settings).
+            if TOML.exists():
+                shutil.copyfile(TOML, out / "mcla.toml.after")
+        finally:
+            if toml_backup is not None:
+                TOML.write_bytes(toml_backup)
+            elif TOML.exists():
+                TOML.unlink()
     elapsed = time.monotonic() - start
-    gpu = guard.finish(out) if guard else None
-    # What the game saved (the pause menu's settings), before the real file
-    # is put back.
-    if TOML.exists():
-        shutil.copyfile(TOML, out / "mcla.toml.after")
-    if toml_backup is not None:
-        TOML.write_bytes(toml_backup)
-    elif TOML.exists():
-        TOML.unlink()
     after = fingerprint()
     if before != after:
         changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
