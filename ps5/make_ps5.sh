@@ -189,6 +189,7 @@ rexglue-resolve-4xmsaa-depth-samples.patch src/graphics/shaders/bytecode/d3d12_5
 rexglue-direct-resolve.patch src/graphics/pipeline/render_target/cache.cpp GetDirectResolveSource
 rexglue-cvar-toml-strings.patch src/core/cvar.cpp LoadConfigByLine
 rexglue-edram-size.patch src/graphics/pipeline/render_target/cache.cpp edram_tiles
+rexglue-guest-markers.patch include/rex/graphics/command_processor.h OnGuestMarker
 LATER
 
 # ---------------------------------------------------------------------------
