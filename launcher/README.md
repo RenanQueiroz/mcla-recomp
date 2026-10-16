@@ -303,6 +303,15 @@ during a build:
   byte; differences, and every 50 a summary per kind (copy shader, MSAA,
   formats, samples, conversion), go to the log. With
   `rexglue-resolve-4xmsaa-depth-samples.patch` in, no difference is expected.
+- `single-tile-2026-10-16.md`: why `mcla_single_tile` never takes effect (no
+  call passes a null render target, and the SDK's EDRAM is 2,048 tiles, too
+  few for a 720p 2x MSAA tile), what one tile would be worth and what it
+  needs, and MSAA on against off (one tile) on both APIs.
+- `single-tile-diag.patch` (game, `src\render_perf.cpp`, `TMPTILE`): logs each
+  kind of `BeginTiledRendering` call (caller, render target, MSAA, tile size,
+  tile count, whether the hook acted) and the EDRAM limit hook's surfaces past
+  2,048 tiles; `mcla_dev_tile_force=1` forces the single tile on the main
+  scene (the picture breaks below row 288 at 1x).
 
 ## Scripted controller input (unattended runs)
 

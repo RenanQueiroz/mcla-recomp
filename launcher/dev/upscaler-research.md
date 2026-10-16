@@ -10,7 +10,7 @@ Verdict: feasible and better placed than most: MCLA already computes reprojectio
 
 ## 2. Frame structure (from LARecomp notes; confirm with a capture)
 - sub_822E6408 walks render-pass bits 1..2^29, dispatching 13 renderers per set bit (LARecomp hooks/ui.cpp:106-109). Renderer object at [0x8287E064]: +448 enable mask, +364 requested, +356 current phase (render_phases.cpp:158-161, :224-225).
-- Scene: 720p, 2xMSAA, tiled (BeginTiledRendering sub_8217A470, r17=0 = main scene; config/render_perf.toml).
+- Scene: 720p, 2xMSAA, tiled (BeginTiledRendering sub_8217A470; config/render_perf.toml). Not r17=0 as LARecomp's notes say: the main scene passes its render target too, and one tile doesn't fit the SDK's EDRAM (single-tile-2026-10-16.md).
 - Post: rage::grPostFX at 0x829054A0; motion blur setup sub_8260E9A0, technique StreakMotionBlur, quarter-res buffers (frame_capture.cpp:3270-3295); DoF composite sub_8260EBB8.
 - Hookable boundary: the phase loop. A hook can emit a PM4 NOP with a magic payload, which the SDK already parses (command_processor.cpp:789); RT64's NOOP-encoded extended commands are the precedent. GPU-side fallback: detect the tonemap/composite and UI shaders by hash.
 - Velocity data exists: motion blur reprojects with the previous frame's matrix; the scene writes a vehicle id (1-5) into stencil and Mc4MotionBlurVehicleMtxs gives each tagged vehicle its own matrix (render_target_pool.cpp:131-141). Wrong id: 123 px error on the player's car vs 2.5 px (depth_stencil_pack_cs.hlsl:13-27). GenVelocityNoVehicleBlur pass exists (constant_upload.cpp:36).

@@ -387,7 +387,9 @@ Larger levers that showed up:
 - Not captured: garage, photo mode, cutscenes; phases 0x1, 0x10, 0x40000,
   0x100000 and 0x800000 are only partly identified.
 - Why `mcla_single_tile` has no effect. The hook site runs inside
-  `sub_8217A470`, but the bins stay 2.
+  `sub_8217A470`, but the bins stay 2. Answered in `single-tile-2026-10-16.md`:
+  no call passes a null render target, and one 2x tile needs 2,944 EDRAM
+  tiles against the SDK's 2,048.
 - **A sub-rectangle (scene at reduced size) upscale has to handle:**
   - two tiles with window offsets and per-tile resolves;
   - the day shadow mask and depth resolves read through VS-projected UVs
