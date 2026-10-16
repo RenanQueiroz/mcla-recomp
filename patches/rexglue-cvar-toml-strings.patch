@@ -1,22 +1,64 @@
+diff --git a/include/rex/cvar.h b/include/rex/cvar.h
+index fe94186..73bd347 100644
+--- a/include/rex/cvar.h
++++ b/include/rex/cvar.h
+@@ -124,7 +124,18 @@ void LoadConfig(const std::filesystem::path& config_path);
+ void ApplyEnvironment();
+ void FinalizeInit();
+ bool IsFinalized();
++// Merges what was changed while running (source kRuntime) into the TOML file:
++// each flag's line replaced where it is or added before the first [table],
++// every other line kept. Command-line and environment values, and defaults
++// set with SetDefaultValue, are not written.
+ void SaveConfig(const std::filesystem::path& config_path);
++// The same for these flags only, whatever set them. False, with the file as it
++// was, when it can't be read or written.
++bool SaveConfigValues(const std::filesystem::path& config_path,
++                      const std::vector<std::string>& names);
++// An app's own default for a flag: its value while nothing else sets it, and
++// a value SaveConfig leaves out. False for an unknown flag or a rejected value.
++bool SetDefaultValue(std::string_view name, std::string_view value);
+ 
+ //=============================================================================
+ // Flag Registry
 diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
-index 228728d..64feaa9 100644
+index 228728d..074885e 100644
 --- a/src/core/cvar.cpp
 +++ b/src/core/cvar.cpp
-@@ -10,6 +10,7 @@
+@@ -10,12 +10,24 @@
  #include <atomic>
  #include <cctype>
  #include <charconv>
 +#include <cstdio>
++#include <cstring>
  #include <filesystem>
  #include <fstream>
  #include <mutex>
-@@ -137,6 +138,114 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
+ #include <optional>
++#include <sstream>
+ #include <string_view>
+ #include <unordered_map>
++#include <utility>
++#include <vector>
++
++#if defined(_WIN32)
++#include <io.h>
++#include <process.h>
++#else
++#include <unistd.h>
++#endif
+ 
+ #include <CLI/CLI.hpp>
+ 
+@@ -137,6 +149,506 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
    }
  }
  
-+// A TOML basic string. Values used to be written between quotes as they were,
-+// so a Windows path came out as "C:\Users\...", where \U starts an escape, and
-+// the whole file failed to parse the next time it was loaded.
++// --- The settings file, as text ------------------------------------------------
++//
++// Strings are written as TOML basic strings. They used to be written between
++// quotes as they were, so a Windows path came out as "C:\Users\...", where \U
++// starts an escape, and the whole file failed to parse the next time.
 +std::string TomlString(std::string_view value) {
 +  std::string out = "\"";
 +  for (char c : value) {
@@ -50,82 +92,472 @@ index 228728d..64feaa9 100644
 +  return out;
 +}
 +
-+// A file toml++ rejects is read again line by line, so that one bad line no
-+// longer costs every setting in it. A double-quoted value that fails only for
-+// its backslashes (a path written by an older SaveConfig) is taken as written,
-+// as a literal string. Lines that still fail are skipped with a warning.
-+void LoadConfigByLine(const std::filesystem::path& config_path) {
-+  std::ifstream in(config_path, std::ios::binary);
-+  std::string line;
-+  std::string prefix;
-+  int line_number = 0;
-+  int skipped = 0;
-+  while (std::getline(in, line)) {
-+    ++line_number;
++// The file is edited in place rather than rewritten: a flag's `key = value`
++// statement is replaced where it is, and every other line (comments, keys of
++// flags not registered, tables, edits by hand) is kept. The scanner finds the
++// statements, including values that span lines (multi-line strings and
++// arrays), so that lines inside such a value are never taken for keys.
++struct TomlText {
++  std::vector<std::string> lines;  // without line endings or a BOM
++  bool bom = false;
++  bool crlf = false;
++};
++
++TomlText SplitToml(std::string_view text) {
++  TomlText out;
++  if (text.substr(0, 3) == "\xEF\xBB\xBF") {
++    out.bom = true;
++    text.remove_prefix(3);
++  }
++  while (!text.empty()) {
++    const size_t end = text.find('\n');
++    std::string line(text.substr(0, end));
 +    if (!line.empty() && line.back() == '\r') {
 +      line.pop_back();
++      out.crlf = true;
 +    }
-+    const size_t first = line.find_first_not_of(" \t");
-+    if (first == std::string::npos || line[first] == '#') {
++    out.lines.push_back(std::move(line));
++    if (end == std::string_view::npos) {
++      break;
++    }
++    text.remove_prefix(end + 1);
++  }
++  return out;
++}
++
++std::string JoinToml(const TomlText& text) {
++  std::string out = text.bom ? "\xEF\xBB\xBF" : "";
++  for (const std::string& line : text.lines) {
++    out += line;
++    out += text.crlf ? "\r\n" : "\n";
++  }
++  return out;
++}
++
++struct TomlPos {
++  size_t line;
++  size_t col;
++};
++
++// Moves past the value that starts at `at`: across lines for a multi-line
++// string or an array, and up to (not including) the whitespace or comment
++// after it. A value still open at the end of the file ends there.
++TomlPos SkipTomlValue(const std::vector<std::string>& lines, TomlPos at) {
++  size_t li = at.line;
++  size_t ci = at.col;
++  int depth = 0;  // [ and { still open
++  auto at_end = [&] { return TomlPos{lines.size() - 1, lines.back().size()}; };
++  while (li < lines.size()) {
++    const std::string& line = lines[li];
++    if (ci >= line.size()) {
++      if (depth == 0) {
++        return {li, line.size()};
++      }
++      ++li;
++      ci = 0;
 +      continue;
 +    }
-+    if (line[first] == '[') {
-+      // A table header: its keys are prefixed as ApplyTomlTable does.
-+      const size_t close = line.find(']', first);
-+      if (close == std::string::npos || line.compare(first, 2, "[[") == 0) {
-+        REXLOG_WARN("Config: {} line {} skipped: {}", config_path.filename().string(),
-+                    line_number, line);
-+        ++skipped;
-+        prefix = "\x01";  // keys under it are skipped too
++    const char c = line[ci];
++    if (line.compare(ci, 3, "\"\"\"") == 0 || line.compare(ci, 3, "'''") == 0) {
++      const std::string close = line.substr(ci, 3);
++      ci += 3;
++      for (;;) {
++        if (li >= lines.size()) {
++          return at_end();
++        }
++        if (ci >= lines[li].size()) {
++          ++li;
++          ci = 0;
++          continue;
++        }
++        if (close[0] == '"' && lines[li][ci] == '\\') {
++          ci += 2;
++          continue;
++        }
++        if (lines[li].compare(ci, 3, close) == 0) {
++          ci += 3;
++          // Up to two more quotes belong to the string.
++          for (int extra = 0; extra < 2 && ci < lines[li].size() && lines[li][ci] == close[0];
++               ++extra) {
++            ++ci;
++          }
++          break;
++        }
++        ++ci;
++      }
++      if (li >= lines.size()) {
++        return at_end();
++      }
++      if (depth == 0) {
++        return {li, ci};
++      }
++    } else if (c == '"' || c == '\'') {
++      ++ci;
++      while (ci < line.size() && line[ci] != c) {
++        ci += (c == '"' && line[ci] == '\\') ? 2 : 1;
++      }
++      ci = std::min(ci + 1, line.size());
++      if (depth == 0) {
++        return {li, ci};
++      }
++    } else if (c == '[' || c == '{') {
++      ++depth;
++      ++ci;
++    } else if (c == ']' || c == '}') {
++      depth = std::max(0, depth - 1);
++      ++ci;
++      if (depth == 0) {
++        return {li, ci};
++      }
++    } else if (c == '#') {
++      if (depth == 0) {
++        return {li, ci};
++      }
++      ci = line.size();  // a comment inside an array runs to the end of its line
++    } else if ((c == ' ' || c == '\t') && depth == 0) {
++      return {li, ci};
++    } else {
++      ++ci;
++    }
++  }
++  return at_end();
++}
++
++// A key at line[pos], bare or quoted parts joined by dots, up to its '='.
++bool ParseTomlKey(const std::string& line, size_t& pos, std::string& key) {
++  key.clear();
++  for (;;) {
++    pos = line.find_first_not_of(" \t", pos);
++    if (pos == std::string::npos) {
++      return false;
++    }
++    if (line[pos] == '"' || line[pos] == '\'') {
++      const size_t end = line.find(line[pos], pos + 1);
++      if (end == std::string::npos) {
++        return false;
++      }
++      key += line.substr(pos + 1, end - pos - 1);
++      pos = end + 1;
++    } else {
++      size_t end = pos;
++      while (end < line.size() &&
++             (std::isalnum(static_cast<unsigned char>(line[end])) || line[end] == '_' ||
++              line[end] == '-')) {
++        ++end;
++      }
++      if (end == pos) {
++        return false;
++      }
++      key += line.substr(pos, end - pos);
++      pos = end;
++    }
++    pos = line.find_first_not_of(" \t", pos);
++    if (pos != std::string::npos && line[pos] == '.') {
++      key += '.';
++      ++pos;
++      continue;
++    }
++    return pos != std::string::npos && line[pos] == '=';
++  }
++}
++
++struct TomlStatement {
++  std::string key;    // unquoted, dotted parts joined with '.'
++  std::string table;  // the [table] it is under, "" at the top, "\x01" under [[...]]
++  size_t first = 0;   // its lines
++  size_t last = 0;
++  size_t value_col = 0;  // where the value starts on `first`
++  size_t value_end = 0;  // and ends on `last`
++};
++
++std::string TrimToml(std::string text) {
++  const size_t begin = text.find_first_not_of(" \t");
++  const size_t end = text.find_last_not_of(" \t");
++  return begin == std::string::npos ? std::string() : text.substr(begin, end - begin + 1);
++}
++
++// The file's statements. `first_table` gets the line of its first [table];
++// `unknown` the lines that are none of a statement, a table, a comment or blank.
++std::vector<TomlStatement> ScanToml(const std::vector<std::string>& lines, size_t* first_table,
++                                    std::vector<size_t>* unknown) {
++  std::vector<TomlStatement> statements;
++  std::string table;
++  if (first_table) {
++    *first_table = lines.size();
++  }
++  for (size_t i = 0; i < lines.size();) {
++    const std::string& line = lines[i];
++    const size_t p = line.find_first_not_of(" \t");
++    if (p == std::string::npos || line[p] == '#') {
++      ++i;
++      continue;
++    }
++    if (line[p] == '[') {
++      if (first_table && *first_table == lines.size()) {
++        *first_table = i;
++      }
++      const size_t close = line.find(']', p);
++      table = line.compare(p, 2, "[[") == 0 || close == std::string::npos
++                  ? "\x01"
++                  : TrimToml(line.substr(p + 1, close - p - 1));
++      ++i;
++      continue;
++    }
++    TomlStatement statement;
++    size_t pos = p;
++    if (!ParseTomlKey(line, pos, statement.key)) {
++      if (unknown) {
++        unknown->push_back(i);
++      }
++      ++i;
++      continue;
++    }
++    statement.table = table;
++    statement.first = i;
++    statement.value_col = std::min(line.find_first_not_of(" \t", pos + 1), line.size());
++    const TomlPos end = SkipTomlValue(lines, {i, statement.value_col});
++    statement.last = end.line;
++    statement.value_end = end.col;
++    statements.push_back(statement);
++    i = end.line + 1;
++  }
++  return statements;
++}
++
++bool HexDigits(std::string_view text, size_t at, size_t count, uint32_t& value) {
++  if (at + count > text.size()) {
++    return false;
++  }
++  value = 0;
++  for (size_t i = at; i < at + count; ++i) {
++    const char c = text[i];
++    if (!std::isxdigit(static_cast<unsigned char>(c))) {
++      return false;
++    }
++    value = value * 16 + uint32_t(std::isdigit(static_cast<unsigned char>(c))
++                                      ? c - '0'
++                                      : (std::tolower(static_cast<unsigned char>(c)) - 'a' + 10));
++  }
++  return true;
++}
++
++// Whether a basic string's body has only TOML escapes, including \u and \U
++// of a Unicode scalar value.
++bool ValidTomlEscapes(std::string_view body) {
++  for (size_t i = 0; i < body.size(); ++i) {
++    if (body[i] != '\\') {
++      continue;
++    }
++    const char next = i + 1 < body.size() ? body[i + 1] : '\0';
++    uint32_t code = 0;
++    if (next != '\0' && std::strchr("btnfr\"\\", next)) {
++      ++i;
++    } else if ((next == 'u' && HexDigits(body, i + 2, 4, code)) ||
++               (next == 'U' && HexDigits(body, i + 2, 8, code))) {
++      if (code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
++        return false;
++      }
++      i += next == 'u' ? 5 : 9;
++    } else {
++      return false;
++    }
++  }
++  return true;
++}
++
++// A one-line double-quoted value whose backslashes are not TOML escapes, as
++// older saves wrote Windows paths, as the same text in a literal string; empty
++// when it isn't one (or holds a quote, which a literal string can't).
++std::string LiteralForBrokenString(const std::string& line, size_t value_col) {
++  if (value_col >= line.size() || line[value_col] != '"' ||
++      line.compare(value_col, 3, "\"\"\"") == 0) {
++    return {};
++  }
++  const size_t close = line.rfind('"');
++  if (close <= value_col) {
++    return {};
++  }
++  const std::string body = line.substr(value_col + 1, close - value_col - 1);
++  const std::string tail = TrimToml(line.substr(close + 1));
++  if (body.find_first_of("\"'") != std::string::npos || (!tail.empty() && tail[0] != '#') ||
++      ValidTomlEscapes(body)) {
++    return {};
++  }
++  return line.substr(0, value_col) + "'" + body + "'" + line.substr(close + 1);
++}
++
++std::string TablePrefix(std::string table) {
++  table.erase(std::remove(table.begin(), table.end(), '"'), table.end());
++  std::replace(table.begin(), table.end(), '.', '_');
++  return table;
++}
++
++// A file toml++ rejects is read again statement by statement, so that one bad
++// line no longer costs every setting in it: each statement that parses on its
++// own applies (with its [table] prefix), a double-quoted value that fails only
++// for its backslashes is taken as written, and the rest is skipped with a
++// warning.
++void LoadConfigByLine(const std::filesystem::path& config_path) {
++  std::ifstream in(config_path, std::ios::binary);
++  std::stringstream content;
++  content << in.rdbuf();
++  const TomlText text = SplitToml(content.str());
++  std::vector<size_t> unknown;
++  const auto statements = ScanToml(text.lines, nullptr, &unknown);
++  int skipped = 0;
++  auto skip = [&](size_t line) {
++    REXLOG_WARN("Config: {} line {} skipped: {}", config_path.filename().string(), line + 1,
++                text.lines[line]);
++    ++skipped;
++  };
++  for (size_t line : unknown) {
++    skip(line);
++  }
++  for (const TomlStatement& statement : statements) {
++    if (statement.table == "\x01") {
++      skip(statement.first);
++      continue;
++    }
++    std::string snippet;
++    for (size_t i = statement.first; i <= statement.last; ++i) {
++      snippet += text.lines[i] + "\n";
++    }
++    std::optional<toml::table> parsed;
++    try {
++      parsed = toml::parse(snippet);
++    } catch (const toml::parse_error&) {
++      if (statement.first == statement.last) {
++        const std::string literal =
++            LiteralForBrokenString(text.lines[statement.first], statement.value_col);
++        if (!literal.empty()) {
++          try {
++            parsed = toml::parse(literal);
++          } catch (const toml::parse_error&) {
++          }
++        }
++      }
++    }
++    if (!parsed) {
++      skip(statement.first);
++      continue;
++    }
++    ApplyTomlTable(*parsed, TablePrefix(statement.table));
++  }
++  REXLOG_WARN("Config: {} read statement by statement, {} line(s) skipped", config_path.string(),
++              skipped);
++}
++
++int CurrentProcessId() {
++#if defined(_WIN32)
++  return _getpid();
++#else
++  return int(getpid());
++#endif
++}
++
++// Written beside the file, flushed to the disk, then renamed over it, so
++// that a crash or a full disk can't leave half a file.
++bool WriteFileDurably(const std::filesystem::path& path, const std::string& content) {
++  auto temporary = path;
++  temporary += "." + std::to_string(CurrentProcessId()) + ".tmp";
++#if defined(_WIN32)
++  FILE* file = _wfopen(temporary.c_str(), L"wb");
++#else
++  FILE* file = std::fopen(temporary.c_str(), "wb");
++#endif
++  if (!file) {
++    return false;
++  }
++  bool ok = std::fwrite(content.data(), 1, content.size(), file) == content.size();
++  ok = std::fflush(file) == 0 && ok;
++#if defined(_WIN32)
++  ok = _commit(_fileno(file)) == 0 && ok;
++#else
++  ok = fsync(fileno(file)) == 0 && ok;
++#endif
++  ok = std::fclose(file) == 0 && ok;
++  std::error_code error;
++  if (ok) {
++    std::filesystem::rename(temporary, path, error);
++    ok = !error;
++  }
++  if (!ok) {
++    std::filesystem::remove(temporary, error);
++  }
++  return ok;
++}
++
++// Sets these `key = value` statements (values already in TOML form) in the
++// file: each replaced where it is, keeping a comment after it, or added
++// before the first [table]; every other line kept. False, with the file as
++// it was, when it can't be read or written.
++bool MergeIntoToml(const std::filesystem::path& path,
++                   const std::vector<std::pair<std::string, std::string>>& values) {
++  std::string old_text;
++  std::error_code error;
++  if (std::filesystem::exists(path, error)) {
++    std::ifstream in(path, std::ios::binary);
++    std::stringstream content;
++    if (in) {
++      content << in.rdbuf();  // (sets failbit on `content` for an empty file)
++    }
++    if (!in || in.bad()) {
++      REXLOG_ERROR("Config: could not read {}; not changed", path.string());
++      return false;
++    }
++    old_text = content.str();
++  } else if (error) {
++    REXLOG_ERROR("Config: could not check {}: {}", path.string(), error.message());
++    return false;
++  }
++  TomlText text = SplitToml(old_text);
++  if (text.lines.empty()) {
++    text.lines.push_back("# Settings");
++  }
++  std::vector<bool> written(values.size(), false);
++  const auto statements = ScanToml(text.lines, nullptr, nullptr);
++  // From the last statement up, so that the line numbers of those above hold.
++  for (auto it = statements.rbegin(); it != statements.rend(); ++it) {
++    bool own = false;
++    for (size_t k = 0; k < values.size() && it->table.empty(); ++k) {
++      if (it->key != values[k].first) {
 +        continue;
 +      }
-+      prefix = line.substr(first + 1, close - first - 1);
-+      prefix.erase(0, prefix.find_first_not_of(" \t"));
-+      prefix.erase(prefix.find_last_not_of(" \t") + 1);
-+      for (char& c : prefix) {
-+        if (c == '.') {
-+          c = '_';
-+        }
-+      }
-+      continue;
++      const std::string& last = text.lines[it->last];
++      const std::string after = last.substr(std::min(it->value_end, last.size()));
++      text.lines[it->first] = text.lines[it->first].substr(0, it->value_col) + values[k].second + after;
++      text.lines.erase(text.lines.begin() + std::ptrdiff_t(it->first + 1),
++                       text.lines.begin() + std::ptrdiff_t(it->last + 1));
++      written[k] = own = true;
++      break;
 +    }
-+    if (prefix == "\x01") {
-+      ++skipped;
-+      continue;
-+    }
-+    std::optional<toml::table> table;
-+    try {
-+      table = toml::parse(line);
-+    } catch (const toml::parse_error&) {
-+      const size_t equals = line.find('=');
-+      const size_t open =
-+          equals == std::string::npos ? std::string::npos : line.find_first_not_of(" \t", equals + 1);
-+      const size_t close = line.rfind('"');
-+      if (open != std::string::npos && line[open] == '"' && close != std::string::npos &&
-+          close > open && line.find('\'', open) == std::string::npos) {
-+        std::string literal = line.substr(0, open) + "'" + line.substr(open + 1, close - open - 1) +
-+                              "'" + line.substr(close + 1);
-+        try {
-+          table = toml::parse(literal);
-+        } catch (const toml::parse_error&) {
-+        }
++    if (!own && it->first == it->last) {
++      std::string literal = LiteralForBrokenString(text.lines[it->first], it->value_col);
++      if (!literal.empty()) {
++        text.lines[it->first] = std::move(literal);
 +      }
 +    }
-+    if (!table) {
-+      REXLOG_WARN("Config: {} line {} skipped: {}", config_path.filename().string(), line_number,
-+                  line);
-+      ++skipped;
-+      continue;
-+    }
-+    ApplyTomlTable(*table, prefix);
 +  }
-+  REXLOG_WARN("Config: {} read line by line, {} line(s) skipped", config_path.string(), skipped);
++  size_t first_table = 0;
++  ScanToml(text.lines, &first_table, nullptr);
++  std::vector<std::string> added;
++  for (size_t k = 0; k < values.size(); ++k) {
++    if (!written[k]) {
++      added.push_back(values[k].first + " = " + values[k].second);
++    }
++  }
++  text.lines.insert(text.lines.begin() + std::ptrdiff_t(first_table), added.begin(), added.end());
++  if (!WriteFileDurably(path, JoinToml(text))) {
++    REXLOG_ERROR("Config: could not write {}; not changed", path.string());
++    return false;
++  }
++  return true;
 +}
 +
  // todo(tomc): move restart manager to Runtime
  std::vector<std::string>& GetPendingRestartStorage() {
    static std::vector<std::string> pending;
-@@ -541,7 +650,7 @@ std::string SerializeToTOML() {
+@@ -541,7 +1053,7 @@ std::string SerializeToTOML() {
    for (const auto& entry : GetRegistryStorage()) {
      if (entry.getter() != entry.default_value) {
        if (entry.type == FlagType::String) {
@@ -134,7 +566,7 @@ index 228728d..64feaa9 100644
        } else {
          result += entry.name + " = " + entry.getter() + "\n";
        }
-@@ -556,7 +665,7 @@ std::string SerializeToTOML(std::string_view category) {
+@@ -556,7 +1068,7 @@ std::string SerializeToTOML(std::string_view category) {
    for (const auto& entry : GetRegistryStorage()) {
      if (entry.category == category && entry.getter() != entry.default_value) {
        if (entry.type == FlagType::String) {
@@ -143,7 +575,7 @@ index 228728d..64feaa9 100644
        } else {
          result += entry.name + " = " + entry.getter() + "\n";
        }
-@@ -648,6 +757,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
+@@ -648,6 +1160,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
      REXLOG_DEBUG("Loaded config from {}", config_path.string());
    } catch (const toml::parse_error& err) {
      REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
@@ -151,3 +583,86 @@ index 228728d..64feaa9 100644
    }
  }
  
+@@ -690,25 +1203,69 @@ bool IsFinalized() {
+   return g_finalized;
+ }
+ 
++bool SaveConfigValues(const std::filesystem::path& config_path,
++                      const std::vector<std::string>& names) {
++  std::vector<std::pair<std::string, std::string>> values;
++  {
++    std::lock_guard lock(GetRegistryMutex());
++    for (const std::string& name : names) {
++      auto it = GetRegistryIndex().find(name);
++      if (it == GetRegistryIndex().end()) {
++        continue;
++      }
++      const FlagEntry& entry = GetRegistryStorage()[it->second];
++      if (entry.type == FlagType::Command) {
++        continue;
++      }
++      values.emplace_back(entry.name, entry.type == FlagType::String ? TomlString(entry.getter())
++                                                                      : entry.getter());
++    }
++  }
++  return values.empty() || MergeIntoToml(config_path, values);
++}
++
+ void SaveConfig(const std::filesystem::path& config_path) {
+-  std::string content = SerializeToTOML();
+-  if (content.empty()) {
+-    REXLOG_DEBUG("SaveConfig: no modified flags to save");
++  // What was changed while running (this overlay's settings, an app's own
++  // menus), merged into the file. Values from the command line or the
++  // environment stay out of it, and so do an app's own defaults
++  // (SetDefaultValue), which are not changes.
++  std::vector<std::string> names;
++  {
++    std::lock_guard lock(GetRegistryMutex());
++    for (const FlagEntry& entry : GetRegistryStorage()) {
++      if (entry.source == Source::kRuntime && entry.type != FlagType::Command) {
++        names.push_back(entry.name);
++      }
++    }
++  }
++  if (names.empty()) {
++    REXLOG_DEBUG("SaveConfig: nothing was changed");
+     return;
+   }
++  if (SaveConfigValues(config_path, names)) {
++    REXLOG_INFO("Saved config to {}", config_path.string());
++  }
++}
+ 
+-  try {
+-    std::ofstream file(config_path);
+-    if (!file) {
+-      REXLOG_ERROR("SaveConfig: failed to open {}", config_path.string());
+-      return;
++bool SetDefaultValue(std::string_view name, std::string_view value) {
++  std::lock_guard lock(GetRegistryMutex());
++  auto it = GetRegistryIndex().find(std::string(name));
++  if (it == GetRegistryIndex().end()) {
++    return false;
++  }
++  FlagEntry& entry = GetRegistryStorage()[it->second];
++  if (!ValidateConstraints(entry, value)) {
++    return false;
++  }
++  if (entry.source == Source::kDefault) {
++    if (!entry.setter(value)) {
++      return false;
+     }
+-    file << "# Auto-generated cvar configuration\n";
+-    file << content;
+-    REXLOG_INFO("Saved config to {}", config_path.string());
+-  } catch (const std::exception& e) {
+-    REXLOG_ERROR("SaveConfig: {}", e.what());
++    entry.default_value = entry.getter();
++  } else {
++    entry.default_value = std::string(value);
+   }
++  return true;
+ }
+ 
+ namespace testing {
