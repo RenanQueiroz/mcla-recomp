@@ -17,7 +17,9 @@ kinds of changes on top of upstream's `main`:
     (resolution, graphics API, the pointer, anti-aliasing during play), restart-only
     rows marked, RESTART GAME, and a QUIT GAME that closes the game; closing
     waits for a career save being written; plus the launcher's four SDK
-    settings as the game's PC defaults (`KNOWN-ISSUES.md`).
+    settings as the game's PC defaults, and the single-tile hook's comments
+    corrected: it has never taken effect, and can't without a larger EDRAM
+    in the SDK (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,

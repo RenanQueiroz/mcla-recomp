@@ -57,7 +57,7 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Resolution | Native (720p), 2× (1440p), 3× (2160p, 4K) | `resolution_scale` = `1`, `2` or `3` | DISPLAY › RESOLUTION (next start) |
 | Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `mcla_fps` (0 for uncapped) | DISPLAY › FPS TARGET |
 | Display | Fullscreen, Windowed | `fullscreen` = `true` or `false` | DISPLAY › FULLSCREEN |
-| Anti-aliasing | On (2× MSAA), Off (about 20% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
+| Anti-aliasing | On (2× MSAA), Off (one tile instead of two: 8 to 18% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
 | HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `mcla_ui_hud_rate` = `30`, `60`, `120` or `0` | DISPLAY › HUD UPDATES |
 | Graphics API | Automatic (Direct3D 12 first), Direct3D 12, Vulkan | `mcla_gpu_backend` = `any`, `d3d12` or `vulkan` | DISPLAY › GRAPHICS API (next start) |
 | Intro | Normal, Fast, Skip (hides the title logo) | `mcla_intro` = `normal`, `fast` or `skip` | CONTROLS › INTRO (next start) |

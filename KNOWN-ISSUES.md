@@ -225,3 +225,26 @@ The launcher passed its choices on the command line at every start, and the comm
 **devrun** (`launcher\dev\devrun.py`) follows a RESTART GAME: it waits for the restarted game too, then puts `mcla.toml` back and checks the real data. Putting the file back is in a `finally`, after closing any game of the run, so an error or Ctrl+C on the way leaves the real file as it was. It no longer passes the four SDK settings, which are the game's defaults now. The dev pad has `saving` (whether a save is being written; `saving wait` until one is) and `close` (the close button's WM_CLOSE, which unlike `quit` waits for a save).
 
 **Not verified:** Linux, where RESTART GAME isn't offered, and the PS5, whose menus have none of the Windows rows. The PC defaults apply on Linux too, where the fork's patches have not been built or run.
+
+## Single-tile rendering has never taken effect (2026-10-16)
+
+Upstream's `mcla_single_tile` (on by default; PERFORMANCE › SINGLE TILE RENDERING in the pause menu) was meant to draw the main scene as one predicated tile instead of the Xbox 360's two. Every scene draw is submitted once per tile: 1280x512 and 1280x208 at 1x, about 1,370 draws each in the city. It has never changed anything, for two reasons:
+- **The hook never acts.** It acts only on a null render target in `grcDevice::BeginTiledRendering` (`sub_8217A470`), a condition taken from LARecomp. No call passes one in this game, the main scene's included: thousands of calls a session were logged on both APIs, at native and 3x, through the title, the city, the menus and a race, and the hook acted on none of them.
+- **The SDK has no room for one tile.** A 720p 2x MSAA tile needs 1,472 EDRAM tiles for the colour and as many for the depth. The SDK's EDRAM is the console's 2,048 tiles with addresses wrapping round, not the 4,096 the hook's comment claimed. Forced onto the main scene, the colour wraps into the depth's tiles: the picture is right down to row 288 (864 at 3x) and garbage below it, and the scene costs 1 ms more GPU time at 3x in EDRAM transfers.
+
+Behaviour is unchanged; the hook's comments now say this (`config/render_perf.toml`, `src/render_perf.cpp`). Making it work needs a 4,096-tile host EDRAM in the SDK:
+- every resolve shader rebuilt, on both APIs;
+- a 12-bit EDRAM base;
+- twice the memory for the EDRAM buffer and the host render targets;
+- an opt-in setting, since the console wraps at 2,048;
+- the hook aimed at the main scene's call.
+
+Estimated from the two tiles' GPU times, that would save about 0.8 ms of GPU time at 3x in the city by day (10% of the GPU frame) and 1.3 ms in the race (12%). It would also take a quarter off the GPU command thread's CPU time.
+
+With anti-aliasing off (`mcla_msaa = false`), the game draws the scene as one tile by itself. Measured by switching it within each run, at 3x:
+- **The city by day:** frames 7.6% shorter on D3D12, where the game's own limit is then reached, and 13.6% on Vulkan.
+- **The race:** 17 to 18% shorter on both APIs.
+- **Draws and the GPU command thread:** 30 to 39% fewer draws, and 22 to 41% less CPU time for the GPU command thread.
+- **Native, in the race:** 8% shorter frames on D3D12 and 22% on Vulkan, where that thread was the bottleneck.
+
+The pause menu and the GPS map keep their own three 4x tiles. Measurements and method: `launcher/dev/single-tile-2026-10-16.md`.
