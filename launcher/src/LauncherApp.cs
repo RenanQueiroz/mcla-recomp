@@ -464,7 +464,7 @@ sealed class LauncherApp : Component
                     Combo("Frame rate", GameOptions.Fps, settings.Fps, (s, i) => s with { Fps = i }),
                     Combo("Display", GameOptions.Display, settings.Display, (s, i) => s with { Display = i }),
                     Combo("Anti-aliasing", GameOptions.AntiAliasing, settings.AntiAliasing, (s, i) => s with { AntiAliasing = i }),
-                    Combo("HUD updates", GameOptions.HudUpdates, settings.HudUpdates, (s, i) => s with { HudUpdates = i }),
+                    Combo("HUD updates", GameOptions.HudRate, settings.HudRate, (s, i) => s with { HudRate = i }),
                     Combo("Graphics API", GameOptions.GraphicsApi, settings.GraphicsApi, (s, i) => s with { GraphicsApi = i })),
                 Subtitle("Game"),
                 Pairs(

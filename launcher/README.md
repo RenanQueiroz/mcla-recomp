@@ -57,8 +57,10 @@ in `KNOWN-ISSUES.md` (game) or `patches\README.md` (SDK).
 The launcher passes every game option explicitly (`--resolution_scale=1` for Native,
 `--vsync=false` with every frame rate): the in-game menu saves what is in effect to
 `mcla.toml`, which would otherwise win over an option left off the command line.
-`--vsync=false` has to be on the command line: set from the game, it reaches only
-mcla.exe's copy of the setting, and the GPU plugin keeps vsync on (60 FPS cap).
+With vsync on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and
+paces it unevenly; the game also turns it off by itself when nothing sets it.
+(An earlier note here said vsync set from the game never reached the GPU plugin;
+rechecked on 2026-10-16, it does, at start and from the pause menu.)
 
 *Anti-aliasing* sets the game's 2× MSAA (`--mcla_msaa`). Off, a 3× frame took
 18 to 25% less time on the title screen (13.2 → 9.9 ms in the night city view,
@@ -77,15 +79,20 @@ shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`). Left out when
 *More mcla.exe options* sets `mcla_gpu_backend`.
 
-*HUD updates* (`--mcla_ui_timing_hud`) sets how often the HUD's Flash movies
-(gauges, minimap, song ticker) take a step. The game steps them once per update,
-which was 30 a second on the console. *Match frame rate* (the default) keeps the
-gauges smooth, but above 30 FPS the song ticker scrolls faster (4× at 120).
-*Match console* steps them 30 times a second: the ticker scrolls at its original
-speed and the needles move in 30 Hz steps. Menus, pop-ups and the GPS panels keep
-the console's pace either way (`mcla_ui_timing_fix`, `KNOWN-ISSUES.md`).
-Not in the game's menu, so there is no "Game setting" choice; left out when *More
-mcla.exe options* sets `mcla_ui_timing_hud`.
+*HUD updates* (`--mcla_ui_hud_rate`) sets how many times a second the HUD's
+Flash movies (gauges, minimap, song ticker, the LOADING badge) take a step: 30
+(the default, as on the console), 60, 120, or every frame (0). The ticker scrolls
+one step at a time and the needles move only when it steps, so at 30 the ticker
+scrolls at its original speed and the needles move in 30 Hz steps; 60 and 120
+make the needles smoother and the ticker two and four times as fast (at a 120 FPS
+cap: 59, 118, 237 and 239 px/s at 720p for 30, 60, 120 and every frame). Menus,
+pop-ups and the GPS panels keep the console's pace whatever it is set to
+(`mcla_ui_timing_fix`, `KNOWN-ISSUES.md`). The game's pause menu has the same
+setting (DISPLAY > HUD UPDATES), but for now the launcher passes its choice
+every start, so a change made there lasts until the game is closed. Left out when
+*More mcla.exe options* sets `mcla_ui_hud_rate`. This replaced a two-way choice
+(`--mcla_ui_timing_hud`) whose default was every frame; the old saved choice is
+not carried over.
 
 It also always passes SDK settings that measured faster (in-run A/B; the first
 two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
@@ -280,7 +287,11 @@ in front. A real controller keeps working alongside it.
   `%LOCALAPPDATA%\mcla-dev\work` from it and passes `--user_data_root` and
   `--cache_root` there, backs up `mcla.toml` next to `mcla.exe` and puts it back
   after the run, and stops if the real save, achievements or `mcla.toml`
-  changed. `run` runs one script, `bench` repeats one per configuration
+  changed. `--toml <file>` starts a run with that `mcla.toml` instead (`none`:
+  with none), and what the game saved there (the pause menu's settings) is kept
+  as `mcla.toml.after` in the run folder. `--vsync unset` leaves `--vsync` off
+  the command line, which otherwise has `--vsync=false`, as the launcher passes.
+  `run` runs one script, `bench` repeats one per configuration
   (alternating, e.g. `--configs d3d12:1,vulkan:1`) and reports each segment's
   median frame time, 1% low and run-to-run spread, `analyze` reads a run.
   `devrun.py prepare --refresh` takes a new snapshot after you have played on.

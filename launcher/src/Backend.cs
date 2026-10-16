@@ -55,11 +55,10 @@ static class GameOptions
     // what is in effect to mcla.toml, and a value left off the command line would
     // fall back to that file instead of the choice shown here.
     //
-    // The recomp paces frames with its own limiter and means vsync to be off,
-    // but turns it off only in mcla.exe's copy of the setting; the GPU plugin
-    // keeps vsync on, and its emulated 60 Hz vblank (driven by a 1 ms sleep loop)
-    // then caps the game at 60 and paces it unevenly at any target. On the
-    // command line the setting reaches the plugin too.
+    // The recomp paces frames with its own limiter and means vsync to be off:
+    // with it on, the GPU plugin's emulated 60 Hz vblank (driven by a 1 ms
+    // sleep loop) caps the game at 60 and paces it unevenly at any target. The
+    // game also turns it off by itself when nothing sets it.
     //
     // 40-50 are for G-Sync/FreeSync displays: a cap the game holds even in its
     // heaviest scenes gives constant frame times, which look smoother than a
@@ -81,13 +80,16 @@ static class GameOptions
     public static readonly Choice[] AntiAliasing = [new(Unset, null), new("On (2× MSAA)", "--mcla_msaa=true"), new("Off (about 20% faster at 3×)", "--mcla_msaa=false")];
     // The GPU plugin's backend. Left unset it tries Direct3D 12 first.
     public static readonly Choice[] GraphicsApi = [new(Unset, null), new("Direct3D 12", "--mcla_gpu_backend=d3d12"), new("Vulkan", "--mcla_gpu_backend=vulkan")];
-    // The HUD's Flash movies (gauges, minimap, song ticker) take one step per
-    // game update. At the console's 30 a second the ticker scrolls at its
-    // original speed but the needles move in 30 Hz steps; at the frame rate the
-    // gauges are smooth and the ticker runs faster above 30 FPS. Menus keep the
-    // console's pace either way. Not in the game's menu, so no "Game setting".
-    public static readonly Choice[] HudUpdates = [new("Match frame rate (smooth gauges)", "--mcla_ui_timing_hud=false"),
-        new("Match console (30 per second)", "--mcla_ui_timing_hud=true")];
+    // How many times a second the HUD's Flash movies (gauges, song ticker,
+    // LOADING badge) take a step. The ticker scrolls one step at a time, so at
+    // the console's 30 it runs at its original speed and the needles move in
+    // 30 Hz steps; 60 and 120 make the needles smoother and the ticker 2 and 4
+    // times as fast; "every frame" steps them with every rendered frame. Menus
+    // keep the console's pace either way. Passed every start for now (no "Game
+    // setting"); the pause menu's DISPLAY > HUD UPDATES changes it until then.
+    public static readonly Choice[] HudRate = [new("30 per second (as on the console)", "--mcla_ui_hud_rate=30"),
+        new("60 per second", "--mcla_ui_hud_rate=60"), new("120 per second", "--mcla_ui_hud_rate=120"),
+        new("Every frame", "--mcla_ui_hud_rate=0")];
 
     // SDK settings that measured faster on MCLA (see README.md), always passed:
     // - uploaded guest memory stays valid across frames instead of being copied
@@ -116,9 +118,9 @@ static class GameOptions
         // Left out when the extra options set them, like the defaults above.
         var antiAliasing = extra.Contains("mcla_msaa") ? null : Pick(AntiAliasing, s.AntiAliasing);
         var graphicsApi = extra.Contains("mcla_gpu_backend") ? null : Pick(GraphicsApi, s.GraphicsApi);
-        var hudUpdates = extra.Contains("mcla_ui_timing_hud") ? null : Pick(HudUpdates, s.HudUpdates);
+        var hudRate = extra.Contains("mcla_ui_hud_rate") ? null : Pick(HudRate, s.HudRate);
         var args = new[] { Pick(Display, s.Display), Pick(Resolution, s.Resolution), Pick(Fps, s.Fps),
-                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing, graphicsApi, hudUpdates }.Concat(tuning).Append(extra);
+                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing, graphicsApi, hudRate }.Concat(tuning).Append(extra);
         return string.Join(" ", args.Where(a => !string.IsNullOrEmpty(a)));
     }
 }
@@ -135,7 +137,9 @@ sealed record LauncherSettings
     public int Prompts { get; init; }
     public int AntiAliasing { get; init; }
     public int GraphicsApi { get; init; }
-    public int HudUpdates { get; init; }
+    // An index into GameOptions.HudRate. It replaced HudUpdates (a two-way
+    // choice whose default was every frame), whose saved value is dropped.
+    public int HudRate { get; init; }
     public string ExtraArguments { get; init; } = "";
     public bool CheckForUpdates { get; init; } = true;
     public bool CloseOnLaunch { get; init; } = true;
