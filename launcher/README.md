@@ -124,12 +124,23 @@ as 48, 115 and 185. In a night scene the average brightness went from 46 to 60
 of 255 with *PC monitor* (`KNOWN-ISSUES.md`).
 
 *Anti-aliasing* is the game's 2× MSAA (`mcla_msaa`), and it switches during play
-too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, the game draws the scene
-as one tile instead of two: a 3× frame is 8 to 18% shorter (7.6% in the city by
-day on D3D12, where the game's own limit is then reached, 13.6% on Vulkan, 17 to
-18% in the race on both; `dev\single-tile-2026-10-16.md`), for slightly more
-jagged thin edges such as pylons and billboard frames; the dithered foliage looks
-cleaner. (Before the clear-rectangle and direct-resolve work it was 18 to 25%.)
+too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, a 3× frame is 2 to 5%
+shorter than on with single-tile rendering (2.1 and 3.1% in the city by day on
+D3D12 and Vulkan, 2.7 and 5.3% in the race), for slightly more jagged thin edges
+such as pylons and billboard frames; the dithered foliage looks cleaner. Against
+anti-aliasing on in two tiles it was 8 to 18% (`dev\single-tile-2026-10-16.md`).
+
+*Single tile rendering* (`mcla_single_tile`, on by default) draws the scene with
+anti-aliasing on once instead of in the Xbox 360's two tiles, in the larger
+EDRAM (4,096 tiles instead of the console's 2,048) the game asks the GPU plugin
+for on PC (`edram_tiles`). It switches during play (the pause menu's PERFORMANCE
+> SINGLE TILE RENDERING). Against two tiles, a 3× frame is 9 to 11% shorter in
+the city by day and 15 to 20% in the race, the GPU command thread uses 28 to
+35% less CPU time, and at native the race is 14% (D3D12) to 25% (Vulkan) faster;
+with a 120 FPS cap at 3× in the city, 99% of frames are within 1 ms of the target
+instead of 93 to 94% (`dev\single-tile-edram-2026-10-16.md`). Off, the scene is
+drawn as on the console. With `--edram_tiles=2048` there is no room for one tile:
+the pause menu's row says UNAVAILABLE and nothing changes either way.
 
 *Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which
 tries Direct3D 12 first, `d3d12` or `vulkan`). Every setting and SDK patch here
@@ -314,15 +325,21 @@ during a build:
   byte; differences, and every 50 a summary per kind (copy shader, MSAA,
   formats, samples, conversion), go to the log. With
   `rexglue-resolve-4xmsaa-depth-samples.patch` in, no difference is expected.
-- `single-tile-2026-10-16.md`: why `mcla_single_tile` never takes effect (no
-  call passes a null render target, and the SDK's EDRAM is 2,048 tiles, too
+- `single-tile-2026-10-16.md`: why `mcla_single_tile` never took effect (no
+  call passes a null render target, and the SDK's EDRAM was 2,048 tiles, too
   few for a 720p 2x MSAA tile), what one tile would be worth and what it
-  needs, and MSAA on against off (one tile) on both APIs.
-- `single-tile-diag.patch` (game, `src\render_perf.cpp`, `TMPTILE`): logs each
-  kind of `BeginTiledRendering` call (caller, render target, MSAA, tile size,
-  tile count, whether the hook acted) and the EDRAM limit hook's surfaces past
-  2,048 tiles; `mcla_dev_tile_force=1` forces the single tile on the main
-  scene (the picture breaks below row 288 at 1x).
+  needs, and MSAA on against off (one tile) on both APIs. Fixed since (next
+  entry); its diagnostic game patch, `single-tile-diag.patch`, was for the old
+  hook and is only in the history.
+- `single-tile-edram-2026-10-16.md`: single-tile rendering that works, in a
+  4,096-tile EDRAM (`rexglue-edram-size.patch`): what changed in the SDK and
+  the game, the checks, one tile against two (and anti-aliasing off) on both
+  APIs at native and 3x, and with a 120 FPS cap; why mode switches without the
+  pause menu can leave the vehicles in the other MSAA mode.
+- `edram-wrap-log.sdk.patch` (SDK, `TMPWRAP`): logs every new kind of EDRAM
+  ownership range or resolve area that crosses tile 2,048 (with the console's
+  EDRAM, the ranges that wrap around), with a count every 5,000. Goes on top of
+  `rexglue-edram-size.patch`.
 
 ## Scripted controller input (unattended runs)
 

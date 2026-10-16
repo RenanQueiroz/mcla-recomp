@@ -17,7 +17,7 @@ Everything this fork adds was built and measured on **Windows only**, with an **
 | Linux, Vulkan | Upstream's build plays: free roam holds 30 FPS on an Intel Core Ultra 5 238V laptop (Mesa ANV), tested by one user. The fork's SDK patches apply on top, but have not been built or run there. |
 | PS5 (jailbroken) | Upstream's build plays at a steady 30 FPS on a PS5 Pro (firmware 13.42), 20 to 25 in the zoomed-out map, and was installed and played on a PS5 Slim (firmware 12.70). The fork's `make_ps5.sh` also applies the fork's SDK patches, which have not been built or run on a console. |
 
-On the test machine, with the launcher's settings: at native resolution the game's own thread sets the pace, at about 6.8 ms a frame (about 145 FPS uncapped in free roam). At 3× (4K) a 120 FPS cap holds in free roam and while driving in the city, with 93% of frames within 1 ms of the target on D3D12 and 97% on Vulkan. Races at 3× run at a median of 9.3 ms a frame on D3D12 and 10.8 ms on Vulkan, uncapped. Method and per-change figures: [patches/README.md](patches/README.md).
+On the test machine, with the launcher's settings: at native resolution the game's own thread sets the pace, at about 6.8 ms a frame (about 145 FPS uncapped in free roam). At 3× (4K) a 120 FPS cap holds in free roam and while driving in the city, with 93% of frames within 1 ms of the target on D3D12 and 97% on Vulkan (99% on both standing in the city by day since single-tile rendering). Races at 3× run at a median of 8.1 ms a frame on D3D12 and 9.3 ms on Vulkan in the race benchmark, uncapped (10.1 and 10.9 ms with the scene in two tiles). Method and per-change figures: [patches/README.md](patches/README.md) and `launcher/dev/single-tile-edram-2026-10-16.md`.
 
 Car reflections are fixed on every renderer (upstream's fix: cars no longer come out white with a glow at night):
 
@@ -58,7 +58,8 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `mcla_fps` (0 for uncapped) | DISPLAY › FPS TARGET |
 | Display | Fullscreen, Windowed | `fullscreen` = `true` or `false` | DISPLAY › FULLSCREEN |
 | Display gamma | TV (as on the console), PC monitor (sRGB, brighter shadows) | `mcla_display_gamma` = `tv` or `pc` | DISPLAY › DISPLAY GAMMA |
-| Anti-aliasing | On (2× MSAA), Off (one tile instead of two: 8 to 18% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
+| Anti-aliasing | On (2× MSAA), Off (2 to 5% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
+| Single tile rendering | On (the scene drawn once instead of in two tiles: 9 to 20% faster at 3×), Off (two tiles, as on the console) | `mcla_single_tile` = `true` or `false` | PERFORMANCE › SINGLE TILE RENDERING |
 | HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `mcla_ui_hud_rate` = `30`, `60`, `120` or `0` | DISPLAY › HUD UPDATES |
 | Graphics API | Automatic (Direct3D 12 first), Direct3D 12, Vulkan | `mcla_gpu_backend` = `any`, `d3d12` or `vulkan` | DISPLAY › GRAPHICS API (next start) |
 | Intro | Normal, Fast, Skip (hides the title logo) | `mcla_intro` = `normal`, `fast` or `skip` | CONTROLS › INTRO (next start) |
@@ -72,7 +73,7 @@ Under *Advanced* are **More mcla.exe options** (any other options, for example `
 
 Launchers before this one passed their choices on the command line at every start, which beat what the pause menu saved. The first time this one opens, it writes the choices that were forcing a value into `mcla.toml` (with `vsync = false`, which came with every frame rate), so nothing changes for you, after keeping a copy of the file as `mcla.toml.before-launcher-settings` next to it. That happens once: the copy marks it as done, and `settings.json` no longer keeps the old choices. If the game is running then, it waits until the game has closed ([launcher/README.md](launcher/README.md#the-games-settings)).
 
-On PC the game also uses four SDK settings that measured faster on this game as its own defaults (`src/mcla_app.cpp`): `clear_memory_page_state=false`, `execute_unclipped_draw_vs_on_cpu=true`, and hot pages, `shared_memory_hot_page_faults=4` with `shared_memory_hot_page_ms=10000`, as upstream's PS5 build runs. The launcher used to pass them. An option on the command line or a line in `mcla.toml` replaces each of them.
+On PC the game also uses four SDK settings that measured faster on this game as its own defaults (`src/mcla_app.cpp`): `clear_memory_page_state=false`, `execute_unclipped_draw_vs_on_cpu=true`, and hot pages, `shared_memory_hot_page_faults=4` with `shared_memory_hot_page_ms=10000`, as upstream's PS5 build runs. The launcher used to pass them. A fifth, `edram_tiles=4096`, gives the GPU the larger EDRAM single-tile rendering needs. An option on the command line or a line in `mcla.toml` replaces each of them.
 
 ### Without the launcher
 
@@ -86,7 +87,7 @@ This is upstream's one command, with the fork's patches. It leaves a **Midnight 
 
 Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120`; they win over `mcla.toml`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on.
 
-The pause menu's Settings tab has three extra submenus. DISPLAY has the frame-rate target, HUD updates, vsync, fullscreen, resolution, graphics API, display gamma, motion blur and depth of field; PERFORMANCE has the detail options and anti-aliasing; CONTROLS has button prompts, intro speed and hiding the mouse pointer. What you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds; it is also saved when the window is closed with a submenu open.
+The pause menu's Settings tab has three extra submenus. DISPLAY has the frame-rate target, HUD updates, vsync, fullscreen, resolution, graphics API, display gamma, motion blur and depth of field; PERFORMANCE has single-tile rendering, the detail options and anti-aliasing; CONTROLS has button prompts, intro speed and hiding the mouse pointer. What you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds; it is also saved when the window is closed with a submenu open.
 
 Rows marked *(NEXT START)* take effect when the game next starts, and say *(RESTART NEEDED)* once changed. **RESTART GAME** (Windows; press it twice) saves, starts the game again with the same options and closes this one; the new one waits for the old one to have closed (if it hasn't within 30 seconds, it says so and doesn't start). As with **QUIT GAME**, progress since the last save is lost. QUIT GAME, RESTART GAME and the window's close button let a career save that is being written finish first, for up to 10 seconds.
 
@@ -119,6 +120,7 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | Change | Effect |
 |---|---|
 | Direct3D 9-style clear rectangles done as host render target clears, not copies between MSAA modes | 13 to 32% shorter frames at 3× |
+| Single-tile rendering: with anti-aliasing on, the scene is drawn once instead of in the console's two tiles, in a 4,096-tile EDRAM the game asks the SDK for on PC | 9 to 11% shorter frames at 3× in the city, 15 to 20% in a race; 28 to 35% less GPU command thread time; a 120 FPS cap at 3× in the city 93-94% to 99% of frames within 1 ms |
 | Resolves read the render target directly instead of dumping it into the EDRAM buffer first | 7 to 12% shorter frames at 3× in the city, 4 to 9% in a race; with it a 120 FPS cap holds at 3× in the city |
 | The EDRAM buffer path reads the right 4x MSAA depth samples at odd resolution scales | no more columns 4 pixels wide, 120 apart at 3×, in the daylight depth |
 | Resolved textures decoded straight into the texture, not through a buffer and a copy | 4 to 6% shorter frames at 3× |
@@ -161,7 +163,6 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | Loading-screen pacing | uncapped free roam at native: mean 81 to 145 FPS; the fast intro speeds up only the start-up logos |
 | The pause menu's settings: only what you change is saved, merged into `mcla.toml`, also when the window is closed; the FPS list has 40, 45 and 50; resolution, graphics API and hiding the pointer added; anti-aliasing switches during play; restart-only rows say so, and *(RESTART NEEDED)* once changed; RESTART GAME; the tabs come back after a submenu | command-line options and paths no longer end up in the file, and a file with an old-style path loads again (`patches/rexglue-cvar-toml-strings.patch`); QUIT GAME closes the game (it left it running behind a window that no longer answered); closing waits for a career save being written |
 | A display gamma setting: the console's TV ramp (the default) or sRGB for PC monitors, switched during play | on a PC monitor the shadows as the game drew them: a night scene's average brightness 46 to 60 of 255 |
-| The pause menu's SINGLE TILE RENDERING row removed | it never had an effect (`mcla_single_tile` is kept as it was) |
 | The launcher edits `mcla.toml` instead of passing options | the launcher and the pause menu show and change the same settings; a choice made in the game sticks |
 | Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD at 30 a second by default, or 60, 120 or every frame | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before); the song title under the speedometer scrolls at its original speed |
 
@@ -184,6 +185,8 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Unclipped draws' vertex shaders on the CPU (PC default) | `--execute_unclipped_draw_vs_on_cpu=false` | The SDK's default. |
 | Clear rectangles as host clears | `--clear_rectangle_draws=false` | |
 | Direct resolves | `--direct_host_resolve=false` | |
+| Single-tile rendering | `--mcla_single_tile=false` | Or the launcher's *Single tile rendering*, or PERFORMANCE › SINGLE TILE RENDERING in the pause menu, which takes effect at once. |
+| The 4,096-tile EDRAM (PC default) | `--edram_tiles=2048` | The SDK's default, the console's size; single-tile rendering then has no room and is off (its pause menu row says UNAVAILABLE). |
 | Resolved textures decoded straight in | `--texture_load_direct=false` | Takes effect at once; turning it back on needs a restart. |
 | No frame wait for new pipelines | `--async_pipeline_end_of_frame_wait=true` | Restores the wait. The old behaviour in full also needs `--async_pipeline_wait_budget_ms=0 --vulkan_async_skip_incomplete_frames_max_ms=0 --vulkan_async_placeholder_pipelines=true`. |
 | Register writes in bulk | `--gpu_regwrite_bulk=false` | |

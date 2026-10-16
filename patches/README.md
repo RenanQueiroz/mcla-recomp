@@ -29,6 +29,7 @@ git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
 git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
 git apply ../../patches/rexglue-cvar-toml-strings.patch
+git apply ../../patches/rexglue-edram-size.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).
@@ -703,3 +704,37 @@ Checked with a small program against the built `rexruntime.dll` (21 checks): a p
 | Change | Files | Affects |
 |---|---|---|
 | Strings saved as escaped TOML; saves merged into the file and written durably; F4 saves only what changed while running; `SaveConfigValues` and `SetDefaultValue`; a file toml++ rejects read statement by statement | `src/core/cvar.cpp`, `include/rex/cvar.h` | all platforms |
+
+## rexglue-edram-size.patch
+
+**Why.** The Xbox 360's EDRAM is 2,048 tiles (10 MiB), and the SDK emulates exactly that, with addresses wrapping around at its end. A title drawing 720p with 2x MSAA has to split the scene into predicated tiles and submit it once per tile; this game draws two (1280x512 and 1280x208), each replaying about 1,370 draws in the city. Patched to draw one tile, it needs 1,472 tiles for the colour and as many for the depth, more than the console had (`launcher/dev/single-tile-2026-10-16.md`).
+
+**What it does.** A setting, `edram_tiles` (GPU options, 2048 or 4096, read at start-up), sets the size of the EDRAM emulated. 2048, the console's, is the default, and with it everything is as before. With 4096:
+- EDRAM addresses wrap at 4,096 tiles, and render target bases are 12 bits (`RB_COLOR_INFO` and `RB_DEPTH_INFO` through `GetBaseTiles(edram_tile_count)`, `RenderTargetKey`, Vulkan's framebuffer keys). The ownership map, its wrap-around, the transfers and the resolve areas use the size in effect (`RenderTargetCache::edram_tile_count`).
+- The EDRAM buffer is twice the size: 20 MiB at 1x, 80 MiB at 2x, 180 MiB at 3x. A backend that can't bind that much whole (D3D12: 2^27 32-bit elements, 512 MiB; Vulkan: `maxStorageBufferRange`) gets the console's 2,048 tiles, with a warning in the log.
+- Host render targets stay as tall as the console's EDRAM from their base, as before, so they take no more memory.
+- The transfer shaders' address constant packs the two pitches in 9 bits each instead of 10 (a render target's pitch is at most 255 tiles at 32bpp, 510 at 64bpp), so that the difference of two 12-bit bases fits beside them.
+- **Resolve shaders.** The 22 EDRAM buffer resolve shaders per API (fast, full and clear, unscaled and scaled) wrap at 10 MiB and read an 11-bit base. Their copies for 4,096 tiles are built from the same xenia-project/xenia 0b2ffa3 sources with two functions redirected (`src/graphics/shaders/resolve_edram4096.xesli`, included first by 22 `resolve_*_edram4096.cs.xesl` entry files): `XeEdramOffsetInts` wraps at 4,096 tiles, and `XeResolveGetInfo` also takes base bit 11, which the host passes in bit 30 of `xe_resolve_edram_info` (`ResolveEdramInfo::base_tiles_bit_11`; bits 0 to 29 are as before). Built with fxc and glslangValidator with spirv-opt as the fork's other shaders; the original 22, built the same way, came out identical to the SDK's. With the larger EDRAM their pipelines are created instead of the console ones. The direct resolve shaders read render targets, not the EDRAM buffer, and are unchanged.
+- **ROV and FSI.** The shader translators get the size from the pipeline caches and wrap the pixel shaders' EDRAM addresses at it; the command processors pass 12-bit bases.
+- **For the title:** `IGraphicsSystem::edram_tile_count()`, the size in effect (0 until the GPU has started), which the command processors set once their render target cache has chosen. The interface changed, so `kGpuPluginAbiVersion` is 2.
+
+`xenos::kEdramTileCount` and `kEdramSizeBytes` are gone, so that every use had to be looked at: `kEdramTileCountConsole` (2,048), `kEdramTileCountMax` (4,096) and `GetEdramSizeBytes(count)` replace them.
+
+A title that relied on the console's wrap-around at 2,048 tiles would draw differently with 4,096, which is why it is a setting, off by default. This game sets it on PC (`MclaApp::ApplyPcDefaults`) for its single-tile hook (`src/render_perf.cpp`); the PS5 build keeps 2,048.
+
+Checked on Windows, RTX 5080, with the game's single tile (`launcher/dev/single-tile-edram-2026-10-16.md`):
+- **Resolves:** `launcher/dev/direct-resolve-validate.sdk.patch` compared direct resolves with the same resolves through the EDRAM buffer and the 4,096-tile shaders (the one-tile scene's colour crosses tile 2,048): 33,700 at native and 3x, city and race, both APIs, none different.
+- **Wrap-around:** `launcher/dev/edram-wrap-log.sdk.patch` logged every EDRAM range crossing tile 2,048. With 4,096 tiles, only the one-tile scene's colour and its resolve; with 2,048 tiles, none in this game.
+- **The picture,** one tile against two within one run, at 1x, 2x and 3x on both APIs, and on the EDRAM buffer, ROV and FSI paths: the same within frame-to-frame noise.
+- **D3D12 debug layer:** no errors, the usual warnings. **Vulkan synchronization validation:** the same write-after-write hazards between compute dispatches as with 2,048 tiles.
+- **With 2,048 tiles** (`--edram_tiles=2048`): the game keeps two tiles whatever its option says, and a switching run (50 switches each way, menus, the GPS map) behaved as before; with this size the SDK uses the console's shaders and limits.
+
+Built and run on Windows only, with an NVIDIA RTX 5080. The PS5 build applies the patch and keeps 2,048 tiles.
+
+| Change | Files | Affects |
+|---|---|---|
+| The setting, the size chosen, ownership and resolve areas, 12-bit keys, 9-bit transfer pitches | `src/graphics/pipeline/render_target/cache.cpp`, `include/rex/graphics/pipeline/render_target/cache.h`, `include/rex/graphics/xenos.h`, `include/rex/graphics/registers.h`, `include/rex/graphics/util/draw.h`, `src/graphics/util/draw.cpp` | D3D12, Vulkan |
+| The EDRAM buffer, resolve pipelines, transfer and dump shaders, framebuffer keys | `src/graphics/d3d12/render_target_cache.cpp`, `include/rex/graphics/d3d12/render_target_cache.h`, `src/graphics/vulkan/render_target_cache.cpp`, `include/rex/graphics/vulkan/render_target_cache.h` | D3D12, Vulkan |
+| ROV and FSI addressing | `src/graphics/pipeline/shader/dxbc_translator*.cpp`, `src/graphics/pipeline/shader/spirv_translator_rb.cpp`, their headers, `src/graphics/{d3d12,vulkan}/pipeline_cache.cpp`, `src/graphics/{d3d12,vulkan}/command_processor.cpp` | D3D12, Vulkan |
+| The 4,096-tile resolve shaders (XeSL sources, DXBC and SPIR-V) | `src/graphics/shaders/resolve_edram4096.xesli`, `src/graphics/shaders/resolve_*_edram4096.cs.xesl`, `src/graphics/shaders/bytecode/d3d12_5_1/resolve_*_edram4096_cs.h`, `src/graphics/shaders/vulkan_spirv/resolve_*_edram4096_cs.h` | D3D12, Vulkan |
+| `IGraphicsSystem::edram_tile_count`, the plugin ABI version | `include/rex/system/interfaces/graphics.h`, `include/rex/system/gpu_plugin.h`, `include/rex/graphics/graphics_system.h` | all platforms |

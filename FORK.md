@@ -17,11 +17,11 @@ kinds of changes on top of upstream's `main`:
     (resolution, graphics API, the pointer, anti-aliasing during play), restart-only
     rows marked, RESTART GAME, and a QUIT GAME that closes the game; closing
     waits for a career save being written; plus the launcher's four SDK
-    settings as the game's PC defaults, and the single-tile hook's comments
-    corrected: it has never taken effect, and can't without a larger EDRAM
-    in the SDK, so its pause menu row is gone; and a display gamma setting,
-    the console's TV ramp or sRGB for PC monitors, switched during play
-    (`KNOWN-ISSUES.md`).
+    settings as the game's PC defaults; a display gamma setting, the
+    console's TV ramp or sRGB for PC monitors, switched during play; and
+    single-tile rendering that takes effect: the main scene with 2x MSAA drawn
+    as one tile instead of two, in a 4,096-tile EDRAM the game asks the SDK
+    for on PC, switched during play (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,
@@ -53,7 +53,9 @@ kinds of changes on top of upstream's `main`:
     the EDRAM buffer path misread at odd resolution scales, and settings files
     saved as valid TOML, merged into the file and written durably (F4 saving
     only what changed while running), and loaded statement by statement when
-    one is bad.
+    one is bad, and an EDRAM of 4,096 tiles as an option (`edram_tiles`, the
+    console's 2,048 by default), for titles patched to draw more at once than
+    the console's EDRAM held.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
   edits the game's settings in `mcla.toml` (shared with the pause menu) and
@@ -114,6 +116,7 @@ git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
 git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
 git apply ../../patches/rexglue-cvar-toml-strings.patch
+git apply ../../patches/rexglue-edram-size.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they

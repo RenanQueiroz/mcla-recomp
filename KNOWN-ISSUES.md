@@ -226,30 +226,34 @@ The launcher passed its choices on the command line at every start, and the comm
 
 **Not verified:** Linux, where RESTART GAME isn't offered, and the PS5, whose menus have none of the Windows rows. The PC defaults apply on Linux too, where the fork's patches have not been built or run.
 
-## Single-tile rendering has never taken effect (2026-10-16)
+## Single-tile rendering (2026-10-16)
 
-Upstream's `mcla_single_tile` (on by default; it had a PERFORMANCE › SINGLE TILE RENDERING row in the pause menu, removed since, see below) was meant to draw the main scene as one predicated tile instead of the Xbox 360's two. Every scene draw is submitted once per tile: 1280x512 and 1280x208 at 1x, about 1,370 draws each in the city. It has never changed anything, for two reasons:
-- **The hook never acts.** It acts only on a null render target in `grcDevice::BeginTiledRendering` (`sub_8217A470`), a condition taken from LARecomp. No call passes one in this game, the main scene's included: thousands of calls a session were logged on both APIs, at native and 3x, through the title, the city, the menus and a race, and the hook acted on none of them.
-- **The SDK has no room for one tile.** A 720p 2x MSAA tile needs 1,472 EDRAM tiles for the colour and as many for the depth. The SDK's EDRAM is the console's 2,048 tiles with addresses wrapping round, not the 4,096 the hook's comment claimed. Forced onto the main scene, the colour wraps into the depth's tiles: the picture is right down to row 288 (864 at 3x) and garbage below it, and the scene costs 1 ms more GPU time at 3x in EDRAM transfers.
+Upstream's `mcla_single_tile` (on by default) is meant to draw the main scene as one predicated tile instead of the Xbox 360's two. With 2x MSAA the game splits the 720p scene into two tiles (1280x512 and 1280x208) and submits every scene draw once per tile, about 1,370 draws each in the city. Until now it never took effect (`launcher/dev/single-tile-2026-10-16.md`): its hook acted only on a null render target, which no call passes, and the SDK's EDRAM is the console's 2,048 tiles, too few for one tile (1,472 tiles of colour and 1,472 of depth).
 
-Behaviour is unchanged; the hook's comments now say this (`config/render_perf.toml`, `src/render_perf.cpp`). Making it work needs a 4,096-tile host EDRAM in the SDK:
-- every resolve shader rebuilt, on both APIs;
-- a 12-bit EDRAM base;
-- twice the memory for the EDRAM buffer and the host render targets;
-- an opt-in setting, since the console wraps at 2,048;
-- the hook aimed at the main scene's call.
+**Now it works:**
+- **SDK** (`patches/rexglue-edram-size.patch`): an `edram_tiles` setting, 2048 (the console's, the default) or 4096. With 4096 the EDRAM wraps at 4,096 tiles, render target bases are 12 bits, the EDRAM buffer is twice the size (20 MiB at 1x, 180 MiB at 3x; host render targets don't grow) and the EDRAM resolve shaders have copies that wrap at 4,096.
+- **Game:** on PC it sets `edram_tiles = 4096` as a default (`MclaApp::ApplyPcDefaults`, applied now before the GPU starts). The hook (`src/render_perf.cpp`, 0x8217A700 in `BeginTiledRendering`) acts on a tiled pass whose whole colour and depth fit in the EDRAM the GPU emulates (`IGraphicsSystem::edram_tile_count`, new in the SDK patch): the main scene with 2x MSAA becomes one 1280x720 tile, one bin and one resolve per target. The pause menu and the GPS map (4x MSAA, 2 x 2,944 tiles) keep their three tiles; with anti-aliasing off the game draws one tile by itself. `mcla_edram_limit` applies only with the larger EDRAM.
+- **PERFORMANCE › SINGLE TILE RENDERING** is back in the pause menu, first in the list, and switches during play. With 2,048 tiles (`--edram_tiles=2048`, or the PS5) it says "(UNAVAILABLE)" and the hook changes nothing. The launcher has *Single tile rendering* (`mcla_single_tile` in `mcla.toml`).
 
-Estimated from the two tiles' GPU times, that would save about 0.8 ms of GPU time at 3x in the city by day (10% of the GPU frame) and 1.3 ms in the race (12%). It would also take a quarter off the GPU command thread's CPU time.
+**Gains,** one tile against two, anti-aliasing on, switched within each run:
+- **3x:** frames 11.0% shorter in the city by day on D3D12 and 9.2% on Vulkan; 19.7% and 14.6% in the race.
+- **Native:** the race 14.0% shorter on D3D12 and 25.3% on Vulkan, where the GPU command thread was the bottleneck (94% busy); the city stays at the game's own limit (about 7.0 ms).
+- **GPU command thread:** 28 to 35% less CPU time; 30 to 35% fewer draws a frame.
+- **GPU:** 1.0 ms less at 3x in the city, 1.1 (Vulkan) to 2.2 ms (D3D12) in the race. The earlier estimate was 0.8 and 1.3 ms.
+- **120 FPS cap at 3x, standing in the city:** frames within 1 ms of the target 92.8 → 99.2% on D3D12, 94.4 → 99.0% on Vulkan.
+- **Anti-aliasing off** is now 2 to 5% faster than on at 3x (it was 8 to 18% faster than two tiles).
 
-With anti-aliasing off (`mcla_msaa = false`), the game draws the scene as one tile by itself. Measured by switching it within each run, at 3x:
-- **The city by day:** frames 7.6% shorter on D3D12, where the game's own limit is then reached, and 13.6% on Vulkan.
-- **The race:** 17 to 18% shorter on both APIs.
-- **Draws and the GPU command thread:** 30 to 39% fewer draws, and 22 to 41% less CPU time for the GPU command thread.
-- **Native, in the race:** 8% shorter frames on D3D12 and 22% on Vulkan, where that thread was the bottleneck.
+**Checks:**
+- **Resolves:** `launcher/dev/direct-resolve-validate.sdk.patch` compared each direct resolve with the same resolve through the EDRAM buffer, now with the 4,096-tile shaders (the one-tile scene's colour crosses tile 2,048): 33,700 resolves at native and 3x, city and race, both APIs, none different.
+- **The picture:** one tile against two, switched within one run with time almost stopped (`mcla_fixed_dt`), shot on consecutive frames: the title, the map zoom-out, the city by day and at night, the pause menu and the GPS map at 1x, 2x and 3x on both APIs, also through the EDRAM buffer path (`--direct_host_resolve=false`) and on the ROV and FSI paths. The differences are frame-to-frame noise (under 0.5 of 255 on average), with no seam at the old tile boundary (row 512), apart from the ROV case below. The race, its pause menu and its replay look the same either way.
+- **Nothing relies on the console's wrap-around** that was seen: `launcher/dev/edram-wrap-log.sdk.patch` logged every EDRAM range crossing tile 2,048. With 4,096 tiles the only ones are the one-tile scene's colour (tiles 1,472 to 2,912) and its resolve; with 2,048 tiles, through the title, the city, the menus and the GPS map, none at all.
+- **Switching:** 50 switches of single tile and 50 of anti-aliasing during play, switches around and inside the pause menu and the GPS map, 20 of each in the race, and the pause menu's own row (A on SINGLE TILE RENDERING): the draws a frame went from one tile to two and back each time, and anti-aliasing off was one tile either way. Video memory stayed flat during the switches, or rose once when the other mode's targets were first made (two tiles: 42 MB at 1x, 360 MB at 3x; anti-aliasing off: 20 and 106 MB).
+- **Debug layers:** the D3D12 debug layer, switching in the city at 1x and 3x and in the race at 3x: no errors, the usual warnings (initial states ignored, MIN/MAX blend factors, live objects at exit). Vulkan synchronization validation, in the city at 1x and 3x and in the race at 1x: only the write-after-write hazards between compute dispatches (the texture loads' scratch buffer, the EDRAM buffer's clears and dumps) that it reports with 2,048 tiles too, in about the same numbers.
+- **The console's size:** with `--edram_tiles=2048`, two tiles whatever `mcla_single_tile` says, and the row says UNAVAILABLE.
 
-The pause menu and the GPS map keep their own three 4x tiles. Measurements and method: `launcher/dev/single-tile-2026-10-16.md`.
+**Switching without the pause menu.** In scripted runs that switched modes with the dev pad's `set` alone, some sequences left the vehicle pass in the other MSAA mode than the scene's (for example 1x draws into the one-tile 2x scene after anti-aliasing was turned off and on). On the default path that costs EDRAM transfers every frame (0.6 ms at 3x in the city, 1 to 3 ms in the race) until the pause menu is next opened, which ends it. On the ROV path, which has no transfers, foliage was drawn wrong at night at 1x; the same happened with 2,048 tiles after anti-aliasing switches, so it isn't the larger EDRAM. A player can't get there: settings change in the pause menu (or in the launcher before the game starts), and every switch that went through the menu was clean.
 
-**The SINGLE TILE RENDERING row is gone from PERFORMANCE** (2026-10-16): it had no effect, whichever way it was set. The option itself is kept as it was (`--mcla_single_tile`, on by default, and a `mcla_single_tile` line in `mcla.toml` still loads), with its hooks; a comment in `src/settings_menu.cpp` points to the note above. The launcher never had this setting.
+**Not verified:** the PS5, which keeps 2,048 tiles (`ps5/make_ps5.sh` applies the SDK patch; the PS5 host doesn't set `edram_tiles`), and Linux. On Vulkan, a GPU whose `maxStorageBufferRange` is under 180 MiB gets 2,048 tiles at 3x, with a warning in the log. Measurements and method: `launcher/dev/single-tile-edram-2026-10-16.md`.
 
 ## Display gamma for PC monitors (2026-10-16)
 
