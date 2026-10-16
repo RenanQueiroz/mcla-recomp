@@ -15,8 +15,9 @@ kinds of changes on top of upstream's `main`:
     console's pace above 30 FPS with the HUD at a rate of its own, and the pause
     menu's settings: saved as changed, merged into `mcla.toml`, with more rows
     (resolution, graphics API, the pointer, anti-aliasing during play), restart-only
-    rows marked, RESTART GAME, and a QUIT GAME that closes the game; plus the
-    launcher's four SDK settings as the game's PC defaults (`KNOWN-ISSUES.md`).
+    rows marked, RESTART GAME, and a QUIT GAME that closes the game; closing
+    waits for a career save being written; plus the launcher's four SDK
+    settings as the game's PC defaults (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,
@@ -46,7 +47,9 @@ kinds of changes on top of upstream's `main`:
     both APIs, 4 to 9% in a race; at native and 2x the resolve time saved
     matters on GPU-bound systems), with a fix for the 4x MSAA depth samples
     the EDRAM buffer path misread at odd resolution scales, and settings files
-    saved as valid TOML and loaded line by line when one line is bad.
+    saved as valid TOML, merged into the file and written durably (F4 saving
+    only what changed while running), and loaded statement by statement when
+    one is bad.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
   edits the game's settings in `mcla.toml` (shared with the pause menu) and
