@@ -77,7 +77,7 @@ cd mcla-recomp
 
 This is upstream's one command, with the fork's patches. It leaves a **Midnight Club Los Angeles** shortcut in the repository folder; double-click it, or `mcla.exe` itself. An Xbox or PlayStation controller works.
 
-Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120 --vsync=false`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on. The launcher's four SDK settings are not passed for you; add them for the same results. The pause menu has three extra entries: DISPLAY (frame-rate target, HUD updates, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`.
+Options go after the program name, for example `mcla.exe --fullscreen=true --resolution_scale=2 --mcla_fps=120 --vsync=false`. `--mcla_fps` takes the frame-rate target, or 0 for uncapped; the game turns vsync off by itself unless the pause menu's VSYNC is on. The launcher's four SDK settings are not passed for you; add them for the same results. The pause menu has three extra entries: DISPLAY (frame-rate target, HUD updates, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); what you change there is saved to `mcla.toml` next to `mcla.exe`, merged into what the file already holds. Rows marked *(NEXT START)* take effect when the game next starts.
 
 ### Updating
 
@@ -148,6 +148,7 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | The motorcycle's lean eased by elapsed time | matches the console at any frame rate (not verified by riding) |
 | The mouse pointer hidden during play | goes on controller input or after about 3 s still; back when the mouse moves |
 | Loading-screen pacing | uncapped free roam at native: mean 81 to 145 FPS; the fast intro speeds up only the start-up logos |
+| The pause menu's settings: only what you change is saved, merged into `mcla.toml`; the FPS list has 40, 45 and 50; restart-only rows say so; the tabs come back after a submenu | command-line options and paths no longer end up in the file, and a file with an old-style path loads again (`patches/rexglue-cvar-toml-strings.patch`) |
 | Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD at 30 a second by default, or 60, 120 or every frame | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before); the song title under the speedometer scrolls at its original speed |
 
 Upstream's own fixes, such as the car reflections and the camera-flight warp that never ended, are in the fork too.

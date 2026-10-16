@@ -166,3 +166,24 @@ With host render targets, every resolve first copied every sample of the render 
 Direct resolves were compared byte for byte with the EDRAM buffer path in the same frame, one a frame in turn, 162,550 of them at native, 2x and 3x (the attract movie, the map zoom-out, the city by day, a drive and the race in the rain, on both APIs): all of them matched. That comparison first showed that the EDRAM path read some wrong samples of 4x MSAA depth at odd resolution scales, native included: a thread's 16 consecutive values crossing the middle of a depth tile, whose halves are swapped in the EDRAM layout, which showed in this game as columns 4 pixels wide, 120 pixels apart at 3x, in the daylight depth. `patches/rexglue-resolve-4xmsaa-depth-samples.patch` fixes that shader, so a resolve gives the same result whichever path it takes; screenshots with direct resolves on and off are identical at every still pixel. Measurements and method: `launcher/dev/direct-resolve-2026-10-15.md`; details in `patches/README.md`.
 
 **Not verified**: other GPUs. On Vulkan drivers without multisampled integer sampled images, resolves from multisampled colour render targets go through the EDRAM buffer (not tested).
+
+## The pause menu's settings (2026-10-16)
+
+The submenus upstream added to the Settings tab of the pause menu (DISPLAY, PERFORMANCE, CONTROLS; `src/settings_menu.cpp`) had these faults.
+
+- **The settings file collected other values.** Leaving a submenu saved with `rex::cvar::SaveConfig`, which rewrites `mcla.toml` with every option that differs from its default, wherever it came from. It wrote the launcher's command line, a host's own settings, the developer tools' options and their paths into the file. A run of the dev tools saved `log_file`, `user_data_root`, the pad script and more, and a Windows path came out as `"C:\Users\..."`, which is not valid TOML (`\U` starts an escape). At the next start the whole file failed to parse and none of its settings applied.
+  - Now only the options changed in these menus are saved, merged into the file. Each one's line is replaced where it is, or added before the first `[table]`. Every other line is kept as it was: comments, keys the game doesn't know, tables, CRLF or LF. The file is written beside the old one and renamed over it.
+  - A double-quoted value whose backslashes are not TOML escapes, as old saves wrote paths, is rewritten as a literal string with the same text.
+  - The SDK's own save (the F4 overlay) now writes valid strings too. An SDK file that still fails to parse is read line by line, so one bad line no longer costs the rest (`patches/rexglue-cvar-toml-strings.patch`).
+- **The launcher's 40, 45 and 50 FPS showed as 30, 30 and 60** in FPS TARGET, which only offered 30, 60, 120 and uncapped; stepping the row then lost the value. The list now has 40, 45 and 50 on PC, and they display and save as themselves. The PS5 keeps 30 and 60.
+- **Restart-only rows are marked from the options themselves.** The options the game reads once, at start-up, are declared `kRequiresRestart`, and their rows add "(NEXT START)" to their names. That covers RACE SHADOWS, SIMPLE CAR SHADOWS, DISTANT TREES, FULLSCREEN BLUR, ANTI ALIASING and INTRO; the SDK's F4 overlay shows them as `[restart]` too, as it does `mcla_gpu_backend`.
+  - DISTANT TREES said "(NEXT LOAD)". But the game creates the impostor targets with the world, once, at start-up (sub_82305230 → sub_8230C388 → sub_8230B778, where its switch is read). A temporary log in both showed one world setup and 53 impostor setups at start-up, and none when an arcade race started or was quit back to free roam. So it is "(NEXT START)" now.
+- **After a submenu, the Settings list kept the submenu's title and had no tab strip** until the pause menu closed. Entering a submenu hides the strip (`tabs_count = 0`) and retitles the menu. Leaving it now calls the strip's own render (sub_82630E40, captured by a mid-asm hook at 0x82630E50), which sets the tabs again and renders the selected tab, title included. Leaving with B and with Start goes through the same path; both save.
+
+Checked on Windows, D3D12, on copies of the settings file through `devrun.py --toml`:
+- a copy of a real one, saved with CRLF: three rows changed, those three lines replaced or added, the other five byte for byte the same;
+- one with an old-style `log_file` path, a line that is not TOML, a comment and a table: it loaded (HUD UPDATES showed its 120); after a change, the path was a literal string, the bad line, the comment and the table were kept, and the new key went in before the table;
+- that result loaded back with the values set in the menu;
+- no file at all: a file with a heading comment and the one key changed.
+
+The real `mcla.toml` stayed byte for byte the same throughout.

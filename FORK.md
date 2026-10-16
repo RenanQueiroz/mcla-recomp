@@ -101,6 +101,7 @@ git apply ../../patches/rexglue-vulkan-pipeline-storage-parallel-translation.pat
 git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
 git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
+git apply ../../patches/rexglue-cvar-toml-strings.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they
