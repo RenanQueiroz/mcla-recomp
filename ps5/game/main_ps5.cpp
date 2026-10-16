@@ -550,6 +550,18 @@ int main() {
 #endif
   rex::cvar::SetFlagByName("vulkan_submit_on_primary_buffer_end",
                            MCLA_STRINGIZE(MCLA_SUBMIT_ON_BUFFER_END));
+  // An EDRAM of 4,096 tiles instead of the console's 2,048 (the SDK's
+  // edram_tiles), so that the scene with 2x MSAA fits in one tile and is drawn
+  // once instead of twice (src/render_perf.cpp, mcla_single_tile; RADV binds
+  // the larger buffer whole). Untested on the console. As a default it gives
+  // way to an edram_tiles line in /data/mcla/mcla.toml; build with
+  // -DMCLA_EDRAM_TILES=2048 for the console's size. Read when the GPU starts,
+  // so not part of the tuning below.
+#ifndef MCLA_EDRAM_TILES
+#define MCLA_EDRAM_TILES 4096
+#endif
+  rex::cvar::SetDefaultValue("edram_tiles", MCLA_STRINGIZE(MCLA_EDRAM_TILES));
+  Line("settings: edram_tiles = %s", rex::cvar::GetFlagByName("edram_tiles").c_str());
   rex::ui::SDLWindowedAppContext app_context;
   if (!app_context.Initialize()) {
     return Finish("the SDL application context did not initialise", 9);
