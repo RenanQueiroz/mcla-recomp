@@ -175,3 +175,161 @@ fall (spread up to 21%).
   `ShaderOutputNotConsumed`, and 10 write after write hazards between texture
   load dispatches into their scratch buffer; the same with
   `--direct_host_resolve=false`. Nothing from the direct resolves.
+  (Correction, round 3: the race run never got to the race, its menus out of
+  step at the validation's frame rate, and the layer stops after 10 reports of
+  a message; both redone below.)
+
+## Round 3: review fixes, full 16bpp, native and 2x, the EDRAM path's 4x fix
+
+After an independent review of the patch and with the scope widened:
+- **Vulkan dummy barriers:** the first direct resolve transitioned all four
+  dummy images, some of which can be null (no multisampled integer sampled
+  images, which Vulkan only guarantees single-sampled, or a failed creation).
+  Only the existing ones are transitioned now.
+- **Multisampled support per kind on Vulkan:** the pipelines no longer need
+  both multisampled dummies. A multisampled colour source needs multisampled
+  integer sampled images either for itself (the 16- and 32-bit formats) or for
+  the dummy of its unused integer binding (8_8_8_8 and the others read as
+  float), so without them multisampled colour sources go through the EDRAM
+  buffer; multisampled depth (the stencil view is a depth/stencil sampled
+  image) and single-sampled sources still resolve directly.
+- **No search without a shader:** the resolve's sample count picks the direct
+  pipeline first, and the render target ownership walk runs only when there's
+  one.
+- **The sample selection check** is gone: `GetResolveInfo` already sanitizes
+  it (`SanitizeCopySampleSelect`).
+- **Full 16bpp** (the race's 128x128 4x resolves into `k_1_5_5_5`) and the
+  **unscaled variants** of all six copy shaders: 24 shaders a backend, 3.1 MB
+  of compact headers (1.3 MB before); `rexglue-direct-resolve.patch` is
+  3.37 MB (1.46 MB before), the fix 265 KB.
+- **`rexglue-resolve-4xmsaa-depth-samples.patch`**, a patch of its own before
+  this one, fixes the 4x depth misreads in the EDRAM path's
+  `resolve_fast_32bpp_4xmsaa` (pixels 4 to 7 of a thread get their own
+  address), the SDK's two headers of it rebuilt for each API with the
+  toolchain that rebuilds the current ones byte for byte. Fallback resolves no
+  longer differ from direct ones, so the validation build compares against the
+  fixed path and expects no difference at all.
+
+### Validation
+
+`direct-resolve-validate.sdk.patch` now also covers unscaled resolves (the
+destination read back from shared memory). Real time, `validate-city` and
+`race.pad`, every kind with zero differing bytes:
+
+| Resolves compared | D3D12 city | D3D12 race | Vulkan city | Vulkan race |
+|---|---|---|---|---|
+| Native | 23,850 | 11,450 | 22,700 | 11,100 |
+| 2x | 18,900 | 10,100 | 23,000 | 10,900 |
+| 3x | 7,000 | 5,100 | 11,100 | 7,350 |
+
+162,550 in all, 9,942 of them 4x depth (`kD24S8` and `kD24FS8`) and 6,584
+full 16bpp (4x `k_8_8_8_8` averaged into `k_1_5_5_5`).
+
+### GPU timestamps
+
+Same stack as before plus `texload-split-timestamps.sdk.patch`, one timedemo
+run a side, median per frame:
+
+| Resolves | D3D12 off | D3D12 on | Vulkan off | Vulkan on |
+|---|---|---|---|---|
+| Native, free roam | 0.48 ms (dump 0.22, copy 0.20) | 0.33 ms (direct 0.28) | 0.50 ms (dump 0.21, copy 0.16) | 0.42 ms (direct 0.32) |
+| Native, race | 0.54 ms (dump 0.21, copy 0.25) | 0.38 ms (direct 0.31) | 0.55 ms (dump 0.21, copy 0.19) | 0.48 ms (direct 0.35) |
+| 2x, free roam | 1.09 ms (dump 0.58, copy 0.43) | 0.67 ms (direct 0.59) | 0.93 ms (dump 0.49, copy 0.31) | 0.65 ms (direct 0.55) |
+| 2x, race | 1.00 ms (dump 0.49, copy 0.40) | 0.66 ms (direct 0.58) | 0.88 ms (dump 0.41, copy 0.29) | 0.70 ms (direct 0.56) |
+| 3x, free roam | 2.23 ms (dump 1.36, copy 0.78) | 1.08 ms (direct 0.98) | 1.90 ms (dump 1.09, copy 0.67) | 1.09 ms (direct 0.98) |
+| 3x, race | 1.79 ms (dump 1.04, copy 0.64) | 0.93 ms (direct 0.82) | 1.65 ms (dump 0.82, copy 0.54) | 1.10 ms (direct 0.96) |
+
+Full 16bpp took the race's last dump away: 3x race 0.97 to 0.93 ms on D3D12
+and 1.23 to 1.10 ms on Vulkan against the first round. At native and 2x the
+frame span (first to last timestamp) here is set by the game thread (7 to 11
+ms), so it isn't the GPU's work; what a GPU-bound system gains is the resolve
+time saved: 0.15 and 0.08 ms a frame at native standing in the city (D3D12,
+Vulkan), 0.42 and 0.28 ms at 2x.
+
+The fixed EDRAM path's 640x640 4x depth copies at 3x: 25 to 26 us on D3D12
+(25 to 27 before), 29 to 30 us on Vulkan (26 to 27 before), so a few us at
+most.
+
+### Texture loads at native (texture_load_direct)
+
+Not extended: at native, the textures reloaded every frame here are the
+resolved 1280x720 `8_8_8_8` (three times), the 1280x720 depth (twice), the
+1280x1280 depth and a 1280x720 `16_16_16_16_FLOAT`. Their copies from the
+scratch buffer, the only pass a direct load removes, take 0.04 ms a frame on
+D3D12 and 0.06 ms on Vulkan standing in the city (all texture loads 0.28 and
+0.41 ms). Loading them directly would take unscaled variants of the four load
+shaders for both APIs and either typeless textures with unordered access for
+every unscaled single-level 2D texture of those formats (static ones too,
+whose sampling could lose compression, on AMD especially) or tracking of
+resolved memory at 1x, which the texture cache doesn't do. For at most 0.06
+ms a frame here (about 0.2 ms on a GPU a quarter as fast), it stays
+resolution-scaled only.
+
+### Benchmark
+
+`devrun.py`, alternating after one warm-up round each, timedemo
+(`--mcla_fixed_dt=60`, uncapped), `drive-spawn.pad` fullscreen and `race.pad`
+windowed. Median frame (spread of the run medians), 1% low:
+
+| Segment | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
+|---|---|---|---|---|
+| 3x free roam (3 runs) | 10.35 ms (1.8%), 75 FPS | 9.19 ms (2.3%), 85 FPS | 9.76 ms (3.2%), 76 FPS | 8.96 ms (1.8%), 86 FPS |
+| 3x drive | 10.09 ms (1.9%), 74 FPS | 8.88 ms (0.5%), 79 FPS | 9.94 ms (0.7%), 69 FPS | 9.03 ms (1.7%), 73 FPS |
+| 3x map zoom-out | 8.53 ms (10.7%), 27 FPS | 7.38 ms (3.2%), 31 FPS | 8.20 ms (15.6%), 29 FPS | 7.88 ms (11.4%), 30 FPS |
+| 3x race (3 runs) | 10.17 ms (2.5%), 71 FPS | 9.29 ms (2.5%), 75 FPS | 11.29 ms (1.0%), 66 FPS | 10.79 ms (1.3%), 68 FPS |
+| 2x free roam (5 runs) | 7.45 ms (5.2%), 101 FPS | 7.01 ms (3.2%), 107 FPS | 6.89 ms (1.2%), 107 FPS | 6.84 ms (0.9%), 111 FPS |
+| 2x drive | 7.21 ms (1.4%), 92 FPS | 7.12 ms (2.1%), 102 FPS | 7.14 ms (3.8%), 88 FPS | 7.05 ms (4.6%), 93 FPS |
+| 2x map zoom-out | 7.00 ms (2.4%), 31 FPS | 6.92 ms (1.7%), 33 FPS | 7.03 ms (2.6%), 31 FPS | 6.96 ms (2.7%), 33 FPS |
+| 2x race (3 runs) | 8.10 ms (3.5%), 85 FPS | 7.86 ms (7.8%), 84 FPS | 8.93 ms (4.8%), 66 FPS | 8.29 ms (7.1%), 67 FPS |
+| Native free roam (3 runs) | 6.86 ms (0.4%), 113 FPS | 6.79 ms (1.5%), 113 FPS | 6.81 ms (0.3%), 112 FPS | 6.84 ms (0.8%), 111 FPS |
+| Native drive | 6.83 ms (0.8%), 112 FPS | 6.84 ms (1.5%), 113 FPS | 6.87 ms (0.3%), 101 FPS | 6.90 ms (0.5%), 103 FPS |
+
+- At 3x the same gains as the first round (D3D12 -11 and -12%, Vulkan -8 and
+  -9%), with free roam and the drive 2 to 6% slower on and off alike than in
+  the first round's runs; the D3D12 race gains more with full 16bpp (-8.7%
+  against -5.6%), the Vulkan race the same (-4.4% against -4.6%).
+- At 2x the frame is close to the game thread's limit (native 6.8 to 6.9 ms),
+  so it gains less than the resolve time: -5.9% standing on D3D12, -0.7% on
+  Vulkan, -1.2 and -1.3% driving, -3.0 and -7.2% in the race; the 1% lows
+  rise more (D3D12 drive 92 to 102 FPS).
+- With a 120 FPS cap at 2x (2 runs): 98.5% of frames within 1 ms of the
+  target off and 98.6% on (D3D12), 99.4 and 99.5% (Vulkan).
+- Native: unchanged, the game thread's frame (6.79 to 6.97 ms in every
+  segment, on and off).
+- 100 runs, all exited 0 with the script done; no frame over 250 ms.
+
+### Checks
+
+- **Screenshots**, settled pause menu standing in the city, eight shots
+  alternating on and off (`set`), at native and 3x on both APIs: identical at
+  every pixel that stays the same from shot to shot (921,000 of 921,600 at
+  native, 8,292,000 of 8,294,400 at 3x; the rest is the menu's animation).
+  The first round's 0.08 to 0.11% of differing pixels were the EDRAM path's
+  4x depth misreads, now fixed.
+- **D3D12 debug layer** (`--d3d12_debug=true`) through `drive-spawn.pad` and
+  `race.pad` at native and 3x: no errors or corruption messages; the warnings
+  are the same unrelated ones as before (initial states ignored for buffers,
+  blend factors with MIN/MAX, live objects at exit).
+- **Vulkan validation with synchronization validation** through the city and
+  the race (a short race pad: the race's start and 900 updates of it) at native
+  and 3x. The layer reports a message only 10 times by default, which would
+  hide later hazards of the same kind, so these ran with
+  `VK_LAYER_ENABLE_MESSAGE_LIMIT=0`: thousands of `ShaderOutputNotConsumed`,
+  and 268 to 1,660 write after write hazards a run, all between compute
+  dispatches into either the texture loads' scratch buffer or the EDRAM buffer
+  (dumps and other stores to it), the same two kinds as in a run with
+  `--direct_host_resolve=false`. None on a render target image, a resolve
+  destination (set 1) or from a direct resolve pipeline. With the limit on,
+  also `vkCmdEndQuery` 07007 and 01923 as before.
+- **The race under synchronization validation:** the menus run at 10 to 20 FPS
+  there, and in the first runs (the first round's and this round's) the waits
+  in time alone let the menu transitions miss presses: the race never
+  started, the script's `wait_until roam` timed out, and the script carried on
+  in the menu until the end (the first round's "through the race" covered
+  only the menus). `boot-to-race.pad` now waits at least as many updates as at
+  60 FPS too (`wait 300ms 18f`, until both have passed; no change above 60
+  FPS), and a failed line ends the script and the run
+  (`devrun.py` reports `SCRIPT FAILED`). With them the race starts in both
+  validation runs. No other run of either round had a failed line.
+- **Watch list:** no silent exit, and no frame near 280 ms in a Vulkan drive
+  (the worst uncapped one 22 ms, in the second 3x series, on and off alike).

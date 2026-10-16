@@ -37,10 +37,11 @@ kinds of changes on top of upstream's `main`:
     sessions: worst frame 1.9 s to 0.25 s on Vulkan, 0.4 s to 0.19 s on
     D3D12), the Vulkan shader storage translated in parallel at start-up,
     and an optional Vulkan pipeline cache file, and resolves that read the
-    render target directly instead of dumping it into the EDRAM buffer first
-    (7 to 12% shorter frames at 3x in the city on both APIs, 5% in a race,
-    and the right samples for 4x MSAA depth, which the old path partly
-    misread).
+    render target directly instead of dumping it into the EDRAM buffer first,
+    at every resolution scale (7 to 12% shorter frames at 3x in the city on
+    both APIs, 4 to 9% in a race; at native and 2x the resolve time saved
+    matters on GPU-bound systems), with a fix for the 4x MSAA depth samples
+    the EDRAM buffer path misread at odd resolution scales.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1` and
   starts the game with chosen options, the measurement tools in

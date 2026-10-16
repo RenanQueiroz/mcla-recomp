@@ -533,6 +533,78 @@ It is meant for drivers without a disk cache of their own, possibly the PS5's, w
 | The setting, loading, saving | `include/rex/graphics/vulkan/pipeline_cache.h`, `src/graphics/vulkan/pipeline_cache.cpp` | Vulkan |
 | The three functions | `include/rex/ui/vulkan/functions/device_1_0.inc` | Vulkan |
 
+## rexglue-resolve-4xmsaa-depth-samples.patch
+
+The EDRAM buffer path's `resolve_fast_32bpp_4xmsaa` read some wrong samples of 4x MSAA depth. A thread copies 8 pixels and loads the 16 consecutive values that start at the first pixel's sample, but depth tiles have their left and right halves swapped in the EDRAM layout. Half a tile is 20 pixels times the resolution scale, so at 1x, 3x and the other odd scales the boundary falls between pixels 3 and 4 of one thread in every row of a tile, and the values that thread loaded for pixels 4 to 7 came from right after pixel 3 in the other half: the next row of samples (the pixel's other vertical sample) or, from a tile's last row, the next tile. In this game that's the four 640x640 4x depth resolves a frame in daylight: some texels had a neighbouring sample's depth, which showed on screen in columns 4 pixels wide, 120 pixels apart at 3x, by 1 to 169 levels out of 255 at edges.
+
+Pixels 4 to 7 now have their own address. In xenia-project/xenia's source at 0b2ffa3 (`src/xenia/gpu/shaders/resolve_fast_32bpp_4xmsaa.xesli`):
+
+```diff
+@@ -34,12 +34,25 @@
+     return;
+   }
+   uint2_xe pixel_index = in_global_thread_id_xe.xy << uint2_xe(3u, 0u);
++  uint2_xe source_pixel_index =
++      uint2_xe(pixel_index.x,
++               max(pixel_index.y,
++                   resolve_info.half_pixel_offset_fill_source.y)) +
++      resolve_info.edram_offset_scaled;
+   uint source_address_int4s =
+       XeEdramOffsetInts(
+-          uint2_xe(pixel_index.x,
+-                   max(pixel_index.y,
+-                       resolve_info.half_pixel_offset_fill_source.y)) +
+-              resolve_info.edram_offset_scaled,
++          source_pixel_index,
++          resolve_info.edram_base_tiles, true, resolve_info.edram_pitch_tiles,
++          kXenosMsaaSamples_4X, resolve_info.edram_is_depth, 0u,
++          XeResolveFirstSampleIndex(resolve_info.sample_select),
++          resolve_info.resolution_scale)
++      >> 2u;
++  // The halves of depth tiles are swapped in the EDRAM. A half is 20 pixels
++  // times the resolution scale, so with an odd scale, pixels 4...7 of a thread
++  // may be in the other half than 0...3, not right after them.
++  uint source_address_int4s_4567 =
++      XeEdramOffsetInts(
++          source_pixel_index + uint2_xe(4u, 0u),
+           resolve_info.edram_base_tiles, true, resolve_info.edram_pitch_tiles,
+           kXenosMsaaSamples_4X, resolve_info.edram_is_depth, 0u,
+           XeResolveFirstSampleIndex(resolve_info.sample_select),
+@@ -54,18 +67,18 @@
+     pixels_0123.zw = array_buffer_load_xe(
+         xe_resolve_edram, source_address_int4s + 1u).xz;
+     pixels_4567.xy = array_buffer_load_xe(
+-        xe_resolve_edram, source_address_int4s + 2u).xz;
++        xe_resolve_edram, source_address_int4s_4567).xz;
+     pixels_4567.zw = array_buffer_load_xe(
+-        xe_resolve_edram, source_address_int4s + 3u).xz;
++        xe_resolve_edram, source_address_int4s_4567 + 1u).xz;
+   } else {
+     pixels_0123.xy = array_buffer_load_xe(
+         xe_resolve_edram, source_address_int4s).yw;
+     pixels_0123.zw = array_buffer_load_xe(
+         xe_resolve_edram, source_address_int4s + 1u).yw;
+     pixels_4567.xy = array_buffer_load_xe(
+-        xe_resolve_edram, source_address_int4s + 2u).yw;
++        xe_resolve_edram, source_address_int4s_4567).yw;
+     pixels_4567.zw = array_buffer_load_xe(
+-        xe_resolve_edram, source_address_int4s + 3u).yw;
++        xe_resolve_edram, source_address_int4s_4567 + 1u).yw;
+   }
+   dont_flatten_xe
+   if (pixel_index.x == 0u &&
+```
+
+The SDK has no sources for its resolve shaders, so the patch is the rebuilt headers of the two variants (unscaled and scaled) for both APIs. D3D12: fxc's `/Fh` output with its default flags, clang-formatted, which rebuilds the SDK's current headers of these two shaders byte for byte from the unchanged source. Vulkan: glslangValidator, `spirv-opt -O -O --canonicalize-ids --strip-debug` and spirv-dis in the layout of `compile_shader_spirv.py`, clang-formatted, which does the same. Colour resolves are unaffected: their halves aren't swapped, so pixel 4's address is where it was.
+
+Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings: with `rexglue-direct-resolve.patch`'s validation build, every direct resolve compared byte for byte with this path matched, the 4x depth ones included, at 1x, 2x and 3x on both APIs (162,550 resolves, of which 9,942 4x depth). Before the fix, 255 of the 263 4x depth resolves compared in the city at 3x on D3D12 differed (`launcher/dev/direct-resolve-2026-10-15.md` in the fork); at 2x the boundary never falls inside a thread. The 640x640 4x depth copies take as long as before at 3x (25 to 26 us each on D3D12, 29 to 30 us on Vulkan, against 25 to 27).
+
+Built and run on Windows only, with an NVIDIA RTX 5080.
+
+| Change | Files | Affects |
+|---|---|---|
+| The shader, unscaled and scaled | `src/graphics/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_4xmsaa_cs.h`, `src/graphics/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_4xmsaa_scaled_cs.h`, `src/graphics/shaders/vulkan_spirv/resolve_fast_32bpp_4xmsaa_cs.h`, `src/graphics/shaders/vulkan_spirv/resolve_fast_32bpp_4xmsaa_scaled_cs.h` | D3D12, Vulkan |
+
 ## rexglue-direct-resolve.patch
 
 **What happened before.** With host render targets, every resolve first dumped the render targets over its area into the EDRAM buffer, every sample of every pixel (`DumpRenderTargets`), and then the resolve shader converted that into the destination. The SDK has a setting for doing it directly, `direct_host_resolve` (on by default), but it was a stub that dumped all the same (`TryResolveCopyDirectly`). At 3x the dumps were 60% of the resolve time: 1.35 ms of the GPU frame standing in the city by day on D3D12 (four 640x640 4x MSAA depth quadrants, the scene's depth and colour, each resolved twice), 1.0 ms in the race.
@@ -540,30 +612,33 @@ It is meant for drivers without a disk cache of their own, possibly the PS5's, w
 **What it does now.** A resolve copy reads the host render target that owns its area directly. The new shaders (`src/graphics/shaders/resolve_direct*.xesl(i)`) are the resolve copy shaders with every EDRAM buffer load replaced by a load of the same sample from the render target, converted to its EDRAM representation exactly as dumping does (`GetOrCreateDumpPipeline`, `GetDumpPipeline`): 8_8_8_8 and 2_10_10_10 from their UNORM views, the piecewise-linear gamma, 7e3 from float16 (D3D12 `max`/`min`, Vulkan `NClamp` as in the dumping), the 16- and 32-bit formats from their unsigned integer views, 24-bit unorm and 20e4 depth (with each API's rounding setting) and stencil. Everything after the loads (sample selection and averaging, exponent bias, packing, swaps, tiling, endian) is the original code. A sample of the resolve's area in the EDRAM sample grid, offset by whole tiles to the render target's base, is the same sample in the render target's texture; then the pixel and sample are as in the dumping (with 2x MSAA emulated with 4x too).
 
 It is used when, otherwise the resolve dumps as before:
+- there's a direct shader for the copy shader: fast 32bpp, fast 64bpp, full 8bpp, full 16bpp, full 32bpp or full 64bpp (the ones this game uses; full 128bpp goes through the EDRAM buffer), at any resolution scale, from single-sampled or multisampled render targets. The resolve's sample count picks the shader before anything else is looked up;
 - one render target owns the whole area the copy reads, with the resolve's pitch, sample count and sample size, and EDRAM addressing doesn't wrap around in it;
-- the samples the copy reads are within the pixels (with 1x MSAA only sample 0; with 2x samples 0, 1 or both);
-- the resolution is scaled (at 1x the dump is a ninth of the work and the frame is CPU-bound here), and the copy shader is one of fast 32bpp, fast 64bpp, full 8bpp, full 32bpp or full 64bpp, the ones this game uses (full 16bpp and 128bpp go through the EDRAM buffer);
 - the render target's format has a conversion: on Vulkan, the 16- and 32-bit formats only through their unsigned integer transfer views, not the floating-point fallbacks.
 
-`--direct_host_resolve=false` goes back to dumping at once. The ten shaders (single-sampled and multisampled sources) are built for both APIs from the xenia-project/xenia 0b2ffa3 shader sources (whose resolve shaders compile to the SDK's resolve shader code exactly) with fxc and glslangValidator with spirv-opt, as `rexglue-texture-load-direct.patch`'s; the headers are 32-bit words without the disassembly, to keep the patch at 1.4 MB. The per-sample loads and the sample averaging are loops that aren't unrolled, so the conversions and unpacking are there once: the full shaders are about 20 KB of DXBC, half of the copy shaders they replace.
+`--direct_host_resolve=false` goes back to dumping at once. The 24 shaders (six copy shaders, single-sampled and multisampled sources, unscaled and scaled) are built for both APIs from the xenia-project/xenia 0b2ffa3 shader sources (whose resolve shaders compile to the SDK's resolve shader code exactly) with fxc and glslangValidator with spirv-opt, as `rexglue-texture-load-direct.patch`'s; the headers are 32-bit words without the disassembly (3.1 MB for the 48). The per-sample loads and the sample averaging are loops that aren't unrolled, so the conversions and unpacking are there once: the full shaders are about 20 KB of DXBC, half of the copy shaders they replace.
 
 - **D3D12:** a root signature like the resolve copy one, with the two source constants and two SRV tables (separate, as bindless one-use descriptors aren't contiguous): t0 the float view (colour or depth), t1 the unsigned one (colour or stencil), a null SRV for the unused one. The render target goes to `NON_PIXEL_SHADER_RESOURCE` as for dumping.
-- **Vulkan:** a pipeline layout with the two sampled images in set 0 and the destination in set 1. Depth render targets use their transfer descriptor set (depth, stencil); colour ones get a two-image set when first resolved directly (the render target's view and a 1x1 dummy image of the other kind), freed with the render target. Without multisampled integer sampled images, resolves from multisampled render targets go through the EDRAM buffer.
+- **Vulkan:** a pipeline layout with the two sampled images in set 0 and the destination in set 1. Depth render targets use their transfer descriptor set (depth, stencil); colour ones get a two-image set when first resolved directly (the render target's view and a 1x1 dummy image of the other kind), freed with the render target. A multisampled colour source needs multisampled integer sampled images (for itself or for the dummy), which Vulkan only guarantees single-sampled: without them, those go through the EDRAM buffer, while multisampled depth and every single-sampled source still resolve directly. The dummies' first barrier skips any that couldn't be created.
 
-**A fix it brings.** The EDRAM buffer path read some wrong samples of 4x MSAA depth. `resolve_fast_32bpp_4xmsaa` loads 16 consecutive values for 8 pixels from where the first one is, but depth tiles have their halves swapped in the EDRAM layout, and when a thread's pixels cross the middle of a tile (whenever half a tile, 40 samples times the resolution scale, isn't a multiple of 16), the values after the middle came from the next sample row: the pixel's other vertical sample, or the next pixel's. The direct path reads every sample where it is. In this game that's the four 640x640 4x depth resolves a frame in daylight: some texels were the depth of a neighbouring sample, which shows on screen in columns 4 pixels wide, 120 pixels apart at 3x.
+**With `rexglue-resolve-4xmsaa-depth-samples.patch`.** The EDRAM buffer path read some wrong samples of 4x MSAA depth at odd resolution scales, 1x included; the direct path reads every sample where it is. That patch, before this one, fixes the EDRAM path, so both paths give the same result whichever one a resolve takes.
 
-Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings, at 3x (2x MSAA).
+Measured on Windows, RTX 5080 and Ryzen 7 9800X3D, with the launcher's settings (2x MSAA).
 
-GPU timestamps (`gpu-timestamps.sdk.patch`, `gpu-timestamps-vulkan.sdk.patch`, `resolve-split-timestamps.sdk.patch`), one timedemo run a side, median per frame:
+GPU timestamps (`gpu-timestamps.sdk.patch`, `gpu-timestamps-vulkan.sdk.patch`, `texload-split-timestamps.sdk.patch`, `resolve-split-timestamps.sdk.patch`), one timedemo run a side, resolve time per frame (median):
 
-| At 3x | Resolves, off | Resolves, on | GPU frame, off | GPU frame, on |
+| Resolves per frame | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
 |---|---|---|---|---|
-| D3D12, standing in the city by day | 2.23 ms (dump 1.36) | 1.07 ms | 10.53 ms | 9.41 ms |
-| Vulkan, standing in the city by day | 1.90 ms (dump 1.09) | 1.12 ms | 10.16 ms | 9.23 ms |
-| D3D12, race | 1.78 ms (dump 1.03) | 0.97 ms | 10.64 ms | 9.98 ms |
-| Vulkan, race | 1.65 ms (dump 0.92) | 1.23 ms | 12.66 ms | 11.98 ms |
+| Native, standing in the city by day | 0.48 ms (dump 0.22) | 0.33 ms | 0.50 ms (dump 0.21) | 0.42 ms |
+| Native, race | 0.54 ms (dump 0.21) | 0.38 ms | 0.55 ms (dump 0.21) | 0.48 ms |
+| 2x, standing in the city by day | 1.09 ms (dump 0.58) | 0.67 ms | 0.93 ms (dump 0.49) | 0.65 ms |
+| 2x, race | 1.00 ms (dump 0.49) | 0.66 ms | 0.88 ms (dump 0.41) | 0.70 ms |
+| 3x, standing in the city by day | 2.23 ms (dump 1.36) | 1.08 ms | 1.90 ms (dump 1.09) | 1.09 ms |
+| 3x, race | 1.79 ms (dump 1.04) | 0.93 ms | 1.65 ms (dump 0.82) | 1.10 ms |
 
-Scripted runs (`launcher/dev/devrun.py`), alternating after a warm-up, median frame time at 3x with the 1% low in brackets; the timedemo has updates of exactly 1/60 s, uncapped (`drive-spawn.pad` fullscreen, five runs a configuration; `race.pad` windowed, three):
+At 3x the GPU frame standing in the city went from 10.59 to 9.04 ms on D3D12 and from 10.02 to 9.54 ms on Vulkan in these runs (10.53 to 9.41 and 10.16 to 9.23 in the first ones). At native and 2x the frames here wait for the game thread, so the time between a frame's first and last timestamps isn't the GPU's work; the resolve time saved is what a GPU-bound system gains.
+
+Scripted runs (`launcher/dev/devrun.py`), alternating after a warm-up, median frame time with the 1% low in brackets; the timedemo has updates of exactly 1/60 s, uncapped (`drive-spawn.pad` fullscreen, `race.pad` windowed). At 3x, before full 16bpp and the unscaled shaders, five runs a configuration (three for the race):
 
 | Segment | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
 |---|---|---|---|---|
@@ -574,17 +649,29 @@ Scripted runs (`launcher/dev/devrun.py`), alternating after a warm-up, median fr
 | Drive, real time | 9.12 ms (89 FPS) | 8.04 ms, -11.8% (101 FPS) | 8.90 ms (96 FPS) | 8.22 ms, -7.6% (103 FPS) |
 | Race (timedemo) | 10.18 ms (71 FPS) | 9.61 ms, -5.6% (75 FPS) | 11.60 ms (65 FPS) | 11.07 ms, -4.6% (67 FPS) |
 
-- **Spread between runs:** free roam and the drive 0.1 to 2.9%, the map zoom-out 4 to 21%, the race 1.5 to 3.5%.
-- **With a 120 FPS cap at 3x,** frames within 1 ms of the target: D3D12 26% off, 93% on; Vulkan 84% off, 97% on.
+With them, timedemo, three runs a configuration at 3x and for the races, five at 2x:
+
+| Segment | D3D12, off | D3D12, on | Vulkan, off | Vulkan, on |
+|---|---|---|---|---|
+| 3x, free roam, standing | 10.35 ms (75 FPS) | 9.19 ms, -11.2% (85 FPS) | 9.76 ms (76 FPS) | 8.96 ms, -8.2% (86 FPS) |
+| 3x, drive | 10.09 ms (74 FPS) | 8.88 ms, -12.0% (79 FPS) | 9.94 ms (69 FPS) | 9.03 ms, -9.2% (73 FPS) |
+| 3x, race | 10.17 ms (71 FPS) | 9.29 ms, -8.7% (75 FPS) | 11.29 ms (66 FPS) | 10.79 ms, -4.4% (68 FPS) |
+| 2x, free roam, standing | 7.45 ms (101 FPS) | 7.01 ms, -5.9% (107 FPS) | 6.89 ms (107 FPS) | 6.84 ms, -0.7% (111 FPS) |
+| 2x, drive | 7.21 ms (92 FPS) | 7.12 ms, -1.2% (102 FPS) | 7.14 ms (88 FPS) | 7.05 ms, -1.3% (93 FPS) |
+| 2x, race | 8.10 ms (85 FPS) | 7.86 ms, -3.0% (84 FPS) | 8.93 ms (66 FPS) | 8.29 ms, -7.2% (67 FPS) |
+
+- **Spread between runs:** free roam and the drive 0.1 to 5.2%, the map zoom-out 0.4 to 21%, the races 1.0 to 7.8%. In the second 3x series free roam and the drive ran 2 to 6% slower than in the first, on and off alike, with the same gains (D3D12 -11 to -12% in both; Vulkan -8.2 and -9.2% against -9.3 and -7.7%); full 16bpp took the D3D12 race from -5.6% to -8.7%.
+- **2x** is close to what the game thread allows here (6.8 to 6.9 ms at native), so the frame gains less than the resolve time saved; the 1% lows rise most (D3D12 drive 92 to 102 FPS).
+- **With a 120 FPS cap at 3x,** frames within 1 ms of the target: D3D12 26% off, 93% on; Vulkan 84% off, 97% on. At 2x: 98.5 to 99.5% either way.
 - **With a 60 FPS cap at 3x:** unchanged, 97 to 99% of frames within 1 ms either way.
-- **Native resolution:** unchanged (direct resolves are used with resolution scaling only), 6.81 to 6.92 ms in every segment, on and off, both APIs.
+- **Native resolution:** the frame time is the game thread's here and doesn't change, 6.79 to 6.97 ms in every segment, on and off, both APIs; the resolve time saved (timestamps above) is what a GPU-bound system gains.
 
 Checks:
 
-- **Bit-exact comparison** (`launcher/dev/direct-resolve-validate.sdk.patch`): one direct resolve at a time was also done through the EDRAM buffer into the same destination and both results compared, at 3x in real time through the attract movie, the map zoom-out, a minute standing in the city by day, a drive, and the race in the rain: 7,300 and 4,300 resolves on D3D12, 14,000 and 6,200 on Vulkan. Every one matched byte for byte except the 4x MSAA depth resolves, which differed in a small part of the texels, the old path's misreads above. With those misreads copied into the direct shader (a test build), 23,550 resolves on both APIs, the 4x depth ones included, all matched.
-- **Screenshots** with the setting switched on and off within one run (the dev pad's `set`), at 3x on both APIs: the attract movie, the map zoom-out, standing in the city, a drive and the race (rain, opponents, HUD) look the same either way. In the pause menu standing in the city, eight shots alternating, the pixels that differ between on and off and stay the same from shot to shot are 0.08% of the picture on D3D12 and 0.11% on Vulkan, mostly columns 4 pixels wide 120 pixels apart (the middles of 4x tiles at 3x), the rest within 4 levels on a parked car: the old path's 4x depth misreads. With them copied into the direct shader (the test build), on and off were identical at every still pixel on both APIs.
-- **D3D12 debug layer** through the city and the race: no errors; the only warnings are unrelated to resolves (initial states ignored for buffers, blend factors with MIN/MAX, live objects at exit).
-- **Vulkan validation** with synchronization validation through the city and the race: only `vkCmdEndQuery` 07007 and 01923 and `ShaderOutputNotConsumed`, and the write after write between texture load dispatches into their scratch buffer, the same with the setting off.
+- **Bit-exact comparison** (`launcher/dev/direct-resolve-validate.sdk.patch`, with `rexglue-resolve-4xmsaa-depth-samples.patch` in): one direct resolve at a time was also done through the EDRAM buffer into the same destination (the scaled resolve buffer, or shared memory at native) and both results compared, in real time through the attract movie, the map zoom-out, a minute standing in the city by day, a drive, and the race in the rain: 162,550 resolves at native, 2x and 3x on both APIs, 9,942 of them 4x depth and 6,584 full 16bpp, with no differing byte in any. Without the other patch, every kind matched except the 4x MSAA depth resolves at 3x (255 of 263 in the city on D3D12 differed), the EDRAM path's misreads.
+- **Screenshots** with the setting switched on and off within one run (the dev pad's `set`): at 3x on both APIs, the attract movie, the map zoom-out, standing in the city, a drive and the race (rain, opponents, HUD) look the same either way. In the pause menu standing in the city, eight shots alternating, on and off are identical at every pixel that stays the same from shot to shot, at native and at 3x on both APIs.
+- **D3D12 debug layer** through the city and the race, at native and 3x: no errors; the only warnings are unrelated to resolves (initial states ignored for buffers, blend factors with MIN/MAX, live objects at exit).
+- **Vulkan validation** with synchronization validation through the city and the race, at native and 3x: `ShaderOutputNotConsumed`, `vkCmdEndQuery` 07007 and 01923, and write after write hazards only between compute dispatches into the texture loads' scratch buffer or into the EDRAM buffer (dumps and other stores to it), the same kinds with the setting off: none on a render target, a resolve destination or a direct resolve pipeline. The layer reports a message only 10 times by default, which would hide later hazards of the same kind, so the city and the race were run again with `VK_LAYER_ENABLE_MESSAGE_LIMIT=0` (thousands of messages, the same kinds). The race now gets there under synchronization validation: in the first round's run the menus, at 10 to 20 FPS, ran out of step and it never started (`boot-to-race.pad` now also waits in game updates).
 - **The attract movie** plays through its resolves on both APIs (the bit-exact comparison above covered its 40 s).
 
 Built and run on Windows only, with an NVIDIA RTX 5080.
