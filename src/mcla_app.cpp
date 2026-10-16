@@ -246,15 +246,20 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
     config.gpu_plugin = "xenos";
   }
 
-  // Left to the SDK when "any"; it then loads the plugin named by --gpu_plugin
-  // with its own default backend.
+  // Loaded here, also for "any" (the plugin named by --gpu_plugin, with its own
+  // default backend, as the SDK would load it), so that the PC defaults reach
+  // the GPU's options before the GPU starts. If this fails, the SDK tries again
+  // and reports it.
   std::string backend = REXCVAR_GET(mcla_gpu_backend);
   if (backend != "any") {
     config.graphics = rex::system::LoadGpuPlugin("xenos", backend);
     if (!config.graphics) {
       REXLOG_ERROR("could not load the xenos GPU plugin with backend '{}'", backend);
     }
+  } else {
+    config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);
   }
+  ApplyPcDefaults();
 
   // Development: scripted controller input (src/dev_pad.cpp), off by default.
   MclaDevPadConfigure(config);
@@ -264,7 +269,9 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
 // off"; the PS5 host sets its own). They become the options' defaults
 // (rex::cvar::SetDefaultValue): used unless the command line, an environment
 // variable or mcla.toml sets them, and never saved as if the user had chosen
-// them. They were options the Windows launcher passed.
+// them. Most were options the Windows launcher passed. Set once the GPU
+// plugin, which defines them, is loaded, and before the GPU starts, which
+// reads edram_tiles.
 void MclaApp::ApplyPcDefaults() {
   // - uploaded guest memory stays valid across frames instead of being copied
   //   to the GPU again every frame;
@@ -272,12 +279,15 @@ void MclaApp::ApplyPcDefaults() {
   //   so they no longer claim the whole EDRAM;
   // - hot pages, as on the PS5: guest memory the game rewrites all the time is
   //   uploaded when drawn from instead of being write-protected again after
-  //   every fault.
+  //   every fault;
+  // - an EDRAM of 4,096 tiles, so that the scene fits in one tile with 2x MSAA
+  //   (mcla_single_tile, src/render_perf.cpp).
   constexpr std::pair<const char*, const char*> kDefaults[] = {
       {"clear_memory_page_state", "false"},
       {"execute_unclipped_draw_vs_on_cpu", "true"},
       {"shared_memory_hot_page_faults", "4"},
       {"shared_memory_hot_page_ms", "10000"},
+      {"edram_tiles", "4096"},
   };
   for (const auto& [name, value] : kDefaults) {
     const bool user_set = rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault;
@@ -324,7 +334,6 @@ bool MclaApp::OnWindowCloseRequested() {
 
 void MclaApp::OnPostSetup() {
   ConfigureFrameTiming();
-  ApplyPcDefaults();
   FollowCursorSetting();
 
   MclaDevPadStart(window());

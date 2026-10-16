@@ -3,35 +3,37 @@
 # credited there to BadassBaboon), used with its author's permission.
 
 # 0x8217A700 in grcDevice::BeginTiledRendering (sub_8217A470), after the tile
-# size has been computed and before the tile rectangle loop. r7/r8 = tile
-# width/height, r28/r25 = target width/height, r17 = render target. The Xbox
-# 360 had 10 MiB of framebuffer memory, so the game renders 720p with 2x MSAA
-# as two tiles (1280x512 and 1280x208; 4x MSAA as three) and submits the scene
-# once per tile. Making the tile the size of the screen would submit it once.
+# size and the tile count (0x827D42A4) have been computed and before the tile
+# rectangle loop. r7/r8 = tile width/height, r28/r25 = target width/height,
+# r18 = the renderer's MSAA mode (1 none, 2 = 2x, 4 = 4x). The Xbox 360 had 10
+# MiB of framebuffer memory: the game sizes a tile so that its colour and its
+# depth take 1,024 EDRAM tiles each, so it renders 720p with 2x MSAA as two
+# tiles (1280x512 and 1280x208; 4x MSAA as three) and submits the scene once
+# per tile. EndTiledRendering (sub_8217B430) resolves each tile.
 #
-# This hook never takes effect with this SDK. It acts only when r17 is 0, and
-# every call passes a render target, the main scene's included (sub_822E5ED8,
-# the call returning to 0x822E6020). Nor could it work: a 720p 2x MSAA tile
-# needs 1,472 EDRAM tiles for the colour and as many for the depth, and the
-# SDK's EDRAM is the console's 2,048 tiles, with addresses wrapping around
-# (xenos::kEdramTileCount; the resolve shaders wrap at 10 MiB). Forced onto
-# the main scene, the colour at tile 1,472 wraps into the depth's tiles, and
-# everything below row 288 (at 1x) resolves as garbage. It needs a host EDRAM
-# of at least 2,944 tiles; LARecomp's unpublished SDK has 4,096. With MSAA
-# off the game draws the scene as one tile by itself.
+# When the GPU emulates a larger EDRAM (the SDK's edram_tiles, 4,096 tiles,
+# which the game makes its PC default; IGraphicsSystem::edram_tile_count says
+# what is in effect) and the whole target's colour and depth fit in it, the
+# hook makes the tile the size of the target and the count 1, so the scene is
+# submitted and resolved once. 720p with 2x MSAA needs 2 x 1,472 tiles: depth
+# at 0 and colour at 1,472. 720p with 4x MSAA needs 2 x 2,944 and keeps its
+# three tiles (the pause menu, the GPS map); without MSAA the game draws one
+# tile by itself. With the console's 2,048 tiles nothing changes.
+# (launcher/dev/single-tile-2026-10-16.md; the old condition, a null render
+# target in r17, never held.)
 [[midasm_hook]]
 address = 0x8217A700
 name = "mcla_single_tile"
-registers = ["r7", "r8", "r17", "r25", "r28"]
+registers = ["r7", "r8", "r18", "r25", "r28"]
 
 # 0x82410E34 in sub_82410D70 (surface creation): rejects a surface whose end
 # exceeds 0x800 EDRAM tiles, the real console's capacity. With
-# mcla_single_tile on it lets a surface end anywhere up to 4,096 tiles (the
-# surface header's base field is 12 bits). That is for a host EDRAM of 4,096
-# tiles; the SDK's has 2,048 (see above), so a surface past it would wrap.
-# None did in the sessions measured (the title, the city, the menus and a
-# race): 11 surfaces each, none ending past 2,048. r3 = base, r30 = size,
-# r11 = base + size; true jumps to the success branch.
+# mcla_single_tile on and a larger EDRAM emulated, it lets a surface end
+# anywhere up to that size; with the console's 2,048 tiles it changes nothing.
+# The single tile's surfaces don't come through here: in the sessions measured
+# (the title, the city, the menus and a race) 11 surfaces did, none ending
+# past 2,048. r3 = base, r30 = size, r11 = base + size; true jumps to the
+# success branch.
 [[midasm_hook]]
 address = 0x82410E34
 name = "mcla_edram_limit"

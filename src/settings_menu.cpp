@@ -52,6 +52,7 @@ bool MclaRelaunchGame();  // src/mcla_app.cpp
 #if !REX_PLATFORM_PS5
 void MclaWaitForSaves();  // src/mcla_app.cpp
 #endif
+bool MclaSingleTileAvailable();  // src/render_perf.cpp
 
 namespace {
 
@@ -444,11 +445,8 @@ constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
 constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
 constexpr double kTrafficDistances[] = {250.0, 325.0, 400.0};
 
-// No SINGLE TILE RENDERING row: mcla_single_tile (src/render_perf.cpp) has
-// never had an effect. Its hook never acts, and the SDK's EDRAM of 2,048 tiles
-// can't hold a 720p 2x MSAA scene in one tile. The option is kept as it is;
-// see launcher/dev/single-tile-2026-10-16.md.
 const ItemDef kPerformanceItems[] = {
+    {"PM_MxSingleTile", ItemKind::kToggle, "mcla_single_tile", "SINGLE TILE RENDERING"},
     {"PM_MxFenceYield", ItemKind::kToggle, "mcla_fence_yield", "GPU WAIT YIELD"},
     {"PM_MxShadows", ItemKind::kToggle, "mcla_shadows", "SHADOWS"},
     {"PM_MxFoliageShadows", ItemKind::kToggle, "mcla_foliage_shadows", "FOLIAGE SHADOWS"},
@@ -505,11 +503,16 @@ bool RestartOnly(const char* option) {
 }
 
 // A restart-only row says "(NEXT START)", and "(RESTART NEEDED)" once its
-// value differs from the one the game started with.
+// value differs from the one the game started with. SINGLE TILE RENDERING
+// says "(UNAVAILABLE)" where the GPU emulates the console's EDRAM, too small
+// for it (src/render_perf.cpp).
 std::string RowLabel(const ItemDef& item, bool pending) {
   std::string label = item.label;
   if (RestartOnly(item.option)) {
     label += pending ? " (RESTART NEEDED)" : " (NEXT START)";
+  }
+  if (std::strcmp(item.option, "mcla_single_tile") == 0 && !MclaSingleTileAvailable()) {
+    label += " (UNAVAILABLE)";
   }
   return label;
 }
