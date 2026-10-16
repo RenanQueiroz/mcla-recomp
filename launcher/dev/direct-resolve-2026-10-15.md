@@ -333,3 +333,35 @@ windowed. Median frame (spread of the run medians), 1% low:
   validation runs. No other run of either round had a failed line.
 - **Watch list:** no silent exit, and no frame near 280 ms in a Vulkan drive
   (the worst uncapped one 22 ms, in the second 3x series, on and off alike).
+
+## Round 4: after a second review
+
+- **Build scripts:** a revised patch keeps the name `make_pc.ps1` and
+  `make_ps5.sh` tell it by, so an SDK patched before the revision kept the old
+  version (round 2's direct resolve after round 3, the shader stutter patches
+  after af5133b) unless the launcher reset it. Both scripts now record each
+  patch's SHA-256 in the SDK checkout's `.mcla-patches` and stop at a patch
+  that is in without its current hash there (revised, or applied by an older
+  script or by hand); `build-game.ps1` resets an SDK without the records once.
+  Tested on scratch SDK copies (worktrees of the patch chain) with the
+  scripts' own step-2/step-3 text: an SDK patched by the 5608f90 script
+  stops with a clear message; a fresh SDK is patched (25 records) and a second
+  run passes silently; the SDK after `rexglue-direct-resolve.patch` is swapped
+  for another version stops, and passes again with the version applied; a
+  missing record stops. `make_ps5.sh` applies the later patches with
+  `--whitespace=nowarn`, as the rebuilt shader headers keep the compiler
+  listing's trailing spaces.
+- **The fast 4x MSAA copy shaders** use the 1x/2x MSAA ones' direct pipelines
+  (`GetDirectResolveCopyShader`): their single-sampled entries could never be
+  picked (a 4x resolve's source is 4x) and their multisampled ones were the
+  same bytecode, so 12 pipelines a backend instead of 16.
+- **The Vulkan startup warning** names what falls back: every multisampled
+  colour source without a multisampled integer dummy, only the 16- and 32-bit
+  formats without the float one.
+- **Checks:** validation of the city at 3x and native on both APIs, 62,650
+  resolves including 3,789 fast 4x depth ones (`kD24S8`, `kD24FS8`), no
+  differing byte; a smoke run a backend at 3x (D3D12 free roam 8.83 ms,
+  Vulkan 8.48 ms, timedemo); Vulkan validation with synchronization
+  validation and no message limit from startup into the city: no VUID error,
+  only `ShaderOutputNotConsumed` and the two upstream write after write kinds
+  (texture load scratch buffer, EDRAM buffer).

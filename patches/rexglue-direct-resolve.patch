@@ -101,10 +101,10 @@ index c5e219a..4cbe654 100644
    // Parameter 0 - 2 root constants (red, green).
    ID3D12RootSignature* uint32_rtv_clear_root_signature_ = nullptr;
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
-index 1c10f09..bf9565a 100644
+index 1c10f09..98d01c1 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
 +++ b/include/rex/graphics/pipeline/render_target/cache.h
-@@ -541,6 +541,40 @@ class RenderTargetCache {
+@@ -541,6 +541,54 @@ class RenderTargetCache {
                                        std::vector<ResolveCopyDumpRectangle>& rectangles_out,
                                        std::vector<ResolveCopyDispatch>& dispatches_out) const;
  
@@ -141,11 +141,25 @@ index 1c10f09..bf9565a 100644
 +  // area. Fills the offset in source_constants_out, not the info.
 +  RenderTarget* GetDirectResolveSource(const draw_util::ResolveInfo& resolve_info,
 +                                       DirectResolveSourceConstants& source_constants_out) const;
++  // The copy shader whose direct resolve shader a copy shader uses: the fast
++  // 4x MSAA ones use the 1x/2x MSAA ones, which read any sample of a
++  // multisampled render target.
++  static draw_util::ResolveCopyShaderIndex GetDirectResolveCopyShader(
++      draw_util::ResolveCopyShaderIndex copy_shader) {
++    switch (copy_shader) {
++      case draw_util::ResolveCopyShaderIndex::kFast32bpp4xMSAA:
++        return draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA;
++      case draw_util::ResolveCopyShaderIndex::kFast64bpp4xMSAA:
++        return draw_util::ResolveCopyShaderIndex::kFast64bpp1x2xMSAA;
++      default:
++        return copy_shader;
++    }
++  }
 +
    // Sets up the needed render targets and transfers to perform a clear in a
    // resolve operation via a host render target clear. resolve_info is expected
    // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
-@@ -594,6 +628,9 @@ class RenderTargetCache {
+@@ -594,6 +642,9 @@ class RenderTargetCache {
    ClearRectangleWaitingForDraw clear_rectangles_waiting_for_draw_[2];
    std::vector<Transfer> clear_rectangle_transfers_[2];
  
@@ -290,7 +304,7 @@ index 99001a7..ddcb608 100644
    // For pixel (fragment) shader interlock.
  
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index 1648537..f163a6c 100644
+index 1648537..18f322c 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
 @@ -79,6 +79,30 @@ namespace shaders {
@@ -324,7 +338,7 @@ index 1648537..f163a6c 100644
  }  // namespace shaders
  
  const D3D12RenderTargetCache::ResolveCopyShaderCode
-@@ -108,6 +132,77 @@ const D3D12RenderTargetCache::ResolveCopyShaderCode
+@@ -108,6 +132,65 @@ const D3D12RenderTargetCache::ResolveCopyShaderCode
           shaders::resolve_full_128bpp_scaled_cs, sizeof(shaders::resolve_full_128bpp_scaled_cs)},
  };
  
@@ -339,14 +353,8 @@ index 1648537..f163a6c 100644
 +          sizeof(shaders::resolve_direct_fast_32bpp_msaa_cs),
 +          shaders::resolve_direct_fast_32bpp_msaa_scaled_cs,
 +          sizeof(shaders::resolve_direct_fast_32bpp_msaa_scaled_cs)}},
-+        // kFast32bpp4xMSAA
-+        {{shaders::resolve_direct_fast_32bpp_cs, sizeof(shaders::resolve_direct_fast_32bpp_cs),
-+          shaders::resolve_direct_fast_32bpp_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_32bpp_scaled_cs)},
-+         {shaders::resolve_direct_fast_32bpp_msaa_cs,
-+          sizeof(shaders::resolve_direct_fast_32bpp_msaa_cs),
-+          shaders::resolve_direct_fast_32bpp_msaa_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_32bpp_msaa_scaled_cs)}},
++        // kFast32bpp4xMSAA - the 1x/2x MSAA one's
++        {},
 +        // kFast64bpp1x2xMSAA
 +        {{shaders::resolve_direct_fast_64bpp_cs, sizeof(shaders::resolve_direct_fast_64bpp_cs),
 +          shaders::resolve_direct_fast_64bpp_scaled_cs,
@@ -355,14 +363,8 @@ index 1648537..f163a6c 100644
 +          sizeof(shaders::resolve_direct_fast_64bpp_msaa_cs),
 +          shaders::resolve_direct_fast_64bpp_msaa_scaled_cs,
 +          sizeof(shaders::resolve_direct_fast_64bpp_msaa_scaled_cs)}},
-+        // kFast64bpp4xMSAA
-+        {{shaders::resolve_direct_fast_64bpp_cs, sizeof(shaders::resolve_direct_fast_64bpp_cs),
-+          shaders::resolve_direct_fast_64bpp_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_64bpp_scaled_cs)},
-+         {shaders::resolve_direct_fast_64bpp_msaa_cs,
-+          sizeof(shaders::resolve_direct_fast_64bpp_msaa_cs),
-+          shaders::resolve_direct_fast_64bpp_msaa_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_64bpp_msaa_scaled_cs)}},
++        // kFast64bpp4xMSAA - the 1x/2x MSAA one's
++        {},
 +        // kFull8bpp
 +        {{shaders::resolve_direct_full_8bpp_cs, sizeof(shaders::resolve_direct_full_8bpp_cs),
 +          shaders::resolve_direct_full_8bpp_scaled_cs,
@@ -402,7 +404,7 @@ index 1648537..f163a6c 100644
  const uint32_t D3D12RenderTargetCache::kTransferUsedRootParameters[size_t(
      TransferRootSignatureIndex::kCount)] = {
      // kColor
-@@ -333,13 +428,6 @@ bool D3D12RenderTargetCache::Initialize() {
+@@ -333,13 +416,6 @@ bool D3D12RenderTargetCache::Initialize() {
      Shutdown();
      return false;
    }
@@ -416,7 +418,7 @@ index 1648537..f163a6c 100644
    // Create the resolve copying pipelines.
    for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
      const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
-@@ -795,6 +883,100 @@ bool D3D12RenderTargetCache::Initialize() {
+@@ -795,6 +871,100 @@ bool D3D12RenderTargetCache::Initialize() {
        return false;
      }
  
@@ -517,7 +519,7 @@ index 1648537..f163a6c 100644
      // k_32_FLOAT and k_32_32_FLOAT clear root signature and pipelines.
      D3D12_ROOT_PARAMETER uint32_rtv_clear_root_constants;
      uint32_rtv_clear_root_constants.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-@@ -977,21 +1159,17 @@ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
+@@ -977,21 +1147,17 @@ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
      }
    }
    dump_pipelines_.clear();
@@ -547,7 +549,7 @@ index 1648537..f163a6c 100644
    ui::d3d12::util::ReleaseAndNull(dump_root_signature_depth_);
    ui::d3d12::util::ReleaseAndNull(dump_root_signature_color_);
  
-@@ -1194,18 +1372,37 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1194,18 +1360,38 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
      if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
        const draw_util::ResolveCopyShaderInfo& copy_shader_info =
            draw_util::resolve_copy_shader_info[size_t(copy_shader)];
@@ -571,8 +573,9 @@ index 1648537..f163a6c 100644
 +          const draw_util::ResolveEdramInfo& direct_edram_info =
 +              resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info
 +                                            : resolve_info.color_edram_info;
-+          direct_pipeline = direct_resolve_pipelines_[size_t(copy_shader)][size_t(
-+              xenos::MsaaSamples(direct_edram_info.msaa_samples) != xenos::MsaaSamples::k1X)];
++          direct_pipeline =
++              direct_resolve_pipelines_[size_t(GetDirectResolveCopyShader(copy_shader))][size_t(
++                  xenos::MsaaSamples(direct_edram_info.msaa_samples) != xenos::MsaaSamples::k1X)];
 +          RenderTarget* source = direct_pipeline
 +                                     ? GetDirectResolveSource(resolve_info, direct_source_constants)
 +                                     : nullptr;
@@ -593,7 +596,7 @@ index 1648537..f163a6c 100644
            // Dump the current contents of the render targets owning the affected
            // range to edram_buffer_.
            uint32_t dump_base;
-@@ -1243,11 +1440,16 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1243,11 +1429,16 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
          // resolve buffer with scaling because only at least 128 * 2^20 R32
          // elements must be addressable
          // (D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP).
@@ -612,7 +615,7 @@ index 1648537..f163a6c 100644
            if (bindless_resources_used_) {
              if (draw_resolution_scaled) {
                descriptor_dest = descriptors[0];
-@@ -1255,12 +1457,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1255,12 +1446,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
                descriptor_dest = command_processor_.GetSharedMemoryUintPow2BindlessUAVHandlePair(
                    copy_shader_info.dest_bpe_log2);
              }
@@ -633,7 +636,7 @@ index 1648537..f163a6c 100644
              }
            } else {
              descriptor_dest = descriptors[0];
-@@ -1268,12 +1472,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1268,12 +1461,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
                shared_memory.WriteUintPow2UAVDescriptor(descriptor_dest.first,
                                                         copy_shader_info.dest_bpe_log2);
              }
@@ -654,7 +657,7 @@ index 1648537..f163a6c 100644
              }
            }
            if (draw_resolution_scaled) {
-@@ -1284,21 +1490,63 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1284,21 +1479,63 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            } else {
              shared_memory.UseForWriting();
            }
@@ -726,7 +729,7 @@ index 1648537..f163a6c 100644
            command_processor_.SubmitBarriers();
            command_list.D3DDispatch(copy_group_count_x, copy_group_count_y, 1);
  
-@@ -5522,69 +5770,56 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
+@@ -5522,69 +5759,56 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
    return pipeline;
  }
  
@@ -34340,7 +34343,7 @@ index 0000000..66f0340
 +    0x00010038,
 +};
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 3ac5e1f..53fb90c 100644
+index 3ac5e1f..f337403 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -92,6 +92,30 @@ namespace shaders {
@@ -34374,7 +34377,7 @@ index 3ac5e1f..53fb90c 100644
  }  // namespace shaders
  
  const VulkanRenderTargetCache::ResolveCopyShaderCode
-@@ -121,6 +145,77 @@ const VulkanRenderTargetCache::ResolveCopyShaderCode
+@@ -121,6 +145,65 @@ const VulkanRenderTargetCache::ResolveCopyShaderCode
           shaders::resolve_full_128bpp_scaled_cs, sizeof(shaders::resolve_full_128bpp_scaled_cs)},
  };
  
@@ -34389,14 +34392,8 @@ index 3ac5e1f..53fb90c 100644
 +          sizeof(shaders::resolve_direct_fast_32bpp_msaa_cs),
 +          shaders::resolve_direct_fast_32bpp_msaa_scaled_cs,
 +          sizeof(shaders::resolve_direct_fast_32bpp_msaa_scaled_cs)}},
-+        // kFast32bpp4xMSAA
-+        {{shaders::resolve_direct_fast_32bpp_cs, sizeof(shaders::resolve_direct_fast_32bpp_cs),
-+          shaders::resolve_direct_fast_32bpp_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_32bpp_scaled_cs)},
-+         {shaders::resolve_direct_fast_32bpp_msaa_cs,
-+          sizeof(shaders::resolve_direct_fast_32bpp_msaa_cs),
-+          shaders::resolve_direct_fast_32bpp_msaa_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_32bpp_msaa_scaled_cs)}},
++        // kFast32bpp4xMSAA - the 1x/2x MSAA one's
++        {},
 +        // kFast64bpp1x2xMSAA
 +        {{shaders::resolve_direct_fast_64bpp_cs, sizeof(shaders::resolve_direct_fast_64bpp_cs),
 +          shaders::resolve_direct_fast_64bpp_scaled_cs,
@@ -34405,14 +34402,8 @@ index 3ac5e1f..53fb90c 100644
 +          sizeof(shaders::resolve_direct_fast_64bpp_msaa_cs),
 +          shaders::resolve_direct_fast_64bpp_msaa_scaled_cs,
 +          sizeof(shaders::resolve_direct_fast_64bpp_msaa_scaled_cs)}},
-+        // kFast64bpp4xMSAA
-+        {{shaders::resolve_direct_fast_64bpp_cs, sizeof(shaders::resolve_direct_fast_64bpp_cs),
-+          shaders::resolve_direct_fast_64bpp_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_64bpp_scaled_cs)},
-+         {shaders::resolve_direct_fast_64bpp_msaa_cs,
-+          sizeof(shaders::resolve_direct_fast_64bpp_msaa_cs),
-+          shaders::resolve_direct_fast_64bpp_msaa_scaled_cs,
-+          sizeof(shaders::resolve_direct_fast_64bpp_msaa_scaled_cs)}},
++        // kFast64bpp4xMSAA - the 1x/2x MSAA one's
++        {},
 +        // kFull8bpp
 +        {{shaders::resolve_direct_full_8bpp_cs, sizeof(shaders::resolve_direct_full_8bpp_cs),
 +          shaders::resolve_direct_full_8bpp_scaled_cs,
@@ -34452,7 +34443,7 @@ index 3ac5e1f..53fb90c 100644
  const VulkanRenderTargetCache::TransferPipelineLayoutInfo
      VulkanRenderTargetCache::kTransferPipelineLayoutInfos[size_t(
          TransferPipelineLayoutIndex::kCount)] = {
-@@ -583,18 +678,20 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+@@ -583,18 +666,20 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
      return false;
    }
  
@@ -34478,7 +34469,7 @@ index 3ac5e1f..53fb90c 100644
      VkPipelineLayoutCreateInfo pipeline_layout_create_info;
      pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
      pipeline_layout_create_info.pNext = nullptr;
-@@ -604,14 +701,13 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+@@ -604,14 +689,13 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
      pipeline_layout_create_info.pushConstantRangeCount = 1;
      pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
      if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_create_info, nullptr,
@@ -34499,7 +34490,7 @@ index 3ac5e1f..53fb90c 100644
  
    // Resolve copy pipelines.
    for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
-@@ -701,6 +797,102 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+@@ -701,6 +785,106 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
        host_depth_store_pipelines_[i] = host_depth_store_pipeline;
      }
  
@@ -34590,11 +34581,15 @@ index 3ac5e1f..53fb90c 100644
 +          direct_resolve_pipelines_[i][j] = direct_pipeline;
 +        }
 +      }
-+      if (direct_resolve_dummy_image_views_[0][1] == VK_NULL_HANDLE ||
-+          direct_resolve_dummy_image_views_[1][1] == VK_NULL_HANDLE) {
++      if (direct_resolve_dummy_image_views_[1][1] == VK_NULL_HANDLE) {
 +        REXGPU_WARN(
-+            "VulkanRenderTargetCache: Multisampled sampled images not supported for direct "
++            "VulkanRenderTargetCache: No multisampled integer sampled image for direct "
 +            "resolves, resolves from multisampled color render targets will go through the "
++            "EDRAM buffer");
++      } else if (direct_resolve_dummy_image_views_[0][1] == VK_NULL_HANDLE) {
++        REXGPU_WARN(
++            "VulkanRenderTargetCache: No multisampled float sampled image for direct resolves, "
++            "resolves from multisampled 16- and 32-bit color render targets will go through the "
 +            "EDRAM buffer");
 +      }
 +    }
@@ -34602,7 +34597,7 @@ index 3ac5e1f..53fb90c 100644
      // Transfer and clear vertex buffer, for quads of up to tile granularity.
      transfer_vertex_buffer_pool_ = std::make_unique<ui::vulkan::VulkanUploadBufferPool>(
          vulkan_device, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-@@ -998,23 +1190,25 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+@@ -998,23 +1182,25 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
      }
    }
    dump_pipelines_.clear();
@@ -34641,7 +34636,7 @@ index 3ac5e1f..53fb90c 100644
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                           dump_pipeline_layout_depth_);
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
-@@ -1162,18 +1356,42 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1162,18 +1348,43 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
      if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
        const draw_util::ResolveCopyShaderInfo& copy_shader_info =
            draw_util::resolve_copy_shader_info[size_t(copy_shader)];
@@ -34665,8 +34660,9 @@ index 3ac5e1f..53fb90c 100644
 +          const draw_util::ResolveEdramInfo& direct_edram_info =
 +              resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info
 +                                            : resolve_info.color_edram_info;
-+          direct_pipeline = direct_resolve_pipelines_[size_t(copy_shader)][size_t(
-+              xenos::MsaaSamples(direct_edram_info.msaa_samples) != xenos::MsaaSamples::k1X)];
++          direct_pipeline =
++              direct_resolve_pipelines_[size_t(GetDirectResolveCopyShader(copy_shader))][size_t(
++                  xenos::MsaaSamples(direct_edram_info.msaa_samples) != xenos::MsaaSamples::k1X)];
 +          RenderTarget* source = direct_pipeline != VK_NULL_HANDLE
 +                                     ? GetDirectResolveSource(resolve_info, direct_source_constants)
 +                                     : nullptr;
@@ -34692,7 +34688,7 @@ index 3ac5e1f..53fb90c 100644
            // Dump the current contents of the render targets owning the affected
            // range to edram_buffer_.
            uint32_t dump_base;
-@@ -1259,28 +1477,76 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1259,28 +1470,76 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                std::pair<uint32_t, uint32_t>(uint32_t(copy_dest_use_start),
                                                              uint32_t(copy_dest_use_length)));
            }
@@ -34783,7 +34779,7 @@ index 3ac5e1f..53fb90c 100644
            }
            command_processor_.SubmitBarriers(true);
            command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
-@@ -1827,6 +2093,10 @@ VulkanRenderTargetCache::VulkanRenderTarget::~VulkanRenderTarget() {
+@@ -1827,6 +2086,10 @@ VulkanRenderTargetCache::VulkanRenderTarget::~VulkanRenderTarget() {
        key().is_depth ? *render_target_cache_.descriptor_set_pool_sampled_image_x2_
                       : *render_target_cache_.descriptor_set_pool_sampled_image_;
    descriptor_set_pool.Free(descriptor_set_index_transfer_source_);
@@ -34794,7 +34790,7 @@ index 3ac5e1f..53fb90c 100644
    if (view_color_transfer_separate_ != VK_NULL_HANDLE) {
      dfn.vkDestroyImageView(device, view_color_transfer_separate_, nullptr);
    }
-@@ -5960,69 +6230,118 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+@@ -5960,69 +6223,118 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
    return pipeline;
  }
  

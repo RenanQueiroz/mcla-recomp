@@ -36,12 +36,12 @@ index 4cbe654..2a1c315 100644
    // Parameter 0 - 2 root constants (red, green).
    ID3D12RootSignature* uint32_rtv_clear_root_signature_ = nullptr;
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
-index bf9565a..7b77d0f 100644
+index 98d01c1..69803be 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
 +++ b/include/rex/graphics/pipeline/render_target/cache.h
-@@ -575,6 +575,17 @@ class RenderTargetCache {
-   RenderTarget* GetDirectResolveSource(const draw_util::ResolveInfo& resolve_info,
-                                        DirectResolveSourceConstants& source_constants_out) const;
+@@ -589,6 +589,17 @@ class RenderTargetCache {
+     }
+   }
  
 +  // TMPDV: validation of direct resolves against the EDRAM buffer path
 +  // (direct_resolve_validate), development only. One resolve at a time is
@@ -57,7 +57,7 @@ index bf9565a..7b77d0f 100644
    // Sets up the needed render targets and transfers to perform a clear in a
    // resolve operation via a host render target clear. resolve_info is expected
    // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
-@@ -631,6 +642,14 @@ class RenderTargetCache {
+@@ -645,6 +656,14 @@ class RenderTargetCache {
    // Temporary storage for GetDirectResolveSource.
    mutable std::vector<ResolveCopyDumpRectangle> direct_resolve_rectangles_;
  
@@ -111,7 +111,7 @@ index ddcb608..0906a9d 100644
    // Temporary storage for Resolve.
    std::vector<Transfer> clear_transfers_[2];
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index f163a6c..8367618 100644
+index 18f322c..0ce8894 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
 @@ -47,6 +47,8 @@ REXCVAR_DEFINE_STRING(render_target_path_d3d12, "", "GPU/D3D12",
@@ -123,7 +123,7 @@ index f163a6c..8367618 100644
  namespace rex::graphics::d3d12 {
  
  // Generated with `xb buildshaders`.
-@@ -1557,6 +1559,20 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1546,6 +1548,20 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
              shared_memory.MarkUAVWritesCommitNeeded();
            }
  
@@ -144,7 +144,7 @@ index f163a6c..8367618 100644
            // Invalidate textures and mark the range as scaled if needed.
            texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
                                              resolve_info.copy_dest_extent_length);
-@@ -5770,6 +5786,165 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
+@@ -5759,6 +5775,165 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
    return pipeline;
  }
  
@@ -425,7 +425,7 @@ index 0d270d3..ec720a0 100644
      const draw_util::ResolveInfo& resolve_info, Transfer::Rectangle& clear_rectangle_out,
      RenderTarget*& depth_render_target_out, std::vector<Transfer>& depth_transfers_out,
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 53fb90c..1e642cf 100644
+index f337403..d4576e0 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -62,6 +62,8 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
@@ -437,7 +437,7 @@ index 53fb90c..1e642cf 100644
  namespace rex::graphics::vulkan {
  
  // Generated with `xb buildshaders`.
-@@ -1209,6 +1211,15 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+@@ -1201,6 +1203,15 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
    direct_resolve_dummy_images_initialized_ = false;
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                           direct_resolve_pipeline_layout_);
@@ -453,7 +453,7 @@ index 53fb90c..1e642cf 100644
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                           dump_pipeline_layout_depth_);
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
-@@ -1551,6 +1562,22 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1544,6 +1555,22 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
            command_processor_.SubmitBarriers(true);
            command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
  
@@ -476,7 +476,7 @@ index 53fb90c..1e642cf 100644
            // Invalidate textures and mark the range as scaled if needed.
            texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
                                              resolve_info.copy_dest_extent_length);
-@@ -6230,6 +6257,149 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+@@ -6223,6 +6250,149 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
    return pipeline;
  }
  
