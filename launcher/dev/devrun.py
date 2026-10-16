@@ -167,6 +167,13 @@ def run(a, tag=None):
         changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
         raise SystemExit(f"REAL DATA CHANGED during the run: {changed}")
     print(f"{out.name}: exit {proc.returncode} after {elapsed:.0f} s; real save data unchanged")
+    # A script line that failed ends the script (and the game): the run is not
+    # what the script describes.
+    log = out / "game.log"
+    if log.exists():
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "dev pad: script " in line and " done: err" in line:
+                raise SystemExit(f"{out.name}: SCRIPT FAILED: {line.split(' done: ', 1)[1]}")
     return out
 
 

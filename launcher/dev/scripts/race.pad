@@ -9,7 +9,7 @@ include boot-to-race.pad
 # game time in the log (devrun.py bench compares runs with them).
 follow sunset-and-vine.route
 watch 60
-wait_until f32 0x827D7510 >= 9.3 60s
+wait_until f32 0x827D7510 >= 9.3 300s
 mark race
 wait 5400f
 mark race_end

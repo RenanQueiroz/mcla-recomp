@@ -6,6 +6,9 @@
 #
 # The menus are driven in real time (they take 30 steps a second of real
 # time), so under --mcla_fixed_dt game time runs faster than in a capped run.
+# Each wait in the menus also lasts at least as many updates as it would at 60
+# FPS (`wait 300ms 18f`): with synchronization validation the menus run at 10
+# to 20 FPS, and waits in time alone let their transitions miss presses.
 # The pause menu opens right after arriving in the city: some 10 to 20 s of
 # game time later the career's phone shows a message, which put the menu
 # presses out of step in a timedemo run.
@@ -15,57 +18,57 @@ press_until start left_title every=2s timeout=90s
 mark map_zoom
 wait_until roam 180s
 mark menu
-wait 1s
+wait 1s 60f
 press start 4f
-wait 1500ms
+wait 1500ms 90f
 # Pause -> Modes; Arcade; Ordered race; Sunset and Vine (the first of each).
 press rb 4f
-wait 1000ms
+wait 1000ms 60f
 press a 4f
-wait 2500ms
+wait 2500ms 150f
 press a 4f
-wait 1500ms
+wait 1500ms 90f
 press a 4f
-wait 1500ms
+wait 1500ms 90f
 # The race options start at the arcade defaults (the save copy's). A held
 # direction repeats after about 8 game updates, so presses last 4 updates
 # (one step each, capped or not) and the gaps are real time (the menus move
 # 30 times a second of real time).
 # Number of opponents 3 -> 7.
 press right 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 300ms
+wait 300ms 18f
 # Difficulty Medium -> Easy, so the opponents stay in sight for longer.
 press down 4f
-wait 300ms
+wait 300ms 18f
 press left 4f
-wait 300ms
+wait 300ms 18f
 # Down to Weather (past Power ups: Off, Traffic: Normal).
 press down 4f
-wait 300ms
+wait 300ms 18f
 press down 4f
-wait 300ms
+wait 300ms 18f
 press down 4f
-wait 300ms
+wait 300ms 18f
 # Weather Dynamic -> Clear, Partly cloudy, Cloudy, Rainy.
 press right 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 300ms
+wait 300ms 18f
 # Time of day Dynamic -> Midnight.
 press down 4f
-wait 300ms
+wait 300ms 18f
 press right 4f
-wait 800ms
+wait 800ms 48f
 # Start race. The game state is 3 (loading) from the arcade map until the race
 # is ready, so "roam" holds again when the intro starts.
 press a 4f

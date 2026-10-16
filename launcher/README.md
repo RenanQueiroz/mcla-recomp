@@ -234,15 +234,18 @@ during a build:
   `devrun.py --cache-root <folder>` runs with a shader storage of its own.
 - `direct-resolve-2026-10-15.md`: resolves that read the render target
   directly instead of dumping it into the EDRAM buffer
-  (`rexglue-direct-resolve.patch`): the byte-for-byte comparison with the
-  EDRAM buffer path, the 4x MSAA depth samples the old path misread, GPU
-  time per resolve, the benchmark and the checks.
+  (`rexglue-direct-resolve.patch`) at any resolution scale, and the 4x MSAA
+  depth samples the EDRAM path misread
+  (`rexglue-resolve-4xmsaa-depth-samples.patch`): the byte-for-byte
+  comparisons, GPU time per resolve, the benchmarks and the checks.
 - `direct-resolve-validate.sdk.patch` (SDK, D3D12 and Vulkan, `TMPDV`): on top
   of `rexglue-direct-resolve.patch`, a `direct_resolve_validate` setting: one
   direct resolve a frame, each in turn, is also done through the EDRAM buffer
-  into the same destination, and both results are read back and compared byte
-  for byte; differences, and every 50 a summary per kind (copy shader, MSAA,
-  formats, samples, conversion), go to the log.
+  into the same destination (the scaled resolve buffer, or shared memory at
+  native resolution), and both results are read back and compared byte for
+  byte; differences, and every 50 a summary per kind (copy shader, MSAA,
+  formats, samples, conversion), go to the log. With
+  `rexglue-resolve-4xmsaa-depth-samples.patch` in, no difference is expected.
 
 ## Scripted controller input (unattended runs)
 
@@ -258,9 +261,13 @@ in front. A real controller keeps working alongside it.
   (`dev\pad.py press start`, `pad.py shot C:\temp\a.png 0.5`, `pad.py -i`), and
   `--mcla_pad_frames_csv=<file>` logs every swap with the script's `mark`s. The
   commands are listed at the top of `src\dev_pad.cpp`: buttons, triggers and
-  sticks, waits in time or engine frames, `wait_until` / `press_until` a
+  sticks, waits in time, engine frames or both (`wait 300ms 18f`: until both
+  have passed, for menus at low frame rates), `wait_until` / `press_until` a
   condition (`left_title`, `loading`, `roam`, or a guest memory word),
-  screenshots, recording and playback. `set <option> <value>` changes an
+  screenshots, recording and playback. A line that fails (a condition timing
+  out, an included script failing) ends the script, and with
+  `--mcla_pad_exit_on_end` the game; `devrun.py` then reports the run as
+  failed. `set <option> <value>` changes an
   option while the game runs, for comparing two settings within one run (the
   time of day and the traffic differ from run to run).
   `--mcla_fixed_dt=N` makes every game update advance exactly 1/N s:

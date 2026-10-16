@@ -9,7 +9,7 @@
 //
 //   press a [150ms]   hold rt 2s   down x   up x   release [all|name]
 //   trigger rt 0.8 [2s]   stick lx -0.5 [1s]
-//   wait 2s | 500ms | 90f (engine frames)
+//   wait 2s | 500ms | 90f (engine frames) | 300ms 18f (until both passed)
 //   wait_until <condition> [timeout]
 //   press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
 //   pos   peek <addr> [bytes]   peeku <addr> [count]   peekf <addr> [count]
@@ -28,6 +28,10 @@
 //
 // The game ignores buttons during its own transitions (the title screen's
 // camera cuts, a menu closing), so scripts press until a condition holds.
+// Menus that move in real time but animate per update need both, as at low
+// frame rates (validation layers) a wait in time alone lets too few updates
+// pass. A line that fails ends the script, and the run with
+// mcla_pad_exit_on_end, rather than the rest running out of step.
 //
 // Engine frames are counted in mcla_frame_delta, the game's per-update timer,
 // which the start-up logos never reach. mcla_fixed_dt=N makes every update
@@ -1307,7 +1311,22 @@ std::string Execute(const std::string& line) {
     if (!ParseDuration(arg(1), amount, frames)) {
       return "err duration";
     }
-    Wait(amount, frames);
+    if (arg(2).empty()) {
+      Wait(amount, frames);
+      return "ok frame=" + std::to_string(g_frame.load());
+    }
+    // A time and a frame count: until both have passed.
+    double amount2;
+    bool frames2;
+    if (!ParseDuration(arg(2), amount2, frames2) || frames2 == frames) {
+      return "err wait <time> <frames>f";
+    }
+    const uint64_t target = g_frame.load() + static_cast<uint64_t>(frames ? amount : amount2);
+    Wait(frames ? amount2 : amount, false);
+    const uint64_t now = g_frame.load();
+    if (now < target) {
+      WaitFrames(target - now);
+    }
     return "ok frame=" + std::to_string(g_frame.load());
   }
   if (cmd == "wait_until" || cmd == "press_until") {
@@ -1748,7 +1767,6 @@ std::string RunScriptFile(const std::string& name) {
   const std::string saved_dir = g_script_dir;
   g_script_dir = path.substr(0, path.find_last_of("\\/"));
   int number = 0;
-  int errors = 0;
   for (std::string line; std::getline(in, line);) {
     number++;
     if (!line.empty() && line.back() == '\r') {
@@ -1756,21 +1774,31 @@ std::string RunScriptFile(const std::string& name) {
     }
     const std::string reply = Execute(line);
     if (reply.rfind("err", 0) == 0) {
-      errors++;
+      // The rest would run out of step (a menu not reached, a race not
+      // started), so the script stops here.
       REXLOG_WARN("dev pad: {}:{}: {} -> {}", path, number, line, reply);
-    } else if (line.find_first_not_of(" \t") != std::string::npos &&
-               line[line.find_first_not_of(" \t")] != '#') {
+      g_script_dir = saved_dir;
+      return reply.rfind("err at ", 0) == 0
+                 ? reply
+                 : "err at " + path + ":" + std::to_string(number) + ": " + line + " -> " + reply;
+    }
+    if (line.find_first_not_of(" \t") != std::string::npos &&
+        line[line.find_first_not_of(" \t")] != '#') {
       REXLOG_INFO("dev pad: {} -> {}", line, reply);
     }
   }
   g_script_dir = saved_dir;
-  return errors ? "err " + std::to_string(errors) + " failed lines in " + path : "ok";
+  return "ok";
 }
 
 void RunScript(std::string path) {
   REXLOG_INFO("dev pad: running script {}", path);
   const std::string reply = RunScriptFile(path);
-  REXLOG_INFO("dev pad: script {} done: {}", path, reply);
+  if (reply == "ok") {
+    REXLOG_INFO("dev pad: script {} done: {}", path, reply);
+  } else {
+    REXLOG_ERROR("dev pad: script {} done: {}", path, reply);
+  }
   if (REXCVAR_GET(mcla_pad_exit_on_end)) {
     RequestQuit();
   }
