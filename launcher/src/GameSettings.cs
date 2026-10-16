@@ -41,8 +41,12 @@ static class GameSettings
          new("60 FPS", 60L), new("120 FPS", 120L), new("Uncapped", 0L)], 30L);
     public static readonly GameSetting Display = new("fullscreen", "Display",
         [new("Fullscreen", true), new("Windowed", false)], true);
+    // The console's gamma ramp for an HDTV, or sRGB, which a PC monitor
+    // expects (src/display_gamma.cpp); it changes during play too.
+    public static readonly GameSetting DisplayGamma = new("mcla_display_gamma", "Display gamma",
+        [new("TV (as on the console)", "tv"), new("PC monitor (sRGB, brighter shadows)", "pc")], "tv");
     public static readonly GameSetting AntiAliasing = new("mcla_msaa", "Anti-aliasing",
-        [new("On (2× MSAA)", true), new("Off (about 20% faster at 3×)", false)], true);
+        [new("On (2× MSAA)", true), new("Off (8 to 18% faster at 3×)", false)], true);
     public static readonly GameSetting HudRate = new("mcla_ui_hud_rate", "HUD updates",
         [new("30 per second (as on the console)", 30L), new("60 per second", 60L),
          new("120 per second", 120L), new("Every frame", 0L)], 30L);
@@ -53,7 +57,7 @@ static class GameSettings
     public static readonly GameSetting Prompts = new("mcla_button_prompts", "Button prompts",
         [new("Follow the controller", "auto"), new("Xbox", "xbox"), new("PlayStation", "playstation")], "auto");
 
-    public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, AntiAliasing, HudRate, GraphicsApi];
+    public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, DisplayGamma, AntiAliasing, HudRate, GraphicsApi];
     public static readonly GameSetting[] Game = [Intro, Prompts];
 
     /// Started by the launcher, from its own shortcut, or again by its pause
