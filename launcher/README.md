@@ -284,6 +284,8 @@ in front. A real controller keeps working alongside it.
   (alternating, e.g. `--configs d3d12:1,vulkan:1`) and reports each segment's
   median frame time, 1% low and run-to-run spread, `analyze` reads a run.
   `devrun.py prepare --refresh` takes a new snapshot after you have played on.
+  Every run is also checked for other programs using the GPU (the GPU guard,
+  below).
 - `dev\scripts\`: `boot-to-roam.pad` (title, the map zoom-out loading, the
   city: the loading benchmark), `drive-spawn.pad` (the same, then about 8 s of
   driving from the spawn point; with `--fixed-dt 60 --track` three runs' paths
@@ -299,6 +301,57 @@ The game ignores buttons during its own transitions (the title screen's camera
 cuts, a menu closing), so scripts press until a condition holds rather than
 once. Benchmarks run with `--mcla_intro=normal` (`devrun.py bench`'s default):
 "fast" also lets the loading loops run unpaced.
+
+### GPU guard (other programs on the GPU)
+
+Another program using the GPU during a run (a second game, a video, a stress
+test) takes GPU time from the game and skews its frame times. While the game
+runs, `devrun.py` samples every process's GPU use once a second from Windows'
+`\GPU Engine(*)\Utilization Percentage` counters through PDH (no admin rights;
+about 1 ms a read). It adds up each process's 3D and compute engines (copy and
+video engines are left out) and ignores the game, its child processes and
+`dwm.exe`, which composes the game's window and gets busier with it. Another
+process above `--gpu-threshold` (default 5, in % of one engine) over the whole
+run or over any 5 s marks the run as **contaminated**:
+
+- the run's summary line (`run`, `bench`, `record`) says whether it was clean,
+  and lists the offending processes with their pid, mean, highest 5 s and peak
+  use, and the game's own use;
+- `gpu-guard.json` in the run folder holds the verdict and those figures for
+  every process seen; `devrun.py analyze <run>` prints it.
+
+Before each run the guard samples for 2 s. If another process is busy, it says
+so and waits up to `--gpu-wait` seconds (default 0; 120 for `bench`) for it to
+stop. If it doesn't stop, the run goes ahead and is marked (`busy_at_start`).
+
+`bench` redoes a contaminated run straight away, so the configurations still
+alternate, up to `--gpu-retries` redos in all (default 3; warm-up runs are not
+redone; a redo's folder ends in `-redoN`). Contaminated runs are left out of the
+statistics, and the summary says how many runs were redone and why. Past the
+cap it says the comparison is NOT RELIABLE, with the runs left out and who was
+using the GPU.
+
+`--no-gpu-guard` turns the guard off. Where the counters are not available
+(some sessions, or GPU performance counters turned off) it warns once and the
+runs go on unchecked. `devrun.py gpu [--seconds 10]` lists who is using the GPU
+right now. `dev\devrun_test.py` tests the verdicts and `bench`'s redos on
+synthetic samples.
+
+Measured on this machine (RTX 5080, 2026-10-16):
+
+- **Background levels.** Idle and during runs, no other process went above
+  2.3% over 5 s: Chrome, an Edge window animating a full-screen canvas (1.8%),
+  the NVIDIA overlay, Windows Terminal, Explorer. dwm.exe peaked at 3%. The
+  game itself reads 50-70% at Native (CPU-bound) and about 77% at 3x.
+- **A light load.** A compute load of about 9% was flagged in every run, yet
+  over a whole run it averaged only 3.5-6%, which is why the 5 s window counts.
+  It did real damage: at 3x (`drive-spawn.pad --fixed-dt 60`) the city
+  segments' 1% low fell to 54-56 and 82-83 fps in two runs against 87-90 clean,
+  with medians within 2%. At Native, which is CPU-bound, the medians moved by
+  only 0.4%. 5% is twice the busiest harmless process above.
+- **Cost.** Guard on against off, 4 alternating runs each of
+  `drive-spawn.pad --fixed-dt 60` at Native: the city segments' medians agreed
+  within 0.2% (6.864 against 6.880 ms), inside the run-to-run spread.
 
 ### Recording a drive for playback
 
