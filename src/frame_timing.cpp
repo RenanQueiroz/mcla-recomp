@@ -332,8 +332,9 @@ void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
 // elapsed time. The console updated 30 times a second, which is what the
 // movies were made for; at 120 FPS they all ran four times as fast (the song
 // ticker under the speedometer scrolls 2 px per update at 720p: 60 px/s at 30,
-// 240 at 120). Each movie is now advanced on its own 30-per-second schedule,
-// and an update that comes before a movie is due skips that movie's advance.
+// 240 at 120). Each movie is now advanced on its own schedule, 30 a second
+// (the HUD at a rate of its own, below), and an update that comes before a
+// movie is due skips that movie's advance.
 // A movie due within a quarter of a frame is advanced early, so at 30 FPS every
 // update still advances once, as before. A movie that falls behind (below 30
 // FPS) is not caught up, as on the console. The start-up logos are left alone:
@@ -342,16 +343,19 @@ void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
 // The in-game HUD is two movies: HUDMAPMOVIE and the gauge movie, which the
 // HUD code creates itself, so it is not among the UI manager's screens. The
 // game sets the gauges' values every update and the movies' own scripts draw
-// them as they advance, in the same step that scrolls the song ticker; paced,
-// the tachometer needle moves 30 times a second. So the HUD has its own
-// setting, off by default: smooth gauges, with the ticker and the LOADING
-// badge running at the frame rate as before.
+// them as they advance, in the same step that scrolls the song ticker: the
+// needles move as often as the ticker steps. So the HUD has a rate of its own:
+// 30 a second by default, as on the console (the ticker at its original speed,
+// the needles in 30 Hz steps); 60 or 120 for smoother needles with the ticker
+// 2 or 4 times as fast; or 0 for every frame, as without this pacing.
 REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
                     "Advance the UI's menus, pop-ups and map screens 30 times a second, as on the "
                     "console, instead of once per rendered frame");
-REXCVAR_DEFINE_BOOL(mcla_ui_timing_hud, false, "MCLA",
-                    "Also advance the in-game HUD 30 times a second: the song ticker and the "
-                    "LOADING badge at the console's pace, but the gauges move 30 times a second");
+REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 30, "MCLA",
+                     "How many times a second the in-game HUD advances (gauges, song ticker, "
+                     "LOADING badge): 30 as on the console, 60 or 120 for smoother needles with "
+                     "a faster ticker, 0 for every frame")
+    .range(0, 240);
 
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
@@ -404,8 +408,7 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
       !g_engine_timer_started.load(std::memory_order_relaxed)) {
     return false;
   }
-  constexpr uint64_t kPeriodMicros = 1'000'000ull / 30;
-  constexpr uint64_t kEarlyMicros = kPeriodMicros / 4;
+  constexpr uint64_t kScreenPeriodMicros = 1'000'000ull / 30;
   struct Schedule {
     uint32_t context;
     uint64_t next_us;
@@ -433,14 +436,19 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
     schedule->checked_us = now;
     schedule->screen = IsUiScreen(context);
   }
-  if (!schedule->screen && !REXCVAR_GET(mcla_ui_timing_hud)) {
-    return false;
+  uint64_t period_us = kScreenPeriodMicros;
+  if (!schedule->screen) {
+    const int32_t hud_rate = REXCVAR_GET(mcla_ui_hud_rate);
+    if (hud_rate <= 0) {
+      return false;
+    }
+    period_us = 1'000'000ull / uint64_t(hud_rate);
   }
-  if (schedule->next_us && now + kEarlyMicros < schedule->next_us) {
+  if (schedule->next_us && now + period_us / 4 < schedule->next_us) {
     return true;
   }
-  const bool behind = !schedule->next_us || now > schedule->next_us + kPeriodMicros;
-  schedule->next_us = behind ? now + kPeriodMicros : schedule->next_us + kPeriodMicros;
+  const bool behind = !schedule->next_us || now > schedule->next_us + period_us;
+  schedule->next_us = behind ? now + period_us : schedule->next_us + period_us;
   return false;
 }
 
