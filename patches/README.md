@@ -28,6 +28,7 @@ git apply ../../patches/rexglue-vulkan-pipeline-storage-parallel-translation.pat
 git apply ../../patches/rexglue-vulkan-pipeline-cache-file.patch
 git apply ../../patches/rexglue-resolve-4xmsaa-depth-samples.patch
 git apply ../../patches/rexglue-direct-resolve.patch
+git apply ../../patches/rexglue-cvar-toml-strings.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).
@@ -682,3 +683,13 @@ Built and run on Windows only, with an NVIDIA RTX 5080.
 | The root signature, null views, pipelines, the resolve | `include/rex/graphics/d3d12/render_target_cache.h`, `src/graphics/d3d12/render_target_cache.cpp` | D3D12 |
 | The pipeline layout, dummy images, descriptor sets, pipelines, the resolve | `include/rex/graphics/vulkan/render_target_cache.h`, `src/graphics/vulkan/render_target_cache.cpp` | Vulkan |
 | The shaders (XeSL sources, DXBC and SPIR-V) | `src/graphics/shaders/resolve_direct*`, `src/graphics/shaders/bytecode/d3d12_5_1/resolve_direct_*_cs.h`, `src/graphics/shaders/vulkan_spirv/resolve_direct_*_cs.h` | D3D12, Vulkan |
+
+## rexglue-cvar-toml-strings.patch
+
+`SaveConfig` (the SDK's F4 settings overlay saves with it, and the game's pause menu did until the fork's merge save) wrote a string option between double quotes as it was. A Windows path came out as `"C:\Users\..."`, where `\U` starts a TOML escape, so the whole file failed to parse at the next start and every setting in it was lost for that run (the file itself stayed). Any path option given on the command line, such as `--log_file`, ended up in the file this way at the next save. Strings are now written as TOML basic strings with `\`, `"` and control characters escaped.
+
+A file that still fails to parse (one saved before this, or edited by hand) is read again line by line instead of not at all: each line that parses on its own applies, with its `[table]` prefix, and a double-quoted value that fails only for its backslashes is taken as written, as a literal string. Lines that still fail are skipped with a warning. Checked with a small program against the built `rexruntime.dll`: a path, a string with quotes and a tab, and a number saved and loaded back unchanged; a file with an old-style path, a line that is not TOML and a table loaded every other value, the path as written. Built and run on Windows only; the PS5 host's `LoadConfig` of `/data/mcla/mcla.toml` goes through the same code.
+
+| Change | Files | Affects |
+|---|---|---|
+| Strings saved as escaped TOML; a file toml++ rejects read line by line | `src/core/cvar.cpp` | all platforms |
