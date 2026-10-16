@@ -2,7 +2,7 @@
 
 Part of this fork (see `..\FORK.md`); Windows only. Desktop shortcut →
 `launcher\app\MclaLauncher.exe`. It opens on the game's settings; **Play**
-starts `mcla.exe` with them. On start it fetches the fork
+starts `mcla.exe`. On start it fetches the fork
 ([RenanQueiroz/mcla-recomp](https://github.com/RenanQueiroz/mcla-recomp)); when
 the fork has new commits it offers **Update and rebuild**, with the commits folded
 under *What's new*. Routine states (checking, up to date, offline) are a line
@@ -52,35 +52,63 @@ rebuild.
 The fork's changes to the game and the SDK are ordinary commits, each described
 in `KNOWN-ISSUES.md` (game) or `patches\README.md` (SDK).
 
-## Options the launcher always passes
+## The game's settings
 
-The launcher passes every game option explicitly (`--resolution_scale=1` for Native,
-`--vsync=false` with every frame rate), so the choice shown here applies whatever
-`mcla.toml` holds: what was changed in the game's pause menu, and, from builds
-before 2026-10-16, which saved every value in effect, an earlier run's options.
-With vsync on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and
-paces it unevenly; the game also turns it off by itself when nothing sets it.
-(An earlier note here said vsync set from the game never reached the GPU plugin;
-rechecked on 2026-10-16, it does, at start and from the pause menu.)
+The drop-downs are the game's own settings, in `mcla.toml` next to `mcla.exe`
+(`out\build\win-amd64-release\`): the same file and values as the Settings tab
+of the game's pause menu (DISPLAY, PERFORMANCE, CONTROLS), so each shows what the
+other set. A drop-down shows the file's value, or the game's default while the
+file doesn't set it; a value set by hand that isn't one of its choices shows as
+"... (set in mcla.toml)". A change is written at once, the way the game writes:
+the key's line is replaced where it is or added before the first `[table]`,
+every other line is kept, and the file is written beside the old one and
+renamed over it (`src\GameSettings.cs`).
 
-*Anti-aliasing* sets the game's 2× MSAA (`--mcla_msaa`). Off, a 3× frame took
-18 to 25% less time on the title screen (13.2 → 9.9 ms in the night city view,
-12.6 → 10.2 ms in Hollywood; about half the draws), for slightly more jagged thin
-edges such as pylons and billboard frames; the dithered foliage looks cleaner.
-Like the settings below, it is left out when *More mcla.exe options* sets `mcla_msaa`.
+While the game runs (started here, from its shortcut, or again by its own
+RESTART GAME; any `mcla.exe` counts, checked every two seconds) the drop-downs
+are greyed out with a note to use the pause menu. The game reads the file only
+when it starts, and its pause menu writes it too, so edits here would neither
+reach the running game nor be safe from being overwritten. When it closes, the
+file is read again and shows what was changed in the game.
 
-*Graphics API* picks the GPU plugin's backend (`--mcla_gpu_backend=d3d12` or
-`vulkan`; "Game setting" passes nothing, and the plugin then tries Direct3D 12
-first). Every setting and SDK patch here works on both. On this machine, in
-scripted runs, Vulkan matches D3D12 at native resolution; at 3x the two are
-within a few percent in the city (Vulkan slightly ahead in free roam), and
-D3D12 is 10 to 15% faster in the race benchmark
+The launcher passes only what is typed under *Advanced*, **More mcla.exe
+options**; an option there wins over `mcla.toml` and the pause menu at every
+start. It no longer passes `--vsync=false`: the game turns vsync off by itself
+unless the pause menu's VSYNC (or `vsync = true` in the file) turns it on, and
+with it on the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces
+it unevenly. (An earlier note here said vsync set from the game never reached
+the GPU plugin; rechecked on 2026-10-16, it does, at start and from the pause
+menu.)
+
+Launchers before 2026-10-16 passed every choice on the command line at every
+start, which beat what the pause menu saved. The first time this one opens it
+moves those choices into `mcla.toml`, once (`SettingsMigration` in
+`src\GameSettings.cs`, flag `SettingsInGameFile` in `settings.json`):
+
+1. it keeps a copy of `mcla.toml` as `mcla.toml.before-launcher-settings`, next
+   to it, before writing anything (and never replaces that copy);
+2. it writes each choice that was forcing a value: every one but "Game setting",
+   and Resolution and HUD updates, which had no "Game setting";
+3. it deletes nothing, and running it again writes the same values.
+
+A new install (no `settings.json`) has nothing to move.
+
+*Anti-aliasing* is the game's 2× MSAA (`mcla_msaa`), and it switches during play
+too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, a 3× frame took 18 to
+25% less time on the title screen (13.2 → 9.9 ms in the night city view, 12.6 →
+10.2 ms in Hollywood; about half the draws), for slightly more jagged thin edges
+such as pylons and billboard frames; the dithered foliage looks cleaner.
+
+*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which
+tries Direct3D 12 first, `d3d12` or `vulkan`). Every setting and SDK patch here
+works on both. On this machine, in scripted runs, Vulkan matches D3D12 at native
+resolution; at 3x the two are within a few percent in the city (Vulkan slightly
+ahead in free roam), and D3D12 is 10 to 15% faster in the race benchmark
 (`dev\direct-resolve-2026-10-15.md`). Since D3D12's textures are placed in
 shared heaps, both are about as smooth in the map zoom-out after the title
-(`dev\d3d12-zoomout-2026-10-15.md`). Left out when
-*More mcla.exe options* sets `mcla_gpu_backend`.
+(`dev\d3d12-zoomout-2026-10-15.md`).
 
-*HUD updates* (`--mcla_ui_hud_rate`) sets how many times a second the HUD's
+*HUD updates* (`mcla_ui_hud_rate`) sets how many times a second the HUD's
 Flash movies (gauges, minimap, song ticker, the LOADING badge) take a step: 30
 (the default, as on the console), 60, 120, or every frame (0). The ticker scrolls
 one step at a time and the needles move only when it steps, so at 30 the ticker
@@ -88,24 +116,23 @@ scrolls at its original speed and the needles move in 30 Hz steps; 60 and 120
 make the needles smoother and the ticker two and four times as fast (at a 120 FPS
 cap: 59, 118, 237 and 239 px/s at 720p for 30, 60, 120 and every frame). Menus,
 pop-ups and the GPS panels keep the console's pace whatever it is set to
-(`mcla_ui_timing_fix`, `KNOWN-ISSUES.md`). The game's pause menu has the same
-setting (DISPLAY > HUD UPDATES), but for now the launcher passes its choice
-every start, so a change made there lasts until the game is closed. Left out when
-*More mcla.exe options* sets `mcla_ui_hud_rate`. This replaced a two-way choice
-(`--mcla_ui_timing_hud`) whose default was every frame; the old saved choice is
-not carried over.
+(`mcla_ui_timing_fix`, `KNOWN-ISSUES.md`).
 
-It also always passes SDK settings that measured faster (in-run A/B; the first
-two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)):
+The launcher also used to pass four SDK settings that measured faster (in-run
+A/B; the first two are ideas from
+[ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)).
+They are now the game's own defaults on PC (`MclaApp::ApplyPcDefaults` in
+`src\mcla_app.cpp`), used unless the command line, an environment variable or
+`mcla.toml` sets them:
 
-- `--clear_memory_page_state=false`: guest memory already uploaded to the GPU
+- `clear_memory_page_state=false`: guest memory already uploaded to the GPU
   stays valid from one frame to the next instead of being copied again every
   frame (2.5 → 0.8 GB/s of uploads; 10 to 21% less GPU command thread time at
   Native, uncapped, depending on the scene). mcla-recomp's PS5 port runs this way too.
-- `--execute_unclipped_draw_vs_on_cpu=true` (Xenia's default): draws with
+- `execute_unclipped_draw_vs_on_cpu=true` (Xenia's default): draws with
   clipping off no longer claim the whole EDRAM, which saves render-target round
   trips (about 11% faster at 3×; no change at Native).
-- `--shared_memory_hot_page_faults=4 --shared_memory_hot_page_ms=10000` (hot
+- `shared_memory_hot_page_faults=4`, `shared_memory_hot_page_ms=10000` (hot
   pages, as mcla-recomp's PS5 port runs): a page the game keeps rewriting is
   uploaded whenever a draw uses it instead of being write-protected again after
   every write fault. With the profiling notes' fast-path patch, write faults go
@@ -115,12 +142,11 @@ two are ideas from [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHo
   agree). Needs `rexglue-hot-pages-watched-ranges.patch`: without it, textures
   the CPU rewrites (the attract movie's colour planes) stopped updating.
 
-Setting any of them under *More mcla.exe options* (e.g.
+To change one, type it under *More mcla.exe options* (e.g.
 `--clear_memory_page_state=true` if geometry or textures ever look stale, or
-`--shared_memory_hot_page_faults=0` to turn hot pages off) replaces the default
-rather than adding to it: a boolean given twice adds up, and any other setting
-given twice is an error for mcla.exe's command-line parser (CLI11 rejects a
-repeated option by default).
+`--shared_memory_hot_page_faults=0` to turn hot pages off). mcla.exe's
+command-line parser doesn't take an option twice (CLI11 rejects a repeated
+option by default; a boolean given twice adds up).
 
 Fixed interaction (2026-10-14): uncapped with the intro at "Normal", about one
 frame in four took 33 ms. mcla-recomp holds loops that never reach the frame
@@ -291,7 +317,9 @@ in front. A real controller keeps working alongside it.
   changed. `--toml <file>` starts a run with that `mcla.toml` instead (`none`:
   with none), and what the game saved there (the pause menu's settings) is kept
   as `mcla.toml.after` in the run folder. `--vsync unset` leaves `--vsync` off
-  the command line, which otherwise has `--vsync=false`, as the launcher passes.
+  the command line, which otherwise has `--vsync=false`.
+  A RESTART GAME in the run (a new mcla.exe started by the game) is followed
+  until the last one exits, before `mcla.toml` is put back and the checks run.
   `run` runs one script, `bench` repeats one per configuration
   (alternating, e.g. `--configs d3d12:1,vulkan:1`) and reports each segment's
   median frame time, 1% low and run-to-run spread, `analyze` reads a run.

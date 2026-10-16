@@ -40,124 +40,57 @@ static class Paths
     }
 }
 
-/// One choice in a game option drop-down: what it shows and the mcla.exe flag it adds.
-sealed record Choice(string Label, string? Argument);
-
-/// The game's command-line options (README.md, "Windows"; the fork's own in
-/// KNOWN-ISSUES.md). The first choice of each passes nothing, which leaves the
-/// value from the in-game pause menu (saved in mcla.toml next to mcla.exe) or
-/// the game's default.
+/// What the launcher passes to mcla.exe: only the options typed under
+/// Advanced, *More mcla.exe options*. The game's settings are in mcla.toml
+/// (GameSettings.cs), which the game reads at start, and an option on the
+/// command line wins over the file. The SDK settings the launcher used to
+/// add every start are now the game's own PC defaults (src/mcla_app.cpp), and
+/// vsync is turned off by the game unless the player turns it on.
 static class GameOptions
 {
-    const string Unset = "Game setting";
-    public static readonly Choice[] Display = [new(Unset, null), new("Fullscreen", "--fullscreen=true"), new("Windowed", "--fullscreen=false")];
-    // Every value is passed explicitly, defaults included: a value left off the
-    // command line would fall back to mcla.toml (what was changed in the pause
-    // menu, or what older builds saved of an earlier run's options) instead of
-    // the choice shown here.
-    //
-    // The recomp paces frames with its own limiter and means vsync to be off:
-    // with it on, the GPU plugin's emulated 60 Hz vblank (driven by a 1 ms
-    // sleep loop) caps the game at 60 and paces it unevenly at any target. The
-    // game also turns it off by itself when nothing sets it.
-    //
-    // 40-50 are for G-Sync/FreeSync displays: a cap the game holds even in its
-    // heaviest scenes gives constant frame times, which look smoother than a
-    // higher rate that keeps dropping below its cap.
-    public static readonly Choice[] Fps = [new(Unset, null),
-        new("30 FPS", "--mcla_fps=30 --vsync=false"), new("40 FPS", "--mcla_fps=40 --vsync=false"),
-        new("45 FPS", "--mcla_fps=45 --vsync=false"), new("50 FPS", "--mcla_fps=50 --vsync=false"),
-        new("60 FPS", "--mcla_fps=60 --vsync=false"), new("120 FPS", "--mcla_fps=120 --vsync=false"),
-        new("Uncapped", "--mcla_fps=0 --vsync=false")];
-    // The SDK's draw resolution scale: the game renders at a multiple of the
-    // console's 1280x720 instead of having that stretched to the screen. The
-    // GPU cost grows with the square: 3× draws nine times the pixels.
-    public static readonly Choice[] Resolution = [new("Native (720p)", "--resolution_scale=1"),
-        new("2× (1440p)", "--resolution_scale=2"), new("3× (2160p, 4K)", "--resolution_scale=3")];
-    public static readonly Choice[] Intro = [new(Unset, null), new("Normal", "--mcla_intro=normal"), new("Fast", "--mcla_intro=fast"), new("Skip (hides the title logo)", "--mcla_intro=skip")];
-    public static readonly Choice[] Prompts = [new(Unset, null), new("Follow the controller", "--mcla_button_prompts=auto"), new("Xbox", "--mcla_button_prompts=xbox"), new("PlayStation", "--mcla_button_prompts=playstation")];
-    // The game's 2× MSAA. Off, a 3× frame took 18 to 25% less time (with about
-    // half the draws), for slightly more jagged thin edges.
-    public static readonly Choice[] AntiAliasing = [new(Unset, null), new("On (2× MSAA)", "--mcla_msaa=true"), new("Off (about 20% faster at 3×)", "--mcla_msaa=false")];
-    // The GPU plugin's backend. Left unset it tries Direct3D 12 first.
-    public static readonly Choice[] GraphicsApi = [new(Unset, null), new("Direct3D 12", "--mcla_gpu_backend=d3d12"), new("Vulkan", "--mcla_gpu_backend=vulkan")];
-    // How many times a second the HUD's Flash movies (gauges, song ticker,
-    // LOADING badge) take a step. The ticker scrolls one step at a time, so at
-    // the console's 30 it runs at its original speed and the needles move in
-    // 30 Hz steps; 60 and 120 make the needles smoother and the ticker 2 and 4
-    // times as fast; "every frame" steps them with every rendered frame. Menus
-    // keep the console's pace either way. Passed every start for now (no "Game
-    // setting"); the pause menu's DISPLAY > HUD UPDATES changes it until then.
-    public static readonly Choice[] HudRate = [new("30 per second (as on the console)", "--mcla_ui_hud_rate=30"),
-        new("60 per second", "--mcla_ui_hud_rate=60"), new("120 per second", "--mcla_ui_hud_rate=120"),
-        new("Every frame", "--mcla_ui_hud_rate=0")];
-
-    // SDK settings that measured faster on MCLA (see README.md), always passed:
-    // - uploaded guest memory stays valid across frames instead of being copied
-    //   to the GPU again every frame (about 21% less GPU command thread time);
-    // - vertex shaders of draws with clipping off run on the CPU, as in Xenia,
-    //   so they no longer claim the whole EDRAM (about 11% faster at 3×);
-    // - hot pages, as on the PS5: guest memory the game rewrites all the time
-    //   is uploaded when drawn from instead of being write-protected again
-    //   after every fault (about 9% shorter frames at native, uncapped).
-    // A boolean given twice adds up instead of the last one winning, and any
-    // other option given twice is a command-line error (CLI11 rejects repeats
-    // by default), so a default is left out when the extra options set it.
-    static readonly (string Name, string Argument)[] Tuning = [
-        ("clear_memory_page_state", "--clear_memory_page_state=false"),
-        ("execute_unclipped_draw_vs_on_cpu", "--execute_unclipped_draw_vs_on_cpu=true"),
-        ("shared_memory_hot_page_faults", "--shared_memory_hot_page_faults=4"),
-        ("shared_memory_hot_page_ms", "--shared_memory_hot_page_ms=10000")];
-
-    public static string Labels(Choice[] choices, int index) => choices[Math.Clamp(index, 0, choices.Length - 1)].Label;
-
-    public static string Arguments(LauncherSettings s)
-    {
-        string? Pick(Choice[] choices, int index) => choices[Math.Clamp(index, 0, choices.Length - 1)].Argument;
-        var extra = s.ExtraArguments.Trim();
-        var tuning = Tuning.Where(t => !extra.Contains(t.Name)).Select(t => t.Argument);
-        // Left out when the extra options set them, like the defaults above.
-        var antiAliasing = extra.Contains("mcla_msaa") ? null : Pick(AntiAliasing, s.AntiAliasing);
-        var graphicsApi = extra.Contains("mcla_gpu_backend") ? null : Pick(GraphicsApi, s.GraphicsApi);
-        var hudRate = extra.Contains("mcla_ui_hud_rate") ? null : Pick(HudRate, s.HudRate);
-        var args = new[] { Pick(Display, s.Display), Pick(Resolution, s.Resolution), Pick(Fps, s.Fps),
-                           Pick(Intro, s.Intro), Pick(Prompts, s.Prompts), antiAliasing, graphicsApi, hudRate }.Concat(tuning).Append(extra);
-        return string.Join(" ", args.Where(a => !string.IsNullOrEmpty(a)));
-    }
+    public static string Arguments(LauncherSettings s) => s.ExtraArguments.Trim();
 }
 
 sealed record LauncherSettings
 {
+    // The drop-downs of launchers before 2026-10-16, which passed the game's
+    // settings on the command line: now read only to write the choices that
+    // forced a value into mcla.toml, once (SettingsMigration).
     public int Display { get; init; }
     public int Resolution { get; init; }
     public int Fps { get; init; }
-    // Which GameOptions.Fps list the Fps index refers to: 0 is the first one
-    // (Game setting, 30, 60, 120, Uncapped), 1 added 40, 45 and 50.
+    // Which list the Fps index refers to: 0 is the first one (Game setting,
+    // 30, 60, 120, Uncapped), 1 added 40, 45 and 50.
     public int FpsList { get; init; }
     public int Intro { get; init; }
     public int Prompts { get; init; }
     public int AntiAliasing { get; init; }
     public int GraphicsApi { get; init; }
-    // An index into GameOptions.HudRate. It replaced HudUpdates (a two-way
-    // choice whose default was every frame), whose saved value is dropped.
     public int HudRate { get; init; }
+    // Set once those choices are in mcla.toml.
+    public bool SettingsInGameFile { get; init; }
+
     public string ExtraArguments { get; init; } = "";
     public bool CheckForUpdates { get; init; } = true;
     public bool CloseOnLaunch { get; init; } = true;
     public bool AutoPlay { get; init; }
 
+    /// The launcher's settings; the first time, the old choices also go into
+    /// the game's mcla.toml (SettingsMigration, which keeps a copy first).
     public static LauncherSettings Load()
     {
+        var existed = File.Exists(Paths.SettingsFile);
+        var settings = new LauncherSettings();
         try
         {
-            if (File.Exists(Paths.SettingsFile))
-                return Migrate(JsonSerializer.Deserialize(File.ReadAllText(Paths.SettingsFile), SettingsJson.Default.LauncherSettings) ?? new());
+            if (existed)
+                settings = JsonSerializer.Deserialize(File.ReadAllText(Paths.SettingsFile), SettingsJson.Default.LauncherSettings) ?? new();
         }
         catch (Exception ex) when (ex is IOException or JsonException)
         {
             Debug.WriteLine($"settings: {ex.Message}; using defaults");
         }
-        return Migrate(new());
+        return SettingsMigration.Run(Migrate(settings), existed, Paths.BuildDir);
     }
 
     // Where each choice of the first Fps list sits in the current one.

@@ -16,10 +16,39 @@ sealed class LauncherApp : Component
     const int MaxLogLines = 2000;
     const string Mono = "Cascadia Mono, Consolas";
 
+    // The game's settings file, next to mcla.exe (GameSettings.cs).
+    static readonly string GameSettingsPath = GameSettingsFile.PathIn(Paths.BuildDir);
+
+    static Dictionary<string, string> ReadGameSettings()
+    {
+        try
+        {
+            return GameSettingsFile.Read(GameSettingsPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Debug.WriteLine($"game settings: {ex.Message}");
+            return new();
+        }
+    }
+
+    // Started here, from its own shortcut, or again by its pause menu's
+    // RESTART GAME: any mcla.exe counts, as for the build.
+    static bool GameIsRunning()
+    {
+        var processes = Process.GetProcessesByName("mcla");
+        foreach (var process in processes) process.Dispose();
+        return processes.Length > 0;
+    }
+
     public override Element Render()
     {
+        // Loading the settings also moves an older launcher's choices into
+        // mcla.toml, once, so it comes before the file is read.
         var initialSettings = UseMemo(LauncherSettings.Load, Array.Empty<object>());
         var (settings, updateSettings) = UseReducer(initialSettings);
+        var initialGameSettings = UseMemo(ReadGameSettings, Array.Empty<object>());
+        var (gameSettings, setGameSettings) = UseState(initialGameSettings, threadSafe: true);
         var (status, setStatus) = UseState<RepoStatus?>(null);
         var (checking, setChecking) = UseState(true);
         var (error, setError) = UseState<string?>(null);
@@ -29,7 +58,8 @@ sealed class LauncherApp : Component
         var (log, updateLog) = UseReducer(ImmutableList<string>.Empty, threadSafe: true);
         var (step, setStep) = UseState<string?>(null);
         var (activity, setActivity) = UseState<Activity?>(null);
-        var (gameRunning, setGameRunning) = UseState(false);
+        var initialRunning = UseMemo(GameIsRunning, Array.Empty<object>());
+        var (gameRunning, setGameRunning) = UseState(initialRunning, threadSafe: true);
         var (countdown, setCountdown) = UseState<int?>(null);
         var (confirmExit, setConfirmExit) = UseState(false);
         var buildRef = UseRef<BuildRun?>(null);
@@ -116,12 +146,33 @@ sealed class LauncherApp : Component
                     ReactorApp.Exit();
                     return;
                 }
-                setGameRunning(true);
-                game?.WaitForExitAsync().ContinueWith(_ => setGameRunning(false), TaskScheduler.Default);
+                setGameRunning(true);  // and the check below notices when it closes
             }
             catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
             {
                 setNotice($"Couldn't start the game: {ex.Message}");
+            }
+        }
+
+        // A setting changed here goes into mcla.toml at once, as the pause menu
+        // writes it. Not while the game runs: it reads the file only when it
+        // starts, and the pause menu is where its settings change then.
+        void SetGameSetting(GameSetting setting, object value)
+        {
+            if (GameIsRunning())
+            {
+                setGameRunning(true);
+                return;
+            }
+            try
+            {
+                Directory.CreateDirectory(Paths.BuildDir);
+                GameSettingsFile.Set(GameSettingsPath, new Dictionary<string, object> { [setting.Key] = value });
+                setGameSettings(ReadGameSettings());
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                setNotice($"Couldn't save the setting in {GameSettingsPath}: {ex.Message}");
             }
         }
 
@@ -198,6 +249,32 @@ sealed class LauncherApp : Component
             }
             window.Closing += OnClosing;
             return () => window.Closing -= OnClosing;
+        }, Array.Empty<object>());
+
+        // Whether the game is running, every two seconds. While it runs the
+        // settings are its pause menu's to change; when it closes the file is
+        // read again, to show what was changed there.
+        UseEffect(() =>
+        {
+            var cts = new CancellationTokenSource();
+            _ = Task.Run(async () =>
+            {
+                var last = GameIsRunning();
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+                try
+                {
+                    while (await timer.WaitForNextTickAsync(cts.Token))
+                    {
+                        var running = GameIsRunning();
+                        if (running == last) continue;
+                        last = running;
+                        setGameRunning(running);
+                        if (!running) setGameSettings(ReadGameSettings());
+                    }
+                }
+                catch (OperationCanceledException) { }
+            });
+            return () => cts.Cancel();
         }, Array.Empty<object>());
 
         // While building, follow the newest log under mcla-recomp\out\ once a second.
@@ -442,11 +519,15 @@ sealed class LauncherApp : Component
             ).Margin(0, 12, 0, 0);
         }
 
-        Element Combo(string header, Choice[] choices, int index, Func<LauncherSettings, int, LauncherSettings> apply) =>
-            ComboBox(choices.Select(c => c.Label).ToArray(), Math.Clamp(index, 0, choices.Length - 1),
-                     i => { if (i >= 0) updateSettings(s => apply(s, i)); })
-                .Header(header)
-                .HAlign(HorizontalAlignment.Stretch);
+        Element SettingCombo(GameSetting setting)
+        {
+            var (choices, index) = setting.Show(gameSettings);
+            return ComboBox(choices.Select(c => c.Label).ToArray(), index,
+                            i => { if (i >= 0 && i < choices.Length && i != index) SetGameSetting(setting, choices[i].Value); })
+                .Header(setting.Header)
+                .HAlign(HorizontalAlignment.Stretch)
+                .IsEnabled(!gameRunning);
+        }
 
         // Two to a row, in reading order.
         static Element Pairs(params Element[] items) =>
@@ -459,23 +540,23 @@ sealed class LauncherApp : Component
         Element Settings() =>
             ScrollViewer(VStack(12,
                 Subtitle("Graphics"),
-                Pairs(
-                    Combo("Resolution", GameOptions.Resolution, settings.Resolution, (s, i) => s with { Resolution = i }),
-                    Combo("Frame rate", GameOptions.Fps, settings.Fps, (s, i) => s with { Fps = i }),
-                    Combo("Display", GameOptions.Display, settings.Display, (s, i) => s with { Display = i }),
-                    Combo("Anti-aliasing", GameOptions.AntiAliasing, settings.AntiAliasing, (s, i) => s with { AntiAliasing = i }),
-                    Combo("HUD updates", GameOptions.HudRate, settings.HudRate, (s, i) => s with { HudRate = i }),
-                    Combo("Graphics API", GameOptions.GraphicsApi, settings.GraphicsApi, (s, i) => s with { GraphicsApi = i })),
+                Pairs(GameSettings.Graphics.Select(SettingCombo).ToArray()),
                 Subtitle("Game"),
-                Pairs(
-                    Combo("Intro", GameOptions.Intro, settings.Intro, (s, i) => s with { Intro = i }),
-                    Combo("Button prompts", GameOptions.Prompts, settings.Prompts, (s, i) => s with { Prompts = i })),
-                TextBlock("\"Game setting\" keeps what you chose in the game's pause menu. Any other choice here replaces it every time the game starts.")
-                    .TextWrapping().Foreground(Theme.SecondaryText),
+                Pairs(GameSettings.Game.Select(SettingCombo).ToArray()),
+                // Lines short enough for the window: in this scroll viewer a
+                // TextBlock is measured without a width limit, so it doesn't wrap.
+                VStack(2, gameRunning
+                    ? [TextBlock("The game is running: change these in its pause menu, on the Settings tab.").Foreground(Theme.SecondaryText),
+                       TextBlock("They show here again once it has closed.").Foreground(Theme.SecondaryText)]
+                    : [TextBlock("These are the game's own settings, in mcla.toml next to mcla.exe. Its pause menu changes them too.").Foreground(Theme.SecondaryText),
+                       TextBlock("Resolution, Graphics API and Intro take effect when the game starts.").Foreground(Theme.SecondaryText)]),
                 Expander("Advanced",
                     VStack(16,
-                        TextBox(settings.ExtraArguments, v => updateSettings(s => s with { ExtraArguments = v }),
-                                placeholderText: "for example --log_file=run.log", header: "More mcla.exe options"),
+                        VStack(4,
+                            TextBox(settings.ExtraArguments, v => updateSettings(s => s with { ExtraArguments = v }),
+                                    placeholderText: "for example --log_file=run.log", header: "More mcla.exe options"),
+                            TextBlock("Passed to mcla.exe at every start; they win over the settings above.")
+                                .Foreground(Theme.SecondaryText)),
                         VStack(4,
                             CheckBox(settings.CheckForUpdates, v => updateSettings(s => s with { CheckForUpdates = v }), "Check for updates when the launcher opens"),
                             CheckBox(settings.CloseOnLaunch, v => updateSettings(s => s with { CloseOnLaunch = v }), "Close the launcher when the game starts"),
