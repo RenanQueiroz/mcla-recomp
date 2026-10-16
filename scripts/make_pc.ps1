@@ -215,6 +215,7 @@ try {
         @{ Patch = "rexglue-resolve-4xmsaa-depth-samples.patch"; File = "src\graphics\shaders\bytecode\d3d12_5_1\resolve_fast_32bpp_4xmsaa_cs.h"; Adds = "Approximately 200 instruction slots used" }
         @{ Patch = "rexglue-direct-resolve.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "GetDirectResolveSource" }
         @{ Patch = "rexglue-cvar-toml-strings.patch"; File = "src\core\cvar.cpp"; Adds = "LoadConfigByLine" }
+        @{ Patch = "rexglue-edram-size.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "edram_tiles" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
