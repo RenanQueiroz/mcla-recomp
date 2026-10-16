@@ -47,13 +47,15 @@ REXCVAR_DEFINE_INT32(mcla_fps, 30, "MCLA",
 // title screen (only "PRESS START" remains). Tested with and without the
 // render-pass mask change; the logo is missing either way.
 REXCVAR_DEFINE_BOOL(mcla_skip_intro, false, "MCLA",
-                    "Skip the intro movies. Side effect: the title screen loses its logo");
+                    "Skip the intro movies. Side effect: the title screen loses its logo")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 // The legal screens and logos at start-up. "skip" is mcla_skip_intro by
 // another name, so that the settings menu can offer all three in one row.
 REXCVAR_DEFINE_STRING(mcla_intro, "normal", "MCLA",
                       "Start-up legal screens and logos: normal (original speed), fast (as "
-                      "fast as the host presents), skip (the title screen loses its logo)");
+                      "fast as the host presents), skip (the title screen loses its logo)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 // Where the frame limiter waits. At the start of the frame (the engine timer),
 // the simulation step is measured before the wait while the frame reaches the

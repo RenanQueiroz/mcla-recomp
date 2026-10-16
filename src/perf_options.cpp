@@ -23,15 +23,25 @@
 #include <rex/system/xmemory.h>
 
 REXCVAR_DEFINE_BOOL(mcla_shadows, true, "MCLA", "Real-time shadows. Off is the largest saving");
+// The options the game reads once, when it starts, are kRequiresRestart: the
+// settings menu marks their rows "(NEXT START)" (src/settings_menu.cpp).
 REXCVAR_DEFINE_BOOL(mcla_race_shadows, true, "MCLA",
-                    "Shadows during races (applies at the next start of the game)");
+                    "Shadows during races (applies at the next start of the game)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_fast_car_shadows, false, "MCLA",
-                    "A simple blob shadow under cars instead of the real-time one (next start)");
+                    "A simple blob shadow under cars instead of the real-time one (next start)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_foliage_shadows, true, "MCLA", "Shadows cast by distant foliage");
+// The impostor render targets are created with the world, once, at start-up
+// (sub_82305230 -> sub_8230C388 -> sub_8230B778, where noimpostors is read):
+// starting or quitting a race does not build them again.
 REXCVAR_DEFINE_BOOL(mcla_foliage_impostors, true, "MCLA",
-                    "Billboards for distant trees (applies at the next load of the city)");
-REXCVAR_DEFINE_BOOL(mcla_fullscreen_blur, true, "MCLA", "The full-screen blur pass (next start)");
-REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA", "Multisample anti-aliasing (next start)");
+                    "Billboards for distant trees (applies at the next start of the game)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_fullscreen_blur, true, "MCLA", "The full-screen blur pass (next start)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA", "Multisample anti-aliasing (next start)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_DOUBLE(mcla_city_lod, 1.0, "MCLA",
                       "Scale of the distance at which the city switches to less detail")
     .range(0.1, 4.0);

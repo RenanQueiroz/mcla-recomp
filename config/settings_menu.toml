@@ -9,7 +9,7 @@
 # menu states. Buttons for our submenus are appended to that tab. Entering one
 # swaps the pause list's row source for row objects of the game's own option
 # classes (checkbox and value rows), each bound to one of our options. Leaving
-# restores the list and saves the options to mcla.toml.
+# restores the list and merges the options changed there into mcla.toml.
 
 # 0x82660644: r3 = the PM_Continue state; its parent is the pause tab.
 [[midasm_hook]]
@@ -86,6 +86,16 @@ address = 0x8265F0F0
 name = "mcla_menu_list_vtable_guard"
 registers = ["r31"]
 jump_address_on_true = 0x8265F108
+
+# 0x82630E50 in sub_82630E40, the tab strip's render (reached through its
+# vtable), after `mr r27,r3`: r27 = the strip. It sets the movie's tabs_count
+# from the strip's tabs and then renders the selected tab. Entering one of our
+# submenus hides the strip (tabs_count = 0) and retitles the menu; leaving it
+# calls this render on the pause screen's strip, which brings both back.
+[[midasm_hook]]
+address = 0x82630E50
+name = "mcla_menu_tab_strip"
+registers = ["r27"]
 
 # --- Options implemented as hooks ---------------------------------------------
 

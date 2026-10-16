@@ -15,12 +15,17 @@
 #include "mcla_app.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
@@ -56,6 +61,8 @@ constexpr uint32_t kFindMovieFn = 0x821F9FB8;
 constexpr uint32_t kSetFlashIntFn = 0x825EE0E0;
 constexpr uint32_t kGetFlashObjFn = 0x825ED480;
 constexpr uint32_t kSetFlashStrFn = 0x827227B8;
+constexpr uint32_t kTabStripRenderFn = 0x82630E40;  // (strip): its tabs, then the selected one
+constexpr uint32_t kWidgetMovieContextSlot = 468;   // vtable offset: the widget's movie context
 
 constexpr uint32_t kOptionRowCtorFn = 0x826349F0;  // (obj, nameKey, values, wrap)
 constexpr uint32_t kLabelRowCtorFn = 0x82633D40;   // (obj, nameKey, childCap)
@@ -367,7 +374,8 @@ struct ItemDef {
 // The console's display is 60 Hz.
 constexpr double kFpsTargets[] = {30.0, 60.0};
 #else
-constexpr double kFpsTargets[] = {30.0, 60.0, 120.0, 0.0};
+// The launcher's list: 40 to 50 are for variable-refresh displays.
+constexpr double kFpsTargets[] = {30.0, 40.0, 45.0, 50.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
 // How often the HUD advances (src/frame_timing.cpp): 0 is every frame.
@@ -398,8 +406,8 @@ const ItemDef kDisplayItems[] = {
 };
 
 // Detail the game can do without when the frame rate matters more; all as
-// shipped by default (src/perf_options.cpp). Rows marked NEXT START are read
-// by the game once, when it starts.
+// shipped by default (src/perf_options.cpp). Options the game reads once, when
+// it starts, are kRequiresRestart, and their rows say "(NEXT START)" (RowLabel).
 constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
 constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
 constexpr double kTrafficDistances[] = {250.0, 325.0, 400.0};
@@ -419,12 +427,11 @@ const ItemDef kPerformanceItems[] = {
      kDensityScales, 3, "%.1f", "NONE"},
     {"PM_MxParked", ItemKind::kNumberChoice, "mcla_parked_cars", "PARKED CARS", nullptr, nullptr,
      kDensityScales, 3, "%.1f", "NONE"},
-    {"PM_MxRaceShadows", ItemKind::kToggle, "mcla_race_shadows", "RACE SHADOWS (NEXT START)"},
-    {"PM_MxFastCarShadows", ItemKind::kToggle, "mcla_fast_car_shadows",
-     "SIMPLE CAR SHADOWS (NEXT START)"},
-    {"PM_MxImpostors", ItemKind::kToggle, "mcla_foliage_impostors", "DISTANT TREES (NEXT LOAD)"},
-    {"PM_MxFsBlur", ItemKind::kToggle, "mcla_fullscreen_blur", "FULLSCREEN BLUR (NEXT START)"},
-    {"PM_MxMsaa", ItemKind::kToggle, "mcla_msaa", "ANTI ALIASING (NEXT START)"},
+    {"PM_MxRaceShadows", ItemKind::kToggle, "mcla_race_shadows", "RACE SHADOWS"},
+    {"PM_MxFastCarShadows", ItemKind::kToggle, "mcla_fast_car_shadows", "SIMPLE CAR SHADOWS"},
+    {"PM_MxImpostors", ItemKind::kToggle, "mcla_foliage_impostors", "DISTANT TREES"},
+    {"PM_MxFsBlur", ItemKind::kToggle, "mcla_fullscreen_blur", "FULLSCREEN BLUR"},
+    {"PM_MxMsaa", ItemKind::kToggle, "mcla_msaa", "ANTI ALIASING"},
 };
 
 const ItemDef kControlItems[] = {
@@ -452,6 +459,20 @@ const MenuDef kMenus[] = {
 };
 constexpr int kMenuCount = int(sizeof(kMenus) / sizeof(kMenus[0]));
 constexpr int kMaxRows = 16;
+
+// An option the game reads only when it starts (kRequiresRestart).
+bool RestartOnly(const char* option) {
+  const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(option);
+  return info && info->lifecycle == rex::cvar::Lifecycle::kRequiresRestart;
+}
+
+std::string RowLabel(const ItemDef& item) {
+  std::string label = item.label;
+  if (RestartOnly(item.option)) {
+    label += " (NEXT START)";
+  }
+  return label;
+}
 
 int ItemValueCount(const ItemDef& item) {
   return item.kind == ItemKind::kToggle ? 2 : item.value_count;
@@ -507,6 +528,20 @@ int ItemCurrentIndex(const ItemDef& item) {
 
 std::atomic<bool> g_settings_dirty{false};
 
+// The options the player changed through these menus: the only ones saved.
+std::mutex g_changed_mutex;
+std::vector<std::string> g_changed_options;
+
+void NoteChanged(const char* option) {
+  std::lock_guard lock(g_changed_mutex);
+  for (const std::string& name : g_changed_options) {
+    if (name == option) {
+      return;
+    }
+  }
+  g_changed_options.emplace_back(option);
+}
+
 void ItemSetIndex(const ItemDef& item, int index) {
   if (index < 0 || index >= ItemValueCount(item)) {
     return;
@@ -525,6 +560,7 @@ void ItemSetIndex(const ItemDef& item, int index) {
       break;
     }
   }
+  NoteChanged(item.option);
   g_settings_dirty.store(true, std::memory_order_relaxed);
 }
 
@@ -554,6 +590,10 @@ std::atomic<int> g_active_menu{-1};
 std::atomic<bool> g_menus_created{false};
 
 std::atomic<uint32_t> g_pause_tab{0};
+// The tab strip the game rendered last, and the pause screen's while one of
+// our submenus is open: entering one hides the strip and retitles the menu.
+std::atomic<uint32_t> g_last_tab_strip{0};
+std::atomic<uint32_t> g_pause_tab_strip{0};
 std::atomic<uint32_t> g_settings_state{0};
 std::atomic<uint32_t> g_last_list{0};
 std::atomic<uint32_t> g_pause_list{0};
@@ -623,7 +663,7 @@ bool BuildRows(int menu) {
     const ItemDef& item = def.items[i];
     // The row constructor resolves its label through the string table once,
     // so the text has to exist first.
-    SetStringTableText(item.key, item.label);
+    SetStringTableText(item.key, RowLabel(item).c_str());
     uint32_t name = AllocGuestString(item.key);
     uint32_t row = CallGuest(kGuestMallocFn, kRowObjectSize);
     if (!name || !row) {
@@ -780,8 +820,142 @@ void RestorePauseList() {
   RefreshPauseList();
 }
 
+// --- Saving ------------------------------------------------------------------
+//
+// Only the options the player changed in these menus are written, merged into
+// the file: each one's `name = value` line is replaced or added, and every
+// other line is kept. (rex::cvar::SaveConfig, used before, rewrote the whole
+// file with every option that differed from its default, wherever it came
+// from: the launcher's command line, a host's own settings, the developer
+// tools, and paths, which it wrote as TOML that no longer parsed.)
+
+// A TOML basic string.
+std::string TomlString(std::string_view text) {
+  std::string out = "\"";
+  for (const char c : text) {
+    switch (c) {
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) {
+          char escape[8];
+          std::snprintf(escape, sizeof escape, "\\u%04X", static_cast<unsigned char>(c));
+          out += escape;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out + '"';
+}
+
+std::string TomlValue(const std::string& option) {
+  const std::string value = OptionGet(option.c_str());
+  const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(option);
+  return info && info->type == rex::cvar::FlagType::String ? TomlString(value) : value;
+}
+
+// The key a `key = value` line sets, or empty for anything else.
+std::string_view LineKey(std::string_view line) {
+  const size_t first = line.find_first_not_of(" \t");
+  if (first == std::string_view::npos) {
+    return {};
+  }
+  size_t end = first;
+  while (end < line.size() && (std::isalnum(static_cast<unsigned char>(line[end])) ||
+                               line[end] == '_' || line[end] == '-')) {
+    ++end;
+  }
+  const size_t equals = line.find_first_not_of(" \t", end);
+  if (end == first || equals == std::string_view::npos || line[equals] != '=') {
+    return {};
+  }
+  return line.substr(first, end - first);
+}
+
+bool IsTableHeader(std::string_view line) {
+  const size_t first = line.find_first_not_of(" \t");
+  return first != std::string_view::npos && line[first] == '[';
+}
+
+// Whether text[at, at + count) is that many hexadecimal digits.
+bool HexDigits(std::string_view text, size_t at, size_t count) {
+  if (at + count > text.size()) {
+    return false;
+  }
+  for (size_t i = at; i < at + count; ++i) {
+    if (!std::isxdigit(static_cast<unsigned char>(text[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The old save wrote a Windows path between double quotes as it was, so its
+// backslashes read as escapes ("C:\Users\..." has \U) and nothing in the file
+// loaded. Such a value is rewritten as the same text in a literal string,
+// which is what it meant. Empty when the line needs nothing, or can't be
+// mended that way.
+std::string MendedLine(const std::string& line) {
+  if (LineKey(line).empty()) {
+    return {};
+  }
+  const size_t equals = line.find('=');
+  const size_t open = line.find_first_not_of(" \t", equals + 1);
+  const size_t close = line.rfind('"');
+  if (open == std::string::npos || line[open] != '"' || close == std::string::npos ||
+      close <= open) {
+    return {};
+  }
+  const std::string_view body(line.data() + open + 1, close - open - 1);
+  if (body.find('\'') != std::string_view::npos || body.find('"') != std::string_view::npos) {
+    return {};
+  }
+  bool valid = true;
+  for (size_t i = 0; i < body.size() && valid; ++i) {
+    if (body[i] != '\\') {
+      continue;
+    }
+    const char next = i + 1 < body.size() ? body[i + 1] : '\0';
+    if (next != '\0' && std::strchr("btnfr\\", next)) {
+      ++i;
+    } else if (next == 'u' && HexDigits(body, i + 2, 4)) {
+      i += 5;
+    } else if (next == 'U' && HexDigits(body, i + 2, 8)) {
+      i += 9;
+    } else {
+      valid = false;
+    }
+  }
+  if (valid) {
+    return {};
+  }
+  return line.substr(0, open) + "'" + std::string(body) + "'" + line.substr(close + 1);
+}
+
 void SaveSettingsIfChanged() {
   if (!g_settings_dirty.exchange(false, std::memory_order_relaxed)) {
+    return;
+  }
+  std::vector<std::string> changed;
+  {
+    std::lock_guard lock(g_changed_mutex);
+    changed = g_changed_options;
+  }
+  if (changed.empty()) {
     return;
   }
   // The file the runtime loads at start: <executable folder>/mcla.toml, or
@@ -789,8 +963,86 @@ void SaveSettingsIfChanged() {
   const auto path = g_mcla_settings_path
                         ? std::filesystem::path(g_mcla_settings_path)
                         : rex::filesystem::GetExecutableFolder() / "mcla.toml";
-  rex::cvar::SaveConfig(path);
-  REXLOG_INFO("settings menu: saved to {}", path.string());
+
+  std::vector<std::string> lines;
+  bool crlf = false;
+  {
+    std::ifstream in(path, std::ios::binary);
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+        crlf = true;
+      }
+      lines.push_back(std::move(line));
+    }
+  }
+  if (lines.empty()) {
+    lines.emplace_back("# Settings saved by the game's pause menu");
+  }
+
+  // Top-level keys come before the first [table]; new ones go there too.
+  size_t top_end = lines.size();
+  for (size_t i = 0; i < lines.size(); ++i) {
+    if (IsTableHeader(lines[i])) {
+      top_end = i;
+      break;
+    }
+  }
+  std::vector<bool> written(changed.size(), false);
+  int mended = 0;
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const std::string_view key = i < top_end ? LineKey(lines[i]) : std::string_view();
+    bool own = false;
+    for (size_t k = 0; k < changed.size() && !key.empty(); ++k) {
+      if (key == changed[k]) {
+        lines[i] = changed[k] + " = " + TomlValue(changed[k]);
+        written[k] = own = true;
+        break;
+      }
+    }
+    if (!own) {
+      if (std::string mended_line = MendedLine(lines[i]); !mended_line.empty()) {
+        lines[i] = std::move(mended_line);
+        ++mended;
+      }
+    }
+  }
+  std::vector<std::string> added;
+  for (size_t k = 0; k < changed.size(); ++k) {
+    if (!written[k]) {
+      added.push_back(changed[k] + " = " + TomlValue(changed[k]));
+    }
+  }
+  lines.insert(lines.begin() + std::ptrdiff_t(top_end), added.begin(), added.end());
+
+  // Written beside it, then renamed over it, so that a crash can't leave
+  // half a file.
+  auto temporary = path;
+  temporary += ".tmp";
+  {
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    for (const std::string& line : lines) {
+      out << line << (crlf ? "\r\n" : "\n");
+    }
+    if (!out) {
+      REXLOG_ERROR("settings menu: could not write {}", temporary.string());
+      return;
+    }
+  }
+  std::error_code error;
+  std::filesystem::rename(temporary, path, error);
+  if (error) {
+    REXLOG_ERROR("settings menu: could not replace {}: {}", path.string(), error.message());
+    std::filesystem::remove(temporary, error);
+    return;
+  }
+  REXLOG_INFO("settings menu: {} setting(s) saved to {}", changed.size(), path.string());
+  if (mended) {
+    REXLOG_INFO(
+        "settings menu: {} line(s) with backslashes in a double-quoted value kept as literal "
+        "strings",
+        mended);
+  }
 }
 
 void CreateSubmenus() {
@@ -845,6 +1097,18 @@ void CreateSubmenus() {
   REXLOG_INFO("settings menu: {} submenus added to the pause menu", kMenuCount);
 }
 
+// The tab strip the game rendered last, if it belongs to the pause screen.
+uint32_t PauseTabStrip() {
+  const uint32_t strip = g_last_tab_strip.load(std::memory_order_relaxed);
+  const uint32_t vtable = strip ? Read32(strip) : 0;
+  const uint32_t context_fn = vtable ? Read32(vtable + kWidgetMovieContextSlot) : 0;
+  if (!context_fn) {
+    return 0;
+  }
+  const uint32_t context = CallGuest(context_fn, strip);
+  return context && context == PauseMovieContext() ? strip : 0;
+}
+
 bool ButtonClicked(uint32_t key) {
   return key && CallGuest(kIsButtonClickedFn, key, 1u) != 0;
 }
@@ -877,6 +1141,10 @@ bool NodeReachesList(uint32_t node, uint32_t list, int depth, int& budget) {
 }  // namespace
 
 // --- Hooks -------------------------------------------------------------------
+
+void mcla_menu_tab_strip(PPCRegister& r27) {
+  g_last_tab_strip.store(r27.u32, std::memory_order_relaxed);
+}
 
 void mcla_menu_capture_continue(PPCRegister& r3) {
   if (r3.u32) {
@@ -958,6 +1226,7 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     Write32(list + kListScroll, 0);
 
     g_active_menu.store(menu, std::memory_order_relaxed);
+    g_pause_tab_strip.store(PauseTabStrip(), std::memory_order_relaxed);
     SyncRowsFromOptions(menu);
     MenuStackPush(submenu);
     ShowSubmenu();
@@ -973,9 +1242,14 @@ bool mcla_menu_cancel(PPCRegister& r31) {
   if (g_active_menu.exchange(-1, std::memory_order_relaxed) < 0) {
     return false;
   }
-  // Pop first, then hand the list back, in that order.
+  // Pop first, then hand the list back, in that order. Then the tab strip,
+  // whose render also renders the selected tab again: the tabs and the
+  // Settings title come back.
   MenuStackPop();
   RestorePauseList();
+  if (uint32_t strip = g_pause_tab_strip.exchange(0, std::memory_order_relaxed)) {
+    CallGuest(kTabStripRenderFn, strip);
+  }
   SaveSettingsIfChanged();
   REXLOG_INFO("settings menu: closed");
   return true;

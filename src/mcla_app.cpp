@@ -12,7 +12,8 @@
 #include <rex/system/gpu_plugin.h>
 
 REXCVAR_DEFINE_STRING(mcla_gpu_backend, "any", "MCLA",
-                      "Graphics backend for the Xenos GPU plugin: any, vulkan or d3d12");
+                      "Graphics backend for the Xenos GPU plugin: any, vulkan or d3d12")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_hide_cursor, true, "MCLA",
                     "Hide the mouse pointer over the game when a controller is used or the "
                     "mouse has been still for a few seconds; moving the mouse or clicking "
