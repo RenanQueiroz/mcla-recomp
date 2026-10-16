@@ -248,15 +248,18 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
 
   // Loaded here, also for "any" (the plugin named by --gpu_plugin, with its own
   // default backend, as the SDK would load it), so that the PC defaults reach
-  // the GPU's options before the GPU starts. If this fails, the SDK tries again
-  // and reports it.
+  // the GPU's options before the GPU starts. A backend that fails to load falls
+  // back to the plugin's default, as the SDK would do next; if that fails too,
+  // the SDK tries once more and reports it.
   std::string backend = REXCVAR_GET(mcla_gpu_backend);
   if (backend != "any") {
     config.graphics = rex::system::LoadGpuPlugin("xenos", backend);
     if (!config.graphics) {
-      REXLOG_ERROR("could not load the xenos GPU plugin with backend '{}'", backend);
+      REXLOG_ERROR("could not load the xenos GPU plugin with backend '{}'; trying its default",
+                   backend);
     }
-  } else {
+  }
+  if (!config.graphics) {
     config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);
   }
   ApplyPcDefaults();

@@ -61,6 +61,8 @@ REXCVAR_DEFINE_STRING(mcla_ab_test, "", "MCLA",
                       "Development: alternate one option every 4 s and log the frame cost of each "
                       "state. shadows, foliage, lod, density or all");
 
+bool MclaSingleTileReadyForMsaaChange();  // src/render_perf.cpp
+
 namespace {
 
 uint8_t* Base() {
@@ -176,7 +178,11 @@ void ApplyShadowPhases(uint8_t* base) {
 // reads while it renders: 2 is the 2x MSAA it uses on an HD display, 1 none
 // (what its own developer switches give). Written at the swap
 // (MclaApplyMsaaAtSwap, from mcla_present_interval), on the presenting thread
-// between two frames, so that no frame sees two modes.
+// between two frames, so that no frame sees two modes. Turning it off while
+// the scene is drawn as one tile waits until a few frames have been drawn in
+// two tiles (src/render_perf.cpp, mcla_single_tile): going from a one-tile
+// frame in one mode to a one-tile frame in the other left the vehicle pass in
+// the old mode.
 constexpr uint32_t kMsaaMode = 384;
 constexpr uint32_t kMsaaNone = 1;
 constexpr uint32_t kMsaaGame = 2;
@@ -184,8 +190,10 @@ constexpr uint32_t kMsaaGame = 2;
 void ApplyMsaa(uint8_t* base) {
   static int applied = -1;
   static uint32_t game_mode = kMsaaGame;
+  static int held = 0;
   const int want = REXCVAR_GET(mcla_msaa) ? 1 : 0;
   if (want == applied) {
+    held = 0;
     return;
   }
   const uint32_t renderer = Read32(base, kRendererPointer);
@@ -193,6 +201,12 @@ void ApplyMsaa(uint8_t* base) {
     return;
   }
   const uint32_t mode = Read32(base, renderer + kMsaaMode);
+  // 60 swaps at most, as a loading screen may draw no tiled pass at all.
+  if (!want && mode != kMsaaNone && held < 60 && !MclaSingleTileReadyForMsaaChange()) {
+    ++held;
+    return;
+  }
+  held = 0;
   if (!want && mode != kMsaaNone) {
     game_mode = mode;
     Write32(base, renderer + kMsaaMode, kMsaaNone);

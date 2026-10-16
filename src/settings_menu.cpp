@@ -505,7 +505,7 @@ bool RestartOnly(const char* option) {
 // A restart-only row says "(NEXT START)", and "(RESTART NEEDED)" once its
 // value differs from the one the game started with. SINGLE TILE RENDERING
 // says "(UNAVAILABLE)" where the GPU emulates the console's EDRAM, too small
-// for it (src/render_perf.cpp).
+// for it (src/render_perf.cpp), and doesn't change then (ItemChangeable).
 std::string RowLabel(const ItemDef& item, bool pending) {
   std::string label = item.label;
   if (RestartOnly(item.option)) {
@@ -515,6 +515,13 @@ std::string RowLabel(const ItemDef& item, bool pending) {
     label += " (UNAVAILABLE)";
   }
   return label;
+}
+
+// SINGLE TILE RENDERING keeps its value where it can't take effect, so that a
+// session with the console's EDRAM (edram_tiles = 2048, or a GPU that can't
+// bind a larger one) doesn't save a value for the next one.
+bool ItemChangeable(const ItemDef& item) {
+  return std::strcmp(item.option, "mcla_single_tile") != 0 || MclaSingleTileAvailable();
 }
 
 int ItemValueCount(const ItemDef& item) {
@@ -1155,7 +1162,9 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     if (index < uint32_t(def.item_count)) {
       const ItemDef& item = def.items[index];
       const int count = ItemValueCount(item);
-      ItemSetIndex(item, (ItemCurrentIndex(item) + 1) % count);
+      if (ItemChangeable(item)) {
+        ItemSetIndex(item, (ItemCurrentIndex(item) + 1) % count);
+      }
       SyncRowsFromOptions(active);
       ShowSubmenu();
     }

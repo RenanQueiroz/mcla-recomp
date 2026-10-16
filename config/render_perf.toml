@@ -5,26 +5,32 @@
 # 0x8217A700 in grcDevice::BeginTiledRendering (sub_8217A470), after the tile
 # size and the tile count (0x827D42A4) have been computed and before the tile
 # rectangle loop. r7/r8 = tile width/height, r28/r25 = target width/height,
-# r18 = the renderer's MSAA mode (1 none, 2 = 2x, 4 = 4x). The Xbox 360 had 10
-# MiB of framebuffer memory: the game sizes a tile so that its colour and its
-# depth take 1,024 EDRAM tiles each, so it renders 720p with 2x MSAA as two
-# tiles (1280x512 and 1280x208; 4x MSAA as three) and submits the scene once
-# per tile. EndTiledRendering (sub_8217B430) resolves each tile.
+# r18 = the renderer's MSAA mode (1 none, 2 = 2x, 4 = 4x), r19 = the target's
+# format (with the MSAA mode and the size, the key of the tile surface cache
+# that follows). The Xbox 360 had 10 MiB of framebuffer memory: the game sizes
+# a tile so that its colour and its depth take 1,024 EDRAM tiles each, so it
+# renders 720p with 2x MSAA as two tiles (1280x512 and 1280x208; 4x MSAA as
+# three) and submits the scene once per tile. EndTiledRendering (sub_8217B430)
+# resolves each tile.
 #
 # When the GPU emulates a larger EDRAM (the SDK's edram_tiles, 4,096 tiles,
-# which the game makes its PC default; IGraphicsSystem::edram_tile_count says
-# what is in effect) and the whole target's colour and depth fit in it, the
-# hook makes the tile the size of the target and the count 1, so the scene is
-# submitted and resolved once. 720p with 2x MSAA needs 2 x 1,472 tiles: depth
-# at 0 and colour at 1,472. 720p with 4x MSAA needs 2 x 2,944 and keeps its
-# three tiles (the pause menu, the GPS map); without MSAA the game draws one
-# tile by itself. With the console's 2,048 tiles nothing changes.
-# (launcher/dev/single-tile-2026-10-16.md; the old condition, a null render
-# target in r17, never held.)
+# which the game sets as a default on PC and on the PS5;
+# IGraphicsSystem::edram_tile_count says what is in effect) and the whole
+# target's colour and depth fit in it, the hook makes the tile the size of the
+# target and the count 1, so the scene is submitted and resolved once. 720p
+# with 2x MSAA needs 2 x 1,472 tiles: depth at 0 and colour at 1,472. 720p with
+# 4x MSAA needs 2 x 2,944 and keeps its three tiles (the pause menu, the GPS
+# map); without MSAA the game draws one tile by itself. With the console's
+# 2,048 tiles nothing changes. The hook also keeps a frame in two tiles between
+# one-tile frames in different MSAA modes, and leaves the tile surface cache's
+# last free slots alone (src/render_perf.cpp).
+# (launcher/dev/single-tile-2026-10-16.md and
+# single-tile-edram-2026-10-16.md; the old condition, a null render target in
+# r17, never held.)
 [[midasm_hook]]
 address = 0x8217A700
 name = "mcla_single_tile"
-registers = ["r7", "r8", "r18", "r25", "r28"]
+registers = ["r7", "r8", "r18", "r19", "r25", "r28"]
 
 # 0x82410E34 in sub_82410D70 (surface creation): rejects a surface whose end
 # exceeds 0x800 EDRAM tiles, the real console's capacity. With
