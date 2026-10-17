@@ -241,6 +241,34 @@ needs two in a row (`KNOWN-ISSUES.md`, "Loading-screen pacing"). The
 "Fast" and "Skip" intros now speed up only the start-up logos, not loading
 screens later.
 
+## Preparing shaders
+
+After a build or update that succeeded, and from *More* › **Prepare shaders**,
+the launcher runs `mcla.exe --mcla_prepare_shaders=true` with the options it
+starts the game with (*More mcla.exe options*; the rest comes from `mcla.toml`,
+as when playing), which:
+
+1. checks the shader pack (`shaderpack\545407F8.shaderpack`) against the
+   game's files and the SDK's storage versions;
+2. rebuilds the pack's shaders from `game\` and adds them, with the pack's
+   pipeline descriptions, to the shader storage
+   (`Documents\mcla\cache\shaders\shareable`), keeping what the files already
+   hold; each file is written beside the old one and renamed over it;
+3. creates every stored pipeline for the current API and resolution, as a start
+   of the game does, so the graphics driver compiles them now;
+4. quits, before the game would start; its window stays hidden.
+
+The status line shows its progress, read from the lines it prints
+(`SHADERPREP <step> ...`, `ShaderPrep.cs`), and its log is
+`logs\prepare-shaders-*.log`. Play is greyed out meanwhile. Closing the
+launcher stops it: what it had added stays, and the game's next start creates
+the rest. If the pack or the game's files don't match, it says so and nothing
+is written; the game then plays as before, compiling shaders as it meets them.
+Run it again after a graphics driver update, which empties the driver's own
+cache, or after changing the resolution or the API, so that the game's next
+start doesn't spend the time instead (`KNOWN-ISSUES.md`, "Shaders prepared
+before the first start").
+
 ## Rebuilding the launcher
 
 Needs the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`). Close the
@@ -361,6 +389,18 @@ during a build:
   every pipeline created and every frame that left draws out, waited or did
   pipeline work on the GPU command thread. Applies on top of the three patches.
   `devrun.py --cache-root <folder>` runs with a shader storage of its own.
+- `shader-prepare-2026-10-17.md`: shader preparation (`--mcla_prepare_shaders`,
+  `src/shader_prepare.cpp`): how the pack's shaders are rebuilt, the pack's
+  contents, the preparation's time and memory, and the race benchmark with
+  and without it with the driver's cache cold. Its tools, in `shaderpack/`:
+  `build_pack.py` makes `shaderpack/545407F8.shaderpack` from shader storages,
+  refuses anything but fingerprints, ranges of `default.xex` and pipeline
+  descriptions, and accepts a pack only once `mcla.exe` rebuilt every shader
+  in it (`--mcla_prepare_shaders_check`); `measure.py` runs the preparation
+  and the race benchmark through `devrun.py`. `shader-salt.sdk.patch` is the
+  salt part of `shader-stutter-timers.sdk.patch`, for a cold driver cache.
+  `devrun.py --stdout <file>` gives the game a standard output, as the
+  launcher does.
 - `direct-resolve-2026-10-15.md`: resolves that read the render target
   directly instead of dumping it into the EDRAM buffer
   (`rexglue-direct-resolve.patch`) at any resolution scale, and the 4x MSAA

@@ -56,6 +56,11 @@ sealed class LauncherApp : Component
         var (log, updateLog) = UseReducer(ImmutableList<string>.Empty, threadSafe: true);
         var (step, setStep) = UseState<string?>(null);
         var (activity, setActivity) = UseState<Activity?>(null);
+        // Preparing shaders (ShaderPrep.cs): after a build, or from More.
+        var (prep, setPrep) = UseState<ShaderPrepRun?>(null, threadSafe: true);
+        var (prepProgress, setPrepProgress) = UseState<ShaderPrepProgress?>(null, threadSafe: true);
+        var (prepResult, setPrepResult) = UseState<int?>(null, threadSafe: true);
+        var prepRef = UseRef<ShaderPrepRun?>(null);
         var initialRunning = UseMemo(GameIsRunning, Array.Empty<object>());
         var (gameRunning, setGameRunning) = UseState(initialRunning, threadSafe: true);
         var runningRef = UseRef(initialRunning);
@@ -72,10 +77,11 @@ sealed class LauncherApp : Component
         var logText = UseMemo(() => string.Join("\n", log), log);
 
         var busy = build != null && buildResult == null;
+        var preparing = prep != null && prepResult == null;
         var failed = buildResult is int exit && exit != 0 && build?.StopRequested != true;
         var gameBuilt = status?.GameBuilt ?? File.Exists(Paths.GameExe);
         var readyToPlay = status is { GameBuilt: true, BuildCurrent: true, UpdateAvailable: false }
-                          && !checking && !busy && build == null && error == null;
+                          && !checking && !busy && !preparing && build == null && error == null;
 
         async Task CheckAsync(bool fetch)
         {
@@ -92,6 +98,37 @@ sealed class LauncherApp : Component
             finally
             {
                 setChecking(false);
+            }
+        }
+
+        // Fills the shader storage from the shader pack and compiles every pipeline, with the
+        // options the game is started with (ShaderPrep.cs). Quietly does nothing in a version
+        // without a pack.
+        void StartPrepare(bool afterBuild)
+        {
+            if (prepRef.Current is { Completion.IsCompleted: false }) return;
+            if (!File.Exists(ShaderPrepRun.PackFile(Paths.Repo)) || !File.Exists(Paths.GameExe))
+            {
+                if (!afterBuild) setNotice("This version has no shader pack, so there are no shaders to prepare.");
+                return;
+            }
+            if (GameIsRunning())
+            {
+                if (!afterBuild) setNotice("Close the game first: shaders are prepared while it isn't running.");
+                return;
+            }
+            setPrepResult(null);
+            setPrepProgress(null);
+            try
+            {
+                var run = new ShaderPrepRun(Paths.GameExe, GameOptions.Arguments(settingsRef.Current), setPrepProgress, Paths.LogsDir);
+                prepRef.Current = run;
+                setPrep(run);
+                _ = run.Completion.ContinueWith(task => setPrepResult(task.Result), TaskScheduler.Default);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+            {
+                setNotice($"Couldn't prepare shaders: {ex.Message}");
             }
         }
 
@@ -129,6 +166,7 @@ sealed class LauncherApp : Component
             {
                 setBuildResult(task.Result);
                 _ = CheckAsync(fetch: false);
+                if (task.Result == 0 && !run.StopRequested) StartPrepare(afterBuild: true);
             }, TaskScheduler.Default);
         }
 
@@ -227,6 +265,7 @@ sealed class LauncherApp : Component
                     psi.ArgumentList.Add(arg);
                 Process.Start(psi);
                 exitingRef.Current = true;
+                prepRef.Current?.Stop();
                 ReactorApp.Exit();
             }
             catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
@@ -261,6 +300,9 @@ sealed class LauncherApp : Component
             if (window == null) return () => { };
             void OnClosing(object? sender, WindowClosingEventArgs e)
             {
+                // Preparing shaders just stops: the storage is only ever replaced whole, and the
+                // next preparation (or the game's next start) does what is left.
+                prepRef.Current?.Stop();
                 if (exitingRef.Current || buildRef.Current is not { Completion.IsCompleted: false }) return;
                 e.Cancel = true;
                 setConfirmExit(true);
@@ -416,6 +458,7 @@ sealed class LauncherApp : Component
                    MenuItem("Rebuild the game", () => StartBuild(BuildKind.Build)),
                    MenuItem("Re-patch and rebuild the SDK", () => StartBuild(BuildKind.ResetSdk)),
                    MenuItem("Run the build in a terminal", BuildInTerminal),
+                   MenuItem("Prepare shaders", () => StartPrepare(afterBuild: false)),
                    MenuSeparator(),
                    MenuItem("Open the game folder", () => Open(Paths.BuildDir)),
                    MenuItem("Open the launcher logs", () => Open(Paths.LogsDir)),
@@ -445,6 +488,8 @@ sealed class LauncherApp : Component
                 return Info("Build stopped", "Finished steps are kept, so the next build continues where this one stopped.", InfoBarSeverity.Warning);
             if (failed)
                 return Info("The build failed", "The output below shows where. Play still starts the last version that built.", InfoBarSeverity.Error);
+            if (preparing)
+                return Info("Preparing shaders", prepProgress?.Describe() ?? "Starting…", InfoBarSeverity.Informational);
             if (checking || status == null)
                 return Empty();
             if (status.UpdateAvailable)
@@ -458,6 +503,13 @@ sealed class LauncherApp : Component
                             InfoBarSeverity.Warning);
             if (!status.BuildCurrent)
                 return Info("The last build didn't finish", "Rebuild to finish it. Play starts the last version that built.", InfoBarSeverity.Warning);
+            if (prep != null && prepResult is int prepExit)
+                return prepExit == 0
+                    ? Info(ShaderPrepRun.Describe(0, null), prep.PipelinesCreated > 0
+                           ? $"{prep.PipelinesCreated:N0} pipelines are compiled for the current settings."
+                           : "The shader storage is ready.", InfoBarSeverity.Success)
+                    : Info("Shaders weren't prepared", ShaderPrepRun.Describe(prepExit, prep.ErrorMessage)
+                           + ". The game still plays, compiling shaders as it meets them.", InfoBarSeverity.Warning);
             if (buildResult == 0)
                 return Info("Build finished", $"You're on version {status.Head[..7]}.", InfoBarSeverity.Success);
             return Empty();
@@ -471,7 +523,7 @@ sealed class LauncherApp : Component
                 .HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch)
             : null;
 
-        Element? LauncherUpdateBar() => status is { LauncherOutdated: true } && !busy
+        Element? LauncherUpdateBar() => status is { LauncherOutdated: true } && !busy && !preparing
             ? (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with
               {
                   IsOpen = true,
@@ -688,7 +740,10 @@ sealed class LauncherApp : Component
                 Pairs(GameSettings.Game.Select(SettingCombo).ToArray()),
                 // Lines short enough for the window: in this scroll viewer a
                 // TextBlock is measured without a width limit, so it doesn't wrap.
-                VStack(2, gameRunning
+                VStack(2, preparing
+                    ? [TextBlock("Shaders are being prepared with these settings.").Foreground(Theme.SecondaryText),
+                       TextBlock("They can be changed again in a few seconds, when it's done.").Foreground(Theme.SecondaryText)]
+                    : gameRunning
                     ? [TextBlock("The game is running: change these in its pause menu, on the Settings tab.").Foreground(Theme.SecondaryText),
                        TextBlock("They show here again once it has closed.").Foreground(Theme.SecondaryText)]
                     : [TextBlock("These are the game's own settings, in mcla.toml next to mcla.exe. Its pause menu changes them too.").Foreground(Theme.SecondaryText),
@@ -727,10 +782,10 @@ sealed class LauncherApp : Component
                     buttons.Add(Button("Rebuild", () => StartBuild(BuildKind.Build)).AccentButton());
             }
 
-            var play = Button(HStack(8, Icon(Symbol.Play), TextBlock(gameRunning ? "Running" : "Play")), Play)
+            var play = Button(HStack(8, Icon(Symbol.Play), TextBlock(gameRunning && !preparing ? "Running" : "Play")), Play)
                 .AutomationName("Play");
             if (buttons.Count == 0 && !busy) play = play.AccentButton();
-            buttons.Add(play.IsEnabled(gameBuilt && !busy && !gameRunning)
+            buttons.Add(play.IsEnabled(gameBuilt && !busy && !preparing && !gameRunning)
                             .ToolTip(status?.UpdateAvailable == true ? "Play the installed version without updating" : "Start the game")
                             .MinWidth(120));
             return HStack(8, buttons.ToArray()).HAlign(HorizontalAlignment.Right).Margin(0, 16, 0, 0);
