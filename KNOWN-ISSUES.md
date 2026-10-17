@@ -290,7 +290,7 @@ Costs and limits:
 - **Rain, smoke and particles** have no motion vectors of their own and may leave faint trails or fade. A reactive mask for them (FSR leans on the current frame where translucent effects changed the picture) is in, experimental and off by default (`temporal_aa_reactive`, 4 is a start; `temporal_aa_debug 5` shows it): in the night race the smoke plumes showed no trails without it, so it stays off until a scene shows it helps.
 - **Exposure:** FSR works out its own (its auto-exposure), not the game's.
 - **Availability:** FSR is offered only where its runtime for the graphics API in use was built and the device has what it needs (the Vulkan runtime needs the Vulkan SDK at build time and a Vulkan 1.3 device); elsewhere, and if it fails, the game uses MSAA. Not on Linux or the PS5 yet.
-- **With MSAA or off** nothing of it runs: no draw is moved, and the game's frame is drawn as before. On Vulkan the device now enables the 16-bit, storage-image and subgroup-size features it has (for FSR); measured against the previous build, MSAA at 3x is within run-to-run noise (race -1.0%, city +0.4%).
+- **With MSAA or off** nothing of it runs: no draw is moved, and the game's frame is drawn as before. On Vulkan the device now enables the 16-bit, storage-image and subgroup-size features it has (for FSR); measured against the previous build at 3x, frame times are within run-to-run noise (Vulkan with MSAA: race -0.1%, city -1.1%; Vulkan off: race -0.9%; D3D12 with MSAA: race -0.6%).
 
 ## HDR output (2026-10-16)
 
