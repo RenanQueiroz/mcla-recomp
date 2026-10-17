@@ -503,12 +503,12 @@ constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
 // FSR 3.1 at native resolution (the SDK's temporal_aa, rexglue-temporal-aa.patch),
 // with its sharpening (temporal_aa_sharpness). All change during play; FSR
 // starts once it is ready (half a second or so the first time).
-#if REX_PLATFORM_PS5
-// FSR isn't built for the console yet.
-constexpr const char* kAntiAliasingValues[] = {"off", "msaa"};
-constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X"};
-#else
 constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr"};
+#if REX_PLATFORM_PS5
+// Built for the console, but not yet run on one; its device features are
+// enabled only when the game starts with it chosen (ps5/game/main_ps5.cpp).
+constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (NEXT START, UNTESTED)"};
+#else
 constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE AA"};
 #endif
 constexpr int kAntiAliasingCount = int(sizeof(kAntiAliasingValues) / sizeof(kAntiAliasingValues[0]));
@@ -537,10 +537,8 @@ const ItemDef kPerformanceItems[] = {
     {"PM_MxFsBlur", ItemKind::kToggle, "mcla_fullscreen_blur", "FULLSCREEN BLUR"},
     {"PM_MxAntiAliasing", ItemKind::kStringChoice, "mcla_anti_aliasing", "ANTI ALIASING",
      kAntiAliasingValues, kAntiAliasingLabels, nullptr, kAntiAliasingCount},
-#if !REX_PLATFORM_PS5
     {"PM_MxFsrSharpness", ItemKind::kNumberChoice, "temporal_aa_sharpness", "FSR SHARPNESS",
      nullptr, nullptr, kSharpness, 6, "%.1f", "OFF"},
-#endif
 };
 
 const ItemDef kControlItems[] = {
@@ -615,8 +613,9 @@ bool LabelChanges(const ItemDef& item) {
   return RestartOnly(item.option) || std::strcmp(item.option, "hdr") == 0;
 }
 
-// FSR (the last anti-aliasing choice) is offered only where it can run
-// (src/perf_options.cpp); where it can't, the game uses MSAA instead.
+// FSR (the last anti-aliasing choice) is offered only where it can run, now or
+// after a restart (src/perf_options.cpp); where it can't, the game uses MSAA
+// instead.
 bool IsAntiAliasingWithoutFsr(const ItemDef& item) {
   return item.kind == ItemKind::kStringChoice && !std::strcmp(item.option, "mcla_anti_aliasing") &&
          !MclaFsrAvailable();

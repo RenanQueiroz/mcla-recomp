@@ -245,7 +245,7 @@ git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.pat
 git apply ../../patches/rexglue-linux-procmap-query.patch
 git apply ../../patches/rexglue-linux-wait-sleep.patch
 # here the fork's patches, in the order of FORK.md, "Building by hand, or on Linux"
-CC=clang-20 CXX=clang++-20 cmake --preset linux-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF
+CC=clang-20 CXX=clang++-20 cmake --preset linux-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON
 cmake --build out/build/linux-amd64 --config Release
 cmake --install out/build/linux-amd64 --config Release
 cd ../..
@@ -257,7 +257,7 @@ cmake --build --preset linux-amd64-release
 ./scripts/play_linux.sh
 ```
 
-The FSR 3.1 anti-aliasing option isn't offered on Linux yet: it is built only with `-DREXGLUE_ENABLE_FSR=ON` (left out above), needs Wine at build time to run FidelityFX's shader compiler, and has not been built or run there.
+The FSR 3.1 anti-aliasing option (`-DREXGLUE_ENABLE_FSR=ON` above) fetches FidelityFX's source from GitHub when the SDK is configured, and builds its Vulkan library from the prebuilt shaders that `rexglue-temporal-aa-shaders-vk.patch` adds (FidelityFX's own shader compiler is a Windows program; no Wine is needed). It needs Vulkan's development files, 1.3.250 or newer (`libvulkan-dev`). Without the network or those, the SDK builds without it (CMake warns, and its summary says `FSR (temporal AA): ON, but ...`), `play_linux.sh` says so, and the game offers MSAA and off only. **It has not been built or run on Linux.**
 
 On Wayland, put `vulkan_allow_present_mode_immediate = false` and `vulkan_allow_present_mode_mailbox = false` in `out/build/linux-amd64-release/mcla.toml`; without them the game presents about 1,000 times a second and keeps the GPU busy.
 
@@ -267,7 +267,7 @@ On Wayland, put `vulkan_allow_present_mode_immediate = false` and `vulkan_allow_
 
 *Installed on a jailbroken PS5 with upstream's build. The tile here is one the user supplied at build time; the background is made from the art on their own disc.*
 
-This is upstream's PS5 build. The fork's `ps5/make_ps5.sh` also applies the fork's SDK patches, after upstream's, and the fork's PS5 host asks for a 4,096-tile EDRAM, so the scene is drawn as one tile (single-tile rendering); **none of it has been built or run on a console.** To keep the console's 2,048 tiles, add `edram_tiles = 2048` to `/data/mcla/mcla.toml`, or build with `-DMCLA_EDRAM_TILES=2048`. For the tested PS5 build, use [upstream's repository](https://github.com/holdmysocks/mcla-recomp): the same steps with `https://github.com/holdmysocks/mcla-recomp.git`.
+This is upstream's PS5 build. The fork's `ps5/make_ps5.sh` also applies the fork's SDK patches, after upstream's, and the fork's PS5 host asks for a 4,096-tile EDRAM, so the scene is drawn as one tile (single-tile rendering), and it builds FSR 3.1 anti-aliasing in (fetched from GitHub the first time; PERFORMANCE > ANTI ALIASING > FSR 3.1 (NEXT START, UNTESTED): it applies from the next start, as the console's Vulkan device gets the features FSR uses only when the game starts with it chosen; MSAA stays the default); **none of it has been built or run on a console.** To keep the console's 2,048 tiles, add `edram_tiles = 2048` to `/data/mcla/mcla.toml`, or build with `-DMCLA_EDRAM_TILES=2048`. For the tested PS5 build, use [upstream's repository](https://github.com/holdmysocks/mcla-recomp): the same steps with `https://github.com/holdmysocks/mcla-recomp.git`.
 
 You need a jailbroken PS5 that runs homebrew, with an FTP server payload (port 2121 by default) and a homebrew mounter that shows folders under `/data/homebrew` on the home screen (ShadowMountPlus was used). The build runs on **Arch Linux as root**: on Windows, an Arch distribution under WSL2. Allow about 30 GB of disk, 16 GB of memory, and about 45 minutes the first time.
 

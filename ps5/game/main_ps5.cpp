@@ -565,6 +565,14 @@ int main() {
   Line("settings: edram_tiles = %s", rex::cvar::GetFlagByName("edram_tiles").c_str());
   // An older mcla_msaa = false in the settings file still means no anti-aliasing.
   MclaMigrateAntiAliasing();
+  // FSR 3.1 (rexglue-temporal-aa.patch) is untested on the console: the Vulkan
+  // device gets the features it uses only when the game starts with it chosen,
+  // so that everyone else's device stays as it was. Chosen during play, it
+  // takes effect at the next start.
+  const bool fsr_at_start = rex::cvar::GetFlagByName("mcla_anti_aliasing") == "fsr";
+  rex::cvar::SetFlagByName("temporal_aa_device_features", fsr_at_start ? "true" : "false");
+  Line("settings: mcla_anti_aliasing = %s (FSR's device features %s)",
+       rex::cvar::GetFlagByName("mcla_anti_aliasing").c_str(), fsr_at_start ? "on" : "off");
   rex::ui::SDLWindowedAppContext app_context;
   if (!app_context.Initialize()) {
     return Finish("the SDL application context did not initialise", 9);

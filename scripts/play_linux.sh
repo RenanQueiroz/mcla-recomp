@@ -16,9 +16,13 @@ for lib in librexruntime.so librexgpu-xenos.so; do
     ln -s "$sdk_lib/$lib" "$build/$lib"
   fi
 done
-# FSR 3.1 (anti-aliasing), when the SDK was built with it (needs Wine).
-if [ -e "$sdk_lib/libamd_fidelityfx_vk.so" ] && [ ! -e "$build/libamd_fidelityfx_vk.so" ]; then
-  ln -s "$sdk_lib/libamd_fidelityfx_vk.so" "$build/libamd_fidelityfx_vk.so"
+# FSR 3.1 (anti-aliasing), when the SDK was built with it.
+if [ -e "$sdk_lib/libamd_fidelityfx_vk.so" ]; then
+  if [ ! -e "$build/libamd_fidelityfx_vk.so" ]; then
+    ln -s "$sdk_lib/libamd_fidelityfx_vk.so" "$build/libamd_fidelityfx_vk.so"
+  fi
+else
+  echo "note: the FSR anti-aliasing option wasn't built (the SDK's CMake output says why: it needs the network the first time and Vulkan's development files); the game offers MSAA and off." >&2
 fi
 
 LD_LIBRARY_PATH="$build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$build/mcla" "$@"

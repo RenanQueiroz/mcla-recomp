@@ -197,15 +197,17 @@ constexpr uint32_t kMsaaNone = 1;
 constexpr uint32_t kMsaaGame = 2;
 
 // Whether FSR can be used: the GPU plugin's temporal_aa_available (unknown
-// until the first frame has ended; no where its runtime isn't there, the
-// device lacks what it needs or it failed). Not on Linux before its port.
+// until the first frame has ended; no where its runtime wasn't built or isn't
+// there, the device lacks what it needs or it failed; next_start where it can
+// after a restart, the device having been made without its features: the PS5
+// started without FSR chosen).
 bool FsrAvailable() {
-#if REX_PLATFORM_LINUX
-  return false;
-#else
   const std::string available = rex::cvar::GetFlagByName("temporal_aa_available");
   return available == "yes" || available == "unknown";
-#endif
+}
+// Whether to offer it: also when it applies at the next start.
+bool FsrOffered() {
+  return FsrAvailable() || rex::cvar::GetFlagByName("temporal_aa_available") == "next_start";
 }
 
 // mcla_anti_aliasing as it applies, read under the option registry's lock
@@ -217,7 +219,11 @@ std::string AntiAliasing() {
     static bool logged = false;
     if (!logged) {
       logged = true;
-      REXLOG_WARN("perf options: FSR is unavailable here; MSAA is used instead");
+      if (FsrOffered()) {
+        REXLOG_INFO("perf options: FSR takes effect at the next start; MSAA until then");
+      } else {
+        REXLOG_WARN("perf options: FSR is unavailable here; MSAA is used instead");
+      }
     }
     return "msaa";
   }
@@ -402,7 +408,7 @@ void MclaTickPerfOptions() {
 // isn't saved as if the player had chosen it).
 // For the pause menu, which offers FSR only where it can run.
 bool MclaFsrAvailable() {
-  return FsrAvailable();
+  return FsrOffered();
 }
 
 void MclaMigrateAntiAliasing() {

@@ -156,7 +156,8 @@ fi
 # before it existed, found by a name it adds; one that is in already must be
 # the version recorded (check_patch). Built and run on Windows only so far.
 while read -r patch file adds; do
-    if grep -qF "$adds" "$rex_src/$file"; then
+    # -s: a patch that adds its file is not in while the file isn't there.
+    if grep -qsF "$adds" "$rex_src/$file"; then
         check_patch "$repo/patches/$patch"
         continue
     fi
@@ -194,6 +195,7 @@ rexglue-hdr-output.patch src/ui/presenter.cpp IsHdrOutputWanted
 rexglue-hdr-ui-layer.patch src/graphics/command_processor.cpp HdrBeforeResolve
 rexglue-hdr-scene-mcla.patch src/graphics/command_processor.cpp HdrPrepareScene
 rexglue-temporal-aa.patch include/rex/graphics/command_processor.h TaaJitterNdcOffset
+rexglue-temporal-aa-shaders-vk.patch thirdparty/fidelityfx-shaders-vk/rexglue_fsr_shaders_vk.h REXGLUE_FSR_SHADERS_VK_FLAGS
 LATER
 
 # ---------------------------------------------------------------------------
@@ -232,14 +234,18 @@ echo "generated sources: $(ls "$repo"/generated/default/*.cpp | wc -l)"
 
 # ---------------------------------------------------------------------------
 step "6/9 the runtime, for PS5"
-if [ ! -f "$rex_build/build.ninja" ]; then
+# FSR 3.1 (rexglue-temporal-aa.patch): FidelityFX's source is fetched at a
+# pinned commit (needs the network the first time) and built as static
+# libraries; without it the runtime builds without FSR. A build folder
+# configured before FSR existed is configured again.
+if [ ! -f "$rex_build/build.ninja" ] || ! grep -q '^REXGLUE_ENABLE_FSR:BOOL=ON$' "$rex_build/CMakeCache.txt"; then
     # -flto=thin: 5-8% more draws a second on the console.
     logged ps5-configure cmake -S "$rex_src" -B "$rex_build" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$sdk/toolchain/prospero.cmake" \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23 \
         -DCMAKE_C_FLAGS="-march=znver2 -flto=thin" \
         -DCMAKE_CXX_FLAGS="-march=znver2 -fexperimental-library -flto=thin" \
-        -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF
+        -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON
 fi
 logged ps5-runtime ninja -C "$rex_build" -j "$jobs" rexruntime rexgpu-xenos
 

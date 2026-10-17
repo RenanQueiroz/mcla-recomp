@@ -71,13 +71,20 @@ kinds of changes on top of upstream's `main`:
 
 ## FSR 3.1 anti-aliasing
 
-`patches/rexglue-temporal-aa.patch` adds AMD FSR 3.1 at native resolution as an
-anti-aliasing option (MSAA stays the default). The SDK build fetches the
-FidelityFX SDK's source at a pinned, hash-checked commit and builds its runtime
-(`amd_fidelityfx_dx12.dll`, and `amd_fidelityfx_vk.dll` with the Vulkan SDK);
-without the network or the Vulkan SDK it builds without FSR (or without FSR on
-Vulkan), and the game offers MSAA and off only. Not yet on Linux or the PS5;
-a reactive mask for rain and smoke is in but experimental and off by default.
+`patches/rexglue-temporal-aa.patch` adds AMD FSR 3.1 at native resolution as
+an anti-aliasing option (MSAA stays the default). The SDK build fetches the
+FidelityFX SDK's source at a pinned, hash-checked commit and builds its
+runtime (`amd_fidelityfx_dx12.dll`, and `amd_fidelityfx_vk.dll` with the
+Vulkan SDK); without the network or the Vulkan SDK it builds without FSR (or
+without FSR on Vulkan), and the game offers MSAA and off only. FidelityFX's
+shader compiler is a Windows program, so Linux and the PS5 build the Vulkan
+runtime from the prebuilt SPIR-V of the permutations rexglue uses, in a patch
+of its own (`patches/rexglue-temporal-aa-shaders-vk.patch`, made by
+`launcher/dev/fsr/fsr_vk_shaders.py`); the PS5 links it statically. Neither
+has been built or run there yet; on
+the PS5 FSR is a choice for the next start, marked UNTESTED, as the console's
+Vulkan device gets FSR's features only when the game starts with it chosen. A
+reactive mask for rain and smoke is in but experimental and off by default.
 KNOWN-ISSUES.md has the costs and limits.
 
 ## Testing so far
@@ -138,6 +145,7 @@ git apply ../../patches/rexglue-hdr-output.patch
 git apply ../../patches/rexglue-hdr-ui-layer.patch
 git apply ../../patches/rexglue-hdr-scene-mcla.patch
 git apply ../../patches/rexglue-temporal-aa.patch
+git apply ../../patches/rexglue-temporal-aa-shaders-vk.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they

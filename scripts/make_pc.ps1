@@ -258,9 +258,12 @@ try {
         @{ Patch = "rexglue-hdr-ui-layer.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrBeforeResolve" }
         @{ Patch = "rexglue-hdr-scene-mcla.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrPrepareScene" }
         @{ Patch = "rexglue-temporal-aa.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaJitterNdcOffset" }
+        @{ Patch = "rexglue-temporal-aa-shaders-vk.patch"; File = "thirdparty\fidelityfx-shaders-vk\rexglue_fsr_shaders_vk.h"; Adds = "REXGLUE_FSR_SHADERS_VK_FLAGS" }
     )
     foreach ($later in $laterPatches) {
-        if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
+        # A patch that adds its file is not in while the file isn't there.
+        if (-not (Test-Path "$sdk\$($later.File)") -or
+            -not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
             Patch "sdk-patch-$($later.Patch -replace '^rexglue-|\.patch$')" $sdk "$root\patches\$($later.Patch)"
             (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
         } else {
