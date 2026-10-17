@@ -165,10 +165,12 @@ void MclaDevPadFrame(uint64_t& ticks);
 void MclaDevPadSwap();
 #endif
 void MclaApplyMsaaAtSwap();
+void MclaTickSettingsMenu();
 
 void mcla_frame_delta(PPCRegister& r8) {
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
+  MclaTickSettingsMenu();
   MclaDevPadFrame(r8.u64);
   if (OriginalTiming()) {
     return;
@@ -357,16 +359,18 @@ void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
 // game sets the gauges' values every update and the movies' own scripts draw
 // them as they advance, in the same step that scrolls the song ticker: the
 // needles move as often as the ticker steps. So the HUD has a rate of its own:
-// 30 a second by default, as on the console (the ticker at its original speed,
-// the needles in 30 Hz steps); 60 or 120 for smoother needles with the ticker
-// 2 or 4 times as fast; or 0 for every frame, as without this pacing.
+// 60 a second by default (smoother needles, the ticker twice its original
+// speed; the user's choice after playing at 30 and 60, 2026-10-16); 30 as on
+// the console (the ticker at its original speed, the needles in 30 Hz steps);
+// 120 (the ticker 4 times as fast); or 0 for every frame, as without this
+// pacing.
 REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
                     "Advance the UI's menus, pop-ups and map screens 30 times a second, as on the "
                     "console, instead of once per rendered frame");
-REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 30, "MCLA",
+REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 60, "MCLA",
                      "How many times a second the in-game HUD advances (gauges, song ticker, "
-                     "LOADING badge): 30 as on the console, 60 or 120 for smoother needles with "
-                     "a faster ticker, 0 for every frame")
+                     "LOADING badge): 60 (the default) or 120 for smoother needles with a faster "
+                     "ticker, 30 as on the console, 0 for every frame")
     .range(0, 240);
 
 namespace {

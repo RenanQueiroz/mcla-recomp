@@ -109,20 +109,35 @@ made in the launcher before then also ends it. It doesn't run while the game
 is running, which writes the file itself: it waits until the game has closed.
 A new install (no `settings.json`) has nothing to move. The old HUD updates
 choice (`HudUpdates`, an on/off switch) isn't carried over; the new one is a
-rate, 30 per second unless set.
+rate, 60 per second unless set.
 
 If `settings.json` can't be saved, the launcher says so instead of carrying on
 as if it had.
 
-*HDR*, *HDR peak brightness*, *HDR paper white* and *HDR highlights* are the
-game's HDR output (`hdr`, `hdr_peak_nits`, `hdr_paper_white_nits`,
-`mcla_hdr_highlights`; the pause menu's DISPLAY rows of the same names; all
-change during play; *HDR* is *Auto* unless `mcla.toml` says otherwise, the
-game's default on Windows). Below them the launcher shows what Windows reports for
-the main display when it opens: whether HDR is on, the peak the Windows HDR
-Calibration app measured (DXGI's `IDXGIOutput6::GetDesc1`, as the game reads
-it) and the SDR content brightness (DisplayConfig's SDR white level), which
-is what *Auto* uses (`src\DisplayHdr.cs`).
+*HDR*, *HDR highlights*, *HDR peak brightness* and *HDR paper white* are the
+game's HDR output (`hdr`, `mcla_hdr_highlights`, `hdr_peak_nits`,
+`hdr_paper_white_nits`; the pause menu's DISPLAY rows of the same names; all
+change during play; *HDR* is *Auto* and *Highlights* Brighter unless
+`mcla.toml` says otherwise, the game's defaults on Windows). The peak and paper
+white are sliders with an *Auto* box, in the pause menu's steps (200 to 4,000
+nits by 50, 80 to 480 by 10): while *Auto* is ticked the slider shows what
+Windows reports and can't be moved, and unticking it starts from that value.
+A drag is written to `mcla.toml` when it ends, an arrow key or the controller's
+left and right one step at a time. The peak never goes below paper white: a
+value that would cross it stops at the last step that doesn't, and the other
+one isn't moved. A value typed into `mcla.toml` between the steps is shown as
+it is, and a step goes from it to the next step that way. Below them the
+launcher shows what Windows reports for the main display when it opens
+(DXGI's `IDXGIOutput6::GetDesc1`, the peak the Windows HDR Calibration app
+measured, and DisplayConfig's SDR white level), as *Auto* would use it: 1,000
+and 200 nits if it reports nothing usable. In the game, *Auto* reads the
+display its window is on, which may not be the main one (`src\DisplayHdr.cs`).
+
+Every setting has an "i" next to its title (the game's settings and the
+Advanced options): hovering shows what it does and which choice suits when, and
+clicking it, or Enter or the controller's A on it, shows the same text in a
+flyout. The texts are in `src\GameSettings.cs`, checked against the code and
+the measurements in these notes.
 
 *Display gamma* (`mcla_display_gamma`) picks the gamma ramp the picture goes
 through on its way to the screen, and it switches during play too (the pause
@@ -162,14 +177,15 @@ shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`).
 
 *HUD updates* (`mcla_ui_hud_rate`) sets how many times a second the HUD's
-Flash movies (gauges, minimap, song ticker, the LOADING badge) take a step: 30
-(the default, as on the console), 60, 120, or every frame (0). The ticker scrolls
-one step at a time and the needles move only when it steps, so at 30 the ticker
-scrolls at its original speed and the needles move in 30 Hz steps; 60 and 120
-make the needles smoother and the ticker two and four times as fast (at a 120 FPS
-cap: 59, 118, 237 and 239 px/s at 720p for 30, 60, 120 and every frame). Menus,
-pop-ups and the GPS panels keep the console's pace whatever it is set to
-(`mcla_ui_timing_fix`, `KNOWN-ISSUES.md`).
+Flash movies (the gauges, the song ticker, the LOADING badge) take a step: 60
+(the default since 2026-10-16, the user's choice after playing at 30 and 60), 30
+(as on the console), 120, or every frame (0). The ticker scrolls one step at a
+time and the needles move only when it steps, so at 30 the ticker scrolls at its
+original speed and the needles move in 30 Hz steps; 60 and 120 make the needles
+smoother and the ticker two and four times as fast (at a 120 FPS cap: 59, 118,
+237 and 239 px/s at 720p for 30, 60, 120 and every frame). Menus, pop-ups and the
+GPS panels keep the console's pace whatever it is set to (`mcla_ui_timing_fix`,
+`KNOWN-ISSUES.md`).
 
 The launcher also used to pass four SDK settings that measured faster (in-run
 A/B; the first two are ideas from
@@ -181,10 +197,13 @@ They are now the game's own defaults on PC (`MclaApp::ApplyPcDefaults` in
 - `clear_memory_page_state=false`: guest memory already uploaded to the GPU
   stays valid from one frame to the next instead of being copied again every
   frame (2.5 → 0.8 GB/s of uploads; 10 to 21% less GPU command thread time at
-  Native, uncapped, depending on the scene). mcla-recomp's PS5 port runs this way too.
+  Native, uncapped, depending on the scene: an older estimate with no dated
+  measurement behind it, to be measured again). mcla-recomp's PS5 port runs this
+  way too.
 - `execute_unclipped_draw_vs_on_cpu=true` (Xenia's default): draws with
   clipping off no longer claim the whole EDRAM, which saves render-target round
-  trips (about 11% faster at 3×; no change at Native).
+  trips (about 11% faster at 3×; no change at Native: also an older estimate, to
+  be measured again).
 - `shared_memory_hot_page_faults=4`, `shared_memory_hot_page_ms=10000` (hot
   pages, as mcla-recomp's PS5 port runs): a page the game keeps rewriting is
   uploaded whenever a draw uses it instead of being write-protected again after
@@ -268,7 +287,9 @@ during a build:
   with it they take 20% off the GPU command thread (see the profiling notes).
 - `profiling-2026-10-14.md`: where the time goes on the CPU at native resolution
   and on the GPU at 3x, with the instrumentation that measured it
-  (`upload-counters.sdk.patch`, `gpu-timestamps.sdk.patch`, `gt-analyze.py`).
+  (`upload-counters.sdk.patch`, `gpu-timestamps.sdk.patch`, `gt-analyze.py`;
+  `upload-counters.sdk.patch` no longer applies since the HDR patches changed
+  the files it touches, and is kept only as a record of that measurement).
 - `vulkan-2026-10-14.md`: the same settings and patches measured on Vulkan,
   where its GPU command thread's time goes, validation, pacing and stress runs,
   the render pass breaks that upload hoisting removed, the Vulkan submission

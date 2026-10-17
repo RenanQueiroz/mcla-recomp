@@ -14,9 +14,11 @@
 
 #include "mcla_app.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +32,9 @@
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
+#if !REX_PLATFORM_PS5
+#include <rex/input/input_system.h>
+#endif
 #include <rex/logging.h>
 #include <rex/ppc.h>
 #include <rex/runtime.h>
@@ -362,7 +367,7 @@ void OptionSet(const char* name, const char* value) {
   rex::cvar::SetFlagByName(name, value);
 }
 
-enum class ItemKind { kToggle, kStringChoice, kNumberChoice };
+enum class ItemKind { kToggle, kStringChoice, kNumberChoice, kNumberRange };
 
 struct ItemDef {
   const char* key;    // menu state name and string-table key; must be unique
@@ -373,8 +378,20 @@ struct ItemDef {
   const char* const* value_labels = nullptr;  // display text (kNumberChoice: optional)
   const double* numbers = nullptr;            // kNumberChoice
   int value_count = 0;
-  const char* number_format = nullptr;
-  const char* zero_label = nullptr;  // kNumberChoice: shown instead of 0
+  const char* number_format = nullptr;  // kNumberRange: for the number's text (%s)
+  const char* zero_label = nullptr;     // kNumberChoice, kNumberRange: shown instead of 0
+  // kNumberRange: 0 (zero_label, first), then range_min to range_max in steps
+  // of range_step. A value set by hand between the steps shows as it is, and
+  // a step from it goes to the next one in that direction. The ends don't
+  // wrap round, so that holding left or right stops there.
+  double range_min = 0.0;
+  double range_max = 0.0;
+  double range_step = 0.0;
+  // Another kNumberRange option this one must stay at or above
+  // (range_partner_below) or at or below; 0 there counts as what AUTO stands
+  // for. A step that would cross it stops at the last value that doesn't.
+  const char* range_partner = nullptr;
+  bool range_partner_below = false;
 };
 
 // Display text must stay within A-Z, 0-9, space, '+', '.', and parentheses.
@@ -417,13 +434,13 @@ constexpr const char* kGammaValues[] = {"tv", "pc"};
 constexpr const char* kGammaLabels[] = {"TV", "PC MONITOR"};
 #if !REX_PLATFORM_PS5
 // HDR output (the SDK's presenter, rexglue-hdr-*.patch): off, auto (when the
-// display is in HDR mode) or on; peak and paper white in nits, AUTO for what
-// the display reports; the highlights' reach above the game's white
-// (mcla_hdr_highlights). All change during play.
+// display is in HDR mode) or on; peak (200 to 4,000 nits in steps of 50) and
+// paper white (80 to 480 in steps of 10, the range of Windows' SDR content
+// brightness), AUTO first for what the display reports; the highlights'
+// reach above the game's white (mcla_hdr_highlights). All change during play,
+// as they're stepped through.
 constexpr const char* kHdrValues[] = {"off", "auto", "on"};
 constexpr const char* kHdrLabels[] = {"OFF", "AUTO", "ON"};
-constexpr double kHdrPeaks[] = {0.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0};
-constexpr double kHdrPaperWhites[] = {0.0, 100.0, 150.0, 200.0, 250.0, 300.0};
 constexpr double kHdrHighlights[] = {1.0, 1.5, 2.0, 3.0};
 constexpr const char* kHdrHighlightLabels[] = {"NORMAL", "BRIGHT", "BRIGHTER", "BRIGHTEST"};
 #endif
@@ -449,10 +466,27 @@ const ItemDef kDisplayItems[] = {
      kGammaLabels, nullptr, 2},
 #if !REX_PLATFORM_PS5
     {"PM_MxHdr", ItemKind::kStringChoice, "hdr", "HDR", kHdrValues, kHdrLabels, nullptr, 3},
-    {"PM_MxHdrPeak", ItemKind::kNumberChoice, "hdr_peak_nits", "PEAK BRIGHTNESS", nullptr, nullptr,
-     kHdrPeaks, 7, "%.0f NITS", "AUTO"},
-    {"PM_MxHdrPaper", ItemKind::kNumberChoice, "hdr_paper_white_nits", "PAPER WHITE", nullptr,
-     nullptr, kHdrPaperWhites, 6, "%.0f NITS", "AUTO"},
+    {.key = "PM_MxHdrPeak",
+     .kind = ItemKind::kNumberRange,
+     .option = "hdr_peak_nits",
+     .label = "PEAK BRIGHTNESS",
+     .number_format = "%s NITS",
+     .zero_label = "AUTO",
+     .range_min = 200.0,
+     .range_max = 4000.0,
+     .range_step = 50.0,
+     .range_partner = "hdr_paper_white_nits",
+     .range_partner_below = true},
+    {.key = "PM_MxHdrPaper",
+     .kind = ItemKind::kNumberRange,
+     .option = "hdr_paper_white_nits",
+     .label = "PAPER WHITE",
+     .number_format = "%s NITS",
+     .zero_label = "AUTO",
+     .range_min = 80.0,
+     .range_max = 480.0,
+     .range_step = 10.0,
+     .range_partner = "hdr_peak_nits"},
     {"PM_MxHdrHighlights", ItemKind::kNumberChoice, "mcla_hdr_highlights", "HIGHLIGHTS", nullptr,
      kHdrHighlightLabels, kHdrHighlights, 4},
 #endif
@@ -537,8 +571,8 @@ std::string RowLabel(const ItemDef& item, bool pending) {
     label += " (UNAVAILABLE)";
   }
 #if !REX_PLATFORM_PS5
-  // HDR while the display says it isn't in HDR mode (known only while HDR
-  // isn't off): the picture stays SDR.
+  // HDR while the display says it isn't in HDR mode (read when DISPLAY opens,
+  // and about once a second while HDR isn't off): the picture stays SDR.
   if (std::strcmp(item.option, "hdr") == 0) {
     const rex::ui::Presenter::HdrDisplayInfo display = rex::ui::Presenter::GetLastHdrDisplayInfo();
     if (display.known && !display.hdr_enabled) {
@@ -556,8 +590,96 @@ bool ItemChangeable(const ItemDef& item) {
   return std::strcmp(item.option, "mcla_single_tile") != 0 || MclaSingleTileAvailable();
 }
 
+// Whether the row's label can change while the menus are open.
+bool LabelChanges(const ItemDef& item) {
+  return RestartOnly(item.option) || std::strcmp(item.option, "hdr") == 0;
+}
+
 int ItemValueCount(const ItemDef& item) {
   return item.kind == ItemKind::kToggle ? 2 : item.value_count;
+}
+
+// --- kNumberRange --------------------------------------------------------------
+
+double RangeValue(const ItemDef& item) {
+  return std::strtod(OptionGet(item.option).c_str(), nullptr);
+}
+
+// The number with up to two decimals and no trailing zeros, within the
+// characters a value's text may use.
+std::string RangeText(const ItemDef& item, double value) {
+  if (!(value > 0.0)) {
+    return item.zero_label;
+  }
+  char number[32];
+  std::snprintf(number, sizeof number, "%.2f", value);
+  std::string text = number;
+  text.erase(text.find_last_not_of('0') + 1);
+  if (!text.empty() && text.back() == '.') {
+    text.pop_back();
+  }
+  char buffer[64];
+  std::snprintf(buffer, sizeof buffer, item.number_format, text.c_str());
+  return buffer;
+}
+
+// The next value in a direction: from 0 (first) to range_min, then by
+// range_step; a value between steps goes to the nearest step that way. The
+// ends stay where they are.
+double RangeStep(const ItemDef& item, double value, int direction) {
+  constexpr double kSlack = 1e-6;
+  const double position = (value - item.range_min) / item.range_step;
+  if (direction > 0) {
+    if (!(value > 0.0) || value < item.range_min) {
+      return item.range_min;
+    }
+    const double next = item.range_min + (std::floor(position + kSlack) + 1.0) * item.range_step;
+    return next <= item.range_max + kSlack ? next : value;
+  }
+  if (!(value > item.range_min + kSlack)) {
+    return 0.0;
+  }
+  if (value > item.range_max) {
+    return item.range_max;
+  }
+  return item.range_min + (std::ceil(position - kSlack) - 1.0) * item.range_step;
+}
+
+// What 0 stands for in an HDR level option: what the display reports.
+double AutoLevel(const char* option) {
+#if !REX_PLATFORM_PS5
+  const rex::ui::Presenter::HdrAutoLevels levels = rex::ui::Presenter::GetHdrAutoLevels();
+  return std::strcmp(option, "hdr_peak_nits") == 0 ? levels.peak_nits : levels.paper_white_nits;
+#else
+  (void)option;
+  return 0.0;
+#endif
+}
+
+// RangeStep, kept on its side of range_partner (PEAK BRIGHTNESS never below
+// PAPER WHITE): a step that would cross it stops at the last step that
+// doesn't, or doesn't move.
+double RangeStepLimited(const ItemDef& item, double value, int direction) {
+  double next = RangeStep(item, value, direction);
+  if (!(next > 0.0) || !item.range_partner) {
+    return next;
+  }
+  double partner = std::strtod(OptionGet(item.range_partner).c_str(), nullptr);
+  if (!(partner > 0.0)) {
+    partner = AutoLevel(item.range_partner);
+  }
+  constexpr double kSlack = 1e-6;
+  const double position = (partner - item.range_min) / item.range_step;
+  if (item.range_partner_below && next < partner) {
+    const double held = std::clamp(item.range_min + std::ceil(position - kSlack) * item.range_step,
+                                   item.range_min, item.range_max);
+    next = direction < 0 && held >= value ? value : held;
+  } else if (!item.range_partner_below && next > partner) {
+    const double held = std::clamp(item.range_min + std::floor(position + kSlack) * item.range_step,
+                                   item.range_min, item.range_max);
+    next = direction > 0 && held <= value ? value : held;
+  }
+  return next;
 }
 
 std::string ItemValueLabel(const ItemDef& item, int index) {
@@ -577,6 +699,8 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
       std::snprintf(buffer, sizeof buffer, item.number_format, item.numbers[index]);
       return buffer;
     }
+    case ItemKind::kNumberRange:  // by value (RangeText)
+      break;
   }
   return "";
 }
@@ -607,6 +731,8 @@ int ItemCurrentIndex(const ItemDef& item) {
       }
       return best;
     }
+    case ItemKind::kNumberRange:  // by value (RangeValue)
+      break;
   }
   return 0;
 }
@@ -644,7 +770,17 @@ void ItemSetIndex(const ItemDef& item, int index) {
       OptionSet(item.option, buffer);
       break;
     }
+    case ItemKind::kNumberRange:  // by value (ItemSetNumber)
+      return;
   }
+  NoteChanged(item.option);
+  g_settings_dirty.store(true, std::memory_order_relaxed);
+}
+
+void ItemSetNumber(const ItemDef& item, double value) {
+  char buffer[32];
+  std::snprintf(buffer, sizeof buffer, "%g", value);
+  OptionSet(item.option, buffer);
   NoteChanged(item.option);
   g_settings_dirty.store(true, std::memory_order_relaxed);
 }
@@ -666,6 +802,11 @@ struct MenuRows {
   int last_index[kMaxRows] = {};
   std::string label[kMaxRows];       // the text its label has now
   std::string start_value[kMaxRows];  // the option's value when the menus were built
+  // kNumberRange: left or right held (Hold).
+  int held_direction[kMaxRows] = {};
+  uint64_t held_since_ms[kMaxRows] = {};
+  uint64_t held_event_ms[kMaxRows] = {};
+  uint64_t held_step_ms[kMaxRows] = {};
   int count = 0;
 };
 
@@ -719,6 +860,17 @@ void CentreRowWindow(MenuRows& rows, int i, const ItemDef& item, int index) {
     SetStringTableText(key, ItemValueLabel(item, value).c_str());
   }
   rows.last_index[i] = index;
+  Write32(rows.row[i] + kRowSelect, 1);
+}
+
+void CentreRangeWindow(MenuRows& rows, int i, const ItemDef& item, double value) {
+  const double values[kRowWindow] = {RangeStep(item, value, -1), value,
+                                     RangeStep(item, value, +1)};
+  for (int slot = 0; slot < kRowWindow; ++slot) {
+    char key[96];
+    WindowKey(item, slot, key, sizeof key);
+    SetStringTableText(key, RangeText(item, values[slot]).c_str());
+  }
   Write32(rows.row[i] + kRowSelect, 1);
 }
 
@@ -794,7 +946,11 @@ bool BuildRows(int menu) {
       }
       CallGuest(kOptionRowCtorFn, row, name, set, 1u);
       rows.row[i] = row;
-      CentreRowWindow(rows, i, item, ItemCurrentIndex(item));
+      if (item.kind == ItemKind::kNumberRange) {
+        CentreRangeWindow(rows, i, item, RangeValue(item));
+      } else {
+        CentreRowWindow(rows, i, item, ItemCurrentIndex(item));
+      }
     }
     Write32(array + uint32_t(4 * i), row);
   }
@@ -819,14 +975,15 @@ void InstallRows(int menu, uint32_t list) {
 }
 
 // Marks a restart-only row whose value now differs from the one the game
-// started with. The row constructor caches its label, so it is set again
-// (kSetRowLabelFn) after the string-table text changes.
+// started with, and HDR's when the display isn't in HDR mode. The row
+// constructor caches its label, so it is set again (kSetRowLabelFn) after the
+// string-table text changes.
 void UpdateRowLabels(int menu) {
   MenuRows& rows = g_rows[menu];
   const MenuDef& def = kMenus[menu];
   for (int i = 0; i < rows.count; ++i) {
     const ItemDef& item = def.items[i];
-    if (!RestartOnly(item.option)) {
+    if (!LabelChanges(item)) {
       continue;
     }
     std::string label = RowLabel(item, OptionGet(item.option) != rows.start_value[i]);
@@ -849,11 +1006,67 @@ void SyncRowsFromOptions(int menu) {
     if (item.kind == ItemKind::kToggle) {
       rows.last_index[i] = index;
       Write8(rows.row[i] + kRowChecked, uint8_t(index));
+    } else if (item.kind == ItemKind::kNumberRange) {
+      CentreRangeWindow(rows, i, item, RangeValue(item));
     } else {
       CentreRowWindow(rows, i, item, index);
     }
   }
   UpdateRowLabels(menu);
+}
+
+// Holding left or right on a kNumberRange row. The game repeats a held
+// direction after about 7 frames and then every 6 (40 ms apart at 150 FPS,
+// 200 ms at 30), so a tap would step more than once at high frame rates and a
+// hold would crawl at low ones. Here a press steps once; a hold steps again
+// from kHoldDelayMs, at most every kHoldIntervalMs, then from kHoldFastMs on
+// every repeat, and kHoldBigSteps times as far from kHoldBigMs. From
+// kHoldFastMs a repeat steps once per 50 ms since the last one (up to 4), so
+// the speed is about the same at any frame rate: PEAK BRIGHTNESS from 200 to
+// 4,000 nits in under three seconds at 150 FPS and at 30. Whether an event
+// repeats a held direction comes from the pad (MclaTickSettingsMenu), or,
+// where the pad doesn't show the direction (another input), from the time
+// since the last event.
+constexpr uint64_t kHoldGapMs = 100;
+constexpr uint64_t kHoldDelayMs = 400;
+constexpr uint64_t kHoldIntervalMs = 100;
+constexpr uint64_t kHoldFastMs = 1200;
+constexpr uint64_t kHoldBigMs = 2200;
+constexpr int kHoldBigSteps = 4;
+
+// Left (0) and right (1), as user 0's pad reads them every frame while a
+// submenu is open: whether each was let go since its last event, and whether
+// it's down now.
+std::atomic<bool> g_hold_released[2] = {true, true};
+std::atomic<bool> g_hold_down[2] = {false, false};
+
+int HoldSteps(MenuRows& rows, int i, int direction) {
+  const uint64_t now = NowMs();
+  const int side = direction < 0 ? 0 : 1;
+  const bool released = g_hold_released[side].exchange(false, std::memory_order_relaxed);
+  const bool repeat =
+      rows.held_direction[i] == direction &&
+      (g_hold_down[side].load(std::memory_order_relaxed) ? !released
+                                                          : now - rows.held_event_ms[i] <= kHoldGapMs);
+  const uint64_t gap = now - rows.held_event_ms[i];
+  rows.held_event_ms[i] = now;
+  if (!repeat) {
+    rows.held_direction[i] = direction;
+    rows.held_since_ms[i] = now;
+    rows.held_step_ms[i] = now;
+    return 1;
+  }
+  const uint64_t held = now - rows.held_since_ms[i];
+  if (held < kHoldDelayMs || (held < kHoldFastMs && now - rows.held_step_ms[i] < kHoldIntervalMs)) {
+    return 0;
+  }
+  rows.held_step_ms[i] = now;
+  if (held < kHoldFastMs) {
+    return 1;
+  }
+  // Repeats further apart than 50 ms (lower frame rates) step more each.
+  const int steps = int(std::clamp<uint64_t>((gap + 25) / 50, 1, 4));
+  return held < kHoldBigMs ? steps : steps * kHoldBigSteps;
 }
 
 // Left and right are handled inside the row, which then re-renders the list.
@@ -875,12 +1088,25 @@ void PollRows(int menu) {
     const int slot = int(Read32(rows.row[i] + kRowSelect));
     if (slot != 1) {
       const int direction = slot < 1 ? -1 : +1;
+      if (item.kind == ItemKind::kNumberRange) {
+        const double value = RangeValue(item);
+        double next = value;
+        for (int step = HoldSteps(rows, i, direction); step > 0; --step) {
+          next = RangeStepLimited(item, next, direction);
+        }
+        if (next != value) {
+          ItemSetNumber(item, next);
+        }
+        CentreRangeWindow(rows, i, item, next);
+        continue;
+      }
       const int index = ((rows.last_index[i] + direction) % count + count) % count;
       ItemSetIndex(item, index);
       CentreRowWindow(rows, i, item, index);
-      UpdateRowLabels(menu);
     }
   }
+  // Every render: HDR's label follows the display.
+  UpdateRowLabels(menu);
 }
 
 // --- Pause list control ------------------------------------------------------
@@ -1147,6 +1373,34 @@ void MclaSaveMenuSettings() {
   SaveSettingsIfChanged();
 }
 
+// Every frame, on the thread that polls input (src/frame_timing.cpp): while a
+// submenu is open, whether left and right are down (d-pad or left stick), for
+// telling a held direction from new presses (HoldSteps).
+void MclaTickSettingsMenu() {
+#if !REX_PLATFORM_PS5
+  if (g_active_menu.load(std::memory_order_relaxed) < 0) {
+    return;
+  }
+  auto* input = static_cast<rex::input::InputSystem*>(
+      rex::Runtime::instance() ? rex::Runtime::instance()->input_system() : nullptr);
+  using rex::X_RESULT;  // in X_ERROR_SUCCESS
+  rex::input::X_INPUT_STATE state = {};
+  bool down[2] = {};
+  if (input && input->GetState(0, &state) == X_ERROR_SUCCESS) {
+    const uint16_t buttons = state.gamepad.buttons;
+    const int16_t stick_x = state.gamepad.thumb_lx;
+    down[0] = (buttons & rex::input::X_INPUT_GAMEPAD_DPAD_LEFT) || stick_x < -16384;
+    down[1] = (buttons & rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT) || stick_x > 16384;
+  }
+  for (int side = 0; side < 2; ++side) {
+    g_hold_down[side].store(down[side], std::memory_order_relaxed);
+    if (!down[side]) {
+      g_hold_released[side].store(true, std::memory_order_relaxed);
+    }
+  }
+#endif
+}
+
 // --- Hooks -------------------------------------------------------------------
 
 void mcla_menu_tab_strip(PPCRegister& r27) {
@@ -1197,7 +1451,13 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     if (index < uint32_t(def.item_count)) {
       const ItemDef& item = def.items[index];
       const int count = ItemValueCount(item);
-      if (ItemChangeable(item)) {
+      if (item.kind == ItemKind::kNumberRange) {
+        const double value = RangeValue(item);
+        const double next = RangeStepLimited(item, value, +1);
+        if (next != value) {
+          ItemSetNumber(item, next);
+        }
+      } else if (ItemChangeable(item)) {
         ItemSetIndex(item, (ItemCurrentIndex(item) + 1) % count);
       }
       SyncRowsFromOptions(active);
@@ -1261,6 +1521,15 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
 
     g_active_menu.store(menu, std::memory_order_relaxed);
     g_pause_tab_strip.store(PauseTabStrip(), std::memory_order_relaxed);
+#if !REX_PLATFORM_PS5
+    // Read now, also with HDR off (it's only read while it isn't), for HDR's
+    // "(NOT AVAILABLE)"; it usually takes well under a millisecond.
+    for (int i = 0; i < kMenus[menu].item_count; ++i) {
+      if (std::strcmp(kMenus[menu].items[i].option, "hdr") == 0) {
+        rex::ui::Presenter::RefreshHdrDisplayInfo(250);
+      }
+    }
+#endif
     SyncRowsFromOptions(menu);
     MenuStackPush(submenu);
     ShowSubmenu();

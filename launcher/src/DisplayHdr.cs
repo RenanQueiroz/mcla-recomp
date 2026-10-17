@@ -11,10 +11,24 @@ sealed record DisplayHdr(bool HdrOn, float PeakNits, float SdrWhiteNits)
 {
     public static readonly Lazy<DisplayHdr?> Main = new(Read);
 
-    public string Describe() =>
-        $"Your main display: HDR {(HdrOn ? "on" : "off")}, peak {PeakNits:0} nits" +
-        (SdrWhiteNits > 0 ? $", SDR content brightness {SdrWhiteNits:0} nits" : "") +
-        " (what AUTO uses).";
+    // What the game's Auto stands for (Presenter::GetHdrAutoLevels): the
+    // report, or 1,000 and 200 nits when it reports nothing usable.
+    public double AutoPeak => PeakNits is >= 80 and <= 10000 ? PeakNits : 1000;
+    public double AutoPaperWhite => SdrWhiteNits is >= 40 and <= 10000 ? SdrWhiteNits : 200;
+
+    // Two short lines: TextBlocks in the settings' scroll viewer don't wrap.
+    public string[] Describe() =>
+    [
+        $"Main display now: HDR {(HdrOn ? "on" : "off")}, peak {AutoPeak:#,0} nits, " +
+        $"SDR content brightness {AutoPaperWhite:#,0} nits (as Auto would use them).",
+        "In the game, Auto reads the display its window is on, and uses 1,000 and 200 nits if it reports nothing usable.",
+    ];
+
+    public static readonly string[] Unknown =
+    [
+        "The launcher couldn't read the main display's HDR state. In the game, Auto reads the display its window is on,",
+        "and uses 1,000 and 200 nits if it reports nothing usable.",
+    ];
 
     static DisplayHdr? Read()
     {

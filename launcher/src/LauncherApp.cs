@@ -1,11 +1,14 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Globalization;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Hooks;
 using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Windows.System;
 using static Microsoft.UI.Reactor.Factories;
 using MenuItemBase = Microsoft.UI.Reactor.Core.MenuFlyoutItemBase;
 
@@ -58,6 +61,8 @@ sealed class LauncherApp : Component
         var runningRef = UseRef(initialRunning);
         runningRef.Current = gameRunning;
         var (countdown, setCountdown) = UseState<int?>(null);
+        // An HDR level slider being dragged: its value until the drag ends.
+        var (levelDrafts, setLevelDrafts) = UseState(ImmutableDictionary<string, double>.Empty);
         var (confirmExit, setConfirmExit) = UseState(false);
         var buildRef = UseRef<BuildRun?>(null);
         var exitingRef = UseRef(false);
@@ -154,7 +159,7 @@ sealed class LauncherApp : Component
         // A setting changed here goes into mcla.toml at once, as the pause menu
         // writes it. Not while the game runs: it reads the file only when it
         // starts, and the pause menu is where its settings change then.
-        void SetGameSetting(GameSetting setting, object value)
+        void SetGameSetting(string key, object value)
         {
             if (GameIsRunning())
             {
@@ -164,7 +169,7 @@ sealed class LauncherApp : Component
             try
             {
                 Directory.CreateDirectory(Paths.BuildDir);
-                GameSettingsFile.Set(GameSettingsPath, new Dictionary<string, object> { [setting.Key] = value });
+                GameSettingsFile.Set(GameSettingsPath, new Dictionary<string, object> { [key] = value });
                 setGameSettings(ReadGameSettings());
                 // A setting chosen here is the user's now: an older launcher's
                 // choices that weren't moved yet must never come over it.
@@ -174,6 +179,16 @@ sealed class LauncherApp : Component
             {
                 setNotice($"Couldn't save the setting in {GameSettingsPath}: {ex.Message}");
             }
+        }
+
+        // An HDR level: a step, or the end of a drag, goes into mcla.toml (a
+        // whole number of nits unless set by hand otherwise; 0 is Auto).
+        void SetLevel(LevelSetting level, double value)
+        {
+            setLevelDrafts(levelDrafts.Remove(level.Key));
+            if (Math.Abs(value - level.Value(gameSettings)) < 1e-9 && gameSettings.ContainsKey(level.Key)) return;
+            var rounded = Math.Round(value);
+            SetGameSetting(level.Key, Math.Abs(value - rounded) < 1e-9 ? (object)(long)rounded : value);
         }
 
         void Open(string target)
@@ -529,15 +544,129 @@ sealed class LauncherApp : Component
             ).Margin(0, 12, 0, 0);
         }
 
+        // The "i" next to a setting's title: its tip on hover, and the same
+        // text in a flyout on click, Enter or the controller's A, so it
+        // doesn't need a mouse.
+        static Element InfoTip(string title, string text) =>
+            Button(Icon(FontIcon("\uE946", "Segoe Fluent Icons, Segoe MDL2 Assets", 14)))
+                .Resources(r => r
+                    .Set("ButtonBackground", Theme.Ref("SubtleFillColorTransparentBrush"))
+                    .Set("ButtonBackgroundPointerOver", Theme.Ref("SubtleFillColorSecondaryBrush"))
+                    .Set("ButtonBackgroundPressed", Theme.Ref("SubtleFillColorTertiaryBrush"))
+                    .Set("ButtonBorderBrush", Theme.Ref("SubtleFillColorTransparentBrush"))
+                    .Set("ButtonBorderBrushPointerOver", Theme.Ref("SubtleFillColorTransparentBrush"))
+                    .Set("ButtonBorderBrushPressed", Theme.Ref("SubtleFillColorTransparentBrush")))
+                .Padding(5, 3, 5, 3)
+                .VAlign(VerticalAlignment.Center)
+                .ToolTip(text)
+                .AutomationName($"About {title}")
+                .WithFlyout(ContentFlyout(TextBlock(text).TextWrapping().MaxWidth(360)));
+
+        static Element SettingTitle(string title, string info) =>
+            HStack(2, TextBlock(title).VAlign(VerticalAlignment.Center), InfoTip(title, info));
+
         Element SettingCombo(GameSetting setting)
         {
             var (choices, index) = setting.Show(gameSettings);
-            return ComboBox(choices.Select(c => c.Label).ToArray(), index,
-                            i => { if (i >= 0 && i < choices.Length && i != index) SetGameSetting(setting, choices[i].Value); })
-                .Header(setting.Header)
-                .HAlign(HorizontalAlignment.Stretch)
-                .IsEnabled(!gameRunning);
+            return VStack(4,
+                SettingTitle(setting.Header, setting.Info),
+                ComboBox(choices.Select(c => c.Label).ToArray(), index,
+                         i => { if (i >= 0 && i < choices.Length && i != index) SetGameSetting(setting.Key, choices[i].Value); })
+                    .AutomationName(setting.Header)
+                    .HAlign(HorizontalAlignment.Stretch)
+                    .IsEnabled(!gameRunning));
         }
+
+        // What Auto stands for: what Windows reports for the main display, as
+        // the game reads it for its own (1,000 and 200 nits if nothing usable).
+        static double AutoLevel(LevelSetting level) =>
+            level.Key == GameSettings.HdrPeak.Key ? DisplayHdr.Main.Value?.AutoPeak ?? 1000
+                                                  : DisplayHdr.Main.Value?.AutoPaperWhite ?? 200;
+
+        static string Nits(double value) => value.ToString("#,0.##", CultureInfo.CurrentCulture) + " nits";
+
+        // Peak brightness and paper white: Auto, or a slider in the pause
+        // menu's steps. Dragging writes mcla.toml when the drag ends; each key
+        // or controller step writes it at once.
+        Element LevelSlider(LevelSetting level)
+        {
+            var file = level.Value(gameSettings);
+            var auto = file <= 0;
+            var autoValue = AutoLevel(level);
+            var partnerLevel = GameSettings.HdrLevels.First(l => l.Key == level.Partner);
+            var partnerFile = partnerLevel.Value(gameSettings);
+            var partner = partnerFile > 0 ? partnerFile : AutoLevel(partnerLevel);
+            var current = auto ? Math.Clamp(autoValue, level.Min, level.Max) : file;
+            var shown = levelDrafts.TryGetValue(level.Key, out var draft) ? draft : current;
+            // With Auto, what Windows reports, in whole nits (its peak has decimals).
+            var text = !auto ? Nits(shown) : DisplayHdr.Main.Value is null ? "" : Nits(Math.Round(autoValue));
+            void Step(int direction)
+            {
+                var next = level.StepFrom(file, direction);
+                if (!(next >= level.Min)) next = level.Min;  // Auto is the checkbox here
+                SetLevel(level, level.Limit(next, file, partner));
+            }
+            void EndDrag()
+            {
+                if (levelDrafts.TryGetValue(level.Key, out var value)) SetLevel(level, value);
+            }
+            var enabled = !gameRunning && !auto;
+            return VStack(4,
+                SettingTitle(level.Header, level.Info),
+                Grid(
+                    columns: [GridSize.Auto, GridSize.Star(), GridSize.Px(130)],
+                    rows: [GridSize.Auto],
+                    CheckBox(auto, v =>
+                        {
+                            if (v) SetLevel(level, 0);
+                            else SetLevel(level, level.Limit(Math.Round(Math.Clamp(autoValue, level.Min, level.Max)), 0, partner));
+                        }, "Auto")
+                        .MinWidth(0)
+                        .IsEnabled(!gameRunning)
+                        .Grid(column: 0),
+                    Slider(shown, level.Min, level.Max, v =>
+                        {
+                            if (!enabled || Math.Abs(v - shown) < 0.5) return;
+                            setLevelDrafts(levelDrafts.SetItem(level.Key, level.Limit(level.Snap(v), file, partner)));
+                        })
+                        .StepFrequency(1)
+                        .ThumbToolTip(false)
+                        .IsEnabled(enabled)
+                        .AutomationName(level.Header)
+                        .OnPreviewKeyDown((_, e) =>
+                        {
+                            if (!enabled) return;
+                            var direction = e.Key switch
+                            {
+                                VirtualKey.Left or VirtualKey.Down or VirtualKey.GamepadDPadLeft
+                                    or VirtualKey.GamepadLeftThumbstickLeft => -1,
+                                VirtualKey.Right or VirtualKey.Up or VirtualKey.GamepadDPadRight
+                                    or VirtualKey.GamepadLeftThumbstickRight => 1,
+                                _ => 0,
+                            };
+                            if (e.Key is VirtualKey.Home or VirtualKey.End)
+                            {
+                                e.Handled = true;
+                                SetLevel(level, level.Limit(e.Key == VirtualKey.Home ? level.Min : level.Max, file, partner));
+                                return;
+                            }
+                            if (direction == 0) return;
+                            e.Handled = true;
+                            Step(direction);
+                        })
+                        .OnPointerCaptureLost((_, _) => EndDrag())
+                        .OnPointerReleased((_, _) => EndDrag())
+                        .Margin(8, 0, 8, 0)
+                        .VAlign(VerticalAlignment.Center)
+                        .Grid(column: 1),
+                    TextBlock(text)
+                        .Foreground(auto ? Theme.SecondaryText : Theme.PrimaryText)
+                        .VAlign(VerticalAlignment.Center)
+                        .Grid(column: 2)));
+        }
+
+        static Element OptionCheckBox(bool value, Action<bool> onChanged, string label, string info) =>
+            HStack(2, CheckBox(value, onChanged, label), InfoTip(label, info));
 
         // Two to a row, in reading order.
         static Element Pairs(params Element[] items) =>
@@ -552,10 +681,9 @@ sealed class LauncherApp : Component
                 Subtitle("Graphics"),
                 Pairs(GameSettings.Graphics.Select(SettingCombo).ToArray()),
                 Subtitle("HDR"),
-                Pairs(GameSettings.HdrSettings.Select(SettingCombo).ToArray()),
-                DisplayHdr.Main.Value is { } display
-                    ? TextBlock(display.Describe()).Foreground(Theme.SecondaryText)
-                    : Empty(),
+                Pairs([.. GameSettings.HdrChoices.Select(SettingCombo), .. GameSettings.HdrLevels.Select(LevelSlider)]),
+                VStack(2, (DisplayHdr.Main.Value?.Describe() ?? DisplayHdr.Unknown)
+                    .Select((line, i) => TextBlock(line).Foreground(Theme.SecondaryText).WithKey(i.ToString())).ToArray()),
                 Subtitle("Game"),
                 Pairs(GameSettings.Game.Select(SettingCombo).ToArray()),
                 // Lines short enough for the window: in this scroll viewer a
@@ -568,14 +696,19 @@ sealed class LauncherApp : Component
                 Expander("Advanced",
                     VStack(16,
                         VStack(4,
+                            SettingTitle("More mcla.exe options", GameSettings.ExtraArgumentsInfo),
                             TextBox(settings.ExtraArguments, v => updateSettings(s => s with { ExtraArguments = v }),
-                                    placeholderText: "for example --log_file=run.log", header: "More mcla.exe options"),
+                                    placeholderText: "for example --log_file=run.log")
+                                .AutomationName("More mcla.exe options"),
                             TextBlock("Passed to mcla.exe at every start; they win over the settings above.")
                                 .Foreground(Theme.SecondaryText)),
                         VStack(4,
-                            CheckBox(settings.CheckForUpdates, v => updateSettings(s => s with { CheckForUpdates = v }), "Check for updates when the launcher opens"),
-                            CheckBox(settings.CloseOnLaunch, v => updateSettings(s => s with { CloseOnLaunch = v }), "Close the launcher when the game starts"),
-                            CheckBox(settings.AutoPlay, v => updateSettings(s => s with { AutoPlay = v }), "Start the game right away when there's nothing to update")))
+                            OptionCheckBox(settings.CheckForUpdates, v => updateSettings(s => s with { CheckForUpdates = v }),
+                                           "Check for updates when the launcher opens", GameSettings.CheckForUpdatesInfo),
+                            OptionCheckBox(settings.CloseOnLaunch, v => updateSettings(s => s with { CloseOnLaunch = v }),
+                                           "Close the launcher when the game starts", GameSettings.CloseOnLaunchInfo),
+                            OptionCheckBox(settings.AutoPlay, v => updateSettings(s => s with { AutoPlay = v }),
+                                           "Start the game right away when there's nothing to update", GameSettings.AutoPlayInfo)))
                 ).HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch)
             ).Padding(0, 0, 12, 0)).Margin(0, 16, 0, 0);
 

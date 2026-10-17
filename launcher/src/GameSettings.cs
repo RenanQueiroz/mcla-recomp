@@ -13,9 +13,12 @@ namespace MclaLauncher;
 sealed record SettingChoice(string Label, object Value);
 
 /// One of the game's settings: its option (a key in mcla.toml), its choices,
-/// and the game's default, which applies while the file doesn't set it.
+/// and the game's default, which applies while the file doesn't set it. Info
+/// is what the "i" next to its title says (Tips).
 sealed record GameSetting(string Key, string Header, SettingChoice[] Choices, object Default)
 {
+    public string Info { get; init; } = "";
+
     /// The choices to show for the file's value, and which one it is. A value
     /// that isn't one of the choices (set by hand) is shown as one more.
     public (SettingChoice[] Choices, int Index) Show(IReadOnlyDictionary<string, string> file)
@@ -29,40 +32,164 @@ sealed record GameSetting(string Key, string Header, SettingChoice[] Choices, ob
     }
 }
 
+/// A level in nits with a slider (the HDR peak and paper white): 0 (or no
+/// line in mcla.toml) is Auto, what the display reports; otherwise Min to Max
+/// in steps of Step, as the pause menu steps it (src/settings_menu.cpp). A
+/// value set by hand between the steps is kept and shown as it is. It stays
+/// at or above (PartnerBelow) or at or below the option Partner, Auto there
+/// counting as what Windows reports: a value that would cross it is held back
+/// at the last step that doesn't.
+sealed record LevelSetting(string Key, string Header, double Min, double Max, double Step)
+{
+    public string Info { get; init; } = "";
+    public string Partner { get; init; } = "";
+    public bool PartnerBelow { get; init; }
+
+    /// The file's value: 0 for Auto (no line, 0, or a value that isn't a number).
+    public double Value(IReadOnlyDictionary<string, string> file)
+    {
+        if (!file.TryGetValue(Key, out var raw)) return 0;
+        var value = SettingValues.Parse(raw) switch
+        {
+            long l => (double)l,
+            double d => d,
+            _ => 0.0,
+        };
+        return value > 0 && double.IsFinite(value) ? value : 0;
+    }
+
+    /// The nearest step to a value, within Min and Max.
+    public double Snap(double value) =>
+        Math.Clamp(Min + Math.Round((value - Min) / Step) * Step, Min, Max);
+
+    /// The next value in a direction, as the pause menu steps: from Auto to
+    /// Min, then by Step (a value between steps goes to the nearest step that
+    /// way); the ends stay.
+    public double StepFrom(double value, int direction)
+    {
+        const double slack = 1e-6;
+        var position = (value - Min) / Step;
+        if (direction > 0)
+        {
+            if (!(value > 0) || value < Min) return Min;
+            var next = Min + (Math.Floor(position + slack) + 1) * Step;
+            return next <= Max + slack ? next : value;
+        }
+        if (!(value > Min + slack)) return 0;
+        if (value > Max) return Max;
+        return Min + (Math.Ceiling(position - slack) - 1) * Step;
+    }
+
+    /// A value kept on its side of the partner's (its effective value given):
+    /// held back at the last step that doesn't cross it, or `current` if that
+    /// would move the other way.
+    public double Limit(double value, double current, double partner)
+    {
+        if (!(value > 0) || !(partner > 0)) return value;
+        const double slack = 1e-6;
+        var position = (partner - Min) / Step;
+        if (PartnerBelow && value < partner)
+        {
+            var held = Math.Clamp(Min + Math.Ceiling(position - slack) * Step, Min, Max);
+            return value < current && held >= current ? current : held;
+        }
+        if (!PartnerBelow && value > partner)
+        {
+            var held = Math.Clamp(Min + Math.Floor(position + slack) * Step, Min, Max);
+            return value > current && held <= current ? current : held;
+        }
+        return value;
+    }
+}
+
 static class GameSettings
 {
     // The choices are the pause menu's (src/settings_menu.cpp); 40 to 50 FPS
     // are for G-Sync/FreeSync displays, where a cap the game holds even in its
-    // heaviest scenes gives constant frame times.
+    // heaviest scenes gives constant frame times. The tips (Info) are checked
+    // against the code and the measurements in README.md, KNOWN-ISSUES.md and
+    // README.md here.
     public static readonly GameSetting Resolution = new("resolution_scale", "Resolution",
-        [new("Native (720p)", 1L), new("2× (1440p)", 2L), new("3× (2160p, 4K)", 3L)], 1L);
+        [new("Native (720p)", 1L), new("2× (1440p)", 2L), new("3× (2160p, 4K)", 3L)], 1L)
+    {
+        Info = "How sharp the 3D picture is: the game's own 720p, or 2× or 3× that. Pick the one closest to "
+             + "your monitor (2× for 1080p and 1440p monitors, 3× for 4K), and go lower if your graphics card "
+             + "can't keep up; 3× needs by far the most GPU power. Takes effect the next time the game starts.",
+    };
     public static readonly GameSetting FrameRate = new("mcla_fps", "Frame rate",
         [new("30 FPS", 30L), new("40 FPS", 40L), new("45 FPS", 45L), new("50 FPS", 50L),
-         new("60 FPS", 60L), new("120 FPS", 120L), new("Uncapped", 0L)], 30L);
+         new("60 FPS", 60L), new("120 FPS", 120L), new("Uncapped", 0L)], 30L)
+    {
+        Info = "The frame-rate cap. The game was made for 30 FPS, the console's rate. 40, 45 and 50 suit "
+             + "G-Sync or FreeSync displays, where a cap the game always holds gives even frame times. Use 60 "
+             + "for a 60 Hz display, and 120 or Uncapped for high-refresh displays if your PC keeps up.",
+    };
     public static readonly GameSetting Display = new("fullscreen", "Display",
-        [new("Fullscreen", true), new("Windowed", false)], true);
+        [new("Fullscreen", true), new("Windowed", false)], true)
+    {
+        Info = "Fullscreen covers the whole screen; Windowed runs the game in a window on the desktop.",
+    };
     // The console's gamma ramp for an HDTV, or sRGB, which a PC monitor
     // expects (src/display_gamma.cpp); it changes during play too.
     public static readonly GameSetting DisplayGamma = new("mcla_display_gamma", "Display gamma",
-        [new("TV (as on the console)", "tv"), new("PC monitor (sRGB, brighter shadows)", "pc")], "tv");
+        [new("TV (as on the console)", "tv"), new("PC monitor (sRGB, brighter shadows)", "pc")], "tv")
+    {
+        Info = "How dark the shadows look. TV (the default) keeps the console's look, with deeper, moodier "
+             + "shadows; PC monitor shows the shadows as the game drew them, with more detail in dark areas. "
+             + "Either is fine on any screen; pick the look you prefer. It applies in HDR too, and switches "
+             + "during play in the pause menu.",
+    };
     public static readonly GameSetting AntiAliasing = new("mcla_msaa", "Anti-aliasing",
-        [new("On (2× MSAA)", true), new("Off (2 to 5% faster at 3× with single tile rendering on)", false)], true);
+        [new("On (2× MSAA)", true), new("Off (2 to 5% faster at 3× with single tile rendering on)", false)], true)
+    {
+        Info = "Smooths jagged edges (2× MSAA). Keep it on unless your graphics card is struggling: off is only "
+             + "2 to 5% faster at 3×, with slightly more jagged thin edges such as poles and sign frames.",
+    };
     // With anti-aliasing on, the scene drawn once instead of in the Xbox 360's
     // two tiles, in the larger EDRAM the game sets up on PC
     // (src/render_perf.cpp); it changes during play too. It does nothing with
     // anti-aliasing off (one tile anyway); edram_tiles = 2048 in mcla.toml
     // goes back to the console's EDRAM altogether.
     public static readonly GameSetting SingleTile = new("mcla_single_tile", "Single tile rendering",
-        [new("On (with anti-aliasing: 9 to 20% faster at 3×)", true), new("Off (two tiles, as on the console)", false)], true);
+        [new("On (with anti-aliasing: 9 to 20% faster at 3×)", true), new("Off (two tiles, as on the console)", false)], true)
+    {
+        Info = "With anti-aliasing on, draws each frame's 3D scene in one go instead of in two halves as the "
+             + "Xbox 360 did, which is 9 to 20% faster at 3×. Keep it on; turn it off only for troubleshooting. "
+             + "It makes no difference with anti-aliasing off.",
+    };
+    // 60 a second by default since 2026-10-16 (the user's choice after
+    // playing at 30 and 60; src/frame_timing.cpp).
     public static readonly GameSetting HudRate = new("mcla_ui_hud_rate", "HUD updates",
         [new("30 per second (as on the console)", 30L), new("60 per second", 60L),
-         new("120 per second", 120L), new("Every frame", 0L)], 30L);
+         new("120 per second", 120L), new("Every frame", 0L)], 60L)
+    {
+        Info = "How many times a second the speedometer and the song title move. 60 (the default) gives smooth "
+             + "needles; 30 is the console's pace, with the needles in steps and the song title scrolling at "
+             + "its original speed. At 60 and 120 the title scrolls two and four times as fast. Every frame "
+             + "follows the frame rate: the smoothest needles, with the title scrolling faster still at high "
+             + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
+    };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
-        [new("Automatic (Direct3D 12 first)", "any"), new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any");
+        [new("Automatic (Direct3D 12 first)", "any"), new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any")
+    {
+        Info = "Which graphics system the game uses; Automatic tries Direct3D 12 first. On the PC it was "
+             + "measured on, the two are within a few percent in the city, and Direct3D 12 is 10 to 15% faster "
+             + "in races at 3×. Try Vulkan if Direct3D 12 gives you trouble. Takes effect the next time the "
+             + "game starts.",
+    };
     public static readonly GameSetting Intro = new("mcla_intro", "Intro",
-        [new("Normal", "normal"), new("Fast", "fast"), new("Skip (hides the title logo)", "skip")], "normal");
+        [new("Normal", "normal"), new("Fast", "fast"), new("Skip (hides the title logo)", "skip")], "normal")
+    {
+        Info = "What plays when the game starts. Normal is as on the console; Fast speeds through the start-up "
+             + "logos; Skip leaves them out and also hides the title logo. Takes effect the next time the game "
+             + "starts.",
+    };
     public static readonly GameSetting Prompts = new("mcla_button_prompts", "Button prompts",
-        [new("Follow the controller", "auto"), new("Xbox", "xbox"), new("PlayStation", "playstation")], "auto");
+        [new("Follow the controller", "auto"), new("Xbox", "xbox"), new("PlayStation", "playstation")], "auto")
+    {
+        Info = "Which button symbols the game shows. Follow the controller matches the controller you're "
+             + "using; Xbox or PlayStation always shows that one.",
+    };
 
     // HDR output (the SDK's presenter; the game's scene in HDR from
     // rexglue-hdr-scene-mcla.patch). Auto, the game's default on Windows
@@ -71,19 +198,61 @@ static class GameSettings
     // Calibration app's peak, the SDR content brightness slider). All change
     // during play too, in the pause menu's DISPLAY settings.
     public static readonly GameSetting Hdr = new("hdr", "HDR",
-        [new("Off", "off"), new("Auto (when Windows HDR is on)", "auto"), new("On", "on")], "auto");
-    public static readonly GameSetting HdrPeak = new("hdr_peak_nits", "HDR peak brightness",
-        [new("Auto (what the display reports)", 0L), new("400 nits", 400L), new("600 nits", 600L),
-         new("800 nits", 800L), new("1000 nits", 1000L), new("1500 nits", 1500L), new("2000 nits", 2000L)], 0L);
-    public static readonly GameSetting HdrPaperWhite = new("hdr_paper_white_nits", "HDR paper white",
-        [new("Auto (Windows' SDR content brightness)", 0L), new("100 nits", 100L), new("150 nits", 150L),
-         new("200 nits", 200L), new("250 nits", 250L), new("300 nits", 300L)], 0L);
+        [new("Off", "off"), new("Auto (when Windows HDR is on)", "auto"), new("On", "on")], "auto")
+    {
+        Info = "Shows the game in HDR on an HDR display: lights, the sun and skies go brighter than white, "
+             + "while the HUD and menus stay at your desktop's brightness. Auto (recommended) turns it on "
+             + "whenever Windows has HDR on for the display, and keeps SDR otherwise. On also tries when "
+             + "Windows says the display isn't in HDR mode; Off always keeps SDR.",
+    };
+    // The brightest highlights of the scene reach about 90% of the peak (the
+    // shoulder's top meets the presenter's roll-off from 0.75 of it).
+    public static readonly LevelSetting HdrPeak = new("hdr_peak_nits", "HDR peak brightness", 200, 4000, 50)
+    {
+        Info = "The brightest your display can show. Auto uses what Windows reports for the display (the "
+             + "Windows HDR Calibration app's result, if you've run it), or 1,000 nits if it reports nothing. "
+             + "If bright highlights look flat or clipped, set your display's real peak: add "
+             + "--hdr_test_pattern=true in More mcla.exe options (or hdr_test_pattern = true in mcla.toml), "
+             + "and the game shows bars that double in brightness; where they stop getting brighter is your "
+             + "peak. Remove it when you're done. The brightest parts of the scene reach about 90% of this, "
+             + "which leaves room for bloom.",
+        Partner = "hdr_paper_white_nits",
+        PartnerBelow = true,
+    };
+    public static readonly LevelSetting HdrPaperWhite = new("hdr_paper_white_nits", "HDR paper white", 80, 480, 10)
+    {
+        Info = "How bright the game's white is, the HUD and menus included. Auto uses Windows' SDR content "
+             + "brightness slider (Settings > Display > HDR), so the game matches your desktop. Set it so the "
+             + "game's white matches a white window on your desktop.",
+        Partner = "hdr_peak_nits",
+    };
+    // Brighter by default since 2026-10-16 (the look the user signed off).
     public static readonly GameSetting HdrHighlights = new("mcla_hdr_highlights", "HDR highlights",
-        [new("Normal", 1.0), new("Bright", 1.5), new("Brighter", 2.0), new("Brightest", 3.0)], 1.0);
+        [new("Normal", 1.0), new("Bright", 1.5), new("Brighter", 2.0), new("Brightest", 3.0)], 2.0)
+    {
+        Info = "How far above the game's white bright things go: lights at night, the sun, a dusk sky. It's a "
+             + "matter of taste: Brighter is the default, and Normal is the mildest.",
+    };
 
     public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, DisplayGamma, AntiAliasing, SingleTile, HudRate, GraphicsApi];
-    public static readonly GameSetting[] HdrSettings = [Hdr, HdrPeak, HdrPaperWhite, HdrHighlights];
+    public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
+    public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Intro, Prompts];
+
+    // The launcher's own options (Advanced).
+    public const string ExtraArgumentsInfo =
+        "Extra options passed to the game every time it starts, for troubleshooting or settings the launcher "
+        + "doesn't show, such as --log_file=run.log. They win over everything above and over the pause menu. "
+        + "Leave it empty unless you need something specific.";
+    public const string CheckForUpdatesInfo =
+        "Looks for a new version of the fork on GitHub when the launcher opens. It downloads nothing by "
+        + "itself; updating, which rebuilds the game in a few minutes, is up to you.";
+    public const string CloseOnLaunchInfo =
+        "Closes this window once the game is running. Turn it off to keep the launcher open while you play; "
+        + "its settings are locked until the game closes.";
+    public const string AutoPlayInfo =
+        "Starts the game a few seconds after the launcher opens, when it's up to date, with a countdown you "
+        + "can cancel.";
 
     /// Started by the launcher, from its own shortcut, or again by its pause
     /// menu's RESTART GAME: any mcla.exe counts, as for the build.

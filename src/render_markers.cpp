@@ -106,6 +106,12 @@ void EmitMarker(PPCContext& ctx, uint8_t* base, uint32_t kind, uint32_t value) {
     sub_82412710(ctx, base);
     put = ctx.r3.u32;
     ctx = saved;
+    // The context's FPSCR is only a cache of the host's MXCSR: the call may
+    // have changed the flush-to-zero mode (sub_82412ED0 turns it off), and
+    // the copy put back above no longer says what MXCSR holds, so the
+    // recompiled code would skip setting it. Put MXCSR back to the caller's
+    // rounding and flush modes too.
+    ctx.fpscr.restoreGuestBits(saved.fpscr.csr);
     // Logged at 1, 2, 4, 8... times.
     if (!(++g_markers_made_room & (g_markers_made_room - 1))) {
       REXLOG_INFO("Render markers: made room in the command buffer {} times", g_markers_made_room);
