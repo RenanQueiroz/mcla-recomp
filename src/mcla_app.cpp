@@ -40,6 +40,19 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
 }
 
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
+  // Present from the UI thread, on request, as when the SDK's achievement toast
+  // was registered for the whole session (src/achievement_toast.h). With no
+  // ImGui dialog registered, the SDK presents from the GPU command thread
+  // instead (host_present_from_non_ui_thread), and on Vulkan that thread, the
+  // busiest one, then spends part of every frame presenting: 16.4 against 14.1
+  // ms a frame in free roam at native resolution, 28 against 24.5 ms at 3x.
+  // D3D12 is as fast either way. A value set on the command line or in
+  // mcla.toml wins.
+  if (rex::cvar::GetFlagSource("host_present_from_non_ui_thread") == rex::cvar::Source::kDefault &&
+      !rex::cvar::SetFlagByName("host_present_from_non_ui_thread", "false")) {
+    REXLOG_WARN("could not set host_present_from_non_ui_thread");
+  }
+
   config.audio_factory = &CreateMclaAudioSystem;
   if (config.gpu_plugin.empty()) {
     config.gpu_plugin = "xenos";

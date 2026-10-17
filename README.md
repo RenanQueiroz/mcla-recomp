@@ -131,6 +131,7 @@ If the game stops with `Call to invalid or unregistered function at guest addres
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by mihawk-99 (GPL-3): the RADV port and toolchain the PS5 version is built on.
 - XenonRecomp by hedge-dev, on which ReXGlue's analysis builds.
 - The Linux build by [@MoonFuji](https://github.com/MoonFuji).
+- [RecompiledHaloReach](https://github.com/Dyotson/RecompiledHaloReach) and [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined) by Dyotson (MIT): the achievement pop-ups shown without repainting the window all the time (`src/achievement_toast.h`, with the licence notice).
 
 ## Licence
 
