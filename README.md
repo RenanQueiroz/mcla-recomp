@@ -45,6 +45,8 @@ The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 202
 
 Options go after the program name, for example `mcla.exe --fullscreen=true --mcla_fps=60` (30, 60, 120, or 0 for uncapped). The pause menu has three extra entries: DISPLAY (frame-rate target, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`.
 
+Frames are held to the target when they are presented (`--mcla_pace_at_swap=false` holds them before the game's update instead, as before).
+
 **Update:** `git pull`, then `.\scripts\make_pc.ps1` again.
 
 | If | Then |
