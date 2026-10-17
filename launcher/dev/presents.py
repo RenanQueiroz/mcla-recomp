@@ -26,6 +26,7 @@ shown twice.
 
     python presents.py <run folder> [<run folder>...]
 """
+import bisect
 import csv
 import ctypes
 import statistics
@@ -85,13 +86,48 @@ def load_present_log(folder):
     return refreshes, paints, switches
 
 
+def latencies(log, pm, begin, end):
+    """Each real frame's time from its swap (the refresh's log line) to the screen (PresentMon's
+    present of it: its CPU start plus DisplayLatency). The frame's present is found from its paint
+    line: thread c (D3D12's frame generation callback, logged before the present) takes the first
+    present called after it, the others (logged after their present) the last one before it."""
+    refreshes, paints, _ = log
+    refresh_time = {n: t for t, n in refreshes if n}
+    calls = []
+    for ns, row in pm:
+        busy = number(row, "CPUBusy")
+        latency = number(row, "DisplayLatency", "MsUntilDisplayed")
+        if ns is None or busy is None or latency is None:
+            continue
+        calls.append((ns + int(busy * 1e6), ns + int(latency * 1e6)))
+    calls.sort()
+    times = [c for c, _ in calls]
+    pacer = any(thread in ("q", "c") for _, _, thread, _, _, _ in paints)
+    result = []
+    seen = set()
+    for t, n, thread, status, _, _ in paints:
+        if not (begin < t <= end) or not n or n in seen or n not in refresh_time or status < 0:
+            continue
+        if pacer and thread not in ("q", "c"):
+            continue
+        if thread == "c":
+            i = bisect.bisect_left(times, t)
+        else:
+            i = bisect.bisect_right(times, t) - 1
+        if i < 0 or i >= len(calls) or abs(calls[i][0] - t) > 50_000_000:
+            continue
+        seen.add(n)
+        result.append((calls[i][1] - refresh_time[n]) / 1e6)
+    return result
+
+
 def report_switches(t0, paints, switches):
     """UI overlay painting's suspensions and resumptions, with the paints around each."""
     if not switches:
         return
     print(f"  UI overlay painting: suspended {sum(1 for _, k in switches if k == 1)} times, "
           f"resumed {sum(1 for _, k in switches if k != 1)}")
-    shown = [x for x in paints if x[2] != "q"]
+    shown = [x for x in paints if x[2] not in ("q", "c")]
     for t, kind in switches:
         name = {1: "suspended", 0: "resumed", 2: "resumed (no UI)"}.get(kind, str(kind))
         window = [x for x in shown if t - 100_000_000 <= x[0] <= t + 300_000_000]
@@ -194,26 +230,26 @@ def report(folder):
             paint_us = []
             # With a pacer, what was presented is what it presented (and the UI
             # thread's own paints while frame-generation mode is suspended).
-            pacer = any(thread == "q" for _, _, thread, _, _, _ in paints)
-            # The refreshes a pacer (or D3D12's frame generation callback) presented: the GPU
-            # thread's and the resume (r) paints of those only hand it frames.
-            paced = {n for _, n, thread, _, _, _ in paints if thread == "q"}
+            pacer = any(thread in ("q", "c") for _, _, thread, _, _, _ in paints)
+            # The refreshes a pacer (q) or D3D12's frame generation callback (c) presented: the
+            # GPU thread's and the resume (r) paints of those only hand them frames.
+            paced = {n for _, n, thread, _, _, _ in paints if thread in ("q", "c")}
             drops = 0
             ui_paints = with_ui = 0
             for t, n, thread, result, us, ui in paints:
                 # The UI thread's own paints present.
                 presents = not (thread in ("g", "r") and n in paced)
-                if begin < t <= end and thread != "q" and ui is not None:
+                if begin < t <= end and thread not in ("q", "c") and ui is not None:
                     ui_paints += 1
                     with_ui += ui > 0
                 # PaintResult for threads g and u (presented, presented suboptimal);
                 # VkResult for the pacer (VK_SUCCESS, VK_SUBOPTIMAL_KHR), -1 for a frame
                 # it dropped.
-                ok = result in ((0, 1000001003) if thread == "q" else (0, 1))
+                ok = result in ((0, 1000001003) if thread in ("q", "c") else (0, 1))
                 if presents and begin < t <= end + 50_000_000 and ok and n:
                     presented[n] = presented.get(n, 0) + 1
                 if begin < t <= end:
-                    if thread == "q" and result == -1:
+                    if thread in ("q", "c") and result == -1:
                         drops += 1
                         continue
                     threads[thread] = threads.get(thread, 0) + 1
@@ -226,10 +262,15 @@ def report(folder):
                      f"more than once {repeats}")
             details.append(f"paints: GPU thread {threads.get('g', 0)}, UI thread {threads.get('u', 0)}"
                            + (f" (resume {threads['r']})" if threads.get("r") else "")
-                           + (f", pacer presents {threads.get('q', 0)}, drops {drops}" if pacer else "")
+                           + (f", pacer presents {threads.get('q', 0) + threads.get('c', 0)}, drops "
+                              f"{drops}" if pacer else "")
                            + (f", with UI {with_ui} of {ui_paints}" if ui_paints else "")
                            + "; "
                            f"paint us {percentiles(paint_us)}")
+        if pm and log:
+            lat = latencies(log, pm, begin, end)
+            if lat:
+                details.append(f"real frames' swap to screen ms {percentiles(lat)} ({len(lat)})")
         if pm:
             seg = [row for ns, row in pm if ns is not None and begin < ns <= end]
             if seg:

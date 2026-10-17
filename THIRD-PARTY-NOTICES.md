@@ -95,12 +95,14 @@ carried by the ReXGlue fork <https://github.com/rexglue/FidelityFX-SDK> at commi
 `eee08db1688ac3d1275a70b728f4a8ba22914213` (AMD's v1.1.4 plus portability fixes).
 
 Used for the FSR 3.1 anti-aliasing option (`patches/rexglue-temporal-aa.patch`
-and `patches/rexglue-temporal-aa-shaders-vk.patch`):
+and `patches/rexglue-temporal-aa-shaders-vk.patch`) and for FSR 3.1 frame
+generation (`patches/rexglue-frame-generation.patch`, in development):
 
 - the ffx-api headers, unmodified, in the first patch as
   `thirdparty/fidelityfx-api/include` of the SDK, with this notice beside them
   (`thirdparty/fidelityfx-api/LICENSE.txt`);
-- 40 compiled shaders of FSR 3's upscaler (SPIR-V, in the headers FidelityFX's
+- compiled shaders of FSR 3's upscaler and, since frame generation, of frame
+  interpolation and optical flow (SPIR-V, in the headers FidelityFX's
   shader compiler generates, made from that commit's source by
   `launcher/dev/fsr/fsr_vk_shaders.py`), in the second patch as
   `thirdparty/fidelityfx-shaders-vk` of the SDK, with this notice beside them
@@ -110,7 +112,11 @@ and `patches/rexglue-temporal-aa-shaders-vk.patch`):
   (`cmake/rexglue_fsr.cmake` fetches it and checks its tree hashes):
   `amd_fidelityfx_dx12.dll` and `amd_fidelityfx_vk.dll` installed next to
   `mcla.exe` on Windows; `libamd_fidelityfx_vk.so` with the SDK's libraries on
-  Linux; static libraries linked into the title on the PS5.
+  Linux; static libraries linked into the title on the PS5. On Windows the
+  runtimes also carry frame generation (its provider, frame interpolation and
+  optical flow), and the Direct3D 12 one AMD's frame interpolation swap chain
+  (which includes the Anti-Lag 2 header); `ffx_framegeneration.h` is among the
+  ffx-api headers.
 
 ```
 This file is part of the FidelityFX SDK.

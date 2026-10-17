@@ -1,0 +1,54 @@
+# Frame generation (rexglue-frame-generation.patch): generation at a
+# non-integer window:output ratio (3x in a 2560x1440 window, 1.5:1: run with
+# --res 3 --window_width/--window_height giving 2560x1440 physical pixels) with
+# dumps, then fullscreen and windowed switches (the generation size changes)
+# and HDR off and on, each followed by dumps. With --d3d12_debug=true too.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.5
+stick lx 0.2
+wait 3s
+mark drive
+set frame_generation_dump 6
+wait 2s
+set frame_generation_dump 0
+set fullscreen true
+mark fullscreen
+wait 4s
+set frame_generation_dump 4
+wait 2s
+set frame_generation_dump 0
+set fullscreen false
+mark windowed
+wait 4s
+set frame_generation_dump 4
+wait 2s
+set frame_generation_dump 0
+set fullscreen true
+mark fullscreen2
+wait 3s
+set fullscreen false
+mark windowed2
+wait 3s
+set hdr off
+mark sdr
+wait 4s
+set frame_generation_dump 4
+wait 2s
+set frame_generation_dump 0
+set hdr on
+mark hdr
+wait 4s
+release all
+wait 3s
+mark still
+set frame_generation_dump 4
+wait 2s
+set frame_generation_dump 0
+mark end
+wait 1s

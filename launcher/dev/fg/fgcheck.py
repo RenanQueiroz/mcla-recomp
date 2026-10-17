@@ -42,6 +42,25 @@ def downscale(img, n):
     return img[:h, :w].reshape(h // n, n, w // n, n, 3).mean(axis=(1, 3)).round().astype(np.int32)
 
 
+def bilinear(img, shape):
+    """img scaled to shape[:2] as the presenter's bilinear pass does: each output pixel's centre
+    mapped into the source, the four nearest texels weighted, edges clamped."""
+    h, w = shape[:2]
+    sh, sw = img.shape[:2]
+    y = np.maximum((np.arange(h) + 0.5) * sh / h - 0.5, 0.0)
+    x = np.maximum((np.arange(w) + 0.5) * sw / w - 0.5, 0.0)
+    y0 = np.minimum(np.floor(y).astype(np.int64), sh - 1)
+    x0 = np.minimum(np.floor(x).astype(np.int64), sw - 1)
+    y1 = np.minimum(y0 + 1, sh - 1)
+    x1 = np.minimum(x0 + 1, sw - 1)
+    fy = (y - np.floor(y))[:, None, None]
+    fx = (x - np.floor(x))[None, :, None]
+    f = img.astype(np.float64)
+    top = f[y0][:, x0] * (1 - fx) + f[y0][:, x1] * fx
+    bottom = f[y1][:, x0] * (1 - fx) + f[y1][:, x1] * fx
+    return np.rint(top * (1 - fy) + bottom * fy).astype(np.int32)
+
+
 def window(img, radius, op):
     """op (np.minimum or np.maximum) over the (2 radius + 1)^2 neighbourhood of each pixel."""
     padded = np.pad(img, ((radius, radius), (radius, radius), (0, 0)), mode="edge")
@@ -85,11 +104,10 @@ def main():
         g = read_ppm(f["generated"])
         r1 = read_ppm(f["real"])
         r0 = read_ppm(prev_real)
-        # Generated at the window's size when smaller: the real frames scaled down to it (a box,
-        # as the presenter's bilinear scaling is at a whole ratio).
-        if g.shape != r1.shape and r1.shape[0] % g.shape[0] == 0:
-            n = r1.shape[0] // g.shape[0]
-            r1, r0 = downscale(r1, n), downscale(r0, n)
+        # Generated at the size shown when the window is smaller: the real frames scaled to it
+        # as the presenter scales them (bilinear, sampled at pixel centres), at any ratio.
+        if g.shape != r1.shape:
+            r1, r0 = bilinear(r1, g.shape), bilinear(r0, g.shape)
         g, r1, r0 = (downscale(x, args.downscale) for x in (g, r1, r0))
         if g.shape != r1.shape or r0.shape != r1.shape:
             continue

@@ -1,0 +1,28 @@
+# Phase 2: generation in the pause menu (the world drawn again behind it):
+# frames dumped standing, then with the pause menu open, then closed again.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 4s
+mark roam_still
+set frame_generation_dump 4
+wait 1s
+set frame_generation_dump 0
+press start 4f
+wait 2s
+mark pause
+set frame_generation_dump 6
+wait 2s
+set frame_generation_dump 0
+wait 2s
+press b 4f
+wait 2s
+mark unpaused
+set frame_generation_dump 4
+wait 1s
+set frame_generation_dump 0
+mark end
+wait 1s
