@@ -8,12 +8,14 @@
 # loader library (it opens vulkan-1.dll at run time, as the console's driver is
 # reached through vk_icdGetInstanceProcAddr), with link-time optimisation and
 # --undefined=ffxCreateContext as the title's link. The program then creates FSR
-# with the plugin's flags on the GPU, dispatches it and checks its output.
+# with the plugin's flags on the GPU, dispatches it and checks its output, and does
+# the same with frame generation (rexglue-frame-generation.patch: manual, FP16 code
+# values, the plugin's flags).
 #
 # Needs the SDK patched and built once with FSR (the pinned FidelityFX checkout
 # in its build tree), Ninja, and the LLVM in tools\ on PATH (clang, lld,
 # llvm-rc, llvm-nm). From the repository, with the GPU free:
-#   set PATH=%CD%	ools\clang+llvm-20.1.8-x86_64-pc-windows-msvcin;%PATH%
+#   set PATH=%CD%\tools\clang+llvm-20.1.8-x86_64-pc-windows-msvc\bin;%PATH%
 #   cmake -S launcher/dev/fsr/static_test -B <scratch>/fsr-static-test -G Ninja ^
 #         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_RC_COMPILER=llvm-rc
 #   cmake --build <scratch>/fsr-static-test
@@ -36,12 +38,14 @@ separate_arguments(_flags NATIVE_COMMAND "${FSR_TEST_FLAGS}")
 include(ExternalProject)
 set(_wrapper "${CMAKE_BINARY_DIR}/wrapper")
 foreach(_file CMakeLists.txt soft_step.cmake check_static.cmake prebuilt_shaders_hook.cmake
-              prebuilt_shaders.cmake vulkan-headers-only/FindVulkan.cmake)
+              prebuilt_shaders.cmake vulkan-headers-only/FindVulkan.cmake
+              ffx_provider_framegenerationswapchain_vk_stub.cpp)
     configure_file("${REXGLUE_SDK}/cmake/fidelityfx/${_file}" "${_wrapper}/${_file}" COPYONLY)
 endforeach()
 set(_archives_dir "${CMAKE_BINARY_DIR}/archives")
 set(_archives)
-foreach(_name amd_fidelityfx_vk ffx_backend_vk_x64 ffx_fsr3upscaler_x64 ffx_fsr2_x64)
+foreach(_name amd_fidelityfx_vk ffx_backend_vk_x64 ffx_fsr3upscaler_x64 ffx_fsr2_x64
+              ffx_frameinterpolation_x64 ffx_opticalflow_x64)
     list(APPEND _archives "${_archives_dir}/${CMAKE_STATIC_LIBRARY_PREFIX}${_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
 endforeach()
 ExternalProject_Add(fsr_static_runtime

@@ -1,0 +1,26 @@
+# Frame generation phase 0 on Vulkan, with --frame_generation=fsr and
+# --frame_generation_dump_path=<folder>: the images the pacer presents right
+# after fullscreen switches (frame_generation_dump), to see that nothing stale
+# or uninitialised is shown.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.5
+wait 3s
+mark fullscreen
+set fullscreen true
+set frame_generation_dump 12
+wait 4s
+set frame_generation_dump 0
+wait 1s
+mark windowed
+set fullscreen false
+set frame_generation_dump 12
+wait 4s
+release all
+mark end
+wait 1s

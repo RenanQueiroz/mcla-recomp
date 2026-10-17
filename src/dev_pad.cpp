@@ -1952,6 +1952,13 @@ void MclaDevPadStart(rex::ui::Window* window) {
     if (g_frames_csv) {
       std::setvbuf(g_frames_csv, nullptr, _IOFBF, 1 << 20);
       std::fprintf(g_frames_csv, "kind,a,b,c\n");
+      // The start on the steady clock's own scale (ns; on Windows the
+      // performance counter, as the SDK's present_log and PresentMon's
+      // --qpc_time), so swaps can be lined up with presents.
+      std::fprintf(g_frames_csv, "t0,%lld,0,0\n",
+                   static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                              g_start.time_since_epoch())
+                                              .count()));
     } else {
       REXLOG_ERROR("dev pad: cannot write {}", path);
     }

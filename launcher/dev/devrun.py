@@ -58,6 +58,12 @@ PRISTINE = DEV / "pristine"
 WORK = DEV / "work"
 CACHE = DEV / "cache"
 RUNS = DEV / "runs"
+# MCLA_PRESENTMON: PresentMon's console program (--presentmon); by default the
+# one winget installs (Intel.PresentMon.Console). Without elevation it needs the
+# account in "Performance Log Users".
+PRESENTMON = os.environ.get("MCLA_PRESENTMON") or next(iter(sorted(
+    (Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WinGet" / "Packages").glob(
+        "Intel.PresentMon.Console_*/presentmon*.exe"))), None)
 
 
 def real_files():
@@ -577,6 +583,8 @@ def game_args(a, out):
         f"--mcla_intro={a.intro}",
         f"--mcla_pad_frames_csv={out / 'frames.csv'}",
     ]
+    if getattr(a, "present_log", False):
+        args.append(f"--present_log={out / 'present.csv'}")
     if a.script:
         args.append(f"--mcla_pad_script={Path(a.script).resolve()}")
         if not a.keep_open:
@@ -629,6 +637,7 @@ def run(a, tag=None):
     env.update(kv.split("=", 1) for kv in a.env)
     args = game_args(a, out)
     (out / "args.txt").write_text(" ".join(args), encoding="utf-8")
+    presentmon = start_presentmon(out) if getattr(a, "presentmon", False) else None
     start = time.monotonic()
     proc = None
     restarts = []
@@ -673,6 +682,8 @@ def run(a, tag=None):
     finally:
         if proc is not None:
             end_games(proc)
+        if presentmon is not None:
+            stop_presentmon(presentmon)
         if guard:
             try:
                 gpu = guard.finish(out)
@@ -703,6 +714,41 @@ def run(a, tag=None):
             if "dev pad: script " in line and " done: err" in line:
                 raise SystemExit(f"{out.name}: SCRIPT FAILED: {line.split(' done: ', 1)[1]}")
     return out
+
+
+def start_presentmon(out):
+    """PresentMon capturing the game's presents for the run, into presentmon.csv (QPC times, so
+    presents.py can line them up with the swaps and the present log)."""
+    if not PRESENTMON or not Path(PRESENTMON).exists():
+        raise SystemExit("--presentmon: no PresentMon (winget install Intel.PresentMon.Console, or "
+                         "set MCLA_PRESENTMON)")
+    log = open(out / "presentmon.log", "w", encoding="utf-8")
+    proc = subprocess.Popen([str(PRESENTMON), "--process_name", EXE.name, "--output_file",
+                             str(out / "presentmon.csv"), "--v2_metrics", "--qpc_time",
+                             "--terminate_on_proc_exit", "--no_console_stats",
+                             "--stop_existing_session", "--session_name", "mcla-devrun"],
+                            stdout=log, stderr=subprocess.STDOUT)
+    # Its trace session must be up before the game's first present.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and proc.poll() is None:
+        if "Started recording" in (out / "presentmon.log").read_text(encoding="utf-8", errors="replace"):
+            break
+        time.sleep(0.2)
+    if proc.poll() is not None:
+        raise SystemExit(f"PresentMon exited: {(out / 'presentmon.log').read_text(errors='replace')[-500:]}")
+    return proc
+
+
+def stop_presentmon(proc):
+    try:
+        proc.wait(timeout=20)  # --terminate_on_proc_exit
+    except subprocess.TimeoutExpired:
+        subprocess.run([str(PRESENTMON), "--terminate_existing_session", "--session_name", "mcla-devrun"],
+                       capture_output=True)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def load_segments(path):
@@ -942,6 +988,10 @@ def main():
                        r"%%LOCALAPPDATA%%\mcla-dev\cache), e.g. an empty one for a first run")
         p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                        help="environment variable for the game (repeatable)")
+        p.add_argument("--presentmon", action="store_true",
+                       help="capture the game's presents with PresentMon (presentmon.csv)")
+        p.add_argument("--present-log", action="store_true",
+                       help="the SDK's log of refreshes and presents (present.csv)")
         p.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
         # A bench waits for another GPU user to stop, also before a redo.
         add_gpu_options(p, wait=120 if name == "bench" else 0)
@@ -968,7 +1018,12 @@ def main():
     if a.cmd == "prepare":
         prepare(a.refresh)
     elif a.cmd == "run":
-        analyze(run(a))
+        out = run(a)
+        analyze(out)
+        if (out / "present.csv").exists() or (out / "presentmon.csv").exists():
+            sys.path.insert(0, str(HERE))  # python -I leaves the script folder out
+            import presents
+            presents.report(out)
     elif a.cmd == "bench":
         bench(a)
     elif a.cmd == "record":

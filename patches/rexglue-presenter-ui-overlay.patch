@@ -1,0 +1,1324 @@
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index 835a8f8..7aa50f6 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -108,6 +108,9 @@ class D3D12Presenter final : public Presenter {
+ 
+   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
+ 
++  bool SupportsUIOverlayPaintMode() const override { return true; }
++  bool RenderUIOverlayFromUIThread() override;
++
+  private:
+   struct GuestOutputPaintRectangleConstants {
+     union {
+@@ -205,6 +208,10 @@ class D3D12Presenter final : public Presenter {
+       kViewIndexHdrUiLayerSrv =
+           kViewIndexGuestOutputIntermediate0Srv + kMaxGuestOutputPaintEffects - 1,
+ 
++      // UI overlay painting: the copy of the UI thread's overlay this paint
++      // puts over the image.
++      kViewIndexUiOverlaySnapshotSrv,
++
+       kViewCount,
+     };
+ 
+@@ -272,8 +279,31 @@ class D3D12Presenter final : public Presenter {
+     // The presenter's own UI over HDR10 output, swap chain sized, in
+     // D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE while not drawn into.
+     Microsoft::WRL::ComPtr<ID3D12Resource> hdr_ui_layer;
++    // UI overlay painting: this paint's copy of the UI thread's newest overlay,
++    // swap chain sized, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE between uses.
++    Microsoft::WRL::ComPtr<ID3D12Resource> ui_overlay_snapshot;
+   };
+ 
++  // UI overlay painting: the UI thread draws its UI drawers into these, at the
++  // swap chain's size, on its own command list (UI thread only; the layers are
++  // replaced only while the UI thread owns painting, so a paint can read them).
++  struct UIOverlay {
++    static constexpr uint32_t kLayerCount = 2;
++    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kLayerCount> layers;
++    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtv_heap;
++    std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, kLayerCount> command_allocators;
++    std::array<UINT64, kLayerCount> command_allocator_submissions = {};
++    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list;
++    uint32_t width = 0;
++    uint32_t height = 0;
++    uint32_t next_layer = 0;
++  };
++  void CreateUIOverlayFromUIThread(uint32_t width, uint32_t height);
++  void DestroyUIOverlayFromUIThread();
++  // Copies the newest overlay and puts it over the bound back buffer (paint).
++  void CompositeUIOverlay(ID3D12GraphicsCommandList* command_list,
++                          D3D12_CPU_DESCRIPTOR_HANDLE back_buffer_rtv);
++
+   explicit D3D12Presenter(HostGpuLossCallback host_gpu_loss_callback, const D3D12Provider& provider)
+       : Presenter(host_gpu_loss_callback), provider_(provider) {}
+ 
+@@ -312,6 +342,8 @@ class D3D12Presenter final : public Presenter {
+   // HDR10 swap chain.
+   Microsoft::WRL::ComPtr<ID3D12PipelineState> guest_output_paint_final_hdr10_pipeline_;
+   Microsoft::WRL::ComPtr<ID3D12PipelineState> hdr_ui_composite_pipeline_;
++  // UI overlay painting: the UI overlay (premultiplied) over the SDR swap chain.
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> ui_overlay_composite_pipeline_;
+ 
+   // The first is the refresher submission tracker fence value at which the
+   // guest output texture was last refreshed, the second is the reference to the
+@@ -329,6 +361,12 @@ class D3D12Presenter final : public Presenter {
+   // drawers (accessible from the UI thread only, at any time).
+   D3D12SubmissionTracker ui_submission_tracker_;
+ 
++  // UI overlay painting.
++  UIOverlay ui_overlay_;
++  // The layer the UI thread last finished drawing into (submitted on the direct
++  // queue, which a paint's copy follows), or UINT32_MAX.
++  std::atomic<uint32_t> ui_overlay_published_{UINT32_MAX};
++
+   // Accessible only by painting and by surface connection lifetime management
+   // (ConnectOrReconnectPaintingToSurfaceFromUIThread,
+   // DisconnectPaintingFromSurfaceFromUIThreadImpl) by the thread doing it, as
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index 2145477..3892214 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -468,6 +468,8 @@ class Presenter {
+     uint32_t display_aspect_ratio_y;
+     bool is_8bpc;
+     GuestOutputHdr hdr;
++    // Which refresh wrote the image, counting from 1 (the present log).
++    uint64_t refresh_number = 0;
+ 
+     GuestOutputProperties() { SetToInactive(); }
+ 
+@@ -820,6 +822,29 @@ class Presenter {
+   // For calling from the painting implementations if requested.
+   void ExecuteUIDrawersFromUIThread(UIDrawContext& ui_draw_context);
+ 
++  // UI overlay painting (rexglue-presenter-ui-overlay.patch; cvar
++  // present_ui_overlay, and frame generation): the guest output thread paints
++  // every guest frame, with or without UI drawers and with implicit vsync; the
++  // UI thread only keeps the connection and draws the drawers into an overlay
++  // layer of the implementation's (RenderUIOverlayFromUIThread), which the guest
++  // output thread's paint puts over the image. Suspended (back to UI-thread
++  // painting) while the guest output thread is silent with drawers to show.
++  virtual bool SupportsUIOverlayPaintMode() const { return false; }
++  // Draws the UI drawers into the overlay and publishes it for the next paints;
++  // false if the implementation can't (the caller then paints as without the mode).
++  virtual bool RenderUIOverlayFromUIThread() { return false; }
++  bool IsUIOverlayPaintModeActive() const {
++    return ui_overlay_paint_mode_ && !ui_overlay_paint_suspended_;
++  }
++  // Whether the presenter paints this way at all (suspended or not).
++  bool ui_overlay_paint_mode() const { return ui_overlay_paint_mode_; }
++  // Whether the guest output thread's paint should put the overlay over the image
++  // (drawers are registered and an overlay has been rendered for them).
++  bool IsUIOverlayActive() const { return ui_overlay_active_.load(std::memory_order_acquire); }
++  // The present log (cvar present_log): a present made by a pacer thread of the
++  // implementation's, for the image of the given refresh.
++  static void LogPresentFromPacer(uint64_t refresh_number, int result, uint64_t present_ns);
++
+  private:
+   enum class PaintMode {
+     // Don't paint at all.
+@@ -955,9 +980,16 @@ class Presenter {
+     // There's no need to limit the frame rate manually if there is vertical
+     // sync in the presentation already as that might result in inconsistent
+     // frame pacing and potentially skipped vertical sync intervals.
++    // With UI overlay painting the UI thread draws the overlay without presenting,
++    // so it is limited by the ticks even with vertical sync.
+     return !ui_drawers_.empty() && paint_mode_ != PaintMode::kNone &&
+-           !surface_paint_connection_has_implicit_vsync_;
++           (!surface_paint_connection_has_implicit_vsync_ || IsUIOverlayPaintModeActive());
+   }
++  // UI overlay painting, the UI thread's part of PaintFromUIThread.
++  void PaintFromUIThreadInUIOverlayPaintMode(bool force_paint, bool draw_ui);
++  // Suspends UI overlay painting while the guest output thread has been silent
++  // for a while with drawers to show, and resumes it when guest frames come again.
++  void UpdateUIOverlayPaintSuspensionFromUIThread(bool draw_ui);
+   void UpdateUITicksNeededFromUIThread();
+   void WaitForUITickFromUIThread();
+   // May be called from any thread.
+@@ -1077,6 +1109,23 @@ class Presenter {
+   // Accessible only by refreshing, whether the last refresh contained an image
+   // rather than being blank.
+   bool guest_output_active_last_refresh_ = false;
++  // The present log (cvar present_log): refreshes so far (refreshing only), and
++  // the refresh number of the image the last consumption acquired.
++  uint64_t guest_output_refresh_count_ = 0;
++  std::atomic<uint64_t> last_consumed_refresh_number_{0};
++  // UI overlay painting (read at initialization).
++  bool ui_overlay_paint_mode_ = false;
++  // UI thread only.
++  bool ui_overlay_paint_suspended_ = false;
++  // The steady clock (ns) at the last guest output refresh.
++  std::atomic<uint64_t> last_refresh_ns_{0};
++
++ protected:
++  // Set by the UI thread when it has drawn the overlay with drawers, cleared when
++  // there are no drawers; read by the guest output thread's paint.
++  std::atomic<bool> ui_overlay_active_{false};
++
++ private:
+ 
+   // Ordered by the Z order, and then by the time of addition.
+   // Note: All the iteration logic involving this Z ordering must be the same as
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index d5305bf..5acccc6 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -12,6 +12,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <memory>
+@@ -152,6 +153,11 @@ class VulkanPresenter final : public Presenter {
+ 
+   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
+ 
++  // UI overlay painting (rexglue-presenter-ui-overlay.patch), in
++  // vulkan_presenter_ui_overlay.cpp.
++  bool SupportsUIOverlayPaintMode() const override;
++  bool RenderUIOverlayFromUIThread() override;
++
+  private:
+   // Usable for both the guest output image itself and for intermediate images.
+   class GuestOutputImage {
+@@ -324,6 +330,10 @@ class VulkanPresenter final : public Presenter {
+       kGuestOutputDescriptorSetHdrUiLayerSampled =
+           kGuestOutputDescriptorSetIntermediate0Sampled + kMaxGuestOutputPaintEffects - 1,
+ 
++      // UI overlay painting: the UI thread's two overlay layers.
++      kGuestOutputDescriptorSetUiOverlay0Sampled,
++      kGuestOutputDescriptorSetUiOverlay1Sampled,
++
+       kGuestOutputDescriptorSetCount,
+     };
+ 
+@@ -437,6 +447,15 @@ class VulkanPresenter final : public Presenter {
+     VkDeviceMemory hdr_ui_layer_memory = VK_NULL_HANDLE;
+     VkImageView hdr_ui_layer_view = VK_NULL_HANDLE;
+     VkFramebuffer hdr_ui_layer_framebuffer = VK_NULL_HANDLE;
++
++    // UI overlay painting (rexglue-presenter-ui-overlay.patch): the UI thread's
++    // overlay layers (kHdrUiLayerFormat, swapchain sized, drawn with
++    // hdr_ui_layer_render_pass_, in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
++    // created after the swapchain and destroyed before it's retired.
++    std::array<VkImage, 2> ui_overlay_images = {};
++    std::array<VkDeviceMemory, 2> ui_overlay_memory = {};
++    std::array<VkImageView, 2> ui_overlay_views = {};
++    std::array<VkFramebuffer, 2> ui_overlay_framebuffers = {};
+   };
+ 
+   explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
+@@ -493,6 +512,28 @@ class VulkanPresenter final : public Presenter {
+   VkPipeline hdr_ui_composite_pipeline_ = VK_NULL_HANDLE;
+   VkFormat hdr_ui_composite_pipeline_format_ = VK_FORMAT_UNDEFINED;
+ 
++  // UI overlay painting (rexglue-presenter-ui-overlay.patch), in
++  // vulkan_presenter_ui_overlay.cpp: the UI thread draws its drawers into one of
++  // two overlay layers, and the guest output thread's paint puts the newest
++  // finished one over the image.
++  // UI thread, after the swapchain has been created / before it's retired.
++  void CreateUIOverlayFromUIThread();
++  void DestroyUIOverlayFromUIThread();
++  // At destruction.
++  void ShutdownUIOverlay();
++  // The overlay over the image in the swapchain render pass.
++  void CompositeUIOverlay(VkCommandBuffer command_buffer);
++  VkShaderModule ui_overlay_composite_fs_ = VK_NULL_HANDLE;
++  VkPipeline ui_overlay_composite_pipeline_ = VK_NULL_HANDLE;
++  VkFormat ui_overlay_composite_pipeline_format_ = VK_FORMAT_UNDEFINED;
++  // UI thread: the overlay's command buffers, one per layer.
++  std::array<VkCommandPool, 2> ui_overlay_command_pools_ = {};
++  std::array<VkCommandBuffer, 2> ui_overlay_command_buffers_ = {};
++  std::array<uint64_t, 2> ui_overlay_submissions_ = {};
++  uint32_t ui_overlay_next_layer_ = 0;
++  // The newest finished overlay layer, UINT32_MAX if none.
++  std::atomic<uint32_t> ui_overlay_published_{UINT32_MAX};
++
+   // Value monotonically increased every time a new guest output image is
+   // initialized, for recreation of dependent objects such as framebuffers in
+   // the refreshers - saving and comparing the handle in the refresher is not
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index 5e450f4..795337f 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -43,6 +43,7 @@ set(REXUI_VULKAN_SOURCES
+     vulkan/vulkan_instance.cpp
+     vulkan/vulkan_mem_alloc.cpp
+     vulkan/vulkan_presenter.cpp
++    vulkan/vulkan_presenter_ui_overlay.cpp
+     vulkan/vulkan_provider.cpp
+     vulkan/vulkan_submission_tracker.cpp
+     vulkan/vulkan_upload_buffer_pool.cpp
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index b422ef4..53fc7ae 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -50,6 +50,7 @@ namespace shaders {
+ #endif
+ #include "ui/shaders/bytecode/d3d12_5_1/guest_output_triangle_strip_rect_vs.h"
+ #include "ui/shaders/bytecode/d3d12_5_1/hdr_ui_composite_ps.h"
++#include "ui/shaders/bytecode/d3d12_5_1/ui_overlay_composite_ps.h"
+ }  // namespace shaders
+ 
+ D3D12Presenter::~D3D12Presenter() {
+@@ -362,6 +363,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     }
+     paint_context_.AwaitSwapChainUsageCompletion();
+     paint_context_.hdr_ui_layer.Reset();
++    paint_context_.ui_overlay_snapshot.Reset();
+     // Using the current swap_chain_allows_tearing_ value that's consistent with
+     // the creation of the swap chain because ResizeBuffers can't toggle the
+     // tearing flag.
+@@ -531,15 +533,226 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+         provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexSwapChainBuffer0 + i));
+   }
+ 
++  if (ui_overlay_paint_mode()) {
++    CreateUIOverlayFromUIThread(paint_context_.swap_chain_width, paint_context_.swap_chain_height);
++  }
++
+   is_vsync_implicit_out = false;
+   return SurfacePaintConnectResult::kSuccess;
+ }
+ 
+ void D3D12Presenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+   paint_context_.DestroySwapChain();
++  DestroyUIOverlayFromUIThread();
+   SetHdrOutputActive(false);
+ }
+ 
++void D3D12Presenter::CreateUIOverlayFromUIThread(uint32_t width, uint32_t height) {
++  if (ui_overlay_.layers[0] && ui_overlay_.width == width && ui_overlay_.height == height) {
++    return;
++  }
++  DestroyUIOverlayFromUIThread();
++  ID3D12Device* device = provider_.GetDevice();
++  if (!ui_overlay_.command_list) {
++    for (Microsoft::WRL::ComPtr<ID3D12CommandAllocator>& allocator :
++         ui_overlay_.command_allocators) {
++      if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
++                                                IID_PPV_ARGS(&allocator)))) {
++        REXLOG_ERROR("D3D12Presenter: Failed to create a UI overlay command allocator");
++        return;
++      }
++    }
++    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
++                                         ui_overlay_.command_allocators[0].Get(), nullptr,
++                                         IID_PPV_ARGS(&ui_overlay_.command_list)))) {
++      REXLOG_ERROR("D3D12Presenter: Failed to create the UI overlay command list");
++      return;
++    }
++    ui_overlay_.command_list->Close();
++    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
++    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
++    rtv_heap_desc.NumDescriptors = UIOverlay::kLayerCount;
++    if (FAILED(device->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&ui_overlay_.rtv_heap)))) {
++      REXLOG_ERROR("D3D12Presenter: Failed to create the UI overlay RTV heap");
++      ui_overlay_.command_list.Reset();
++      return;
++    }
++  }
++  D3D12_RESOURCE_DESC layer_desc = {};
++  layer_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++  layer_desc.Width = width;
++  layer_desc.Height = height;
++  layer_desc.DepthOrArraySize = 1;
++  layer_desc.MipLevels = 1;
++  layer_desc.Format = kSwapChainFormat;
++  layer_desc.SampleDesc.Count = 1;
++  layer_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++  layer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++  D3D12_CLEAR_VALUE clear_value = {};
++  clear_value.Format = kSwapChainFormat;
++  D3D12_CPU_DESCRIPTOR_HANDLE rtv_start = ui_overlay_.rtv_heap->GetCPUDescriptorHandleForHeapStart();
++  for (uint32_t i = 0; i < UIOverlay::kLayerCount; ++i) {
++    if (FAILED(device->CreateCommittedResource(
++            &util::kHeapPropertiesDefault, provider_.GetHeapFlagCreateNotZeroed(), &layer_desc,
++            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear_value,
++            IID_PPV_ARGS(&ui_overlay_.layers[i])))) {
++      REXLOG_ERROR("D3D12Presenter: Failed to create a UI overlay layer");
++      DestroyUIOverlayFromUIThread();
++      return;
++    }
++    device->CreateRenderTargetView(ui_overlay_.layers[i].Get(), nullptr,
++                                   provider_.OffsetRTVDescriptor(rtv_start, i));
++  }
++  ui_overlay_.width = width;
++  ui_overlay_.height = height;
++  ui_overlay_.next_layer = 0;
++}
++
++void D3D12Presenter::DestroyUIOverlayFromUIThread() {
++  // Painting (which copies from the layers) isn't running while the UI thread
++  // manages the connection; the UI thread's own drawing into them must end.
++  ui_submission_tracker_.AwaitAllSubmissionsCompletion();
++  ui_overlay_published_.store(UINT32_MAX, std::memory_order_release);
++  for (Microsoft::WRL::ComPtr<ID3D12Resource>& layer : ui_overlay_.layers) {
++    layer.Reset();
++  }
++  ui_overlay_.width = 0;
++  ui_overlay_.height = 0;
++}
++
++bool D3D12Presenter::RenderUIOverlayFromUIThread() {
++  if (!ui_overlay_.layers[0] || !ui_overlay_.command_list) {
++    return false;
++  }
++  const uint32_t layer_index = ui_overlay_.next_layer;
++  ID3D12Resource* layer = ui_overlay_.layers[layer_index].Get();
++  ui_submission_tracker_.AwaitSubmissionCompletion(
++      ui_overlay_.command_allocator_submissions[layer_index]);
++  ID3D12CommandAllocator* allocator = ui_overlay_.command_allocators[layer_index].Get();
++  allocator->Reset();
++  ID3D12GraphicsCommandList* command_list = ui_overlay_.command_list.Get();
++  command_list->Reset(allocator, nullptr);
++  D3D12_RESOURCE_BARRIER barrier;
++  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++  barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
++  barrier.Transition.pResource = layer;
++  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++  command_list->ResourceBarrier(1, &barrier);
++  D3D12_CPU_DESCRIPTOR_HANDLE rtv = provider_.OffsetRTVDescriptor(
++      ui_overlay_.rtv_heap->GetCPUDescriptorHandleForHeapStart(), layer_index);
++  const float kClear[] = {0.0f, 0.0f, 0.0f, 0.0f};
++  command_list->ClearRenderTargetView(rtv, kClear, 0, nullptr);
++  command_list->OMSetRenderTargets(1, &rtv, TRUE, nullptr);
++  {
++    D3D12UIDrawContext ui_draw_context(*this, ui_overlay_.width, ui_overlay_.height, command_list,
++                                       ui_submission_tracker_.GetCurrentSubmission(),
++                                       ui_submission_tracker_.GetCompletedSubmission());
++    ExecuteUIDrawersFromUIThread(ui_draw_context);
++  }
++  std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
++  command_list->ResourceBarrier(1, &barrier);
++  command_list->Close();
++  ID3D12CommandList* execute_command_list = command_list;
++  provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
++  ui_overlay_.command_allocator_submissions[layer_index] =
++      ui_submission_tracker_.GetCurrentSubmission();
++  ui_submission_tracker_.NextSubmission();
++  // A paint that copies it is submitted on the same queue after this, so it
++  // reads the finished layer (or, if the UI thread has drawn into it again
++  // meanwhile, a newer finished one).
++  ui_overlay_published_.store(layer_index, std::memory_order_release);
++  ui_overlay_.next_layer = layer_index ^ 1;
++  return true;
++}
++
++void D3D12Presenter::CompositeUIOverlay(ID3D12GraphicsCommandList* command_list,
++                                        D3D12_CPU_DESCRIPTOR_HANDLE back_buffer_rtv) {
++  const uint32_t layer_index = ui_overlay_published_.load(std::memory_order_acquire);
++  if (layer_index >= UIOverlay::kLayerCount || !ui_overlay_.layers[layer_index] ||
++      ui_overlay_.width != paint_context_.swap_chain_width ||
++      ui_overlay_.height != paint_context_.swap_chain_height) {
++    return;
++  }
++  ID3D12Device* device = provider_.GetDevice();
++  ID3D12DescriptorHeap* view_heap = paint_context_.view_heap.Get();
++  if (!paint_context_.ui_overlay_snapshot) {
++    D3D12_RESOURCE_DESC snapshot_desc = {};
++    snapshot_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    snapshot_desc.Width = paint_context_.swap_chain_width;
++    snapshot_desc.Height = paint_context_.swap_chain_height;
++    snapshot_desc.DepthOrArraySize = 1;
++    snapshot_desc.MipLevels = 1;
++    snapshot_desc.Format = kSwapChainFormat;
++    snapshot_desc.SampleDesc.Count = 1;
++    snapshot_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++    if (FAILED(device->CreateCommittedResource(
++            &util::kHeapPropertiesDefault, provider_.GetHeapFlagCreateNotZeroed(), &snapshot_desc,
++            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
++            IID_PPV_ARGS(&paint_context_.ui_overlay_snapshot)))) {
++      REXLOG_ERROR("D3D12Presenter: Failed to create the UI overlay snapshot");
++      return;
++    }
++    device->CreateShaderResourceView(
++        paint_context_.ui_overlay_snapshot.Get(), nullptr,
++        provider_.OffsetViewDescriptor(view_heap->GetCPUDescriptorHandleForHeapStart(),
++                                       PaintContext::kViewIndexUiOverlaySnapshotSrv));
++  }
++  ID3D12Resource* snapshot = paint_context_.ui_overlay_snapshot.Get();
++  ID3D12Resource* layer = ui_overlay_.layers[layer_index].Get();
++  D3D12_RESOURCE_BARRIER barriers[2];
++  for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
++    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
++    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++  }
++  barriers[0].Transition.pResource = snapshot;
++  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++  barriers[1].Transition.pResource = layer;
++  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++  command_list->ResourceBarrier(2, barriers);
++  command_list->CopyResource(snapshot, layer);
++  for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
++    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
++  }
++  command_list->ResourceBarrier(2, barriers);
++  command_list->OMSetRenderTargets(1, &back_buffer_rtv, TRUE, nullptr);
++  D3D12_VIEWPORT viewport = {0.0f, 0.0f, float(paint_context_.swap_chain_width),
++                             float(paint_context_.swap_chain_height), 0.0f, 1.0f};
++  command_list->RSSetViewports(1, &viewport);
++  D3D12_RECT scissor = {0, 0, LONG(paint_context_.swap_chain_width),
++                        LONG(paint_context_.swap_chain_height)};
++  command_list->RSSetScissorRects(1, &scissor);
++  command_list->SetDescriptorHeaps(1, &view_heap);
++  command_list->SetPipelineState(paint_context_.swap_chain_hdr ? hdr_ui_composite_pipeline_.Get()
++                                                               : ui_overlay_composite_pipeline_.Get());
++  command_list->SetGraphicsRootSignature(
++      guest_output_paint_root_signatures_[kGuestOutputPaintRootSignatureIndexBilinear].Get());
++  command_list->SetGraphicsRootDescriptorTable(
++      UINT(GuestOutputPaintRootParameter::kSource),
++      provider_.OffsetViewDescriptor(view_heap->GetGPUDescriptorHandleForHeapStart(),
++                                     PaintContext::kViewIndexUiOverlaySnapshotSrv));
++  GuestOutputPaintRectangleConstants whole_image;
++  whole_image.x = -1.0f;
++  whole_image.y = 1.0f;
++  whole_image.width = 2.0f;
++  whole_image.height = -2.0f;
++  command_list->SetGraphicsRoot32BitConstants(UINT(GuestOutputPaintRootParameter::kRectangle),
++                                              sizeof(whole_image) / sizeof(uint32_t), &whole_image,
++                                              0);
++  if (paint_context_.swap_chain_hdr) {
++    HdrOutputState hdr_state = GetHdrOutputState();
++    const float ui_levels[] = {hdr_state.sdr_white_nits,
++                               hdr_state.sdr_pure_gamma_2_2 ? 1.0f : 0.0f, 0.0f, 0.0f};
++    command_list->SetGraphicsRoot32BitConstants(
++        UINT(GuestOutputPaintRootParameter::kEffectConstants), 4, ui_levels, 0);
++  }
++  command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++  command_list->DrawInstanced(4, 1, 0, 0);
++}
++
+ bool D3D12Presenter::RefreshGuestOutputImpl(
+     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
+     std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref,
+@@ -612,6 +825,7 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+   swap_chain_hdr = false;
+   hdr_metadata_levels = {};
+   hdr_ui_layer.Reset();
++  ui_overlay_snapshot.Reset();
+ }
+ 
+ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
+@@ -1303,6 +1517,10 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+       command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+       command_list->DrawInstanced(4, 1, 0, 0);
+     }
++  } else if (!execute_ui_drawers && ui_overlay_paint_mode() && IsUIOverlayActive()) {
++    // UI overlay painting: the UI thread's overlay over the image.
++    CompositeUIOverlay(command_list, back_buffer_rtv);
++    back_buffer_bound = true;
+   } else if (execute_ui_drawers) {
+     // Draw the UI.
+     if (!back_buffer_bound) {
+@@ -1659,6 +1877,15 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+     REXLOG_ERROR("D3D12Presenter: Failed to create the HDR UI composite pipeline");
+     return false;
+   }
++  // UI overlay painting: the overlay over the SDR swap chain (same blending).
++  guest_output_paint_pipeline_desc.PS.pShaderBytecode = shaders::ui_overlay_composite_ps;
++  guest_output_paint_pipeline_desc.PS.BytecodeLength = sizeof(shaders::ui_overlay_composite_ps);
++  guest_output_paint_pipeline_desc.RTVFormats[0] = kSwapChainFormat;
++  if (FAILED(device->CreateGraphicsPipelineState(&guest_output_paint_pipeline_desc,
++                                                 IID_PPV_ARGS(&ui_overlay_composite_pipeline_)))) {
++    REXLOG_ERROR("D3D12Presenter: Failed to create the UI overlay composite pipeline");
++    return false;
++  }
+ 
+   // Initialize connection-independent parts of the painting context.
+ 
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 1da5824..722544c 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -15,6 +15,9 @@
+ #include <chrono>
+ #include <cmath>
+ #include <condition_variable>
++#include <cstdio>
++#include <mutex>
++#include <string>
+ #include <thread>
+ #include <utility>
+ 
+@@ -89,6 +92,104 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
+                     "Enable output dithering in the final present pass")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(present_ui_overlay, false, "UI/Presenter",
++                    "The guest output thread presents every guest frame even while the "
++                    "presenter's UI (overlays, dialogs, pop-ups) is shown: the UI thread draws "
++                    "it into a layer that the guest output thread's paint puts over the image, "
++                    "instead of presenting at the display's rate itself")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_INT32(present_debug_stall_ms, 0, "UI/Presenter",
++                     "Development: when changed to a positive value, the guest output thread "
++                     "sleeps that long once at its next refresh (to test how UI overlay painting "
++                     "is suspended while it is silent)")
++    .range(0, 60000);
++
++REXCVAR_DEFINE_STRING(present_log, "", "UI/Presenter",
++                      "Development: a CSV of every guest output refresh and host present (steady "
++                      "clock in ns, the refresh's number, which thread presented), to compare what "
++                      "is presented with what the guest swapped")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++namespace {
++// The present log (present_log): one buffered line per guest output refresh
++// ("r,<ns>,<refresh>") and per paint ("p,<ns after>,<refresh>,<thread g|u>,
++// <result>,<us in the paint>"), from the refreshing thread and whichever
++// thread paints. With a pacer, its presents are "p" lines of thread
++// q, and the guest output thread's paints don't present. The clock is
++// std::chrono::steady_clock (on Windows, the performance counter in 100 ns
++// units scaled to ns, as PresentMon's --qpc_time). Flushed about once a
++// second, so a run that is killed (a hang) still leaves its lines.
++class PresentLog {
++ public:
++  static PresentLog& Get() {
++    static PresentLog log;
++    return log;
++  }
++  bool enabled() const { return file_ != nullptr; }
++  static uint64_t Now() {
++    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                        std::chrono::steady_clock::now().time_since_epoch())
++                        .count());
++  }
++  void Refresh(uint64_t time, uint64_t refresh) {
++    std::lock_guard<std::mutex> lock(mutex_);
++    std::fprintf(file_, "r,%llu,%llu\n", static_cast<unsigned long long>(time),
++                 static_cast<unsigned long long>(refresh));
++    FlushPeriodically(time);
++  }
++  void Paint(uint64_t time, uint64_t refresh, char thread, int result, uint64_t paint_ns) {
++    std::lock_guard<std::mutex> lock(mutex_);
++    std::fprintf(file_, "p,%llu,%llu,%c,%d,%llu\n", static_cast<unsigned long long>(time),
++                 static_cast<unsigned long long>(refresh), thread, result,
++                 static_cast<unsigned long long>(paint_ns / 1000));
++    FlushPeriodically(time);
++  }
++  ~PresentLog() {
++    if (file_) {
++      std::fclose(file_);
++    }
++  }
++
++ private:
++  PresentLog() {
++    const std::string path = REXCVAR_GET(present_log);
++    if (path.empty()) {
++      return;
++    }
++#if REX_PLATFORM_WIN32
++    if (fopen_s(&file_, path.c_str(), "w")) {
++      file_ = nullptr;
++    }
++#else
++    file_ = std::fopen(path.c_str(), "w");
++#endif
++    if (!file_) {
++      REXLOG_ERROR("present_log: can't open {}", path);
++      return;
++    }
++    std::setvbuf(file_, nullptr, _IOFBF, 1 << 20);
++    std::fprintf(file_, "kind,ns,refresh,thread,result,paint_us\n");
++    REXLOG_INFO("present_log: {}", path);
++  }
++  // With mutex_ held.
++  void FlushPeriodically(uint64_t time) {
++    if (time >= last_flush_ + 1'000'000'000) {
++      std::fflush(file_);
++      last_flush_ = time;
++    }
++  }
++  std::mutex mutex_;
++  FILE* file_ = nullptr;
++  uint64_t last_flush_ = 0;
++};
++
++// Whether this thread is in the guest output thread's paint (the present log's
++// thread column; is_in_ui_thread_paint_ belongs to the UI thread, which may be
++// drawing the overlay meanwhile with UI overlay painting).
++thread_local bool tls_in_guest_output_thread_paint = false;
++}  // namespace
++
+ REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
+                     "Allow overscan cutoff based on safe area settings")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -522,6 +623,16 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+   // connection has become outdated and has requested the UI thread to
+   // reconnect).
+   bool draw_ui = !ui_drawers_.empty();
++  if (ui_overlay_paint_mode_) {
++    // While suspended, and for the paint that resumes it (so the guest frame
++    // that ended the silence is shown), the UI thread paints as without it.
++    bool was_suspended = ui_overlay_paint_suspended_;
++    UpdateUIOverlayPaintSuspensionFromUIThread(draw_ui);
++    if (IsUIOverlayPaintModeActive() && !was_suspended) {
++      PaintFromUIThreadInUIOverlayPaintMode(force_paint, draw_ui);
++      return;
++    }
++  }
+   bool do_paint = force_paint || draw_ui;
+   // Reset ui_thread_paint_requested_ unconditionally also, regardless of
+   // whether the UI needs to be drawn - the flag may be set to try reconnecting,
+@@ -626,10 +737,103 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+   }
+ }
+ 
++void Presenter::PaintFromUIThreadInUIOverlayPaintMode([[maybe_unused]] bool force_paint,
++                                                       bool draw_ui) {
++  // is_in_ui_thread_paint_ has been set by PaintFromUIThread. The guest output
++  // thread paints every guest frame, so a forced or requested paint isn't done
++  // here: only the connection is kept (the guest output thread can't reconnect),
++  // and the drawers go into the overlay.
++  ui_thread_paint_requested_.store(false, std::memory_order_relaxed);
++  bool outdated;
++  {
++    // Written by the guest output thread while it paints, under this mutex.
++    std::lock_guard<std::mutex> lock(paint_mode_mutex_);
++    outdated = surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated;
++  }
++  bool request_repaint_immediately = false;
++  if (outdated || paint_mode_ != PaintMode::kGuestOutputThreadImmediately) {
++    // Take the painting over (waiting for a paint in progress) only for this;
++    // a guest frame refreshed meanwhile is requested from the UI thread, which
++    // doesn't paint it: taking it over for every overlay would drop frames.
++    if (paint_mode_ == PaintMode::kGuestOutputThreadImmediately) {
++      SetPaintModeFromUIThread(PaintMode::kUIThreadOnRequest);
++    }
++    if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
++      UpdateSurfacePaintConnectionFromUIThread(nullptr, false);
++      if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
++        // Retry in the next frame, giving the window system time.
++        request_repaint_immediately = true;
++      }
++    }
++    SetPaintModeFromUIThread(GetDesiredPaintModeFromUIThread(
++        surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable));
++  }
++  if (draw_ui && paint_mode_ != PaintMode::kNone) {
++    // As fast as the UI thread would paint (the overlay isn't presented here).
++    WaitForUITickFromUIThread();
++    ui_overlay_active_.store(RenderUIOverlayFromUIThread(), std::memory_order_release);
++  } else if (!draw_ui) {
++    ui_overlay_active_.store(false, std::memory_order_release);
++  }
++  is_in_ui_thread_paint_ = false;
++  bool request_repaint_at_tick = false;
++  if (paint_mode_ != PaintMode::kNone) {
++    if (request_ui_paint_after_current_ui_thread_paint_ && !ui_drawers_.empty()) {
++      request_repaint_at_tick = true;
++    }
++  } else {
++    request_repaint_immediately = false;
++  }
++  if (request_repaint_at_tick || request_repaint_immediately) {
++    RequestPaintOrConnectionRecoveryViaWindow(request_repaint_immediately);
++  }
++}
++
++void Presenter::UpdateUIOverlayPaintSuspensionFromUIThread(bool draw_ui) {
++  constexpr uint64_t kSilentNs = 1'000'000'000;
++  constexpr uint64_t kAliveNs = 100'000'000;
++  const uint64_t now = PresentLog::Now();
++  const uint64_t last = last_refresh_ns_.load(std::memory_order_relaxed);
++  if (!ui_overlay_paint_suspended_) {
++    // Something to show while the guest output thread is stuck or gone (a modal
++    // prompt, the settings overlay during a hang): the UI thread paints again.
++    if (draw_ui && last && now > last + kSilentNs) {
++      ui_overlay_paint_suspended_ = true;
++      ui_overlay_active_.store(false, std::memory_order_release);
++      REXLOG_INFO("Presenter: no guest frame for {} ms with UI to show; UI overlay painting "
++                  "suspended",
++                  (now - last) / 1'000'000);
++    }
++  } else if (!draw_ui || (last && now < last + kAliveNs)) {
++    ui_overlay_paint_suspended_ = false;
++    REXLOG_INFO("Presenter: UI overlay painting resumed");
++  }
++}
++
++void Presenter::LogPresentFromPacer(uint64_t refresh_number, int result, uint64_t present_ns) {
++  if (PresentLog::Get().enabled()) {
++    PresentLog::Get().Paint(PresentLog::Now(), refresh_number, 'q', result, present_ns);
++  }
++}
++
+ bool Presenter::RefreshGuestOutput(
+     uint32_t frontbuffer_width, uint32_t frontbuffer_height, uint32_t display_aspect_ratio_x,
+     uint32_t display_aspect_ratio_y,
+     std::function<bool(GuestOutputRefreshContext& context)> refresher) {
++  if (ui_overlay_paint_mode_) {
++    // Development: a stall of the guest output thread on request.
++    static int32_t last_stall_ms = 0;
++    const int32_t stall_ms = REXCVAR_GET(present_debug_stall_ms);
++    if (stall_ms != last_stall_ms) {
++      last_stall_ms = stall_ms;
++      if (stall_ms > 0) {
++        REXLOG_INFO("Presenter: present_debug_stall_ms: the guest output thread sleeps {} ms",
++                    stall_ms);
++        std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
++      }
++    }
++  }
++  last_refresh_ns_.store(PresentLog::Now(), std::memory_order_relaxed);
+   GuestOutputProperties& writable_properties =
+       guest_output_properties_[guest_output_mailbox_writable_];
+   writable_properties.frontbuffer_width = frontbuffer_width;
+@@ -637,6 +841,8 @@ bool Presenter::RefreshGuestOutput(
+   writable_properties.display_aspect_ratio_x = display_aspect_ratio_x;
+   writable_properties.display_aspect_ratio_y = display_aspect_ratio_y;
+   writable_properties.is_8bpc = false;
++  // Every call is one guest swap, published or not (the present log).
++  writable_properties.refresh_number = ++guest_output_refresh_count_;
+   bool is_active = writable_properties.IsActive();
+   if (is_active) {
+     if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_, frontbuffer_width,
+@@ -645,6 +851,9 @@ bool Presenter::RefreshGuestOutput(
+       // If failed to refresh, don't send the currently writable image to the
+       // mailbox as it may be in an undefined state. Don't disable the guest
+       // output either though because the failure may be something transient.
++      if (PresentLog::Get().enabled()) {
++        PresentLog::Get().Refresh(PresentLog::Now(), 0);
++      }
+       return false;
+     }
+     guest_output_active_last_refresh_ = true;
+@@ -652,10 +861,14 @@ bool Presenter::RefreshGuestOutput(
+     // Request presenting a blank image if there was a true image previously,
+     // but not now.
+     if (!guest_output_active_last_refresh_) {
++      if (PresentLog::Get().enabled()) {
++        PresentLog::Get().Refresh(PresentLog::Now(), 0);
++      }
+       return false;
+     }
+     guest_output_active_last_refresh_ = false;
+   }
++  const uint64_t published_refresh_number = writable_properties.refresh_number;
+ 
+   // Make the new image the next to present on the host (the "ready" one),
+   // replacing the one already specified as the next (dropping it instead of
+@@ -673,6 +886,9 @@ bool Presenter::RefreshGuestOutput(
+       last_acquired_and_ready,
+       (last_acquired_and_ready & 3) | (guest_output_mailbox_writable_ << 2),
+       std::memory_order_acq_rel, std::memory_order_relaxed)) {}
++  if (PresentLog::Get().enabled()) {
++    PresentLog::Get().Refresh(PresentLog::Now(), published_refresh_number);
++  }
+   // Now, it's known that `ready == writable` on the host presentation side.
+   // Take the next `writable` with this assumption about its current value in
+   // mind.
+@@ -709,7 +925,9 @@ bool Presenter::RefreshGuestOutput(
+       case PaintMode::kGuestOutputThreadImmediately:
+         // Both painting and window paint requesting are accessible.
+         if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable) {
++          tls_in_guest_output_thread_paint = true;
+           paint_result = PaintAndPresent(false);
++          tls_in_guest_output_thread_paint = false;
+           if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
+             RequestPaintOrConnectionRecoveryViaWindow(true);
+           }
+@@ -868,6 +1086,14 @@ void Presenter::RequestUIPaintFromUIThread() {
+ 
+ bool Presenter::InitializeCommonSurfaceIndependent() {
+   HdrRegisterSettingCallbacks();
++  if (REXCVAR_GET(present_ui_overlay)) {
++    if (SupportsUIOverlayPaintMode()) {
++      ui_overlay_paint_mode_ = true;
++      REXLOG_INFO("Presenter: UI overlay painting");
++    } else {
++      REXLOG_WARN("Presenter: UI overlay painting isn't available with this graphics backend");
++    }
++  }
+   {
+     std::lock_guard<std::mutex> config_lock(guest_output_paint_config_mutex_);
+     guest_output_paint_config_ = BuildGuestOutputPaintConfigFromCVar();
+@@ -926,6 +1152,8 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
+   // inactive.
+   const GuestOutputProperties& properties = guest_output_properties_[mailbox_index];
+   mailbox_index_or_max_if_inactive_out = properties.IsActive() ? mailbox_index : UINT32_MAX;
++  last_consumed_refresh_number_.store(properties.IsActive() ? properties.refresh_number : 0,
++                                      std::memory_order_relaxed);
+   if (properties_out) {
+     *properties_out = properties;
+   }
+@@ -1392,6 +1620,11 @@ Presenter::PaintMode Presenter::GetDesiredPaintModeFromUIThread(bool is_paintabl
+     // lifecycle.
+     return PaintMode::kNone;
+   }
++  if (IsUIOverlayPaintModeActive()) {
++    // Every guest frame is painted by the guest output thread, in the queue
++    // right after its own work; the UI goes through the overlay.
++    return PaintMode::kGuestOutputThreadImmediately;
++  }
+   if (!REXCVAR_GET(host_present_from_non_ui_thread)) {
+     return PaintMode::kUIThreadOnRequest;
+   }
+@@ -1582,7 +1815,16 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
+   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
++  const bool log_present = PresentLog::Get().enabled();
++  const uint64_t paint_start = log_present ? PresentLog::Now() : 0;
+   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
++  if (log_present) {
++    const uint64_t paint_end = PresentLog::Now();
++    PresentLog::Get().Paint(paint_end,
++                            last_consumed_refresh_number_.load(std::memory_order_relaxed),
++                            tls_in_guest_output_thread_paint ? 'g' : 'u', int(result),
++                            paint_end - paint_start);
++  }
+   switch (result) {
+     case PaintResult::kPresented:
+       surface_paint_connection_was_optimal_at_successful_paint_ = true;
+diff --git a/src/ui/shaders/bytecode/d3d12_5_1/ui_overlay_composite_ps.h b/src/ui/shaders/bytecode/d3d12_5_1/ui_overlay_composite_ps.h
+new file mode 100644
+index 0000000..73a6cc3
+--- /dev/null
++++ b/src/ui/shaders/bytecode/d3d12_5_1/ui_overlay_composite_ps.h
+@@ -0,0 +1,14 @@
++// Generated from ui_overlay_composite.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t ui_overlay_composite_ps[] = {
++    0x43425844, 0x4B0B6F27, 0x4891953E, 0x34CAF05A, 0xD972A2CC, 0x00000001, 0x00000140, 0x00000003,
++    0x0000002C, 0x00000060, 0x00000094, 0x4E475349, 0x0000002C, 0x00000001, 0x00000008, 0x00000020,
++    0x00000000, 0x00000001, 0x00000003, 0x00000000, 0x0000030F, 0x505F5653, 0x7469736F, 0x006E6F69,
++    0x4E47534F, 0x0000002C, 0x00000001, 0x00000008, 0x00000020, 0x00000000, 0x00000000, 0x00000003,
++    0x00000000, 0x0000000F, 0x545F5653, 0x65677261, 0xABAB0074, 0x58454853, 0x000000A4, 0x00000051,
++    0x00000029, 0x0100086A, 0x07001858, 0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555,
++    0x00000000, 0x04002064, 0x00101032, 0x00000000, 0x00000001, 0x03000065, 0x001020F2, 0x00000000,
++    0x02000068, 0x00000001, 0x0500001B, 0x00100032, 0x00000000, 0x00101046, 0x00000000, 0x08000036,
++    0x001000C2, 0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D,
++    0x001020F2, 0x00000000, 0x00100E46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x0100003E,
++};
+diff --git a/src/ui/shaders/ui_overlay_composite.ps.xesl b/src/ui/shaders/ui_overlay_composite.ps.xesl
+new file mode 100644
+index 0000000..2a3c4b7
+--- /dev/null
++++ b/src/ui/shaders/ui_overlay_composite.ps.xesl
+@@ -0,0 +1,27 @@
++// UI overlay painting (rexglue-presenter-ui-overlay.patch): the presenter's own
++// UI (ImGui, the achievement toasts), drawn by the UI thread into an 8-bit layer
++// cleared to 0, put over the SDR swap chain image as the UI would have been
++// drawn over it: the layer holds the UI's colour premultiplied by its coverage,
++// blended with ONE / INV_SRC_ALPHA. (Over HDR10 output, hdr_ui_composite.ps.)
++// Built with guest_output_triangle_strip_rect.vs.xesl over the whole image, with
++// the bilinear guest output effect's root signature / pipeline layout.
++
++#include "xesl.xesli"
++
++entry_outputs_begin_xe
++  entry_out_target_xe(float4_xe, xe_ui_overlay_composite_color, 0)
++entry_outputs_end_stage_inputs_begin_xe
++entry_stage_inputs_end_bindings_begin_pixel_xe
++  texture_xe(texture_2d_xe, xe_ui_overlay_composite_layer, set=0, binding=0, t0,
++             space0, texture(0))
++  entry_binding_next_xe
++  sampler_state_xe(xe_ui_overlay_composite_sampler, set=0, binding=1, s0, space0,
++                   sampler(0))
++entry_bindings_end_inputs_begin_xe
++  entry_in_pixel_coord_xe
++entry_inputs_end_code_begin_xe
++{
++  out_xe(xe_ui_overlay_composite_color) =
++      texel_fetch_2d_xe(xe_ui_overlay_composite_layer, int2_xe(in_pixel_coord_xe.xy), 0);
++}
++entry_code_end_xe
+diff --git a/src/ui/shaders/vulkan_spirv/ui_overlay_composite_ps.h b/src/ui/shaders/vulkan_spirv/ui_overlay_composite_ps.h
+new file mode 100644
+index 0000000..5965a9d
+--- /dev/null
++++ b/src/ui/shaders/vulkan_spirv/ui_overlay_composite_ps.h
+@@ -0,0 +1,22 @@
++// Generated from ui_overlay_composite.ps.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t ui_overlay_composite_ps[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x00006020, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0007000F, 0x00000004, 0x0000161F, 0x6E69616D, 0x00000000, 0x00001339, 0x00000C93, 0x00030010,
++    0x0000161F, 0x00000007, 0x00040047, 0x00001339, 0x0000001E, 0x00000000, 0x00040047, 0x00000BE2,
++    0x00000021, 0x00000000, 0x00040047, 0x00000BE2, 0x00000022, 0x00000000, 0x00040047, 0x00000C93,
++    0x0000000B, 0x0000000F, 0x00020013, 0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00030016,
++    0x0000000D, 0x00000020, 0x00040017, 0x0000001D, 0x0000000D, 0x00000004, 0x00040020, 0x0000029A,
++    0x00000003, 0x0000001D, 0x0004003B, 0x0000029A, 0x00001339, 0x00000003, 0x00090019, 0x00000096,
++    0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00040020,
++    0x00000313, 0x00000000, 0x00000096, 0x0004003B, 0x00000313, 0x00000BE2, 0x00000000, 0x00040020,
++    0x0000029B, 0x00000001, 0x0000001D, 0x0004003B, 0x0000029B, 0x00000C93, 0x00000001, 0x00040017,
++    0x00000013, 0x0000000D, 0x00000002, 0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x00040017,
++    0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x00050036,
++    0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x0000601F, 0x0004003D, 0x00000096,
++    0x00005268, 0x00000BE2, 0x0004003D, 0x0000001D, 0x00005455, 0x00000C93, 0x0007004F, 0x00000013,
++    0x00002229, 0x00005455, 0x00005455, 0x00000000, 0x00000001, 0x0004006E, 0x00000012, 0x000030C5,
++    0x00002229, 0x0007005F, 0x0000001D, 0x000042DF, 0x00005268, 0x000030C5, 0x00000002, 0x00000A0B,
++    0x0003003E, 0x00001339, 0x000042DF, 0x000100FD, 0x00010038,
++};
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 6726f53..40cd73d 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -203,6 +203,7 @@ namespace shaders {
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_ps.h"
+ #include "../shaders/vulkan_spirv/hdr_ui_composite_ps.h"
++#include "../shaders/vulkan_spirv/ui_overlay_composite_ps.h"
+ #if defined(REX_HAS_FIDELITYFX_SDK)
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_ps.h"
+@@ -284,6 +285,9 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
+ }
+ 
+ VulkanPresenter::~VulkanPresenter() {
++  // UI overlay painting's objects.
++  ShutdownUIOverlay();
++
+   // Destroy the swapchain after its images are not used for drawing anymore.
+   // This is a confusing part in Vulkan, as vkQueuePresentKHR doesn't signal a
+   // fence clearly indicating when it's safe to destroy a swapchain, so we
+@@ -870,6 +874,9 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+   // The retirement or destruction of the swapchain here will also cause
+   // awaiting completion of the usage of the swapchain and the surface on the
+   // GPU.
++  // UI overlay painting: the overlay's layers, released before the swapchain
++  // is retired.
++  DestroyUIOverlayFromUIThread();
+   if (paint_context_.vulkan_surface != VK_NULL_HANDLE) {
+     VkSwapchainKHR old_swapchain = paint_context_.PrepareForSwapchainRetirement();
+     bool surface_unusable;
+@@ -1166,11 +1173,15 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+     paint_context_.swapchain_framebuffers.emplace_back(image_view, framebuffer);
+   }
+ 
++  // UI overlay painting: the overlay layers.
++  CreateUIOverlayFromUIThread();
++
+   is_vsync_implicit_out = paint_context_.swapchain_is_fifo;
+   return SurfacePaintConnectResult::kSuccess;
+ }
+ 
+ void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
++  DestroyUIOverlayFromUIThread();
+   paint_context_.DestroySwapchainAndVulkanSurface();
+   paint_context_.swapchain_hdr_wanted = 0;
+   paint_context_.swapchain_hdr = false;
+@@ -2482,6 +2493,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+                              sizeof(whole_image), sizeof(ui_levels), ui_levels);
+       dfn.vkCmdDraw(draw_command_buffer, 4, 1, 0, 0);
+     }
++  } else if (!execute_ui_drawers && ui_overlay_paint_mode() && IsUIOverlayActive()) {
++    // UI overlay painting: the UI thread's overlay over the image.
++    CompositeUIOverlay(draw_command_buffer);
+   } else if (execute_ui_drawers && !paint_context_.swapchain_hdr) {
+     // Draw the UI.
+     VulkanUIDrawContext ui_draw_context(
+@@ -2790,6 +2804,14 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+     REXLOG_ERROR("VulkanPresenter: Failed to create the HDR UI composite shader module");
+     return false;
+   }
++  // UI overlay painting: the overlay over an SDR image.
++  shader_module_create_info.codeSize = sizeof(shaders::ui_overlay_composite_ps);
++  shader_module_create_info.pCode = shaders::ui_overlay_composite_ps;
++  if (dfn.vkCreateShaderModule(device, &shader_module_create_info, nullptr,
++                               &ui_overlay_composite_fs_) != VK_SUCCESS) {
++    REXLOG_ERROR("VulkanPresenter: Failed to create the UI overlay composite shader module");
++    return false;
++  }
+ 
+   VkAttachmentDescription intermediate_render_pass_attachment;
+   intermediate_render_pass_attachment.flags = 0;
+diff --git a/src/ui/vulkan/vulkan_presenter_ui_overlay.cpp b/src/ui/vulkan/vulkan_presenter_ui_overlay.cpp
+new file mode 100644
+index 0000000..f81dd76
+--- /dev/null
++++ b/src/ui/vulkan/vulkan_presenter_ui_overlay.cpp
+@@ -0,0 +1,279 @@
++/**
++ ******************************************************************************
++ * ReXGlue: UI overlay painting (rexglue-presenter-ui-overlay.patch), Vulkan    *
++ * side of the presenter: the overlay layers the UI thread draws its drawers   *
++ * into, and their composite over the image in the guest output's paint.      *
++ ******************************************************************************
++ */
++
++#include <cstdint>
++
++#include <rex/logging.h>
++#include <rex/ui/vulkan/presenter.h>
++#include <rex/ui/vulkan/util.h>
++
++namespace rex {
++namespace ui {
++namespace vulkan {
++
++bool VulkanPresenter::SupportsUIOverlayPaintMode() const { return true; }
++
++void VulkanPresenter::CreateUIOverlayFromUIThread() {
++  if (!ui_overlay_paint_mode() || paint_context_.swapchain == VK_NULL_HANDLE) {
++    return;
++  }
++  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
++  const VkDevice device = vulkan_device_->device();
++  const VkExtent2D extent = paint_context_.swapchain_extent;
++
++  // The UI overlay layers.
++  bool overlay_created = true;
++  for (uint32_t i = 0; i < 2 && overlay_created; ++i) {
++    VkImageCreateInfo image_create_info = {};
++    image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    image_create_info.imageType = VK_IMAGE_TYPE_2D;
++    image_create_info.format = kHdrUiLayerFormat;
++    image_create_info.extent = {extent.width, extent.height, 1};
++    image_create_info.mipLevels = 1;
++    image_create_info.arrayLayers = 1;
++    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++    image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (!util::CreateDedicatedAllocationImage(vulkan_device_, image_create_info,
++                                              util::MemoryPurpose::kDeviceLocal,
++                                              paint_context_.ui_overlay_images[i],
++                                              paint_context_.ui_overlay_memory[i])) {
++      overlay_created = false;
++      break;
++    }
++    VkImageViewCreateInfo view_create_info = {};
++    view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++    view_create_info.image = paint_context_.ui_overlay_images[i];
++    view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++    view_create_info.format = kHdrUiLayerFormat;
++    view_create_info.subresourceRange = util::InitializeSubresourceRange();
++    if (dfn.vkCreateImageView(device, &view_create_info, nullptr,
++                              &paint_context_.ui_overlay_views[i]) != VK_SUCCESS) {
++      overlay_created = false;
++      break;
++    }
++    VkFramebufferCreateInfo framebuffer_create_info = {};
++    framebuffer_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
++    framebuffer_create_info.renderPass = hdr_ui_layer_render_pass_;
++    framebuffer_create_info.attachmentCount = 1;
++    framebuffer_create_info.pAttachments = &paint_context_.ui_overlay_views[i];
++    framebuffer_create_info.width = extent.width;
++    framebuffer_create_info.height = extent.height;
++    framebuffer_create_info.layers = 1;
++    if (dfn.vkCreateFramebuffer(device, &framebuffer_create_info, nullptr,
++                                &paint_context_.ui_overlay_framebuffers[i]) != VK_SUCCESS) {
++      overlay_created = false;
++      break;
++    }
++    // Nothing paints while the UI thread manages the connection, and the last
++    // paints were awaited when the previous connection was released.
++    VkDescriptorImageInfo image_info = {VK_NULL_HANDLE, paint_context_.ui_overlay_views[i],
++                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
++    VkWriteDescriptorSet write = {};
++    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++    write.dstSet = paint_context_.guest_output_descriptor_sets
++                       [PaintContext::kGuestOutputDescriptorSetUiOverlay0Sampled + i];
++    write.descriptorCount = 1;
++    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++    write.pImageInfo = &image_info;
++    dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
++  }
++  if (!overlay_created) {
++    REXLOG_ERROR("VulkanPresenter: Failed to create the UI overlay layers");
++  }
++  ui_overlay_next_layer_ = 0;
++}
++
++void VulkanPresenter::DestroyUIOverlayFromUIThread() {
++  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
++  const VkDevice device = vulkan_device_->device();
++  // The guest output thread's paints (which read the overlay) and the UI
++  // thread's overlay drawing are over.
++  paint_context_.submission_tracker.AwaitAllSubmissionsCompletion();
++  ui_submission_tracker_.AwaitAllSubmissionsCompletion();
++  ui_overlay_published_.store(UINT32_MAX, std::memory_order_release);
++  for (uint32_t i = 0; i < 2; ++i) {
++    util::DestroyAndNullHandle(dfn.vkDestroyFramebuffer, device,
++                               paint_context_.ui_overlay_framebuffers[i]);
++    util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, paint_context_.ui_overlay_views[i]);
++    util::DestroyAndNullHandle(dfn.vkDestroyImage, device, paint_context_.ui_overlay_images[i]);
++    util::DestroyAndNullHandle(dfn.vkFreeMemory, device, paint_context_.ui_overlay_memory[i]);
++  }
++}
++
++void VulkanPresenter::ShutdownUIOverlay() {
++  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
++  const VkDevice device = vulkan_device_->device();
++  DestroyUIOverlayFromUIThread();
++  for (uint32_t i = 0; i < 2; ++i) {
++    ui_overlay_command_buffers_[i] = VK_NULL_HANDLE;
++    util::DestroyAndNullHandle(dfn.vkDestroyCommandPool, device, ui_overlay_command_pools_[i]);
++  }
++  util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, ui_overlay_composite_pipeline_);
++  util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, ui_overlay_composite_fs_);
++}
++
++bool VulkanPresenter::RenderUIOverlayFromUIThread() {
++  if (paint_context_.ui_overlay_framebuffers[0] == VK_NULL_HANDLE ||
++      paint_context_.ui_overlay_framebuffers[1] == VK_NULL_HANDLE) {
++    return false;
++  }
++  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
++  const VkDevice device = vulkan_device_->device();
++  const uint32_t layer = ui_overlay_next_layer_;
++  if (ui_overlay_command_pools_[layer] == VK_NULL_HANDLE) {
++    VkCommandPoolCreateInfo pool_create_info = {};
++    pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
++    pool_create_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
++    pool_create_info.queueFamilyIndex = vulkan_device_->queue_family_graphics_compute();
++    if (dfn.vkCreateCommandPool(device, &pool_create_info, nullptr,
++                                &ui_overlay_command_pools_[layer]) != VK_SUCCESS) {
++      return false;
++    }
++    VkCommandBufferAllocateInfo allocate_info = {};
++    allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
++    allocate_info.commandPool = ui_overlay_command_pools_[layer];
++    allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++    allocate_info.commandBufferCount = 1;
++    if (dfn.vkAllocateCommandBuffers(device, &allocate_info,
++                                     &ui_overlay_command_buffers_[layer]) != VK_SUCCESS) {
++      util::DestroyAndNullHandle(dfn.vkDestroyCommandPool, device,
++                                 ui_overlay_command_pools_[layer]);
++      return false;
++    }
++  }
++  // The command buffer's previous use; the guest output thread's reads of the
++  // layer are ordered against this drawing by the layer render pass's
++  // dependencies (both on the graphics queue).
++  ui_submission_tracker_.AwaitSubmissionCompletion(ui_overlay_submissions_[layer]);
++  VkCommandBuffer command_buffer = ui_overlay_command_buffers_[layer];
++  dfn.vkResetCommandPool(device, ui_overlay_command_pools_[layer], 0);
++  VkCommandBufferBeginInfo begin_info = {};
++  begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++  dfn.vkBeginCommandBuffer(command_buffer, &begin_info);
++  VkClearValue clear_value = {};
++  VkRenderPassBeginInfo pass_begin_info = {};
++  pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
++  pass_begin_info.renderPass = hdr_ui_layer_render_pass_;
++  pass_begin_info.framebuffer = paint_context_.ui_overlay_framebuffers[layer];
++  pass_begin_info.renderArea.extent = paint_context_.swapchain_extent;
++  pass_begin_info.clearValueCount = 1;
++  pass_begin_info.pClearValues = &clear_value;
++  dfn.vkCmdBeginRenderPass(command_buffer, &pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
++  const uint64_t submission = ui_submission_tracker_.GetCurrentSubmission();
++  {
++    VulkanUIDrawContext ui_draw_context(
++        *this, paint_context_.swapchain_extent.width, paint_context_.swapchain_extent.height,
++        command_buffer, submission, ui_submission_tracker_.UpdateAndGetCompletedSubmission(),
++        hdr_ui_layer_render_pass_, kHdrUiLayerFormat);
++    ExecuteUIDrawersFromUIThread(ui_draw_context);
++  }
++  dfn.vkCmdEndRenderPass(command_buffer);
++  dfn.vkEndCommandBuffer(command_buffer);
++
++  VkCommandBuffer command_buffers[2];
++  uint32_t command_buffer_count = 0;
++  const size_t setup_index = paint_context_.ui_setup_command_buffer_current_index;
++  if (setup_index != SIZE_MAX) {
++    PaintContext::UISetupCommandBuffer& setup = paint_context_.ui_setup_command_buffers[setup_index];
++    dfn.vkEndCommandBuffer(setup.command_buffer);
++    command_buffers[command_buffer_count++] = setup.command_buffer;
++    paint_context_.ui_setup_command_buffer_current_index = SIZE_MAX;
++  }
++  command_buffers[command_buffer_count++] = command_buffer;
++  VkSubmitInfo submit_info = {};
++  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++  submit_info.commandBufferCount = command_buffer_count;
++  submit_info.pCommandBuffers = command_buffers;
++  VkResult submit_result;
++  {
++    VulkanSubmissionTracker::FenceAcquisition fence_acquisition =
++        ui_submission_tracker_.AcquireFenceToAdvanceSubmission();
++    {
++      const VulkanDevice::Queue::Acquisition queue_acquisition =
++          vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
++      submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info,
++                                        fence_acquisition.fence());
++    }
++    if (submit_result != VK_SUCCESS) {
++      fence_acquisition.SubmissionFailedOrDropped();
++      if (setup_index != SIZE_MAX) {
++        paint_context_.ui_setup_command_buffers[setup_index].last_usage_submission_index = 0;
++      }
++    }
++  }
++  if (submit_result != VK_SUCCESS) {
++    return false;
++  }
++  ui_overlay_submissions_[layer] = submission;
++  // A paint that reads it is submitted to the same queue after this.
++  ui_overlay_published_.store(layer, std::memory_order_release);
++  ui_overlay_next_layer_ = layer ^ 1;
++  return true;
++}
++
++void VulkanPresenter::CompositeUIOverlay(VkCommandBuffer command_buffer) {
++  const uint32_t layer = ui_overlay_published_.load(std::memory_order_acquire);
++  if (layer >= 2 || paint_context_.ui_overlay_framebuffers[layer] == VK_NULL_HANDLE) {
++    return;
++  }
++  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
++  const VkDevice device = vulkan_device_->device();
++  const bool hdr = paint_context_.swapchain_hdr;
++  VkPipeline& pipeline = hdr ? hdr_ui_composite_pipeline_ : ui_overlay_composite_pipeline_;
++  VkFormat& pipeline_format =
++      hdr ? hdr_ui_composite_pipeline_format_ : ui_overlay_composite_pipeline_format_;
++  if (pipeline_format != paint_context_.swapchain_render_pass_format) {
++    if (pipeline != VK_NULL_HANDLE) {
++      paint_context_.submission_tracker.AwaitAllSubmissionsCompletion();
++      util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, pipeline);
++    }
++    pipeline = CreateGuestOutputPaintPipeline(
++        GuestOutputPaintEffect::kBilinear, paint_context_.swapchain_render_pass,
++        hdr ? hdr_ui_composite_fs_ : ui_overlay_composite_fs_, true);
++    pipeline_format = paint_context_.swapchain_render_pass_format;
++  }
++  if (pipeline == VK_NULL_HANDLE) {
++    return;
++  }
++  VkPipelineLayout layout =
++      guest_output_paint_pipeline_layouts_[kGuestOutputPaintPipelineLayoutIndexBilinear];
++  dfn.vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
++  dfn.vkCmdBindDescriptorSets(
++      command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1,
++      &paint_context_.guest_output_descriptor_sets
++           [PaintContext::kGuestOutputDescriptorSetUiOverlay0Sampled + layer],
++      0, nullptr);
++  VkViewport viewport = {0.0f, 0.0f, float(paint_context_.swapchain_extent.width),
++                         float(paint_context_.swapchain_extent.height), 0.0f, 1.0f};
++  dfn.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
++  VkRect2D scissor = {{0, 0}, paint_context_.swapchain_extent};
++  dfn.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
++  GuestOutputPaintRectangleConstants whole_image;
++  whole_image.x = -1.0f;
++  whole_image.y = -1.0f;
++  whole_image.width = 2.0f;
++  whole_image.height = 2.0f;
++  dfn.vkCmdPushConstants(command_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
++                         sizeof(whole_image), &whole_image);
++  if (hdr) {
++    HdrOutputState hdr_state = GetHdrOutputState();
++    const float ui_levels[] = {hdr_state.sdr_white_nits,
++                               hdr_state.sdr_pure_gamma_2_2 ? 1.0f : 0.0f, 0.0f, 0.0f};
++    dfn.vkCmdPushConstants(command_buffer, layout, VK_SHADER_STAGE_FRAGMENT_BIT,
++                           sizeof(whole_image), sizeof(ui_levels), ui_levels);
++  }
++  dfn.vkCmdDraw(command_buffer, 4, 1, 0, 0);
++}
++
++}  // namespace vulkan
++}  // namespace ui
++}  // namespace rex

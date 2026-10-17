@@ -19,6 +19,7 @@ UI = ("src/ui/shaders", "ui/shaders", "src/ui/shaders/bytecode/d3d12_5_1", "src/
 GPU = ("src/graphics/shaders", "gpu/shaders", "src/graphics/shaders/bytecode/d3d12_5_1", "src/graphics/shaders/vulkan_spirv")
 SHADERS = {
     "hdr_ui_composite.ps": UI,
+    "ui_overlay_composite.ps": UI,
     "hdr_refresh.cs": GPU,
     "hdr_fullscreen.vs": GPU,
     "hdr_underlay_restore.ps": GPU,

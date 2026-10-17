@@ -37,6 +37,8 @@ git apply ../../patches/rexglue-hdr-scene-mcla.patch
 git apply ../../patches/rexglue-temporal-aa.patch
 git apply ../../patches/rexglue-temporal-aa-shaders-vk.patch
 git apply ../../patches/rexglue-fullscreen-setting-ui-thread.patch
+git apply ../../patches/rexglue-presenter-ui-overlay.patch
+git apply ../../patches/rexglue-frame-generation.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).
@@ -866,9 +868,11 @@ Not done yet: the reactive mask on by default; building and running it on Linux 
 **Why.** FSR's Vulkan runtime embeds its shaders as SPIR-V in headers that FidelityFX's shader compiler, FidelityFX_SC.exe, generates at build time; it is a Windows program, so Linux and the PS5 (whose build host is Linux) can't run it. This patch adds those headers, prebuilt, for the permutations rexglue's native anti-aliasing can ask for, so neither needs Wine or a Windows tool. Generated, so in a patch of its own; `rexglue-temporal-aa.patch` uses it.
 
 **What it adds.** `thirdparty/fidelityfx-shaders-vk/`, made by `launcher/dev/fsr/fsr_vk_shaders.py` from a Windows build's FidelityFX_SC output at the pinned FidelityFX commit:
-- For each of the FSR 3 upscaler's ten passes and its four device variants (wave32 or 64, FP16 or not; the device picks), the permutation table (`*_permutations.h`) with the keys rexglue's create flags reach (HDR input, inverted depth, vectors at the render size, no jitter cancellation: four of 64, the Lanczos table that the device picks times sharpening) leading to their blobs, unchanged, and every other key to an empty entry; tables FidelityFX's code doesn't use (the 16-bit ones of the passes without FP16, whose blobs its runtime doesn't embed) empty: 40 blobs, 0.94 MB of SPIR-V, 5.17 MB as headers (115 files).
+- For each of the FSR 3 upscaler's ten passes and its four device variants (wave32 or 64, FP16 or not; the device picks), the permutation table (`*_permutations.h`) with the keys rexglue's create flags reach (HDR input, inverted depth, vectors at the render size, no jitter cancellation: four of 64, the Lanczos table that the device picks times sharpening) leading to their blobs, unchanged, and every other key to an empty entry; tables FidelityFX's code doesn't use (the 16-bit ones of the passes without FP16, whose blobs its runtime doesn't embed) empty.
+- The same for frame generation (`rexglue-frame-generation.patch`): frame interpolation's 11 passes and optical flow's 7, for the create flags of `frame_generation_fsr.h` (`REXGLUE_FSR_SHADERS_VK_FG_FLAGS`): 40 more table entries (26 and 14).
+- Each blob is stored once: FidelityFX_SC writes the same SPIR-V for several variants of a pass (wave64, 16-bit), and those tables point at one header. 38 distinct blobs, 0.72 MB of SPIR-V, 4.28 MB as headers (185 files); before frame generation and the folding the set was 40 blobs, 0.94 MB and 5.17 MB.
 - FSR 2's 32 tables empty (ffx-api links FSR 2, but rexglue asks for FSR 3.1).
-- `rexglue_fsr_shaders_vk.h`: the create flags the set is for, of those that choose FSR 3's permutations; the GPU plugin compares its own with them before it creates FSR from this set.
+- `rexglue_fsr_shaders_vk.h`: the create flags the set is for, of those that choose FSR 3's permutations (and frame generation's); the GPU plugin compares its own with them before it creates FSR from this set.
 - FidelityFX's MIT licence and a README.
 
 The script stops without writing on a FidelityFX checkout that isn't the pinned commit or has other trees or modified files (as `rexglue_fsr.cmake` checks it), on an option it doesn't know, on create flags in the GPU plugin it can't map to options (`kTaaFsrCreateFlags` in `temporal_aa_fsr.h`, which both backends must use as they are), on FidelityFX choosing its permutations from the flags differently from what it assumes (the lines of `ffx_fsr3upscaler.cpp` it checks), on a table the accessor indexes with a key of another layout, on a table whose blobs the runtime embeds only in part, on a build that itself used the prebuilt set, and when its own output has a key rexglue can ask for that leads to an empty entry. Its output doesn't depend on the order FidelityFX_SC writes things in (it varies from run to run). Run it again after a change of the FidelityFX commit or of the create flags, and remake the patch.
@@ -888,3 +892,43 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 | Change | Files | Affects |
 |---|---|---|
 | `fullscreen` applied on the UI thread | `src/ui/rex_app.cpp` | all platforms with a window |
+
+## rexglue-presenter-ui-overlay.patch
+
+**Why.** While any UI drawer is registered (an ImGui dialog such as the F4 settings overlay or the console, the achievement pop-up) or Vulkan's FIFO makes presenting wait for vertical sync, the presenter paints from the UI thread: it presents at the display's rate and shows each guest frame when it gets to it, on the queue the GPU command thread submits to. With the F4 overlay open that halves the game's frame rate (`KNOWN-ISSUES.md`). Frame generation needs every guest frame painted by the guest output thread, in the queue right after the frame's own work. This patch adds that way of painting, with the UI still shown: UI overlay painting.
+
+**What it adds.**
+- **`present_ui_overlay`** (off; restart), and frame generation, turn it on. The guest output thread paints every guest frame, with or without drawers and with implicit vertical sync. The UI thread no longer paints: it keeps the connection (reconnecting when the guest output thread finds it outdated) and, at its usual tick rate, draws the drawers into one of two overlay layers (8-bit, premultiplied, the swap chain's size) on a command list of its own, publishing the newest finished one. The guest output thread's paint puts it over the image: in SDR with `ui_overlay_composite.ps` (one-to-one, premultiplied blending), over HDR10 with `hdr_ui_composite.ps` and the UI levels the HDR UI layer uses. On D3D12 the paint first copies the published layer into a snapshot of its own; on Vulkan it samples it, the layer render pass's dependencies ordering the UI thread's drawing against the paint's reads (both on the graphics queue).
+- **Suspension.** When no guest frame has come for 1 s while a drawer is registered (a hang on a load, a modal prompt), the UI thread paints and presents as before, until a guest frame less than 100 ms old comes again. Logged both ways. `present_debug_stall_ms` makes the guest output thread sleep once, to test it.
+- **The present log** (`present_log=<csv>`, development): one line per guest output refresh (steady clock in ns, the refresh's number, 0 if not published) and one per paint (the refresh it showed, the painting thread, the result, its duration), flushed about once a second. `launcher/dev/presents.py` lines it up with the swaps of `frames.csv` and PresentMon's capture (`devrun.py --present-log --presentmon`). An implementation's pacer thread logs its presents as thread q (`LogPresentFromPacer`).
+- **Checked** with frame generation's phase 0, which is this way of painting (plus the pacer on Vulkan; `rexglue-frame-generation.patch` has the figures): every guest frame presented once with the F4 overlay open (146 a second, against 77 without it), the suspension during a forced 3 s stall, resizes and HDR switches. On its own (`present_ui_overlay`, Vulkan without the pacer) it is not measured yet, nor made the default.
+
+| Change | Files | Affects |
+|---|---|---|
+| UI overlay painting, its suspension, the present log | `include/rex/ui/presenter.h`, `src/ui/presenter.cpp` | all platforms |
+| The overlay layers and their composite | `include/rex/ui/d3d12/d3d12_presenter.h`, `src/ui/d3d12/d3d12_presenter.cpp`, `include/rex/ui/vulkan/presenter.h`, `src/ui/vulkan/vulkan_presenter.cpp`, `src/ui/vulkan/vulkan_presenter_ui_overlay.cpp`, `src/ui/CMakeLists.txt` | D3D12; Vulkan (all platforms) |
+| The overlay composite shader, compiled | `src/ui/shaders/ui_overlay_composite.ps.xesl`, `src/ui/shaders/bytecode/d3d12_5_1/ui_overlay_composite_ps.h`, `src/ui/shaders/vulkan_spirv/ui_overlay_composite_ps.h` | D3D12; Vulkan |
+
+## rexglue-frame-generation.patch
+
+**Why.** AMD FSR 3.1 frame generation, an interpolated frame between every two the game renders. This is phase 0 of the plan: the build of FidelityFX's frame generation and the way frames are presented for it, without generating any yet.
+
+**What it adds.**
+- **`frame_generation`** (off or fsr; restart). fsr turns on UI overlay painting (`rexglue-presenter-ui-overlay.patch`) and, on Vulkan, the frame pacer. Nothing is generated yet.
+- **FidelityFX.** The frame generation provider in the ffx-api runtimes (`FFX_API_ENABLE_FRAMEGEN_PROVIDER`), with frame interpolation and optical flow. On Vulkan its frame interpolation swapchain is replaced by a stub (`cmake/fidelityfx/ffx_provider_framegenerationswapchain_vk_stub.cpp`): rexglue drives frame generation itself, and AMD's Vulkan swapchain at this commit doesn't build with Clang. A configure check stops the build if the Vulkan backend ever gets the provider's define. The wrapper's files are hashed into the runtime's configure, so changing one rebuilds it. `ffx_framegeneration.h` (MIT, unmodified) and `src/graphics/frame_generation_fsr.h` with the create flags, which a `static_assert` checks against the prebuilt Vulkan set's (`rexglue-temporal-aa-shaders-vk.patch`).
+- **Vulkan device.** With `frame_generation` on: a second queue for the pacer (queue 1 of the graphics family where it has two, as NVIDIA's does; otherwise one of another family that can present) and timeline semaphores (Vulkan 1.2; without them frame generation stays off).
+- **The Vulkan frame pacer.** The guest output thread paints each frame into one of two present images (the swap chain's format and size, shared by both queue families) and hands it to the pacer thread. That thread acquires a swap chain image with a fence it waits for on the CPU, copies the frame into it and presents it on its own queue, so a present waiting for vertical sync never holds the graphics queue. Timeline semaphores order paint, copy and the next paint into the same image. The guest output thread waits until the pacer has taken the previous frame (back-pressure, no frame dropped). MAILBOX is never used. A reconnect (resize, HDR switch) pauses the pacer and drops the frames it hadn't taken. If the swap chain can't be copied into, the guest output thread presents itself. `frame_generation_dump=N` (development) writes the next N presented images as PPM files.
+- **Checked** (Windows, RTX 5080, 1920x1080 window, uncapped, PresentMon and the present log, `launcher/dev/fg/fg-mode.pad`). On both APIs, with frame generation on:
+  - **Every guest frame presented exactly once:** in steady driving, with the F4 overlay open and after a stall (146 a second with the overlay, against 77 on the default path).
+  - **The suspension:** during a forced 3 s stall the UI thread painted the overlay about 480 times, and the mode resumed afterwards.
+  - **Reconnects:** each lost one guest frame per resize or HDR switch on D3D12, and up to five on Vulkan's fullscreen switches (the default path loses none at an HDR switch).
+  - **No stale image after a switch:** the frames the Vulkan pacer presented right after fullscreen switches, read back, are whole frames at the new size.
+  - **The pacer:** on its own queue (family 0, queue 1), with as many presents in the present log as PresentMon counted.
+
+| Change | Files | Affects |
+|---|---|---|
+| `frame_generation`; frame generation's flag in the presenter | `include/rex/ui/presenter.h`, `src/ui/presenter.cpp`, `include/rex/ui/d3d12/d3d12_presenter.h` | all platforms |
+| FidelityFX's frame generation provider and its build | `cmake/fidelityfx/CMakeLists.txt`, `cmake/fidelityfx/ffx_provider_framegenerationswapchain_vk_stub.cpp`, `cmake/rexglue_fsr.cmake`, `thirdparty/fidelityfx-api/` | where FSR is built |
+| The create flags and their check against the prebuilt set | `src/graphics/frame_generation_fsr.h`, `src/graphics/vulkan/temporal_aa.cpp` | Vulkan |
+| The pacer's queue and timeline semaphores | `include/rex/ui/vulkan/device.h`, `include/rex/ui/vulkan/functions/device_1_2_khr_timeline_semaphore.inc`, `src/ui/vulkan/vulkan_device.cpp` | Vulkan, with `frame_generation` on |
+| The present images and the pacer | `include/rex/ui/vulkan/presenter.h`, `src/ui/vulkan/vulkan_presenter.cpp`, `src/ui/vulkan/vulkan_presenter_frame_generation.cpp`, `src/ui/CMakeLists.txt` | Vulkan, with `frame_generation` on |

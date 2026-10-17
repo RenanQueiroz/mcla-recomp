@@ -18,6 +18,7 @@
 
 #include <rex/ui/vulkan/device.h>
 
+#include "frame_generation_fsr.h"
 #include "temporal_aa_fsr.h"
 
 #include <ffx_api/vk/ffx_api_vk.h>
@@ -435,6 +436,90 @@ int main() {
 
   ffx_result = ffxDestroyContext(&context, nullptr);
   Check(ffx_result == FFX_API_RETURN_OK, "ffxDestroyContext", ffx_result);
+
+  // Frame generation, as the plugin creates it (frame_generation_fsr.h): manual
+  // (no swapchain), the scene in FP16 code values told sRGB. Four frames of a
+  // still, flat picture: the generated frame is that picture.
+  ffxCreateContextDescFrameGeneration fg_create = {};
+  fg_create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+  fg_create.header.pNext = &backend.header;
+  fg_create.flags = rex::graphics::kFgCreateFlags;
+  fg_create.displaySize = {kWidth, kHeight};
+  fg_create.maxRenderSize = {kWidth, kHeight};
+  fg_create.backBufferFormat = FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
+  ffxContext fg = nullptr;
+  ffx_result = ffxCreateContext(&fg, &fg_create.header, nullptr);
+  if (Check(ffx_result == FFX_API_RETURN_OK, "ffxCreateContext (frame generation, the plugin's flags)",
+            ffx_result)) {
+    dfn.vkResetCommandPool(device, pool, 0);
+    dfn.vkBeginCommandBuffer(command_buffer, &begin);
+    barrier(output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    for (uint64_t frame = 1; frame <= 4 && ffx_result == FFX_API_RETURN_OK; ++frame) {
+      ffxConfigureDescFrameGeneration configure = {};
+      configure.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+      configure.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+      configure.frameGenerationEnabled = true;
+      configure.frameID = frame;
+      ffx_result = ffxConfigure(&fg, &configure.header);
+      if (ffx_result != FFX_API_RETURN_OK) {
+        break;
+      }
+      ffxDispatchDescFrameGenerationPrepare prepare = {};
+      prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE;
+      prepare.frameID = frame;
+      prepare.commandList = command_buffer;
+      prepare.renderSize = {kWidth, kHeight};
+      prepare.motionVectorScale = {1.0f, 1.0f};
+      prepare.frameTimeDelta = 8.3f;
+      prepare.cameraNear = 0.5f;
+      prepare.cameraFar = 5000.0f;
+      prepare.cameraFovAngleVertical = 1.0f;
+      prepare.viewSpaceToMetersFactor = 1.0f;
+      prepare.depth = resource(depth, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+      prepare.motionVectors = resource(vectors, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+      ffx_result = ffxDispatch(&fg, &prepare.header);
+      if (ffx_result != FFX_API_RETURN_OK) {
+        break;
+      }
+      ffxDispatchDescFrameGeneration generate = {};
+      generate.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
+      generate.commandList = command_buffer;
+      generate.presentColor = resource(color, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+      generate.outputs[0] = resource(output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+      generate.numGeneratedFrames = 1;
+      generate.reset = frame == 1;
+      generate.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+      generate.minMaxLuminance[0] = 0.0f;
+      generate.minMaxLuminance[1] = 1.0f;
+      generate.frameID = frame;
+      ffx_result = ffxDispatch(&fg, &generate.header);
+    }
+    Check(ffx_result == FFX_API_RETURN_OK, "frame generation: configure, prepare, generate, 4 frames",
+          ffx_result);
+    barrier(output, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    dfn.vkCmdCopyImageToBuffer(command_buffer, output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               readback, 1, &copy);
+    dfn.vkEndCommandBuffer(command_buffer);
+    result = dfn.vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+    Check(result == VK_SUCCESS, "frame generation submission", result);
+    result = dfn.vkQueueWaitIdle(queue);
+    Check(result == VK_SUCCESS, "the GPU finished frame generation (no device loss)", result);
+    dfn.vkMapMemory(device, readback_memory, 0, 8, 0, &mapped);
+    half = static_cast<const uint16_t*>(mapped);
+    for (int i = 0; i < 4; ++i) {
+      pixel[i] = HalfToFloat(half[i]);
+    }
+    dfn.vkUnmapMemory(device, readback_memory);
+    std::printf("generated centre: %.4f %.4f %.4f (input %.4f %.4f %.4f)\n", pixel[0], pixel[1],
+                pixel[2], kColor[0], kColor[1], kColor[2]);
+    bool same_generated = true;
+    for (int i = 0; i < 3; ++i) {
+      same_generated = same_generated && std::fabs(pixel[i] - kColor[i]) <= 0.01f + 0.02f * kColor[i];
+    }
+    Check(same_generated, "the generated frame of a still picture is that picture");
+    ffx_result = ffxDestroyContext(&fg, nullptr);
+    Check(ffx_result == FFX_API_RETURN_OK, "ffxDestroyContext (frame generation)", ffx_result);
+  }
   dfn.vkDestroyCommandPool(device, pool, nullptr);
   for (Image* image : {&color, &depth, &vectors, &output}) {
     dfn.vkDestroyImage(device, image->image, nullptr);

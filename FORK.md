@@ -147,6 +147,8 @@ git apply ../../patches/rexglue-hdr-scene-mcla.patch
 git apply ../../patches/rexglue-temporal-aa.patch
 git apply ../../patches/rexglue-temporal-aa-shaders-vk.patch
 git apply ../../patches/rexglue-fullscreen-setting-ui-thread.patch
+git apply ../../patches/rexglue-presenter-ui-overlay.patch
+git apply ../../patches/rexglue-frame-generation.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they

@@ -1,0 +1,43 @@
+# Frame generation phase 0 (rexglue-frame-generation.patch), run with
+# --frame_generation=fsr: a steady drive, the F4 settings overlay (an ImGui
+# drawer) open through a forced 3 s stall of the guest output thread (UI overlay
+# painting suspended, then resumed) and a fullscreen switch (a resize), then the
+# overlay closed and an HDR switch. devrun.py --presentmon --present-log; read
+# with presents.py: presents per swap, per segment.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 5s
+mark steady
+trigger rt 0.5
+stick lx 0.15
+wait 20s
+key F4
+mark overlay
+wait 15s
+set present_debug_stall_ms 3000
+mark stall
+wait 6s
+mark after_stall
+wait 8s
+set fullscreen true
+mark fullscreen
+wait 6s
+set fullscreen false
+mark windowed
+wait 6s
+key F4
+mark overlay_off
+wait 6s
+set hdr off
+mark hdr_off
+wait 6s
+set hdr on
+mark hdr_on
+wait 6s
+release all
+mark end
+wait 1s

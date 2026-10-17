@@ -1,0 +1,16 @@
+# Presented-frame gate (frame generation, phase 0): boot to the city, settle, then 40 s of gentle
+# driving (the "steady" segment) where presents are compared with guest swaps.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 5s
+mark steady
+trigger rt 0.5
+stick lx 0.15
+wait 40s
+release all
+mark steady_end
+wait 1s
