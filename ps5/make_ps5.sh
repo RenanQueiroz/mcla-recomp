@@ -192,6 +192,7 @@ rexglue-edram-size.patch src/graphics/pipeline/render_target/cache.cpp edram_til
 rexglue-guest-markers.patch include/rex/graphics/command_processor.h OnGuestMarker
 rexglue-hdr-output.patch src/ui/presenter.cpp IsHdrOutputWanted
 rexglue-hdr-ui-layer.patch src/graphics/command_processor.cpp HdrBeforeResolve
+rexglue-hdr-scene-mcla.patch src/graphics/command_processor.cpp HdrPrepareScene
 LATER
 
 # ---------------------------------------------------------------------------

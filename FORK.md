@@ -121,6 +121,7 @@ git apply ../../patches/rexglue-edram-size.patch
 git apply ../../patches/rexglue-guest-markers.patch
 git apply ../../patches/rexglue-hdr-output.patch
 git apply ../../patches/rexglue-hdr-ui-layer.patch
+git apply ../../patches/rexglue-hdr-scene-mcla.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they
