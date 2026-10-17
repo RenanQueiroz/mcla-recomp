@@ -296,7 +296,7 @@ static class GameSettings
     public const string ExtraArgumentsInfo =
         "Extra options passed to the game every time it starts, for troubleshooting or settings the launcher "
         + "doesn't show, such as --log_file=run.log. They win over everything above and over the pause menu. "
-        + "Leave it empty unless you need something specific.";
+        + "An option typed twice counts once, with its last value. Leave it empty unless you need something specific.";
     public const string CheckForUpdatesInfo =
         "Looks for a new version of the fork on GitHub when the launcher opens. It downloads nothing by "
         + "itself; updating, which rebuilds the game in a few minutes, is up to you.";

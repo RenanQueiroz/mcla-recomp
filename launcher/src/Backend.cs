@@ -48,7 +48,82 @@ static class Paths
 /// vsync is turned off by the game unless the player turns it on.
 static class GameOptions
 {
-    public static string Arguments(LauncherSettings s) => s.ExtraArguments.Trim();
+    public static string Arguments(LauncherSettings s) => LastOfEach(s.ExtraArguments.Trim());
+
+    /// Every option once, the last one typed winning: the SDK's command line
+    /// parser fails on a repeated option, and the game then ignores every
+    /// option on the command line (the error goes only to stderr). --name and
+    /// --no-name are one option; a separated "--name value" keeps its value.
+    internal static string LastOfEach(string arguments)
+    {
+        var items = new List<(string? Key, string Text)>();
+        var tokens = Tokenize(arguments);
+        for (int i = 0; i < tokens.Count; ++i)
+        {
+            string text = tokens[i];
+            string? key = OptionKey(text);
+            if (key != null && !text.Contains('=') && i + 1 < tokens.Count && !tokens[i + 1].StartsWith('-'))
+            {
+                text += " " + tokens[++i];
+            }
+            if (key != null)
+            {
+                items.RemoveAll(item => item.Key == key);
+            }
+            items.Add((key, text));
+        }
+        return string.Join(' ', items.Select(item => item.Text));
+    }
+
+    static string? OptionKey(string token)
+    {
+        if (!token.StartsWith("--"))
+        {
+            return null;
+        }
+        string name = token[2..];
+        int equals = name.IndexOf('=');
+        if (equals >= 0)
+        {
+            name = name[..equals];
+        }
+        name = name.Trim('"');
+        if (name.StartsWith("no-"))
+        {
+            name = name[3..];
+        }
+        return name.Length > 0 ? name : null;
+    }
+
+    // Separated by white space; a double-quoted span, quotes kept, stays in its token.
+    static List<string> Tokenize(string text)
+    {
+        var tokens = new List<string>();
+        var current = new StringBuilder();
+        bool quoted = false;
+        foreach (char c in text)
+        {
+            if (c == '"')
+            {
+                quoted = !quoted;
+            }
+            if (char.IsWhiteSpace(c) && !quoted)
+            {
+                if (current.Length > 0)
+                {
+                    tokens.Add(current.ToString());
+                    current.Clear();
+                }
+                continue;
+            }
+            current.Append(c);
+        }
+        if (current.Length > 0)
+        {
+            tokens.Add(current.ToString());
+        }
+        return tokens;
+    }
 }
 
 sealed record LauncherSettings

@@ -226,5 +226,24 @@ class Bench(unittest.TestCase):
         self.assertIn("forza.exe", text)
 
 
+class GameArgs(unittest.TestCase):
+    """game_args(): every option once, the last value winning (the SDK ignores the whole command
+    line when one is repeated)."""
+
+    def test_repeated_option_last_wins(self):
+        a = argparse.Namespace(cache_root=None, backend="vulkan", res="1", fps="0", vsync="false",
+                               fullscreen=True, intro="normal", script="", keep_open=False,
+                               pipe="", fixed_dt=0, record=None, track=False,
+                               extra=["--hdr=off", "--vsync=true", "--hdr=on"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            args = devrun.game_args(a, Path("out"))
+        keys = [x.split("=", 1)[0] for x in args]
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertIn("--hdr=on", args)
+        self.assertNotIn("--hdr=off", args)
+        self.assertIn("--vsync=true", args)
+        self.assertNotIn("--vsync=false", args)
+
+
 if __name__ == "__main__":
     unittest.main()

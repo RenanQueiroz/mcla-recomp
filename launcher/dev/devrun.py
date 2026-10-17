@@ -599,7 +599,17 @@ def game_args(a, out):
         # The car's position twice a second (at 60), to compare runs' paths.
         args.append(f"--mcla_pad_record={out / 'pad.csv'}")
     args += a.extra
-    return args
+    # One value per option, the last one: the SDK's command line parser (CLI11) fails on a
+    # repeated option, and the SDK then applies none of them, so the game would run on the
+    # real Documents\\mcla, its cache and the default API (it happened on 2026-10-17).
+    last = {}
+    for arg in args:
+        key = arg.split("=", 1)[0]
+        if key in last:
+            print(f"devrun: {key} given twice; the last value is used", flush=True)
+            del last[key]
+        last[key] = arg
+    return list(last.values())
 
 
 def mcla_running():
@@ -634,6 +644,14 @@ def run(a, tag=None):
     before = fingerprint()
     toml_backup = TOML.read_bytes() if TOML.exists() else None
     env = dict(os.environ, REX_PERF_LOG_CSV=str(out / "perf.csv"))
+    # The private folders and the API again as environment variables, which the SDK applies
+    # below the command line: if it can't parse the command line, a run still can't reach
+    # the real data.
+    env["REX_USER_DATA_ROOT"] = str(WORK)
+    env["REX_CACHE_ROOT"] = str(Path(a.cache_root).resolve() if a.cache_root else CACHE)
+    env["REX_MCLA_GPU_BACKEND"] = a.backend
+    if GAME_DATA:
+        env["REX_GAME_DATA_ROOT"] = str(GAME_DATA)
     env.update(kv.split("=", 1) for kv in a.env)
     args = game_args(a, out)
     (out / "args.txt").write_text(" ".join(args), encoding="utf-8")

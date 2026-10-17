@@ -25,4 +25,27 @@ else
   echo "note: the FSR anti-aliasing option wasn't built (the SDK's CMake output says why: it needs the network the first time and Vulkan's development files); the game offers MSAA and off." >&2
 fi
 
+# One value per option, the last given: the SDK's command line parser fails on a
+# repeated option, and the game then ignores every option on the command line.
+option_name() { k="${1%%=*}"; k="${k#--}"; echo "${k#no-}"; }
+count=$#
+i=0
+for arg do
+  i=$((i + 1))
+  keep=1
+  case "$arg" in
+    --?*)
+      name=$(option_name "$arg")
+      j=0
+      for later do
+        j=$((j + 1))
+        if [ "$j" -gt "$i" ] && [ "$j" -le "$count" ]; then
+          case "$later" in --?*) [ "$(option_name "$later")" = "$name" ] && keep=0 ;; esac
+        fi
+      done ;;
+  esac
+  if [ "$keep" = 1 ]; then set -- "$@" "$arg"; fi
+done
+shift "$count"
+
 LD_LIBRARY_PATH="$build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$build/mcla" "$@"
