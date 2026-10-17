@@ -370,6 +370,14 @@ constexpr double kFpsTargets[] = {30.0, 60.0};
 constexpr double kFpsTargets[] = {30.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
+// How often the HUD advances (mcla_ui_hud_rate, src/frame_timing.cpp): 0 is
+// every frame.
+#if REX_PLATFORM_PS5
+constexpr double kHudRates[] = {30.0, 60.0, 0.0};
+#else
+constexpr double kHudRates[] = {30.0, 60.0, 120.0, 0.0};
+#endif
+constexpr int kHudRateCount = int(sizeof(kHudRates) / sizeof(kHudRates[0]));
 constexpr const char* kPromptValues[] = {"auto", "xbox", "playstation"};
 constexpr const char* kPromptLabels[] = {"AUTO", "XBOX", "PLAYSTATION"};
 constexpr const char* kIntroValues[] = {"normal", "fast", "skip"};
@@ -378,6 +386,8 @@ constexpr const char* kIntroLabels[] = {"NORMAL", "FAST", "SKIP (NO LOGO)"};
 const ItemDef kDisplayItems[] = {
     {"PM_MxFps", ItemKind::kNumberChoice, "mcla_fps", "FPS TARGET", nullptr, nullptr, kFpsTargets,
      kFpsTargetCount, "%.0f", "UNCAPPED"},
+    {"PM_MxHudRate", ItemKind::kNumberChoice, "mcla_ui_hud_rate", "HUD UPDATES", nullptr, nullptr,
+     kHudRates, kHudRateCount, "%.0f PER SECOND", "EVERY FRAME"},
 #if !REX_PLATFORM_PS5
     // Neither means anything on the console: there is one display mode, and
     // the PS5 host turns the emulated vsync off at every start.
