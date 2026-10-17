@@ -28,6 +28,7 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
 REXCVAR_DEFINE_BOOL(mcla_motion_blur, true, "MCLA", "Motion blur");
@@ -38,6 +39,10 @@ REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
 // Set by a host that keeps the settings file somewhere other than next to
 // the executable (PS5).
 const char* g_mcla_settings_path = nullptr;
+
+#if !REX_PLATFORM_PS5
+void MclaWaitForSaves();  // src/mcla_app.cpp
+#endif
 
 namespace {
 
@@ -847,6 +852,31 @@ void CreateSubmenus() {
   REXLOG_INFO("settings menu: {} submenus added to the pause menu", kMenuCount);
 }
 
+// Ends the game as the window's close button does: on the UI thread, after any
+// career save in progress (MclaWaitForSaves), the window is closed, which ends
+// the title and the process (ReXApp::OnClosing).
+// WindowedAppContext::RequestDeferredQuit, used before, only left the UI loop:
+// the app then waited for the game's main thread, which doesn't end, so the
+// game played on behind a window that no longer answered. The PS5 host has no
+// window listener of that kind, so it keeps the request it had.
+void CloseGame() {
+  auto* runtime = rex::Runtime::instance();
+#if REX_PLATFORM_PS5
+  if (auto* context = runtime ? runtime->app_context() : nullptr) {
+    context->RequestDeferredQuit();
+  }
+#else
+  rex::ui::Window* window = runtime ? runtime->display_window() : nullptr;
+  if (!window) {
+    return;
+  }
+  window->app_context().CallInUIThread([window] {
+    MclaWaitForSaves();
+    window->RequestClose();
+  });
+#endif
+}
+
 bool ButtonClicked(uint32_t key) {
   return key && CallGuest(kIsButtonClickedFn, key, 1u) != 0;
 }
@@ -933,12 +963,9 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
   }
 
   if (ButtonClicked(g_quit_button_key.load(std::memory_order_relaxed))) {
-    auto* runtime = rex::Runtime::instance();
-    if (auto* context = runtime ? runtime->app_context() : nullptr) {
-      REXLOG_INFO("settings menu: quit requested");
-      SaveSettingsIfChanged();
-      context->RequestDeferredQuit();
-    }
+    REXLOG_INFO("settings menu: quit requested");
+    SaveSettingsIfChanged();
+    CloseGame();
     r3.u64 = 1;
     return true;
   }
