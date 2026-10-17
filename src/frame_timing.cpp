@@ -27,6 +27,7 @@
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/runtime.h>
 
 #ifdef _WIN32
@@ -154,8 +155,15 @@ float ReadGuestFloat(uint32_t address) {
 
 void MclaTickButtonPrompts();
 void MclaTickPerfOptions();
+// The dev pad (src/dev_pad.cpp), a PC development tool the PS5 build doesn't
+// compile: no-ops there.
+#if REX_PLATFORM_PS5
+static void MclaDevPadFrame(uint64_t&) {}
+static void MclaDevPadSwap() {}
+#else
 void MclaDevPadFrame(uint64_t& ticks);
 void MclaDevPadSwap();
+#endif
 void MclaApplyMsaaAtSwap();
 
 void mcla_frame_delta(PPCRegister& r8) {
