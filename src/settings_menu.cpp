@@ -61,6 +61,8 @@ constexpr uint32_t kFindMovieFn = 0x821F9FB8;
 constexpr uint32_t kSetFlashIntFn = 0x825EE0E0;
 constexpr uint32_t kGetFlashObjFn = 0x825ED480;
 constexpr uint32_t kSetFlashStrFn = 0x827227B8;
+constexpr uint32_t kTabStripRenderFn = 0x82630E40;  // (strip): its tabs, then the selected one
+constexpr uint32_t kWidgetMovieContextSlot = 468;   // vtable offset: the widget's movie context
 
 constexpr uint32_t kOptionRowCtorFn = 0x826349F0;  // (obj, nameKey, values, wrap)
 constexpr uint32_t kLabelRowCtorFn = 0x82633D40;   // (obj, nameKey, childCap)
@@ -372,7 +374,8 @@ struct ItemDef {
 // The console's display is 60 Hz.
 constexpr double kFpsTargets[] = {30.0, 60.0};
 #else
-constexpr double kFpsTargets[] = {30.0, 60.0, 120.0, 0.0};
+// 40 to 50 are for variable-refresh displays.
+constexpr double kFpsTargets[] = {30.0, 40.0, 45.0, 50.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
 // How often the HUD advances (mcla_ui_hud_rate, src/frame_timing.cpp): 0 is
@@ -428,7 +431,7 @@ const ItemDef kPerformanceItems[] = {
     {"PM_MxRaceShadows", ItemKind::kToggle, "mcla_race_shadows", "RACE SHADOWS (NEXT START)"},
     {"PM_MxFastCarShadows", ItemKind::kToggle, "mcla_fast_car_shadows",
      "SIMPLE CAR SHADOWS (NEXT START)"},
-    {"PM_MxImpostors", ItemKind::kToggle, "mcla_foliage_impostors", "DISTANT TREES (NEXT LOAD)"},
+    {"PM_MxImpostors", ItemKind::kToggle, "mcla_foliage_impostors", "DISTANT TREES (NEXT START)"},
     {"PM_MxFsBlur", ItemKind::kToggle, "mcla_fullscreen_blur", "FULLSCREEN BLUR (NEXT START)"},
     {"PM_MxMsaa", ItemKind::kToggle, "mcla_msaa", "ANTI ALIASING (NEXT START)"},
 };
@@ -560,6 +563,10 @@ std::atomic<int> g_active_menu{-1};
 std::atomic<bool> g_menus_created{false};
 
 std::atomic<uint32_t> g_pause_tab{0};
+// The tab strip the game rendered last, and the pause screen's while one of
+// our submenus is open: entering one hides the strip and retitles the menu.
+std::atomic<uint32_t> g_last_tab_strip{0};
+std::atomic<uint32_t> g_pause_tab_strip{0};
 std::atomic<uint32_t> g_settings_state{0};
 std::atomic<uint32_t> g_last_list{0};
 std::atomic<uint32_t> g_pause_list{0};
@@ -851,6 +858,31 @@ void CreateSubmenus() {
   REXLOG_INFO("settings menu: {} submenus added to the pause menu", kMenuCount);
 }
 
+bool InImage(uint32_t address) {
+  return address >= 0x82000000 && address < 0x82A00000;
+}
+
+// The tab strip the game rendered last, if it belongs to the pause screen.
+// Checked to be one (its vtable holds the strip's render) before a virtual
+// of it is called.
+uint32_t PauseTabStrip() {
+  const uint32_t strip = g_last_tab_strip.load(std::memory_order_relaxed);
+  const uint32_t vtable = strip >= 0x10000 ? Read32(strip) : 0;
+  if (!InImage(vtable)) {
+    return 0;
+  }
+  bool is_strip = false;
+  for (uint32_t slot = 0; slot < 160 && !is_strip; ++slot) {
+    is_strip = Read32(vtable + 4 * slot) == kTabStripRenderFn;
+  }
+  const uint32_t context_fn = is_strip ? Read32(vtable + kWidgetMovieContextSlot) : 0;
+  if (!InImage(context_fn)) {
+    return 0;
+  }
+  const uint32_t context = CallGuest(context_fn, strip);
+  return context && context == PauseMovieContext() ? strip : 0;
+}
+
 // Ends the game as the window's close button does: on the UI thread, after any
 // career save in progress (MclaWaitForSaves), the window is closed, which ends
 // the title and the process (ReXApp::OnClosing).
@@ -908,6 +940,10 @@ bool NodeReachesList(uint32_t node, uint32_t list, int depth, int& budget) {
 }  // namespace
 
 // --- Hooks -------------------------------------------------------------------
+
+void mcla_menu_tab_strip(PPCRegister& r27) {
+  g_last_tab_strip.store(r27.u32, std::memory_order_relaxed);
+}
 
 void mcla_menu_capture_continue(PPCRegister& r3) {
   if (r3.u32) {
@@ -986,6 +1022,7 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     Write32(list + kListScroll, 0);
 
     g_active_menu.store(menu, std::memory_order_relaxed);
+    g_pause_tab_strip.store(PauseTabStrip(), std::memory_order_relaxed);
     SyncRowsFromOptions(menu);
     MenuStackPush(submenu);
     ShowSubmenu();
@@ -1001,9 +1038,14 @@ bool mcla_menu_cancel(PPCRegister& r31) {
   if (g_active_menu.exchange(-1, std::memory_order_relaxed) < 0) {
     return false;
   }
-  // Pop first, then hand the list back, in that order.
+  // Pop first, then hand the list back, in that order. Then the tab strip,
+  // whose render also renders the selected tab again: the tabs and the
+  // Settings title come back.
   MenuStackPop();
   RestorePauseList();
+  if (uint32_t strip = g_pause_tab_strip.exchange(0, std::memory_order_relaxed)) {
+    CallGuest(kTabStripRenderFn, strip);
+  }
   SaveSettingsIfChanged();
   REXLOG_INFO("settings menu: closed");
   return true;

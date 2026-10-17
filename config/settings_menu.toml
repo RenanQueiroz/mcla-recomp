@@ -87,6 +87,16 @@ name = "mcla_menu_list_vtable_guard"
 registers = ["r31"]
 jump_address_on_true = 0x8265F108
 
+# 0x82630E50 in sub_82630E40, the tab strip's render (reached through its
+# vtable), after `mr r27,r3`: r27 = the strip. It sets the movie's tabs_count
+# from the strip's tabs and then renders the selected tab. Entering one of our
+# submenus hides the strip (tabs_count = 0) and retitles the menu; leaving it
+# calls this render on the pause screen's strip, which brings both back.
+[[midasm_hook]]
+address = 0x82630E50
+name = "mcla_menu_tab_strip"
+registers = ["r27"]
+
 # --- Options implemented as hooks ---------------------------------------------
 
 # Motion blur: two sites that load the blur enable into r3.
