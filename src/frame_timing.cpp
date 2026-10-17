@@ -15,11 +15,13 @@
 #include "mcla_app.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #include <rex/chrono/clock.h>
@@ -273,6 +275,134 @@ void mcla_chassis_depth_smoothing(PPCRegister& f0) {
   if (dt > 0.0) {
     f0.f64 = PerFrameToContinuous(0.10, dt);
   }
+}
+
+// The UI's Flash movies (menus, pop-ups, and the HUD with its song ticker and
+// "LOADING" badge) advance exactly one movie frame per game update: the UI
+// manager steps them in the Flash player's one-frame mode, which ignores the
+// elapsed time. The console updated 30 times a second, which is what the
+// movies were made for; at 120 FPS they all ran four times as fast (the song
+// ticker under the speedometer scrolls 2 px per update at 720p: 60 px/s at 30,
+// 240 at 120). Each movie is now advanced on its own schedule, 30 a second
+// (the HUD at a rate of its own, below), and an update that comes before a
+// movie is due skips that movie's advance.
+// A movie due within a quarter of a frame is advanced early, so at 30 FPS every
+// update still advances once, as before. A movie that falls behind (below 30
+// FPS) is not caught up, as on the console. The start-up logos are left alone:
+// the fast intro is meant to run them as fast as possible.
+//
+// The in-game HUD is two movies: HUDMAPMOVIE and the gauge movie, which the
+// HUD code creates itself, so it is not among the UI manager's screens. The
+// game sets the gauges' values every update and the movies' own scripts draw
+// them as they advance, in the same step that scrolls the song ticker: the
+// needles move as often as the ticker steps. So the HUD has a rate of its own:
+// 60 a second by default (smoother needles than at 30, the ticker twice its
+// original speed: the better trade in play); 30 as on the console (the ticker
+// at its original speed, the needles in 30 Hz steps);
+// 120 (the ticker 4 times as fast); or 0 for every frame, as without this
+// pacing.
+REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
+                    "Advance the UI's menus, pop-ups and map screens 30 times a second, as on the "
+                    "console, instead of once per rendered frame");
+REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 60, "MCLA",
+                     "How many times a second the in-game HUD advances (gauges, song ticker, "
+                     "LOADING badge): 60 (the default) or 120 for smoother needles with a faster "
+                     "ticker, 30 as on the console, 0 for every frame")
+    .range(0, 240);
+
+namespace {
+// The UI manager and its movie map (atMap name -> movie**: buckets at +60,
+// count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
+// context). From LARecomp's notes, used with its author's permission.
+constexpr uint32_t kUiManagerPtr = 0x8286D804;
+
+uint32_t ReadGuestU32(uint32_t address) {
+  if (address < 0x10000) {
+    return 0;
+  }
+  const uint8_t* p = rex::Runtime::instance()->virtual_membase() + address;
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+
+bool GuestStringIs(uint32_t address, const char* text) {
+  if (address < 0x10000) {
+    return false;
+  }
+  const char* s = reinterpret_cast<const char*>(rex::Runtime::instance()->virtual_membase() +
+                                                address);
+  return std::strncmp(s, text, std::strlen(text) + 1) == 0;
+}
+
+// Whether a player context belongs to one of the UI manager's screens other
+// than the HUD map.
+bool IsUiScreen(uint32_t context) {
+  const uint32_t manager = ReadGuestU32(kUiManagerPtr);
+  if (!manager) {
+    return false;
+  }
+  const uint32_t buckets = ReadGuestU32(manager + 60);
+  const uint32_t count = ReadGuestU32(manager + 64) >> 16;
+  for (uint32_t i = 0; buckets && i < count && i < 256; i++) {
+    uint32_t node = ReadGuestU32(buckets + 4 * i);
+    for (int guard = 0; node && guard < 256; guard++, node = ReadGuestU32(node + 12)) {
+      const uint32_t holder = ReadGuestU32(node + 8);
+      const uint32_t movie = holder ? ReadGuestU32(holder) : 0;
+      if (movie && ReadGuestU32(movie + 56) == context) {
+        return !GuestStringIs(ReadGuestU32(node), "HUDMAPMOVIE");
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
+
+bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
+  if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
+      !g_engine_timer_started.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  constexpr uint64_t kScreenPeriodMicros = 1'000'000ull / 30;
+  struct Schedule {
+    uint32_t context;
+    uint64_t next_us;
+    uint64_t checked_us;  // when IsUiScreen was last asked: movies come and go
+    bool screen;
+  };
+  static std::mutex mutex;
+  static std::array<Schedule, 32> schedules{};
+  static size_t replace = 0;
+  const uint32_t context = r31.u32;
+  const uint64_t now = NowMicros();
+  std::lock_guard lock(mutex);
+  Schedule* schedule = nullptr;
+  for (Schedule& s : schedules) {
+    if (s.context == context) {
+      schedule = &s;
+      break;
+    }
+  }
+  if (!schedule) {
+    schedule = &schedules[replace++ % schedules.size()];
+    *schedule = {context, 0, 0, false};
+  }
+  if (now - schedule->checked_us > 1'000'000) {
+    schedule->checked_us = now;
+    schedule->screen = IsUiScreen(context);
+  }
+  uint64_t period_us = kScreenPeriodMicros;
+  if (!schedule->screen) {
+    const int32_t hud_rate = REXCVAR_GET(mcla_ui_hud_rate);
+    if (hud_rate <= 0) {
+      return false;
+    }
+    period_us = 1'000'000ull / uint64_t(hud_rate);
+  }
+  if (schedule->next_us && now + period_us / 4 < schedule->next_us) {
+    return true;
+  }
+  const bool behind = !schedule->next_us || now > schedule->next_us + period_us;
+  schedule->next_us = behind ? now + period_us : schedule->next_us + period_us;
+  return false;
 }
 
 static bool SkipIntro() {
