@@ -147,11 +147,19 @@ def report(folder):
             # With a pacer, what was presented is what it presented (and the UI
             # thread's own paints while frame-generation mode is suspended).
             pacer = any(thread == "q" for _, _, thread, _, _ in paints)
+            drops = 0
             for t, n, thread, result, us in paints:
                 presents = thread != "g" if pacer else True
-                if presents and begin < t <= end + 50_000_000 and result in (0, 1) and n:
+                # PaintResult for threads g and u (presented, presented suboptimal);
+                # VkResult for the pacer (VK_SUCCESS, VK_SUBOPTIMAL_KHR), -1 for a frame
+                # it dropped.
+                ok = result in ((0, 1000001003) if thread == "q" else (0, 1))
+                if presents and begin < t <= end + 50_000_000 and ok and n:
                     presented[n] = presented.get(n, 0) + 1
                 if begin < t <= end:
+                    if thread == "q" and result == -1:
+                        drops += 1
+                        continue
                     threads[thread] = threads.get(thread, 0) + 1
                     paint_us.append(us)
             shown = [n for n in published if n in presented]
@@ -161,7 +169,8 @@ def report(folder):
                      f"{len(shown)} ({100.0 * len(shown) / max(1, len(published)):.2f}%), never {never}, "
                      f"more than once {repeats}")
             details.append(f"paints: GPU thread {threads.get('g', 0)}, UI thread {threads.get('u', 0)}"
-                           + (f", pacer presents {threads.get('q', 0)}" if pacer else "") + "; "
+                           + (f", pacer presents {threads.get('q', 0)}, drops {drops}" if pacer else "")
+                           + "; "
                            f"paint us {percentiles(paint_us)}")
         if pm:
             seg = [row for ns, row in pm if ns is not None and begin < ns <= end]

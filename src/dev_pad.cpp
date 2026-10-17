@@ -53,6 +53,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -68,7 +69,11 @@
 #include <rex/input/input_system.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
+#include <rex/system/achievement_manager.h>
 #include <rex/system/interfaces/graphics.h>
+#include <rex/system/kernel_state.h>
+#include <rex/ui/imgui_dialog.h>
+#include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/virtual_key.h>
@@ -108,6 +113,33 @@ using Clock = std::chrono::steady_clock;
 
 bool g_enabled = false;
 rex::ui::Window* g_window = nullptr;
+rex::ui::ImGuiDrawer* g_imgui_drawer = nullptr;
+
+// testdialog: a dialog that closes itself from inside its own draw once its
+// time is up, the way a XAM message box closes from its OK button.
+class SelfClosingTestDialog final : public rex::ui::ImGuiDialog {
+ public:
+  SelfClosingTestDialog(rex::ui::ImGuiDrawer* drawer, double seconds)
+      : rex::ui::ImGuiDialog(drawer),
+        until_(std::chrono::steady_clock::now() +
+               std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                   std::chrono::duration<double>(seconds))) {}
+
+ protected:
+  void OnDraw(ImGuiIO&) override {
+    ImGui::SetNextWindowPos(ImVec2(80, 80), ImGuiCond_Always);
+    ImGui::Begin("dev pad test dialog", nullptr,
+                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextUnformatted("This dialog closes itself from its own draw.");
+    ImGui::End();
+    if (std::chrono::steady_clock::now() >= until_) {
+      Close();
+    }
+  }
+
+ private:
+  std::chrono::steady_clock::time_point until_;
+};
 
 // --- Engine frames and swaps ---
 
@@ -1563,6 +1595,45 @@ std::string Execute(const std::string& line) {
     });
     return "ok";
   }
+  if (cmd == "testdialog") {
+    double seconds = 3.0;
+    if (args.size() == 2 && !ParseNumber(args[1], seconds)) {
+      return "err usage: testdialog [seconds]";
+    }
+    if (!g_window || !g_imgui_drawer) {
+      return "err no window";
+    }
+    rex::ui::ImGuiDrawer* drawer = g_imgui_drawer;
+    g_window->app_context().CallInUIThread([drawer, seconds] {
+      // Owned by the drawer; it deletes itself when it closes.
+      new SelfClosingTestDialog(drawer, seconds);
+    });
+    return "ok";
+  }
+  if (cmd == "toast") {
+    // toast [id]: the achievement pop-up for an achievement (the first one
+    // listed by default), as at an unlock, without unlocking or saving anything
+    // (AchievementManager::ShowAchievementNotification), for checking the
+    // presenter while a pop-up is shown.
+    auto* runtime = rex::Runtime::instance();
+    auto* kernel = runtime ? runtime->kernel_state() : nullptr;
+    if (!kernel) {
+      return "err no kernel state";
+    }
+    auto& achievements = kernel->achievements();
+    uint32_t id = 0;
+    if (args.size() == 2) {
+      id = uint32_t(std::strtoul(args[1].c_str(), nullptr, 0));
+    } else {
+      const auto all = achievements.ListAchievements();
+      if (all.empty()) {
+        return "err no achievements";
+      }
+      id = all.front().id;
+    }
+    return achievements.ShowAchievementNotification(id) ? "ok " + std::to_string(id)
+                                                        : "err no achievement " + std::to_string(id);
+  }
   if (cmd == "log") {
     REXLOG_INFO("dev pad: {}", line.substr(line.find("log") + 3));
     return "ok";
@@ -1941,11 +2012,12 @@ void MclaDevPadConfigure(rex::RuntimeConfig& config) {
 }
 
 // Called from MclaApp::OnPostSetup.
-void MclaDevPadStart(rex::ui::Window* window) {
+void MclaDevPadStart(rex::ui::Window* window, rex::ui::ImGuiDrawer* imgui_drawer) {
   if (!g_enabled) {
     return;
   }
   g_window = window;
+  g_imgui_drawer = imgui_drawer;
   g_start = Clock::now();
   if (const std::string path = REXCVAR_GET(mcla_pad_frames_csv); !path.empty()) {
     g_frames_csv = std::fopen(path.c_str(), "w");

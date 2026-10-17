@@ -60,7 +60,16 @@ kinds of changes on top of upstream's `main`:
     the console's EDRAM held, and HDR output: the title's markers read from the
     command stream, HDR10 swap chains with the display's levels, the guest's UI
     kept as a separate layer, and this game's scene in HDR from its tone map's
-    inputs (`patches/README.md`, `launcher/dev/hdr-2026-10-16.md`).
+    inputs (`patches/README.md`, `launcher/dev/hdr-2026-10-16.md`), and AMD
+    FSR 3.1 as an anti-aliasing option, and the fullscreen setting applied on
+    the UI thread (switching it with the F4 or console overlay open could hang
+    the game), and UI overlay painting: every guest frame presented by the
+    guest output thread while the presenter's own UI is shown, that UI drawn by
+    the UI thread into a layer put over the image (`present_ui_overlay`, off by
+    default), and the groundwork of FSR 3.1 frame generation: FidelityFX's
+    frame generation built on Windows, and on Vulkan a frame pacer that copies
+    and presents each frame on a queue of its own (`frame_generation`, off by
+    default; no frames are generated yet).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
   edits the game's settings in `mcla.toml` (shared with the pause menu) and

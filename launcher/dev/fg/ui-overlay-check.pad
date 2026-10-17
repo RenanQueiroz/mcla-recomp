@@ -1,0 +1,32 @@
+# UI overlay painting (rexglue-presenter-ui-overlay.patch): an on-demand
+# drawer (the achievement pop-up, shown, not unlocked) and a dialog that closes
+# itself inside its draw. With --frame_generation=fsr on Vulkan and
+# --frame_generation_dump_path=<folder>: dumps of what the pacer presents while
+# each shows and after the dialog closed.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+toast
+mark toast
+wait 1500ms
+set frame_generation_dump 1
+wait 4s
+set frame_generation_dump 0
+mark toast_gone
+wait 1s
+testdialog 2
+mark dialog
+wait 1s
+set frame_generation_dump 1
+wait 3s
+set frame_generation_dump 0
+mark dialog_closed
+wait 1s
+set frame_generation_dump 1
+wait 2s
+mark end
+wait 1s

@@ -1,0 +1,35 @@
+# UI overlay painting as the default (present_ui_overlay): presents per swap
+# with no presenter UI, then with the F4 settings overlay, an achievement
+# pop-up (toast: shown, not unlocked) and the console overlay. Run with
+# --presentmon --present-log, present_ui_overlay on and off.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.5
+stick lx 0.15
+mark plain
+wait 12s
+key F4
+mark settings
+wait 10s
+key F4
+mark settings_closed
+wait 3s
+toast
+mark toast
+wait 4s
+mark toast_gone
+wait 3s
+key Backtick
+mark console
+wait 10s
+key Backtick
+mark console_closed
+wait 4s
+release all
+mark end
+wait 1s

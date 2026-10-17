@@ -44,7 +44,7 @@ REXCVAR_DEFINE_BOOL(mcla_hide_cursor, true, "MCLA",
 std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
     rex::runtime::FunctionDispatcher* function_dispatcher);
 void MclaDevPadConfigure(rex::RuntimeConfig& config);
-void MclaDevPadStart(rex::ui::Window* window);
+void MclaDevPadStart(rex::ui::Window* window, rex::ui::ImGuiDrawer* imgui_drawer);
 void MclaSaveMenuSettings();  // src/settings_menu.cpp
 void MclaMigrateAntiAliasing();  // src/perf_options.cpp
 
@@ -349,7 +349,7 @@ void MclaApp::OnPostSetup() {
   ConfigureFrameTiming();
   FollowCursorSetting();
 
-  MclaDevPadStart(window());
+  MclaDevPadStart(window(), imgui_drawer());
 
   // The game probes for loose city data on a "t:" drive that retail consoles
   // do not have. Give it a device so the probes fail with "not found" rather

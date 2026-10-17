@@ -1,8 +1,8 @@
 diff --git a/cmake/fidelityfx/CMakeLists.txt b/cmake/fidelityfx/CMakeLists.txt
-index 365a133..13ce07a 100644
+index 365a133..fef4722 100644
 --- a/cmake/fidelityfx/CMakeLists.txt
 +++ b/cmake/fidelityfx/CMakeLists.txt
-@@ -10,13 +10,18 @@
+@@ -10,13 +10,24 @@
  #   REXGLUE_FSR_STATIC          static libraries instead, checked and copied to
  #                               REXGLUE_FSR_ARCHIVE_DIR by the target rexglue_fsr_static
  #                               (the PS5)
@@ -16,18 +16,24 @@ index 365a133..13ce07a 100644
 -# Upscaling only: no frame generation providers.
 -set(FFX_API_ENABLE_FRAMEGEN_PROVIDER OFF CACHE BOOL "" FORCE)
 +set(_wrapper_hash "${REXGLUE_FSR_WRAPPER_HASH}")
-+# Upscaling and frame generation (rexglue-frame-generation.patch): the frame
-+# generation provider and its optical flow and frame interpolation components.
-+# On Vulkan, without AMD's frame-interpolation swapchain (below).
-+set(FFX_API_ENABLE_FRAMEGEN_PROVIDER ON CACHE BOOL "" FORCE)
++# Upscaling, and on Windows frame generation (rexglue-frame-generation.patch):
++# the frame generation provider and its optical flow and frame interpolation
++# components, on Vulkan without AMD's frame-interpolation swapchain (below).
++# Elsewhere upscaling only, as before, until frame generation is checked there
++# (phase 5), so FSR anti-aliasing can't be lost to code that isn't used yet.
++if(WIN32)
++    set(FFX_API_ENABLE_FRAMEGEN_PROVIDER ON CACHE BOOL "" FORCE)
++else()
++    set(FFX_API_ENABLE_FRAMEGEN_PROVIDER OFF CACHE BOOL "" FORCE)
++endif()
  if(REXGLUE_FSR_SHADERS_DIR)
      # FidelityFX_SC isn't run: right after the SDK's project() for the Vulkan
      # backend (after it has picked its compiler), the hook puts
-@@ -50,6 +55,41 @@ unset(CMAKE_GENERATOR_PLATFORM CACHE)
+@@ -50,6 +61,41 @@ unset(CMAKE_GENERATOR_PLATFORM CACHE)
  string(TOLOWER "${FFX_API_BACKEND}" _backend)
  string(REGEX REPLACE "_x64$" "" _backend "${_backend}")
  set(_target amd_fidelityfx_${_backend})
-+if(_backend STREQUAL "vk")
++if(_backend STREQUAL "vk" AND FFX_API_ENABLE_FRAMEGEN_PROVIDER)
 +    # Vulkan frame generation is "manual" (FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY):
 +    # rexglue presents the frames itself. AMD's Vulkan frame-interpolation
 +    # swapchain is Win32-only and doesn't compile with Clang at this commit, so
@@ -149,7 +155,7 @@ index a8ee628..02344b9 100644
          list(APPEND args "-DREXGLUE_FSR_SHADERS_DIR=${REXGLUE_FSR_SHADERS_DIR}"
               "-DREXGLUE_FSR_SHADERS_HASH=${_rexglue_fsr_shaders_hash}")
 diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
-index 7aa50f6..2186c0d 100644
+index c355da2..4618570 100644
 --- a/include/rex/ui/d3d12/d3d12_presenter.h
 +++ b/include/rex/ui/d3d12/d3d12_presenter.h
 @@ -109,6 +109,9 @@ class D3D12Presenter final : public Presenter {
@@ -163,10 +169,10 @@ index 7aa50f6..2186c0d 100644
  
   private:
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index 3892214..ef6c981 100644
+index 5a6a72a..dbe3f1e 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
-@@ -845,6 +845,12 @@ class Presenter {
+@@ -850,6 +850,18 @@ class Presenter {
    // implementation's, for the image of the given refresh.
    static void LogPresentFromPacer(uint64_t refresh_number, int result, uint64_t present_ns);
  
@@ -175,14 +181,20 @@ index 3892214..ef6c981 100644
 +  // whether it was asked for (read at initialization).
 +  virtual bool SupportsFrameGeneration() const { return false; }
 +  bool frame_generation_wanted() const { return frame_generation_wanted_; }
++  // Whether the connection can present frame generation's way (Vulkan: its
++  // pacer); without that, UI overlay painting isn't forced (implicit vsync and
++  // the rest go as without frame generation). UI thread, at connection.
++  void SetFrameGenerationPresentingFromUIThread(bool available) {
++    ui_overlay_paint_forced_ = frame_generation_wanted_ && available;
++  }
 +
   private:
    enum class PaintMode {
      // Don't paint at all.
-@@ -1115,6 +1121,7 @@ class Presenter {
-   std::atomic<uint64_t> last_consumed_refresh_number_{0};
-   // UI overlay painting (read at initialization).
-   bool ui_overlay_paint_mode_ = false;
+@@ -1130,6 +1142,7 @@ class Presenter {
+   // Also with implicit vsync or presenting from the UI thread only (frame
+   // generation, whose pacer presents).
+   bool ui_overlay_paint_forced_ = false;
 +  bool frame_generation_wanted_ = false;
    // UI thread only.
    bool ui_overlay_paint_suspended_ = false;
@@ -247,7 +259,7 @@ index 0000000..6919ef0
 +XE_UI_VULKAN_FUNCTION_PROMOTED(vkSignalSemaphoreKHR, vkSignalSemaphore)
 +XE_UI_VULKAN_FUNCTION_PROMOTED(vkWaitSemaphoresKHR, vkWaitSemaphores)
 diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
-index 5acccc6..35ece53 100644
+index 5c087f3..07cb7d3 100644
 --- a/include/rex/ui/vulkan/presenter.h
 +++ b/include/rex/ui/vulkan/presenter.h
 @@ -13,9 +13,13 @@
@@ -264,17 +276,18 @@ index 5acccc6..35ece53 100644
  #include <utility>
  #include <vector>
  
-@@ -157,6 +161,9 @@ class VulkanPresenter final : public Presenter {
+@@ -157,6 +161,10 @@ class VulkanPresenter final : public Presenter {
    // vulkan_presenter_ui_overlay.cpp.
    bool SupportsUIOverlayPaintMode() const override;
    bool RenderUIOverlayFromUIThread() override;
 +  // Frame generation (rexglue-frame-generation.patch), in
 +  // vulkan_presenter_frame_generation.cpp.
 +  bool SupportsFrameGeneration() const override;
++  void PrepareGuestOutputThreadPaint() override;
  
   private:
    // Usable for both the guest output image itself and for intermediate images.
-@@ -370,7 +377,9 @@ class VulkanPresenter final : public Presenter {
+@@ -370,7 +378,9 @@ class VulkanPresenter final : public Presenter {
          const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
          VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out,
          VkFormat& image_format_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
@@ -285,7 +298,7 @@ index 5acccc6..35ece53 100644
  
      // Destroys the swapchain and its derivatives, nulls `swapchain` and returns
      // the original swapchain object, if it existed, for use as oldSwapchain if
-@@ -456,6 +465,24 @@ class VulkanPresenter final : public Presenter {
+@@ -456,6 +466,24 @@ class VulkanPresenter final : public Presenter {
      std::array<VkDeviceMemory, 2> ui_overlay_memory = {};
      std::array<VkImageView, 2> ui_overlay_views = {};
      std::array<VkFramebuffer, 2> ui_overlay_framebuffers = {};
@@ -310,7 +323,7 @@ index 5acccc6..35ece53 100644
    };
  
    explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
-@@ -521,7 +548,7 @@ class VulkanPresenter final : public Presenter {
+@@ -521,7 +549,7 @@ class VulkanPresenter final : public Presenter {
    void DestroyUIOverlayFromUIThread();
    // At destruction.
    void ShutdownUIOverlay();
@@ -319,7 +332,7 @@ index 5acccc6..35ece53 100644
    void CompositeUIOverlay(VkCommandBuffer command_buffer);
    VkShaderModule ui_overlay_composite_fs_ = VK_NULL_HANDLE;
    VkPipeline ui_overlay_composite_pipeline_ = VK_NULL_HANDLE;
-@@ -534,6 +561,83 @@ class VulkanPresenter final : public Presenter {
+@@ -536,6 +564,89 @@ class VulkanPresenter final : public Presenter {
    // The newest finished overlay layer, UINT32_MAX if none.
    std::atomic<uint32_t> ui_overlay_published_{UINT32_MAX};
  
@@ -350,7 +363,11 @@ index 5acccc6..35ece53 100644
 +  // until everything it submitted and presented is done.
 +  void PauseFramePacerFromUIThread();
 +  // Before the UI thread presents itself (UI overlay painting suspended).
-+  bool WaitForFramePacerIdle();
++  enum class FramePacerIdleResult { kIdle, kTimedOut, kDeviceLost };
++  FramePacerIdleResult WaitForFramePacerIdle();
++  // A frame the pacer won't present, with why (logged, counted, and in the
++  // present log as result -1).
++  void NoteFramePacerDrop(uint64_t frame_id, uint64_t refresh_number, const char* reason);
 +  // The guest output thread's paint for the pacer: the wait for its slot, and
 +  // the frame given to it after the paint has been submitted.
 +  PaintResult WaitForFramePacerSlot(uint64_t& frame_id_out);
@@ -359,7 +376,8 @@ index 5acccc6..35ece53 100644
 +  void FramePacerPresent(const FramePacerFrame& frame);
 +  // Signals the copy timeline up to `value` for frames that weren't copied.
 +  void SignalFramePacerCopyTimeline(uint64_t value);
-+  bool WaitForTimeline(VkSemaphore semaphore, uint64_t value, bool stop_on_exit);
++  // false on device loss, or (stop_on_request) when the pacer is asked to stop.
++  bool WaitForTimeline(VkSemaphore semaphore, uint64_t value, bool stop_on_request);
 +
 +  // Created at the first connection with frame generation.
 +  VkSemaphore frame_pacer_paint_timeline_ = VK_NULL_HANDLE;  // frame N's paint signals N + 1
@@ -372,7 +390,7 @@ index 5acccc6..35ece53 100644
 +  std::deque<FramePacerFrame> frame_pacer_queue_;
 +  uint64_t frame_pacer_pushed_ = 0;
 +  uint64_t frame_pacer_taken_ = 0;
-+  uint64_t frame_pacer_dropped_ = 0;
++  uint64_t frame_pacer_dropped_ = 0;  // since the connection was made
 +  bool frame_pacer_busy_ = false;
 +  bool frame_pacer_paused_ = true;
 +  bool frame_pacer_exit_ = false;
@@ -385,7 +403,8 @@ index 5acccc6..35ece53 100644
 +  // whether the guest output thread's paints go to the pacer, its copy
 +  // command buffers (on the pacer's family) and one present semaphore per
 +  // swapchain image.
-+  bool frame_pacer_connected_ = false;
++  // Also read by the guest output thread before its paint lock.
++  std::atomic<bool> frame_pacer_connected_{false};
 +  std::array<VkCommandPool, kFramePacerCopySlots> frame_pacer_command_pools_ = {};
 +  std::array<VkCommandBuffer, kFramePacerCopySlots> frame_pacer_command_buffers_ = {};
 +  std::vector<VkSemaphore> frame_pacer_present_semaphores_;
@@ -471,7 +490,7 @@ index 795337f..50656b5 100644
      vulkan/vulkan_provider.cpp
      vulkan/vulkan_submission_tracker.cpp
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 722544c..0314a49 100644
+index 4144379..89fbb54 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
 @@ -92,6 +92,13 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
@@ -488,11 +507,10 @@ index 722544c..0314a49 100644
  REXCVAR_DEFINE_BOOL(present_ui_overlay, false, "UI/Presenter",
                      "The guest output thread presents every guest frame even while the "
                      "presenter's UI (overlays, dialogs, pop-ups) is shown: the UI thread draws "
-@@ -1086,7 +1093,17 @@ void Presenter::RequestUIPaintFromUIThread() {
+@@ -1118,10 +1125,21 @@ void Presenter::RequestUIPaintFromUIThread() {
  
  bool Presenter::InitializeCommonSurfaceIndependent() {
    HdrRegisterSettingCallbacks();
--  if (REXCVAR_GET(present_ui_overlay)) {
 +  // Frame generation (rexglue-frame-generation.patch) paints this way too.
 +  if (REXCVAR_GET(frame_generation) != "off") {
 +    if (SupportsFrameGeneration()) {
@@ -503,26 +521,39 @@ index 722544c..0314a49 100644
 +      REXLOG_WARN("Presenter: frame generation isn't available with this graphics backend");
 +    }
 +  }
+   ui_overlay_paint_start_ns_ = PresentLog::Now();
+-  if (REXCVAR_GET(present_ui_overlay)) {
 +  if (REXCVAR_GET(present_ui_overlay) || frame_generation_wanted_) {
      if (SupportsUIOverlayPaintMode()) {
        ui_overlay_paint_mode_ = true;
++      ui_overlay_paint_forced_ = frame_generation_wanted_;
        REXLOG_INFO("Presenter: UI overlay painting");
+     } else {
+       REXLOG_WARN("Presenter: UI overlay painting isn't available with this graphics backend");
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index aa5f63c..d03ab25 100644
+index aa5f63c..310ebe9 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
-@@ -48,6 +48,10 @@ REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC, "UI/V
+@@ -48,6 +48,18 @@ REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC, "UI/V
                      "allow fallback to solid fill for line/point polygon modes)")
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
  
 +// Frame generation (rexglue-frame-generation.patch), in presenter.cpp: the
 +// device gets the pacer's queue and timeline semaphores when it's wanted.
 +REXCVAR_DECLARE(std::string, frame_generation);
++REXCVAR_DEFINE_STRING(frame_generation_debug_pacer_queue, "auto", "GPU",
++                      "Development: the queue frame generation's pacer gets: auto (a second "
++                      "graphics queue where the family has two, otherwise another family that "
++                      "can present), other_family (another family even if the graphics family "
++                      "has two), or none (no queue of its own: frame generation can't present "
++                      "its way, and the connection paints as without it)")
++    .allowed({"auto", "other_family", "none"})
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +
  namespace rex {
  namespace ui {
  namespace vulkan {
-@@ -417,6 +421,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -417,6 +429,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      const VkQueueFamilyProperties& queue_family_properties = queue_families[queue_family_index];
  
      const VkQueueFlags queue_unsupported_flags = ~queue_family_properties.queueFlags;
@@ -530,7 +561,7 @@ index aa5f63c..d03ab25 100644
  
      if (!(queue_unsupported_flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
        first_queue_family_graphics_compute =
-@@ -503,6 +508,40 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -503,6 +516,50 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
          size_t(1), device->queue_families_[device->queue_family_sparse_binding_].queues.size()));
    }
  
@@ -540,11 +571,17 @@ index aa5f63c..d03ab25 100644
 +  // queue in the graphics and compute family where it has one, otherwise one
 +  // of another family that may present (any family can copy). Without one,
 +  // the pacer shares the graphics queue.
++  // Windows only until frame generation is checked elsewhere (phase 5), and
++  // only with the timeline semaphores the pacer needs (Vulkan 1.2).
 +  const bool frame_generation_wanted =
-+      with_swapchain && with_gpu_emulation && REXCVAR_GET(frame_generation) != "off";
-+  if (frame_generation_wanted) {
++      REX_PLATFORM_WIN32 && with_swapchain && with_gpu_emulation &&
++      REXCVAR_GET(frame_generation) != "off" &&
++      properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0) &&
++      get_physical_device_properties2_supported && features_1_2.supported.timelineSemaphore;
++  const std::string& pacer_queue_choice = REXCVAR_GET(frame_generation_debug_pacer_queue);
++  if (frame_generation_wanted && pacer_queue_choice != "none") {
 +    const uint32_t graphics_family = device->queue_family_graphics_compute_;
-+    if (queue_families[graphics_family].queueCount >= 2 &&
++    if (pacer_queue_choice != "other_family" && queue_families[graphics_family].queueCount >= 2 &&
 +        device->queue_families_[graphics_family].may_support_presentation) {
 +      device->queue_family_pacer_ = graphics_family;
 +    } else {
@@ -565,26 +602,30 @@ index aa5f63c..d03ab25 100644
 +          device->queue_family_pacer_ == graphics_family ? 1 : 0;
 +      pacer_family_queues.resize(
 +          std::max(size_t(device->queue_index_pacer_) + 1, pacer_family_queues.size()));
++      REXLOG_INFO("Vulkan device: frame generation's pacer gets queue {} of family {}",
++                  device->queue_index_pacer_, device->queue_family_pacer_);
++    } else {
++      REXLOG_WARN("Vulkan device: no queue for frame generation's pacer");
 +    }
 +  }
 +
    size_t max_enabled_queues_per_family = 0;
    for (const QueueFamily& queue_family : device->queue_families_) {
      max_enabled_queues_per_family =
-@@ -693,6 +732,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -693,6 +750,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  
 +  // Frame generation (rexglue-frame-generation.patch): the pacer's timeline
 +  // semaphores (Vulkan 1.2; without them, frame generation stays off).
-+  if (frame_generation_wanted && properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
++  if (frame_generation_wanted) {
 +    XE_UI_VULKAN_FEATURE_2(features_1_2, timelineSemaphore);
 +  }
 +
    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
      if (with_gpu_emulation) {
        XE_UI_VULKAN_FEATURE_2(features_1_3, shaderDemoteToHelperInvocation);
-@@ -812,6 +857,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -812,6 +875,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
  #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
  #include <rex/ui/vulkan/functions/device_1_3_khr_maintenance4.inc>
    }
@@ -595,7 +636,7 @@ index aa5f63c..d03ab25 100644
  
    // Non-promoted extensions, and extensions promoted to a Vulkan version not
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 40cd73d..00d3de4 100644
+index ebb0622..7f6157b 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -285,6 +285,9 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
@@ -640,8 +681,8 @@ index 40cd73d..00d3de4 100644
        // Vulkan surface.
 @@ -1175,12 +1183,15 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
  
-   // UI overlay painting: the overlay layers.
-   CreateUIOverlayFromUIThread();
+   // UI overlay painting: the overlay layers are made when the UI thread first
+   // draws into them.
 +  // Frame generation: the pacer.
 +  CreateFramePacerFromUIThread();
  
@@ -669,29 +710,27 @@ index 40cd73d..00d3de4 100644
  
    const VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
    const VkPhysicalDevice physical_device = vulkan_device->physical_device();
-@@ -1494,8 +1509,39 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1494,8 +1509,37 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
    swapchain_create_info.imageExtent = image_extent;
    swapchain_create_info.imageArrayLayers = 1;
    swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 -  uint32_t swapchain_queue_family_indices[2];
 -  if (queue_family_index_graphics_compute != queue_family_index_present) {
 +  // Frame generation (rexglue-frame-generation.patch): the pacer copies into
-+  // the images and presents them on its own queue where the device has one
-+  // that can present to this surface, otherwise on the presentation queue.
++  // the images and presents them on a queue of its own, which must be able to
++  // present to this surface. It never shares the graphics queue: a present
++  // that blocks on the CPU would hold that queue's lock.
 +  uint32_t pacer_queue_family = UINT32_MAX;
 +  uint32_t pacer_queue_index = 0;
 +  if (frame_generation) {
 +    const uint32_t device_pacer_family = vulkan_device->queue_family_pacer();
 +    if (device_pacer_family != UINT32_MAX &&
++        (surface_capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
 +        ifn.vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, device_pacer_family, surface,
 +                                                 &queue_family_present_supported) == VK_SUCCESS &&
 +        queue_family_present_supported) {
 +      pacer_queue_family = device_pacer_family;
 +      pacer_queue_index = vulkan_device->queue_index_pacer();
-+    } else {
-+      pacer_queue_family = queue_family_index_present;
-+    }
-+    if (surface_capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) {
 +      swapchain_create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 +      transfer_dst_out = true;
 +    }
@@ -711,7 +750,7 @@ index 40cd73d..00d3de4 100644
      // Using concurrent sharing mode to avoid an explicit ownership transfer
      // before presenting, which would require an additional command buffer
      // submission with the acquire barrier and a semaphore between the graphics
-@@ -1503,10 +1549,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1503,10 +1547,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
      // and Xenia only uses the swapchain for the final guest output and the
      // internal UI, so keeping framebuffer compression is not worth the
      // additional submission complexity and possibly latency.
@@ -723,16 +762,15 @@ index 40cd73d..00d3de4 100644
      swapchain_create_info.pQueueFamilyIndices = swapchain_queue_family_indices;
    } else {
      swapchain_create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-@@ -1549,7 +1593,7 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
-     // (though on Windows with borderless fullscreen, GDI copying is used
+@@ -1550,6 +1592,7 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
      // instead of independent flip, so it's not supported there).
      swapchain_create_info.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
--  } else if (REXCVAR_GET(vulkan_allow_present_mode_mailbox) &&
-+  } else if (REXCVAR_GET(vulkan_allow_present_mode_mailbox) && !frame_generation &&
+   } else if (REXCVAR_GET(vulkan_allow_present_mode_mailbox) &&
++             pacer_queue_family == UINT32_MAX &&
               std::find(present_modes.cbegin(), present_modes.cend(), VK_PRESENT_MODE_MAILBOX_KHR) !=
                   present_modes.cend()) {
      // Allowing dropping frames to reduce latency, but no tearing.
-@@ -1579,6 +1623,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1579,6 +1622,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
        uint32_t(swapchain_create_info.presentMode));
  
    present_queue_family_out = queue_family_index_present;
@@ -741,7 +779,7 @@ index 40cd73d..00d3de4 100644
    image_format_out = swapchain_create_info.imageFormat;
    image_extent_out = swapchain_create_info.imageExtent;
    is_fifo_out = swapchain_create_info.presentMode == VK_PRESENT_MODE_FIFO_KHR ||
-@@ -1788,6 +1834,25 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1788,6 +1833,32 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                                                         &paint_context_.swapchain, &metadata);
      }
    }
@@ -749,7 +787,7 @@ index 40cd73d..00d3de4 100644
 +  // thread's paints go into a present image for the pacer; the UI thread,
 +  // presenting itself while UI overlay painting is suspended, first lets the
 +  // pacer finish.
-+  const bool paced = frame_pacer_connected_ && !execute_ui_drawers;
++  const bool paced = frame_pacer_connected_.load(std::memory_order_relaxed) && !execute_ui_drawers;
 +  uint64_t paced_frame = 0;
 +  bool paced_suboptimal = false;
 +  if (paced) {
@@ -759,15 +797,22 @@ index 40cd73d..00d3de4 100644
 +    } else if (slot_result != PaintResult::kPresented) {
 +      return slot_result;
 +    }
-+  } else if (frame_pacer_connected_ && !WaitForFramePacerIdle()) {
-+    return PaintResult::kGpuLostResponsible;
++  } else if (frame_pacer_connected_.load(std::memory_order_relaxed)) {
++    switch (WaitForFramePacerIdle()) {
++      case FramePacerIdleResult::kIdle:
++        break;
++      case FramePacerIdleResult::kTimedOut:
++        return PaintResult::kNotPresented;
++      case FramePacerIdleResult::kDeviceLost:
++        return PaintResult::kGpuLostResponsible;
++    }
 +  }
 +  const uint32_t paced_slot = uint32_t(paced_frame & 1);
 +
  #if REX_PLATFORM_PS5
    // Nothing can be seen of presentation on the console except the screen, so
    // the first few paints and then one in every 300 are logged: that it was
-@@ -1838,10 +1903,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1838,12 +1909,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    // safe to return early from this function in case of an error.
  
    VkSemaphore acquire_semaphore = paint_submission.acquire_semaphore();
@@ -780,9 +825,12 @@ index 40cd73d..00d3de4 100644
 +            : dfn.vkAcquireNextImageKHR(device, paint_context_.swapchain, UINT64_MAX,
 +                                        acquire_semaphore, VK_NULL_HANDLE, &swapchain_image_index);
  #if REX_PLATFORM_PS5
-   if (ps5_log_paint) {
+-  if (ps5_log_paint) {
++  if (ps5_log_paint && !paced) {
      REXLOG_INFO("VulkanPresenter: paint {} acquire returned {}, image {}", ps5_paint_index,
-@@ -1888,9 +1954,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+                 static_cast<int>(acquire_result), swapchain_image_index);
+   }
+@@ -1888,9 +1960,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    VkRenderPassBeginInfo swapchain_render_pass_begin_info;
    swapchain_render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
    swapchain_render_pass_begin_info.pNext = nullptr;
@@ -796,7 +844,7 @@ index 40cd73d..00d3de4 100644
    swapchain_render_pass_begin_info.renderArea.offset.x = 0;
    swapchain_render_pass_begin_info.renderArea.offset.y = 0;
    swapchain_render_pass_begin_info.renderArea.extent = paint_context_.swapchain_extent;
-@@ -2540,6 +2608,25 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2540,6 +2614,25 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    submit_info.pCommandBuffers = command_buffers;
    submit_info.signalSemaphoreCount = 1;
    submit_info.pSignalSemaphores = &present_semaphore;
@@ -822,7 +870,7 @@ index 40cd73d..00d3de4 100644
    {
      VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
          paint_context_.submission_tracker.AcquireFenceToAdvanceSubmission());
-@@ -2582,6 +2669,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2582,6 +2675,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
      }
    }
  
@@ -836,10 +884,10 @@ index 40cd73d..00d3de4 100644
    present_info.pNext = nullptr;
 diff --git a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
 new file mode 100644
-index 0000000..384845e
+index 0000000..1c114de
 --- /dev/null
 +++ b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
-@@ -0,0 +1,742 @@
+@@ -0,0 +1,812 @@
 +/**
 + ******************************************************************************
 + * ReXGlue: frame generation (rexglue-frame-generation.patch), Vulkan side of  *
@@ -884,8 +932,28 @@ index 0000000..384845e
 +}  // namespace
 +
 +bool VulkanPresenter::SupportsFrameGeneration() const {
-+  // The pacer's synchronisation needs timeline semaphores (Vulkan 1.2).
-+  return vulkan_device_->properties().timelineSemaphore;
++  // The pacer's synchronisation needs timeline semaphores (Vulkan 1.2); the
++  // device asks for them with frame generation on Windows only, until it is
++  // checked elsewhere (phase 5).
++  return REX_PLATFORM_WIN32 && vulkan_device_->properties().timelineSemaphore;
++}
++
++void VulkanPresenter::PrepareGuestOutputThreadPaint() {
++  // Back-pressure, before the paint lock is taken: until the pacer has taken
++  // the previous frame. Bounded, so a present or acquire blocked in the driver
++  // never holds the guest output thread (and through the lock, the UI thread).
++  if (!frame_pacer_connected_.load(std::memory_order_acquire)) {
++    return;
++  }
++  std::unique_lock<std::mutex> lock(frame_pacer_mutex_);
++  if (!frame_pacer_condition_.wait_for(lock, std::chrono::seconds(1), [this] {
++        return frame_pacer_taken_ >= frame_pacer_pushed_ || frame_pacer_paused_ ||
++               (frame_pacer_status_.load(std::memory_order_relaxed) &
++                kFramePacerStatusDeviceLost);
++      })) {
++    REXLOG_WARN("VulkanPresenter: the frame pacer hasn't taken a frame for 1 s (a present or "
++                "acquire blocked?)");
++  }
 +}
 +
 +void VulkanPresenter::CreateFramePacerFromUIThread() {
@@ -896,11 +964,15 @@ index 0000000..384845e
 +  const VkDevice device = vulkan_device_->device();
 +  const VkExtent2D extent = paint_context_.swapchain_extent;
 +
-+  // The pacer: needs timeline semaphores and swapchain images it can copy
-+  // into; without either, the guest output thread presents itself.
++  // The pacer: needs a queue of its own that can present to this surface and
++  // swapchain images it can copy into. Without them, painting goes as without
++  // frame generation on this connection (UI overlay painting isn't forced, so
++  // implicit vsync stays with the UI thread, and MAILBOX was allowed).
 +  if (!paint_context_.swapchain_transfer_dst || paint_context_.pacer_queue_family == UINT32_MAX) {
-+    REXLOG_WARN("VulkanPresenter: frame generation without the pacer (the swapchain can't be "
-+                "copied into)");
++    REXLOG_WARN("VulkanPresenter: frame generation can't present on this connection (no queue of "
++                "its own that can present here and copy into the swapchain); painting as "
++                "without it");
++    SetFrameGenerationPresentingFromUIThread(false);
 +    return;
 +  }
 +  if (frame_pacer_paint_timeline_ == VK_NULL_HANDLE) {
@@ -955,13 +1027,15 @@ index 0000000..384845e
 +    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 +    subpass.colorAttachmentCount = 1;
 +    subpass.pColorAttachments = &color_attachment;
++    // The dependencies are the swapchain render pass's, so the two are
++    // compatible (render pass compatibility includes them).
 +    VkSubpassDependency dependencies[2] = {};
 +    // srcStageMask is the stage the wait for the copy timeline is at.
 +    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 +    dependencies[0].dstSubpass = 0;
 +    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 +    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-+    dependencies[0].srcAccessMask = 0;
++    dependencies[0].srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
 +    dependencies[0].dstAccessMask =
 +        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 +    dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
@@ -972,7 +1046,7 @@ index 0000000..384845e
 +    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 +    dependencies[1].srcAccessMask =
 +        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-+    dependencies[1].dstAccessMask = 0;
++    dependencies[1].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
 +    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 +    VkRenderPassCreateInfo render_pass_create_info = {};
 +    render_pass_create_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -1075,7 +1149,9 @@ index 0000000..384845e
 +  }
 +
 +  frame_pacer_status_.store(0, std::memory_order_relaxed);
-+  frame_pacer_connected_ = true;
++  frame_pacer_dropped_ = 0;
++  frame_pacer_connected_.store(true, std::memory_order_release);
++  SetFrameGenerationPresentingFromUIThread(true);
 +  {
 +    std::lock_guard<std::mutex> lock(frame_pacer_mutex_);
 +    frame_pacer_paused_ = false;
@@ -1099,12 +1175,22 @@ index 0000000..384845e
 +    frame_pacer_paused_ = true;
 +    frame_pacer_stop_requested_.store(true, std::memory_order_relaxed);
 +    // Frames not taken yet are dropped (their present images are released).
-+    frame_pacer_dropped_ += frame_pacer_queue_.size();
++    for (const FramePacerFrame& frame : frame_pacer_queue_) {
++      NoteFramePacerDrop(frame.id, frame.refresh_number, "reconnect");
++    }
 +    frame_pacer_queue_.clear();
 +    frame_pacer_taken_ = frame_pacer_pushed_;
 +    frame_pacer_condition_.notify_all();
-+    // Every wait of the pacer is cut into slices that see the request.
-+    frame_pacer_condition_.wait(lock, [this] { return !frame_pacer_busy_; });
++    // Every wait of the pacer is cut into slices that see the request; only a
++    // present or acquire blocked in the driver keeps it busy. Its objects
++    // can't be destroyed before it's done, so this waits on, saying so (the
++    // guest output thread doesn't paint meanwhile and the game goes on).
++    uint32_t seconds = 0;
++    while (!frame_pacer_condition_.wait_for(lock, std::chrono::seconds(1),
++                                            [this] { return !frame_pacer_busy_; })) {
++      REXLOG_WARN("VulkanPresenter: waiting {} s for the frame pacer to finish a present",
++                  ++seconds);
++    }
 +  }
 +  // The pacer's copies and presents finished, and the copy timeline at the
 +  // last frame given to it, so the next paints don't wait for dropped frames.
@@ -1120,7 +1206,11 @@ index 0000000..384845e
 +  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
 +  const VkDevice device = vulkan_device_->device();
 +  PauseFramePacerFromUIThread();
-+  frame_pacer_connected_ = false;
++  frame_pacer_connected_.store(false, std::memory_order_release);
++  if (frame_pacer_dropped_) {
++    REXLOG_INFO("VulkanPresenter: the frame pacer dropped {} frames on this connection",
++                frame_pacer_dropped_);
++  }
 +  // The guest output thread's paints into the present images are over.
 +  paint_context_.submission_tracker.AwaitAllSubmissionsCompletion();
 +  for (VkSemaphore& semaphore : frame_pacer_present_semaphores_) {
@@ -1256,7 +1346,8 @@ index 0000000..384845e
 +  REXLOG_INFO("VulkanPresenter: frame_generation_dump: {}", path);
 +}
 +
-+bool VulkanPresenter::WaitForTimeline(VkSemaphore semaphore, uint64_t value, bool stop_on_exit) {
++bool VulkanPresenter::WaitForTimeline(VkSemaphore semaphore, uint64_t value,
++                                      bool stop_on_request) {
 +  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
 +  VkSemaphoreWaitInfo wait_info = {};
 +  wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -1273,7 +1364,10 @@ index 0000000..384845e
 +      frame_pacer_status_.fetch_or(kFramePacerStatusDeviceLost, std::memory_order_relaxed);
 +      return false;
 +    }
-+    if (stop_on_exit) {
++    if (stop_on_request) {
++      if (frame_pacer_stop_requested_.load(std::memory_order_relaxed)) {
++        return false;
++      }
 +      std::lock_guard<std::mutex> lock(frame_pacer_mutex_);
 +      if (frame_pacer_exit_) {
 +        return false;
@@ -1322,12 +1416,17 @@ index 0000000..384845e
 +  frame_id_out = frame;
 +  // Back-pressure: the pacer has taken every earlier frame (so the present
 +  // image this one goes into is free once the copy of frame - 2 is done, which
-+  // the paint's submission waits for on the GPU).
-+  while (frame_pacer_taken_ < frame) {
-+    if (frame_pacer_status_.load(std::memory_order_relaxed) & kFramePacerStatusDeviceLost) {
-+      return PaintResult::kGpuLostResponsible;
-+    }
-+    frame_pacer_condition_.wait_for(lock, kFramePacerWaitSlice);
++  // the paint's submission waits for on the GPU). Waited for before the paint
++  // lock (PrepareGuestOutputThreadPaint), so normally already true; bounded
++  // here, as this holds the paint lock.
++  if (!frame_pacer_condition_.wait_for(lock, kFramePacerWaitSlice, [this, frame] {
++        return frame_pacer_taken_ >= frame ||
++               (frame_pacer_status_.load(std::memory_order_relaxed) &
++                kFramePacerStatusDeviceLost);
++      })) {
++    lock.unlock();
++    NoteFramePacerDrop(frame, 0, "the pacer was busy with the previous frame");
++    return PaintResult::kNotPresented;
 +  }
 +  lock.unlock();
 +  const uint32_t status = frame_pacer_status_.load(std::memory_order_relaxed);
@@ -1354,15 +1453,31 @@ index 0000000..384845e
 +  frame_pacer_condition_.notify_all();
 +}
 +
-+bool VulkanPresenter::WaitForFramePacerIdle() {
++VulkanPresenter::FramePacerIdleResult VulkanPresenter::WaitForFramePacerIdle() {
 +  std::unique_lock<std::mutex> lock(frame_pacer_mutex_);
-+  while (!frame_pacer_queue_.empty() || frame_pacer_busy_) {
-+    if (frame_pacer_status_.load(std::memory_order_relaxed) & kFramePacerStatusDeviceLost) {
-+      return false;
-+    }
-+    frame_pacer_condition_.wait_for(lock, kFramePacerWaitSlice);
++  if (!frame_pacer_condition_.wait_for(lock, std::chrono::milliseconds(500), [this] {
++        return (frame_pacer_queue_.empty() && !frame_pacer_busy_) ||
++               (frame_pacer_status_.load(std::memory_order_relaxed) &
++                kFramePacerStatusDeviceLost);
++      })) {
++    REXLOG_WARN("VulkanPresenter: the frame pacer is still busy; this paint is skipped");
++    return FramePacerIdleResult::kTimedOut;
 +  }
-+  return true;
++  return (frame_pacer_status_.load(std::memory_order_relaxed) & kFramePacerStatusDeviceLost)
++             ? FramePacerIdleResult::kDeviceLost
++             : FramePacerIdleResult::kIdle;
++}
++
++void VulkanPresenter::NoteFramePacerDrop(uint64_t frame_id, uint64_t refresh_number,
++                                         const char* reason) {
++  // Logged for the first frames and then every 100th, counted per connection.
++  const uint64_t count = ++frame_pacer_dropped_;
++  if (count <= 20 || count % 100 == 0) {
++    REXLOG_INFO("VulkanPresenter: frame pacer: frame {} (refresh {}) not presented: {} ({} on "
++                "this connection)",
++                frame_id, refresh_number, reason, count);
++  }
++  LogPresentFromPacer(refresh_number, -1, 0);
 +}
 +
 +void VulkanPresenter::FramePacerThread() {
@@ -1391,12 +1506,15 @@ index 0000000..384845e
 +  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
 +  const VkDevice device = vulkan_device_->device();
 +  const uint64_t value = frame.id + 1;
-+  const auto drop = [this, value]() { SignalFramePacerCopyTimeline(value); };
++  const auto drop = [this, value, &frame](const char* reason) {
++    NoteFramePacerDrop(frame.id, frame.refresh_number, reason);
++    SignalFramePacerCopyTimeline(value);
++  };
 +
 +  // The paint finished on the GPU (also where later phases will measure the
 +  // rendered frame's time).
 +  if (!WaitForTimeline(frame_pacer_paint_timeline_, value, true)) {
-+    drop();
++    drop("stopped or lost waiting for its paint");
 +    return;
 +  }
 +
@@ -1412,7 +1530,7 @@ index 0000000..384845e
 +      break;
 +    }
 +    if (frame_pacer_stop_requested_.load(std::memory_order_relaxed)) {
-+      drop();
++      drop("stopped waiting for a swapchain image");
 +      return;
 +    }
 +  }
@@ -1424,11 +1542,11 @@ index 0000000..384845e
 +      break;
 +    case VK_ERROR_DEVICE_LOST:
 +      frame_pacer_status_.fetch_or(kFramePacerStatusDeviceLost, std::memory_order_relaxed);
-+      drop();
++      drop("device lost acquiring");
 +      return;
 +    default:
 +      frame_pacer_status_.fetch_or(kFramePacerStatusOutdated, std::memory_order_relaxed);
-+      drop();
++      drop("the swapchain is out of date");
 +      return;
 +  }
 +  for (;;) {
@@ -1439,7 +1557,7 @@ index 0000000..384845e
 +    }
 +    if (fence_result != VK_TIMEOUT) {
 +      frame_pacer_status_.fetch_or(kFramePacerStatusDeviceLost, std::memory_order_relaxed);
-+      drop();
++      drop("device lost waiting for the swapchain image");
 +      return;
 +    }
 +  }
@@ -1451,7 +1569,7 @@ index 0000000..384845e
 +  if (frame.id >= kFramePacerCopySlots &&
 +      !WaitForTimeline(frame_pacer_copy_timeline_, value - kFramePacerCopySlots, false)) {
 +    frame_pacer_status_.fetch_or(kFramePacerStatusOutdated, std::memory_order_relaxed);
-+    drop();
++    drop("device lost waiting for a copy command buffer");
 +    return;
 +  }
 +  VkCommandBuffer command_buffer = frame_pacer_command_buffers_[copy_slot];
@@ -1557,7 +1675,7 @@ index 0000000..384845e
 +                                     ? kFramePacerStatusDeviceLost
 +                                     : kFramePacerStatusOutdated,
 +                                 std::memory_order_relaxed);
-+    drop();
++    drop("the copy's submission failed");
 +    return;
 +  }
 +  switch (present_result) {
