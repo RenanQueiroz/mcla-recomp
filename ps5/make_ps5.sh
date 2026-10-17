@@ -30,6 +30,8 @@
 # Locations, changeable through the environment:
 #   PS5VK   (/root/ps5vk)   the Vulkan driver project and its toolchain
 #   WORK    (/root/mcla)    the SDK checkout and all build trees
+#   MCLA_PS5_FSR (1)       0: without FSR 3.1 anti-aliasing (untested on the console,
+#                           offered for the next start; MSAA stays the default)
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -234,20 +236,48 @@ echo "generated sources: $(ls "$repo"/generated/default/*.cpp | wc -l)"
 
 # ---------------------------------------------------------------------------
 step "6/9 the runtime, for PS5"
-# FSR 3.1 (rexglue-temporal-aa.patch): FidelityFX's source is fetched at a
-# pinned commit (needs the network the first time) and built as static
-# libraries; without it the runtime builds without FSR. A build folder
-# configured before FSR existed is configured again.
-if [ ! -f "$rex_build/build.ninja" ] || ! grep -q '^REXGLUE_ENABLE_FSR:BOOL=ON$' "$rex_build/CMakeCache.txt"; then
+# FSR 3.1 (rexglue-temporal-aa.patch), unless MCLA_PS5_FSR=0: FidelityFX's
+# source is fetched at a pinned commit (needs the network the first time) and
+# built as static libraries; if that fails, the runtime builds without FSR. A
+# build folder configured with the other choice is configured again.
+fsr=${MCLA_PS5_FSR:-1}
+case $fsr in 0) fsr_cmake=OFF ;; 1) fsr_cmake=ON ;; *) fail "MCLA_PS5_FSR must be 0 or 1" ;; esac
+if [ ! -f "$rex_build/build.ninja" ] || ! grep -q "^REXGLUE_ENABLE_FSR:BOOL=$fsr_cmake\$" "$rex_build/CMakeCache.txt"; then
     # -flto=thin: 5-8% more draws a second on the console.
     logged ps5-configure cmake -S "$rex_src" -B "$rex_build" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$sdk/toolchain/prospero.cmake" \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23 \
         -DCMAKE_C_FLAGS="-march=znver2 -flto=thin" \
         -DCMAKE_CXX_FLAGS="-march=znver2 -fexperimental-library -flto=thin" \
-        -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON
+        -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=$fsr_cmake
 fi
 logged ps5-runtime ninja -C "$rex_build" -j "$jobs" rexruntime rexgpu-xenos
+# FidelityFX's static libraries, next to the runtime's (the game links every
+# archive there): none without FSR; and none if they refer to a Vulkan function
+# that neither the GPU plugin (src/graphics/vulkan/temporal_aa_static.cpp, as a
+# loader would export it) nor the driver defines, as the title couldn't link
+# them. Without them the game doesn't offer FSR.
+fsr_archives=$(ls "$rex_src/out/ps5-amd64"/libamd_fidelityfx_*.a "$rex_src/out/ps5-amd64"/libffx_*.a 2> /dev/null || true)
+if [ "$fsr" = 0 ]; then
+    [ -z "$fsr_archives" ] || rm -f $fsr_archives
+    echo "FSR: left out (MCLA_PS5_FSR=0)"
+elif [ ! -f "$rex_src/out/ps5-amd64/libamd_fidelityfx_vk.a" ]; then
+    echo "note: FSR 3.1 was not built (fetching FidelityFX needs the network, or its build failed: $logs/ps5-runtime.log); the game offers MSAA and off"
+else
+    nm=$(command -v llvm-nm || true)
+    [ -n "$nm" ] || fail "llvm-nm is missing (pacman -S llvm)"
+    radv="$driver/.deps/native/radv-release/lib/libvulkan_radeon.ps5.a"
+    wanted=$("$nm" -u -j $fsr_archives 2> /dev/null | grep -E '^vk[A-Z]' | sort -u || true)
+    defined=$( { "$nm" --defined-only -j "$rex_src/out/ps5-amd64/librexgpu-xenos.a" 2> /dev/null
+                 [ ! -f "$radv" ] || "$nm" --defined-only -j "$radv" 2> /dev/null; } | sort -u || true)
+    missing=$(comm -23 <(printf '%s\n' "$wanted") <(printf '%s\n' "$defined") | grep . || true)
+    if [ -n "$missing" ]; then
+        echo "warning: FidelityFX refers to Vulkan functions nothing in the title defines ($(echo $missing)); building without FSR" >&2
+        rm -f $fsr_archives
+    else
+        echo "FSR: FidelityFX's static libraries built; the Vulkan functions it calls directly: $(echo $wanted)"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 step "7/9 the title's tile and backgrounds"
@@ -284,7 +314,7 @@ fi
 
 # ---------------------------------------------------------------------------
 step "8/9 the game for PS5 (about 120 large files: 10 to 30 minutes the first time)"
-export PS5_VULKAN="$driver" REX_SRC="$rex_src" REX_BUILD="$rex_build" MCLA_PS5_WORK="$WORK/game-ps5" JOBS="$jobs"
+export PS5_VULKAN="$driver" REX_SRC="$rex_src" REX_BUILD="$rex_build" MCLA_PS5_WORK="$WORK/game-ps5" JOBS="$jobs" MCLA_PS5_FSR="$fsr"
 export TITLE="$title_id" MCLA_TITLE_NAME="Midnight Club: Los Angeles" ART_DIR="$art_dir"
 if [ -n "$play" ]; then
     export MCLA_PLAY=1 MCLA_LOG_LEVEL=warning

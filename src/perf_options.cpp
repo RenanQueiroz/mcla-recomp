@@ -23,6 +23,8 @@
 #include <rex/runtime.h>
 #include <rex/system/xmemory.h>
 
+void MclaFallBackFromFsr();  // src/settings_menu.cpp
+
 REXCVAR_DEFINE_BOOL(mcla_shadows, true, "MCLA", "Real-time shadows. Off is the largest saving");
 // The options the game reads once, when it starts, are kRequiresRestart: the
 // settings menu marks their rows "(NEXT START)" (src/settings_menu.cpp).
@@ -205,9 +207,13 @@ bool FsrAvailable() {
   const std::string available = rex::cvar::GetFlagByName("temporal_aa_available");
   return available == "yes" || available == "unknown";
 }
+// Whether it can run after a restart only.
+bool FsrNextStart() {
+  return rex::cvar::GetFlagByName("temporal_aa_available") == "next_start";
+}
 // Whether to offer it: also when it applies at the next start.
 bool FsrOffered() {
-  return FsrAvailable() || rex::cvar::GetFlagByName("temporal_aa_available") == "next_start";
+  return FsrAvailable() || FsrNextStart();
 }
 
 // mcla_anti_aliasing as it applies, read under the option registry's lock
@@ -225,6 +231,14 @@ std::string AntiAliasing() {
         REXLOG_WARN("perf options: FSR is unavailable here; MSAA is used instead");
       }
     }
+#if REX_PLATFORM_PS5
+    // The console's device got FSR's features for this choice (main_ps5.cpp).
+    static bool fell_back = false;
+    if (!fell_back && rex::cvar::GetFlagByName("temporal_aa_available") == "no") {
+      fell_back = true;
+      MclaFallBackFromFsr();
+    }
+#endif
     return "msaa";
   }
   return anti_aliasing;
@@ -407,6 +421,10 @@ void MclaTickPerfOptions() {
 // still does while mcla_anti_aliasing isn't set (its default becomes off, which
 // isn't saved as if the player had chosen it).
 // For the pause menu, which offers FSR only where it can run.
+bool MclaFsrNextStart() {
+  return FsrNextStart();
+}
+
 bool MclaFsrAvailable() {
   return FsrOffered();
 }

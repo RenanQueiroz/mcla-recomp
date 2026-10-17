@@ -59,15 +59,23 @@ licence, whose notice the ReXGlue SDK already carries in its `LICENSE`.
 carried by the ReXGlue fork <https://github.com/rexglue/FidelityFX-SDK> at commit
 `eee08db1688ac3d1275a70b728f4a8ba22914213` (AMD's v1.1.4 plus portability fixes).
 
-Used for the FSR 3.1 anti-aliasing option (`patches/rexglue-temporal-aa.patch`):
+Used for the FSR 3.1 anti-aliasing option (`patches/rexglue-temporal-aa.patch`
+and `patches/rexglue-temporal-aa-shaders-vk.patch`):
 
-- the ffx-api headers, unmodified, in the patch as
+- the ffx-api headers, unmodified, in the first patch as
   `thirdparty/fidelityfx-api/include` of the SDK, with this notice beside them
   (`thirdparty/fidelityfx-api/LICENSE.txt`);
-- `amd_fidelityfx_dx12.dll` and `amd_fidelityfx_vk.dll`, built from that
-  commit's source when the SDK is built (`cmake/rexglue_fsr.cmake` fetches it
-  and checks its tree hashes) and installed next to `mcla.exe`. No FidelityFX
-  binaries are in this repository.
+- 40 compiled shaders of FSR 3's upscaler (SPIR-V, in the headers FidelityFX's
+  shader compiler generates, made from that commit's source by
+  `launcher/dev/fsr/fsr_vk_shaders.py`), in the second patch as
+  `thirdparty/fidelityfx-shaders-vk` of the SDK, with this notice beside them
+  (`LICENSE.txt` there): the only FidelityFX binaries in this repository, for
+  builds where that compiler (a Windows program) can't run;
+- FidelityFX's runtime, built from that commit's source when the SDK is built
+  (`cmake/rexglue_fsr.cmake` fetches it and checks its tree hashes):
+  `amd_fidelityfx_dx12.dll` and `amd_fidelityfx_vk.dll` installed next to
+  `mcla.exe` on Windows; `libamd_fidelityfx_vk.so` with the SDK's libraries on
+  Linux; static libraries linked into the title on the PS5.
 
 ```
 This file is part of the FidelityFX SDK.

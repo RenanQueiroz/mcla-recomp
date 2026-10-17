@@ -34,19 +34,22 @@ index af378d8..64a86fd 100644
  message(STATUS "===========================================")
 diff --git a/cmake/fidelityfx/CMakeLists.txt b/cmake/fidelityfx/CMakeLists.txt
 new file mode 100644
-index 0000000..fbf23d3
+index 0000000..365a133
 --- /dev/null
 +++ b/cmake/fidelityfx/CMakeLists.txt
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,140 @@
 +# Builds one ffx-api backend (FFX_API_BACKEND = DX12_X64 or VK_X64) of the FidelityFX
 +# SDK at FFX_ROOT as a shared library, for cmake/rexglue_fsr.cmake (an ExternalProject,
 +# so the two backends, which can't share a configure, each get their own).
-+#   REXGLUE_FSR_SHADERS_DIR   the prebuilt shaders (thirdparty/fidelityfx-shaders-vk)
-+#                             instead of FidelityFX_SC (Vulkan; prebuilt_shaders*.cmake)
-+#   REXGLUE_FSR_VULKAN_HEADERS  Vulkan headers to use instead of find_package(Vulkan)
-+#                             (a cross build, which links nothing: REXGLUE_FSR_STATIC)
-+#   REXGLUE_FSR_STATIC        static libraries instead, copied to REXGLUE_FSR_ARCHIVE_DIR
-+#                             by the target rexglue_fsr_static (the PS5)
++#   REXGLUE_FSR_SHADERS_DIR     the prebuilt shaders (thirdparty/fidelityfx-shaders-vk)
++#                               instead of FidelityFX_SC (Vulkan; prebuilt_shaders*.cmake)
++#   REXGLUE_FSR_SHADERS_HASH    their hash (only to make a new set rebuild the runtime)
++#   REXGLUE_FSR_VULKAN_HEADERS  Vulkan headers to build against instead of
++#                               find_package(Vulkan)'s, and REXGLUE_FSR_VULKAN_LIBRARY
++#                               the library to link (none for static libraries)
++#   REXGLUE_FSR_STATIC          static libraries instead, checked and copied to
++#                               REXGLUE_FSR_ARCHIVE_DIR by the target rexglue_fsr_static
++#                               (the PS5)
 +cmake_minimum_required(VERSION 3.23)
 +project(rexglue_fidelityfx C CXX)
 +if(NOT FFX_ROOT OR NOT FFX_API_BACKEND)
@@ -69,7 +72,19 @@ index 0000000..fbf23d3
 +    # FidelityFX's find_package(Vulkan REQUIRED) gets these headers.
 +    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/vulkan-headers-only")
 +endif()
++if(REXGLUE_FSR_STATIC)
++    # Here, so that the static library below sees Vulkan's targets too (imported
++    # targets belong to the folder that finds them).
++    find_package(Vulkan REQUIRED)
++endif()
 +add_subdirectory("${FFX_ROOT}/ffx-api" "${CMAKE_BINARY_DIR}/ffx-api")
++if(REXGLUE_FSR_SHADERS_DIR)
++    get_property(_hook_ran GLOBAL PROPERTY REXGLUE_FSR_PREBUILT_HOOK_RAN)
++    if(NOT _hook_ran)
++        message(FATAL_ERROR "FSR: FidelityFX's Vulkan project isn't FidelityFX-SDK_VK_x64 any more, so "
++                            "the prebuilt shaders' hook didn't run (prebuilt_shaders_hook.cmake)")
++    endif()
++endif()
 +# FidelityFX's toolchain.cmake sets a Visual Studio platform, which Ninja rejects.
 +unset(CMAKE_GENERATOR_PLATFORM CACHE)
 +string(TOLOWER "${FFX_API_BACKEND}" _backend)
@@ -89,7 +104,10 @@ index 0000000..fbf23d3
 +
 +if(REXGLUE_FSR_STATIC)
 +    # ffx-api's own library is SHARED; the same sources and settings as a static
-+    # library, under the same name, next to the static libraries it uses.
++    # library, under the same name, next to the static libraries it uses: its
++    # target's properties, its folder's compile definitions and options (where
++    # ffx-api selects its backend: FFX_BACKEND_VK), and its link libraries' usage
++    # requirements (the backend's, the components', the Vulkan headers).
 +    get_target_property(_sources ${_target} SOURCES)
 +    get_target_property(_source_dir ${_target} SOURCE_DIR)
 +    set(_static_sources)
@@ -110,33 +128,82 @@ index 0000000..fbf23d3
 +            set_property(TARGET ${_target}_static PROPERTY ${_property} "${_value}")
 +        endif()
 +    endforeach()
++    get_directory_property(_definitions DIRECTORY "${_source_dir}" COMPILE_DEFINITIONS)
++    target_compile_definitions(${_target}_static PRIVATE ${_definitions})
 +    get_target_property(_links ${_target} LINK_LIBRARIES)
++    target_link_libraries(${_target}_static PRIVATE ${_links})
++    # Every static library it needs, through their own links.
 +    set(_archives)
-+    foreach(_link IN LISTS _links)
-+        if(TARGET ${_link})
-+            get_target_property(_type ${_link} TYPE)
-+            if(_type STREQUAL "STATIC_LIBRARY")
-+                list(APPEND _archives "$<TARGET_FILE:${_link}>")
-+                add_dependencies(${_target}_static ${_link})
++    set(_pending ${_links})
++    set(_seen)
++    while(_pending)
++        list(POP_FRONT _pending _link)
++        if(NOT TARGET ${_link} OR _link IN_LIST _seen)
++            continue()
++        endif()
++        list(APPEND _seen ${_link})
++        get_target_property(_type ${_link} TYPE)
++        if(_type STREQUAL "STATIC_LIBRARY")
++            list(APPEND _archives "$<TARGET_FILE:${_link}>")
++            get_target_property(_more ${_link} LINK_LIBRARIES)
++            if(_more)
++                list(APPEND _pending ${_more})
 +            endif()
 +        endif()
-+    endforeach()
++    endwhile()
++    # Its own folder: on Windows the shared library's import library has the name.
 +    set_target_properties(${_target}_static PROPERTIES OUTPUT_NAME ${_target}
-+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
++        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/static")
 +    set_target_properties(${_target} PROPERTIES EXCLUDE_FROM_ALL ON)
++    # The archive must have the backend in it (an ffx-api built without its
++    # backend's definition still links, but can't create anything).
++    if(CMAKE_NM)
++        set(_nm "${CMAKE_NM}")
++    else()
++        get_filename_component(_compiler_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
++        find_program(_nm NAMES llvm-nm nm HINTS "${_compiler_dir}" REQUIRED)
++    endif()
++    string(TOUPPER "${_backend}" _backend_upper)
++    if(_backend_upper STREQUAL "VK")
++        set(_interface ffxGetInterfaceVK)
++    else()
++        set(_interface ffxGetInterfaceDX12)
++    endif()
 +    add_custom_target(rexglue_fsr_static
++        COMMAND "${CMAKE_COMMAND}" "-DNM=${_nm}" "-DARCHIVE=$<TARGET_FILE:${_target}_static>"
++                "-DSYMBOL=${_interface}" -P "${CMAKE_CURRENT_LIST_DIR}/check_static.cmake"
 +        COMMAND "${CMAKE_COMMAND}" -E make_directory "${REXGLUE_FSR_ARCHIVE_DIR}"
 +        COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:${_target}_static>" ${_archives}
 +                "${REXGLUE_FSR_ARCHIVE_DIR}"
 +        DEPENDS ${_target}_static
 +        VERBATIM)
 +endif()
+diff --git a/cmake/fidelityfx/check_static.cmake b/cmake/fidelityfx/check_static.cmake
+new file mode 100644
+index 0000000..21826f2
+--- /dev/null
++++ b/cmake/fidelityfx/check_static.cmake
+@@ -0,0 +1,14 @@
++# The static ffx-api (cmake/fidelityfx/CMakeLists.txt, REXGLUE_FSR_STATIC) must
++# refer to its backend's interface: built without the backend's definition it
++# still links, but creating FSR always fails.
++#   cmake -DNM=<llvm-nm> -DARCHIVE=<libamd_fidelityfx_vk.a> -DSYMBOL=ffxGetInterfaceVK -P check_static.cmake
++execute_process(COMMAND "${NM}" -u "${ARCHIVE}" RESULT_VARIABLE result OUTPUT_VARIABLE undefined
++                ERROR_VARIABLE error)
++if(NOT result EQUAL 0)
++    message(FATAL_ERROR "FSR: ${NM} -u ${ARCHIVE} failed: ${error}")
++endif()
++string(FIND "${undefined}" "${SYMBOL}" found)
++if(found EQUAL -1)
++    message(FATAL_ERROR "FSR: ${ARCHIVE} doesn't refer to ${SYMBOL}: ffx-api was built without its backend")
++endif()
++message(STATUS "FSR: ${ARCHIVE} refers to ${SYMBOL}")
 diff --git a/cmake/fidelityfx/prebuilt_shaders.cmake b/cmake/fidelityfx/prebuilt_shaders.cmake
 new file mode 100644
-index 0000000..addd05b
+index 0000000..3d97f52
 --- /dev/null
 +++ b/cmake/fidelityfx/prebuilt_shaders.cmake
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,61 @@
 +# Stands in for FidelityFX_SC.exe (prebuilt_shaders_hook.cmake), called as it
 +# would be:
 +#   cmake -DREXGLUE_FSR_SHADERS_DIR=<dir> -P prebuilt_shaders.cmake -- <FidelityFX_SC's arguments>
@@ -185,16 +252,25 @@ index 0000000..addd05b
 +endforeach()
 +# FidelityFX_SC's output is newer than its input; so is this.
 +file(TOUCH "${output}/${name}_permutations.h")
-+# Make's syntax: spaces in paths escaped.
-+string(REPLACE " " "\\ " target "${output}/${name}_permutations.h")
-+string(REPLACE " " "\\ " source "${shader}")
-+file(WRITE "${output}/${name}_permutations.h.d" "${target}: ${source}\n")
++# Make's syntax, spaces in paths escaped: the shader and the prebuilt files, so
++# that a new set is copied again.
++set(dependencies "${shader}")
++foreach(file IN LISTS files)
++    list(APPEND dependencies "${REXGLUE_FSR_SHADERS_DIR}/${file}")
++endforeach()
++string(REPLACE " " "\\ " depfile "${output}/${name}_permutations.h")
++string(APPEND depfile ":")
++foreach(dependency IN LISTS dependencies)
++    string(REPLACE " " "\\ " dependency "${dependency}")
++    string(APPEND depfile " ${dependency}")
++endforeach()
++file(WRITE "${output}/${name}_permutations.h.d" "${depfile}\n")
 diff --git a/cmake/fidelityfx/prebuilt_shaders_hook.cmake b/cmake/fidelityfx/prebuilt_shaders_hook.cmake
 new file mode 100644
-index 0000000..2542d73
+index 0000000..07e0158
 --- /dev/null
 +++ b/cmake/fidelityfx/prebuilt_shaders_hook.cmake
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,10 @@
 +# Included by FidelityFX's sdk/CMakeLists.txt right after its project() for the
 +# Vulkan backend (CMAKE_PROJECT_<name>_INCLUDE, set by cmake/fidelityfx/CMakeLists.txt
 +# when REXGLUE_FSR_SHADERS_DIR is given), after it has chosen its shader compiler:
@@ -203,6 +279,8 @@ index 0000000..2542d73
 +set(FFX_SC_EXECUTABLE "${CMAKE_COMMAND}" "-DREXGLUE_FSR_SHADERS_DIR=${REXGLUE_FSR_SHADERS_DIR}"
 +    -P "${REXGLUE_FSR_WRAPPER_DIR}/prebuilt_shaders.cmake" --)
 +message(STATUS "FSR: FidelityFX's Vulkan shaders come from ${REXGLUE_FSR_SHADERS_DIR}, not its shader compiler (no Wine needed)")
++# The wrapper checks that this ran (a renamed project would skip it silently).
++set_property(GLOBAL PROPERTY REXGLUE_FSR_PREBUILT_HOOK_RAN TRUE)
 diff --git a/cmake/fidelityfx/soft_step.cmake b/cmake/fidelityfx/soft_step.cmake
 new file mode 100644
 index 0000000..b9f78c9
@@ -237,13 +315,14 @@ index 0000000..b9f78c9
 +endif()
 diff --git a/cmake/fidelityfx/vulkan-headers-only/FindVulkan.cmake b/cmake/fidelityfx/vulkan-headers-only/FindVulkan.cmake
 new file mode 100644
-index 0000000..52b355d
+index 0000000..2a628d3
 --- /dev/null
 +++ b/cmake/fidelityfx/vulkan-headers-only/FindVulkan.cmake
-@@ -0,0 +1,21 @@
-+# FidelityFX's find_package(Vulkan) in a cross build (cmake/fidelityfx/CMakeLists.txt,
-+# REXGLUE_FSR_VULKAN_HEADERS): the SDK's own Vulkan headers and no library, as
-+# the static libraries built there link nothing.
+@@ -0,0 +1,27 @@
++# FidelityFX's find_package(Vulkan) when the SDK gives it Vulkan headers
++# (cmake/fidelityfx/CMakeLists.txt, REXGLUE_FSR_VULKAN_HEADERS): the SDK's own,
++# and REXGLUE_FSR_VULKAN_LIBRARY to link if set (Linux: the system's loader;
++# none for the PS5's static libraries, which link nothing).
 +set(Vulkan_INCLUDE_DIR "${REXGLUE_FSR_VULKAN_HEADERS}")
 +set(Vulkan_INCLUDE_DIRS "${REXGLUE_FSR_VULKAN_HEADERS}")
 +# The headers' version, for FidelityFX's minimum (CheckVulkanSDKVersion).
@@ -254,20 +333,25 @@ index 0000000..52b355d
 +string(REGEX MATCH "VK_MAKE_API_VERSION[(]0, ([0-9]+), ([0-9]+)," _ "${_vulkan_version_lines}")
 +set(Vulkan_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${_vulkan_patch}")
 +set(Vulkan_FOUND TRUE)
-+if(NOT TARGET Vulkan::Vulkan)
-+    add_library(Vulkan::Vulkan INTERFACE IMPORTED)
-+    set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${REXGLUE_FSR_VULKAN_HEADERS}")
-+endif()
 +if(NOT TARGET Vulkan::Headers)
 +    add_library(Vulkan::Headers INTERFACE IMPORTED)
 +    set_target_properties(Vulkan::Headers PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${REXGLUE_FSR_VULKAN_HEADERS}")
 +endif()
++if(NOT TARGET Vulkan::Vulkan)
++    add_library(Vulkan::Vulkan INTERFACE IMPORTED)
++    set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${REXGLUE_FSR_VULKAN_HEADERS}")
++    if(REXGLUE_FSR_VULKAN_LIBRARY)
++        set(Vulkan_LIBRARY "${REXGLUE_FSR_VULKAN_LIBRARY}")
++        set(Vulkan_LIBRARIES "${REXGLUE_FSR_VULKAN_LIBRARY}")
++        set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_LINK_LIBRARIES "${REXGLUE_FSR_VULKAN_LIBRARY}")
++    endif()
++endif()
 diff --git a/cmake/rexglue_fsr.cmake b/cmake/rexglue_fsr.cmake
 new file mode 100644
-index 0000000..80d405b
+index 0000000..a8ee628
 --- /dev/null
 +++ b/cmake/rexglue_fsr.cmake
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,334 @@
 +# rexglue_fsr.cmake - AMD FSR 3.1 for temporal anti-aliasing (rexglue-temporal-aa.patch)
 +#
 +# Builds ffx-api of the AMD FidelityFX SDK 1.1.4 (MIT) from source, as
@@ -290,9 +374,10 @@ index 0000000..80d405b
 +# FidelityFX compiles its shaders at build time with its own FidelityFX_SC tool
 +# (from the same commit), a Windows program. Elsewhere the Vulkan library is
 +# built from the prebuilt shaders of the permutations rexglue uses
-+# (REXGLUE_FSR_PREBUILT_SHADERS). The Vulkan library needs the Vulkan SDK (or,
-+# on Linux, Vulkan's development files: find_package(Vulkan)); without it only
-+# the D3D12 one is built. On the PS5 both are static libraries (no modules).
++# (REXGLUE_FSR_PREBUILT_SHADERS). On Windows the Vulkan library needs the Vulkan
++# SDK (without it only the D3D12 one is built); elsewhere it is built against
++# the SDK's own Vulkan headers, and on Linux links the system's Vulkan loader.
++# On the PS5 it is static libraries (no modules).
 +
 +if(NOT REXGLUE_ENABLE_FSR)
 +    return()
@@ -415,20 +500,33 @@ index 0000000..80d405b
 +if(REXGLUE_USE_D3D12)
 +    list(APPEND _rexglue_fsr_apis dx12)
 +endif()
-+set(_rexglue_fsr_vk_args)
++# The Vulkan runtime's headers and library: on Windows the Vulkan SDK's; off it
++# the SDK's own headers (thirdparty/vulkan-headers, so no development package
++# or minimum version is needed), with the system's loader on Linux and no
++# library for the PS5's static libraries.
++set(_rexglue_fsr_vulkan_headers "")
++set(_rexglue_fsr_vulkan_library "")
 +if(REXGLUE_USE_VULKAN)
-+    if(PS5 OR PROSPERO)
-+        # Cross build: the SDK's own Vulkan headers (a static library links nothing).
-+        list(APPEND _rexglue_fsr_apis vk)
-+        list(APPEND _rexglue_fsr_vk_args "-DREXGLUE_FSR_VULKAN_HEADERS=${REXGLUE_ROOT}/thirdparty/vulkan-headers/include")
-+    else()
++    if(WIN32)
 +        find_package(Vulkan QUIET)
 +        if(Vulkan_FOUND)
 +            list(APPEND _rexglue_fsr_apis vk)
-+        elseif(WIN32)
-+            message(WARNING "FSR: the Vulkan SDK was not found; FSR is built for Direct3D 12 only (set VULKAN_SDK, or install it, for Vulkan)")
 +        else()
-+            message(WARNING "FSR: Vulkan's development files (libvulkan-dev or similar) were not found; building without FSR")
++            message(WARNING "FSR: the Vulkan SDK was not found; FSR is built for Direct3D 12 only (set VULKAN_SDK, or install it, for Vulkan)")
++        endif()
++    else()
++        set(_rexglue_fsr_vulkan_headers "${REXGLUE_ROOT}/thirdparty/vulkan-headers/include")
++        if(PS5 OR PROSPERO)
++            list(APPEND _rexglue_fsr_apis vk)
++        else()
++            find_library(REXGLUE_FSR_VULKAN_LIBRARY NAMES vulkan libvulkan.so.1
++                         DOC "The Vulkan loader FSR's Vulkan runtime links (Linux)")
++            if(REXGLUE_FSR_VULKAN_LIBRARY)
++                set(_rexglue_fsr_vulkan_library "${REXGLUE_FSR_VULKAN_LIBRARY}")
++                list(APPEND _rexglue_fsr_apis vk)
++            else()
++                message(WARNING "FSR: the Vulkan loader (libvulkan.so.1) was not found; building without FSR")
++            endif()
 +        endif()
 +    endif()
 +endif()
@@ -446,11 +544,24 @@ index 0000000..80d405b
 +    "Build FSR's Vulkan runtime from the prebuilt shaders in thirdparty/fidelityfx-shaders-vk (needed off Windows)"
 +    ${_rexglue_fsr_prebuilt_default})
 +set(REXGLUE_FSR_SHADERS_DIR "${REXGLUE_ROOT}/thirdparty/fidelityfx-shaders-vk")
++set(_rexglue_fsr_shaders_hash "")
 +if("vk" IN_LIST _rexglue_fsr_apis)
 +    if(REXGLUE_FSR_PREBUILT_SHADERS)
 +        if(EXISTS "${REXGLUE_FSR_SHADERS_DIR}/rexglue_fsr_shaders_vk.h")
 +            set(REXGLUE_FSR_VK_PREBUILT ON)
-+            list(APPEND _rexglue_fsr_vk_args "-DREXGLUE_FSR_SHADERS_DIR=${REXGLUE_FSR_SHADERS_DIR}")
++            # Their hash, in the runtime's configure command: a new set
++            # configures and builds it again (and this configure runs again when
++            # a file of the set changes).
++            file(GLOB _rexglue_fsr_shaders LIST_DIRECTORIES false "${REXGLUE_FSR_SHADERS_DIR}/*")
++            list(SORT _rexglue_fsr_shaders)
++            set(_rexglue_fsr_hashes "")
++            foreach(file IN LISTS _rexglue_fsr_shaders)
++                file(SHA256 "${file}" hash)
++                get_filename_component(name "${file}" NAME)
++                string(APPEND _rexglue_fsr_hashes "${name} ${hash}\n")
++            endforeach()
++            string(SHA256 _rexglue_fsr_shaders_hash "${_rexglue_fsr_hashes}")
++            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_rexglue_fsr_shaders})
 +        else()
 +            message(WARNING "FSR: the prebuilt Vulkan shaders (thirdparty/fidelityfx-shaders-vk, rexglue-temporal-aa-shaders-vk.patch) are missing; building without FSR for Vulkan")
 +            list(REMOVE_ITEM _rexglue_fsr_apis vk)
@@ -489,21 +600,46 @@ index 0000000..80d405b
 +    # source folder (CMAKE_HOME_DIRECTORY/bin), which would otherwise be the
 +    # SDK's own and shared by the two builds.
 +    set(wrapper_dir "${CMAKE_BINARY_DIR}/_deps/ffx-${api}-p")
-+    foreach(file CMakeLists.txt soft_step.cmake prebuilt_shaders_hook.cmake prebuilt_shaders.cmake
-+                 vulkan-headers-only/FindVulkan.cmake)
++    foreach(file CMakeLists.txt soft_step.cmake check_static.cmake prebuilt_shaders_hook.cmake
++                 prebuilt_shaders.cmake vulkan-headers-only/FindVulkan.cmake)
 +        configure_file("${REXGLUE_ROOT}/cmake/fidelityfx/${file}" "${wrapper_dir}/${file}" COPYONLY)
 +    endforeach()
++    # Every switch of the wrapper given, empty or off when not used, so that its
++    # cache keeps none from an earlier configure.
 +    set(args "-DFFX_ROOT=${_rexglue_fsr_src}" -DFFX_API_BACKEND=${api_upper}_X64)
++    if(api STREQUAL "vk" AND REXGLUE_FSR_VK_PREBUILT)
++        list(APPEND args "-DREXGLUE_FSR_SHADERS_DIR=${REXGLUE_FSR_SHADERS_DIR}"
++             "-DREXGLUE_FSR_SHADERS_HASH=${_rexglue_fsr_shaders_hash}")
++    else()
++        list(APPEND args "-DREXGLUE_FSR_SHADERS_DIR=" "-DREXGLUE_FSR_SHADERS_HASH=")
++    endif()
 +    if(api STREQUAL "vk")
-+        list(APPEND args ${_rexglue_fsr_vk_args})
++        list(APPEND args "-DREXGLUE_FSR_VULKAN_HEADERS=${_rexglue_fsr_vulkan_headers}"
++             "-DREXGLUE_FSR_VULKAN_LIBRARY=${_rexglue_fsr_vulkan_library}")
++    else()
++        list(APPEND args "-DREXGLUE_FSR_VULKAN_HEADERS=" "-DREXGLUE_FSR_VULKAN_LIBRARY=")
++    endif()
++    if(NOT WIN32)
++        # The Linux library is a shared object; the PS5's title is position-independent.
++        list(APPEND args -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
 +    endif()
 +    if(REXGLUE_FSR_STATIC)
++        # Linked into the title with the SDK's own code, with link-time
++        # optimisation: the same code model as the SDK (an LTO link refuses
++        # modules with different ones).
++        set(flags_c "${CMAKE_C_FLAGS}")
++        set(flags_cxx "${CMAKE_CXX_FLAGS}")
++        if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64" AND NOT APPLE)
++            string(APPEND flags_c " -mcmodel=large")
++            string(APPEND flags_cxx " -mcmodel=large")
++        endif()
 +        set(library "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/libamd_fidelityfx_${api}.a")
 +        list(APPEND args -DREXGLUE_FSR_STATIC=ON "-DREXGLUE_FSR_ARCHIVE_DIR=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}"
 +             "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
-+             "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}" "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}")
++             "-DCMAKE_C_FLAGS=${flags_c}" "-DCMAKE_CXX_FLAGS=${flags_cxx}")
 +        set(target rexglue_fsr_static)
 +    else()
++        list(APPEND args -DREXGLUE_FSR_STATIC=OFF "-DREXGLUE_FSR_ARCHIVE_DIR=")
 +        set(library "${binary_dir}/bin/${_rexglue_fsr_library_prefix}amd_fidelityfx_${api}${_rexglue_fsr_library_suffix}")
 +        set(target amd_fidelityfx_${api})
 +    endif()
@@ -546,7 +682,7 @@ index 0000000..80d405b
 +    if(REXGLUE_FSR_STATIC)
 +        string(APPEND REXGLUE_FSR_STATUS "; static")
 +    endif()
-+    string(APPEND REXGLUE_FSR_STATUS ")")
++    string(APPEND REXGLUE_FSR_STATUS "), built with the SDK; one that fails to build is left out with a warning")
 +else()
 +    set(REXGLUE_FSR_STATUS "ON, but no runtime can be built here (see the warnings above)")
 +endif()
@@ -1275,10 +1411,10 @@ index e3851c0..5150ff5 100644
                                                  D3D12_RECT source, uint32_t dest_x,
 diff --git a/src/graphics/d3d12/temporal_aa.cpp b/src/graphics/d3d12/temporal_aa.cpp
 new file mode 100644
-index 0000000..eb2f1d0
+index 0000000..19896ee
 --- /dev/null
 +++ b/src/graphics/d3d12/temporal_aa.cpp
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,844 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch), Direct3D 12: see
 + * CommandProcessor::TaaFrame and D3D12CommandProcessor::TaaRun.
@@ -1923,8 +2059,7 @@ index 0000000..eb2f1d0
 +    fsr.width = width;
 +    fsr.height = height;
 +    fsr.state.store(TaaFsr::kCreating, std::memory_order_release);
-+    uint32_t flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED |
-+                     FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
++    uint32_t flags = kTaaFsrCreateFlags;
 +    if (TaaDebug() == 1) {
 +      flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
 +    }
@@ -3541,10 +3676,10 @@ index 0000000..1c3015e
 +#endif  // REX_HAS_FSR
 diff --git a/src/graphics/temporal_aa_fsr.h b/src/graphics/temporal_aa_fsr.h
 new file mode 100644
-index 0000000..d89dfd8
+index 0000000..c495d85
 --- /dev/null
 +++ b/src/graphics/temporal_aa_fsr.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,45 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch): the AMD FSR 3.1 runtime
 + * (FidelityFX SDK 1.1.4 ffx-api, MIT, built from source by
@@ -3559,6 +3694,12 @@ index 0000000..d89dfd8
 +#include <ffx_api/ffx_upscale.h>
 +
 +namespace rex::graphics {
++
++// What both backends create FSR with. The prebuilt Vulkan shaders are made for
++// these (launcher/dev/fsr/fsr_vk_shaders.py reads them here).
++constexpr uint32_t kTaaFsrCreateFlags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE |
++                                        FFX_UPSCALE_ENABLE_DEPTH_INVERTED |
++                                        FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
 +
 +struct FsrRuntime {
 +  PfnFfxCreateContext create = nullptr;
@@ -3668,10 +3809,10 @@ index fc91bb7..c7d1540 100644
                                                   int32_t dest_y) {
 diff --git a/src/graphics/vulkan/temporal_aa.cpp b/src/graphics/vulkan/temporal_aa.cpp
 new file mode 100644
-index 0000000..32ff95e
+index 0000000..6810d22
 --- /dev/null
 +++ b/src/graphics/vulkan/temporal_aa.cpp
-@@ -0,0 +1,1105 @@
+@@ -0,0 +1,1108 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch), Vulkan: see
 + * CommandProcessor::TaaFrame and VulkanCommandProcessor::TaaRun.
@@ -3697,6 +3838,10 @@ index 0000000..32ff95e
 +#if defined(REX_FSR_PREBUILT_SHADERS_VK) && REX_FSR_PREBUILT_SHADERS_VK
 +// The prebuilt shaders' create flags (thirdparty/fidelityfx-shaders-vk).
 +#include <rexglue_fsr_shaders_vk.h>
++static_assert((rex::graphics::kTaaFsrCreateFlags & (REXGLUE_FSR_SHADERS_VK_FLAG_MASK)) ==
++                  (REXGLUE_FSR_SHADERS_VK_FLAGS),
++              "FSR's create flags differ from the prebuilt shaders' (thirdparty/fidelityfx-shaders-vk): "
++              "make them again with launcher/dev/fsr/fsr_vk_shaders.py");
 +#endif
 +#endif
 +
@@ -4542,8 +4687,7 @@ index 0000000..32ff95e
 +            vulkan_device->vulkan_instance()->functions().vkGetInstanceProcAddr(
 +                vulkan_device->vulkan_instance()->instance(), "vkGetDeviceProcAddr")),
 +        std::memory_order_relaxed);
-+    uint32_t flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED |
-+                     FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
++    uint32_t flags = kTaaFsrCreateFlags;
 +    if (TaaDebug() == 1) {
 +      flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
 +    }
@@ -4779,19 +4923,20 @@ index 0000000..32ff95e
 +}  // namespace rex::graphics::vulkan
 diff --git a/src/graphics/vulkan/temporal_aa_static.cpp b/src/graphics/vulkan/temporal_aa_static.cpp
 new file mode 100644
-index 0000000..fd00f18
+index 0000000..7d90e1f
 --- /dev/null
 +++ b/src/graphics/vulkan/temporal_aa_static.cpp
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,93 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch), where FidelityFX is
 + * linked statically (REX_FSR_STATIC: the PS5, which can't load modules and has
 + * no Vulkan loader, its driver being linked in as an ICD).
 + *
 + * FidelityFX's Vulkan backend gets its device functions through the
-+ * vkGetDeviceProcAddr it is given, but calls a few functions directly, as
-+ * exported by a loader: these are those, forwarded to the instance and device
-+ * the GPU plugin created (one of each).
++ * vkGetDeviceProcAddr it is given, but refers to eight directly, as exported by
++ * a loader (ffx_vk.cpp at the pinned commit): these are those, forwarded to the
++ * instance and device the GPU plugin created (one of each). ps5/make_ps5.sh
++ * checks that nothing else is left undefined.
 + */
 +
 +#if defined(REX_FSR_STATIC) && REX_FSR_STATIC
@@ -4857,6 +5002,12 @@ index 0000000..fd00f18
 +    VkPhysicalDevice physical_device, VkPhysicalDeviceProperties2* properties) {
 +  taa_static_ifn.load(std::memory_order_acquire)
 +      ->vkGetPhysicalDeviceProperties2(physical_device, properties);
++}
++
++// Only its address is taken (a fallback for the vkGetDeviceProcAddr FidelityFX
++// is given), but the link needs it all the same.
++VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* name) {
++  return taa_static_ifn.load(std::memory_order_acquire)->vkGetDeviceProcAddr(device, name);
 +}
 +
 +VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(VkDevice device, const VkBufferCreateInfo* info,
@@ -4933,23 +5084,24 @@ index 376305a..1fd3bd2 100644
  }
  
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index 3fdcf75..012425f 100644
+index 3fdcf75..aa5f63c 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
-@@ -22,6 +22,12 @@
+@@ -22,6 +22,13 @@
  #include <rex/string.h>
  #include <rex/ui/vulkan/device.h>
  
-+REXCVAR_DEFINE_BOOL(temporal_aa_device_features, true, "GPU",
++REXCVAR_DEFINE_BOOL(temporal_aa_device_features, !REX_PLATFORM_PS5, "GPU",
 +                    "Temporal anti-aliasing: enable the Vulkan device features FSR uses (16-bit "
 +                    "types and storage, extended storage image formats, subgroup size control) "
 +                    "where the device has them. Read when the device is created; without them "
-+                    "FSR can't run on Vulkan until the next start (a host that keeps its device "
-+                    "as it was unless FSR is chosen, the PS5, sets it).");
++                    "FSR can't run on Vulkan until the next start. Off by default on the PS5, "
++                    "whose host turns it on when the game starts with FSR chosen, so that the "
++                    "console's device stays as it was otherwise.");
  REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                      "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                      "required for Vulkan GPU emulation")
-@@ -304,6 +310,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -304,6 +311,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
  
    VkPhysicalDeviceFeatures2 supported_features_2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
  
@@ -4961,7 +5113,7 @@ index 3fdcf75..012425f 100644
    VulkanFeatures<VkPhysicalDeviceVulkan12Features,
                   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES>
        features_1_2;
-@@ -340,6 +351,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -340,6 +352,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
  
    if (get_physical_device_properties2_supported) {
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
@@ -4972,7 +5124,7 @@ index 3fdcf75..012425f 100644
        features_1_2.Link(supported_features_2, device_create_info);
      }
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
-@@ -659,6 +674,24 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -659,6 +675,24 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  

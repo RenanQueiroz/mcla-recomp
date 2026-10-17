@@ -60,6 +60,7 @@ void MclaWaitForSaves();  // src/mcla_app.cpp
 #endif
 bool MclaSingleTileAvailable();  // src/render_perf.cpp
 bool MclaFsrAvailable();  // src/perf_options.cpp
+bool MclaFsrNextStart();  // src/perf_options.cpp
 
 namespace {
 
@@ -504,13 +505,15 @@ constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
 // with its sharpening (temporal_aa_sharpness). All change during play; FSR
 // starts once it is ready (half a second or so the first time).
 constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr"};
-#if REX_PLATFORM_PS5
-// Built for the console, but not yet run on one; its device features are
-// enabled only when the game starts with it chosen (ps5/game/main_ps5.cpp).
-constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (NEXT START, UNTESTED)"};
-#else
+#if REX_PLATFORM_WIN32
 constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE AA"};
+#else
+// Built for Linux and the console, but not yet run on either.
+constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (UNTESTED)"};
 #endif
+// While FSR can run only after a restart (the PS5 started without it chosen:
+// its device features are enabled only then, ps5/game/main_ps5.cpp).
+constexpr const char* kFsrNextStartLabel = "FSR 3.1 (NEXT START, UNTESTED)";
 constexpr int kAntiAliasingCount = int(sizeof(kAntiAliasingValues) / sizeof(kAntiAliasingValues[0]));
 constexpr double kSharpness[] = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
 constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
@@ -716,6 +719,10 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
     case ItemKind::kToggle:
       return index ? "ON" : "OFF";
     case ItemKind::kStringChoice:
+      if (item.values == kAntiAliasingValues && !std::strcmp(item.values[index], "fsr") &&
+          MclaFsrNextStart()) {
+        return kFsrNextStartLabel;
+      }
       return item.value_labels[index];
     case ItemKind::kNumberChoice: {
       if (item.value_labels) {
@@ -808,6 +815,21 @@ void ItemSetIndex(const ItemDef& item, int index) {
   NoteChanged(item.option);
   g_settings_dirty.store(true, std::memory_order_relaxed);
 }
+
+}  // namespace
+
+// The PS5 started with FSR chosen, which gave its device FSR's features, and FSR
+// can't run after all (it failed, or isn't in the build): the setting becomes
+// MSAA, what the game uses and the menu shows, saved with the next settings save,
+// so that the console doesn't keep starting with those features for nothing.
+void MclaFallBackFromFsr() {
+  OptionSet("mcla_anti_aliasing", "msaa");
+  NoteChanged("mcla_anti_aliasing");
+  g_settings_dirty.store(true, std::memory_order_relaxed);
+  REXLOG_WARN("settings menu: FSR can't run here; anti-aliasing set to MSAA (saved with the next settings save)");
+}
+
+namespace {
 
 void ItemSetNumber(const ItemDef& item, double value) {
   char buffer[32];

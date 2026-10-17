@@ -27,13 +27,28 @@ work=${MCLA_PS5_WORK:-/root/mcla/game-ps5}
 jobs=${JOBS:-$(nproc)}
 cxx="$sdk/bin/prospero-clang++"
 mkdir -p "$work/obj" "$work/src/generated" "$work/src/src" "$work/src/ps5"
-# FSR 3.1: the GPU plugin refers to FidelityFX weakly, which pulls nothing out
-# of an archive; when the runtime build made FidelityFX's static libraries,
-# this makes the link take them.
-fsr_link="" fsr_ld=""
-if [ -f "$libs/libamd_fidelityfx_vk.a" ]; then
-    fsr_link="-Wl,--undefined=ffxCreateContext" fsr_ld="--undefined=ffxCreateContext"
+# FSR 3.1 (untested on the console): FidelityFX's static libraries, when the
+# runtime build made them (ps5/make_ps5.sh; MCLA_PS5_FSR=0 leaves FSR out). The
+# GPU plugin refers to FidelityFX weakly, which pulls nothing out of an archive,
+# so --undefined makes the link take them; if that link fails, the game is
+# linked again without them, and FSR is then unavailable. Without them the
+# plugin's weak references stay unresolved, never dynamic imports
+# (nodynamic-undefined-weak).
+fsr_archives=() runtime_archives=()
+for archive in "$libs"/*.a; do
+    case $(basename "$archive") in
+        libamd_fidelityfx_*.a|libffx_*.a) fsr_archives+=("$archive") ;;
+        *) runtime_archives+=("$archive") ;;
+    esac
+done
+fsr=0
+if [ "${MCLA_PS5_FSR:-1}" != 0 ] && [ -f "$libs/libamd_fidelityfx_vk.a" ]; then
+    fsr=1
 fi
+fsr_fallback() {
+    tail -20 "$1" >&2
+    echo "warning: linking FidelityFX (FSR 3.1) failed (log: $1); linking again without it, so the game won't offer FSR" >&2
+}
 
 # A local copy of the sources: the repository is on a Windows drive here, which
 # is slow to read 120 MB from for every compile and has CRLF line endings.
@@ -145,17 +160,49 @@ for stage in "${stages[@]}"; do
     if [ -n "${TITLE:-}" ]; then
         # As an installable title, linked with the Vulkan driver, log over TCP.
         ( cd "$runtime_build" && eval "\"$cxx\" $flags $extra -DMCLA_TITLE -I\"$work/src/ps5\" -o \"$work/obj/title_stage$stage.o\" -c \"$work/src/ps5/main_ps5.cpp\"" )
-        bash "$here/../title_build.sh" "$TITLE" "${MCLA_TITLE_NAME:-MCLA Stage $stage}" \
-            "$work/obj/title_stage$stage.o" "$work"/obj/gen_*.o "$work"/obj/host_*.o $fsr_ld \
-            --start-group $(ls "$libs"/*.a | tr '\n' ' ') "$sdk/target/lib/libc++experimental.a" --end-group
+        title_link() {  # 1: with FidelityFX
+            local options=() archives=()
+            if [ "$1" = 1 ]; then
+                options=(--undefined=ffxCreateContext) archives=("${fsr_archives[@]}")
+            elif [ "${MCLA_PS5_FSR:-1}" != 0 ]; then
+                options=(-z nodynamic-undefined-weak)
+            fi
+            bash "$here/../title_build.sh" "$TITLE" "${MCLA_TITLE_NAME:-MCLA Stage $stage}" \
+                "$work/obj/title_stage$stage.o" "$work"/obj/gen_*.o "$work"/obj/host_*.o "${options[@]}" \
+                --start-group "${runtime_archives[@]}" "${archives[@]}" "$sdk/target/lib/libc++experimental.a" --end-group
+        }
+        if [ "$fsr" = 1 ]; then
+            if title_link 1 > "$work/fsr-link-stage$stage.log" 2>&1; then
+                cat "$work/fsr-link-stage$stage.log"
+            else
+                fsr_fallback "$work/fsr-link-stage$stage.log"
+                title_link 0
+            fi
+        else
+            title_link 0
+        fi
         continue
     fi
     ( cd "$runtime_build" && eval "\"$cxx\" $flags $extra -I\"$work/src/ps5\" -o \"$work/obj/main_stage$stage.o\" -c \"$work/src/ps5/main_ps5.cpp\"" )
     # The runtime's libraries as one group because they reference each other.
     # nodynamic-undefined-weak: see ps5/probes/arena/build.sh.
-    "$cxx" -Wl,-z,nodynamic-undefined-weak -Wl,-T,"$work/payload.ld" $fsr_link \
-        -o "$work/mcla-stage$stage.elf" "$work/obj/main_stage$stage.o" "$work"/obj/gen_*.o "$work"/obj/host_*.o \
-        -Wl,--start-group $(ls "$libs"/*.a | tr '\n' ' ') "$sdk/target/lib/libc++experimental.a" -Wl,--end-group
+    payload_link() {  # 1: with FidelityFX
+        local options=() archives=()
+        if [ "$1" = 1 ]; then
+            options=(-Wl,--undefined=ffxCreateContext) archives=("${fsr_archives[@]}")
+        fi
+        "$cxx" -Wl,-z,nodynamic-undefined-weak -Wl,-T,"$work/payload.ld" "${options[@]}" \
+            -o "$work/mcla-stage$stage.elf" "$work/obj/main_stage$stage.o" "$work"/obj/gen_*.o "$work"/obj/host_*.o \
+            -Wl,--start-group "${runtime_archives[@]}" "${archives[@]}" "$sdk/target/lib/libc++experimental.a" -Wl,--end-group
+    }
+    if [ "$fsr" = 1 ]; then
+        if ! payload_link 1 > "$work/fsr-link-stage$stage.log" 2>&1; then
+            fsr_fallback "$work/fsr-link-stage$stage.log"
+            payload_link 0
+        fi
+    else
+        payload_link 0
+    fi
     bash "$here/../payload_ld.sh" check "$work/mcla-stage$stage.elf"
     ls -la "$work/mcla-stage$stage.elf"
 done
