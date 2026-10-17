@@ -1034,3 +1034,23 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 | Change | Files | Affects |
 |---|---|---|
 | A present semaphore per swapchain image | `include/rex/ui/vulkan/presenter.h`, `src/ui/vulkan/vulkan_presenter.cpp` | Vulkan (all platforms) |
+
+## rexglue-d3d12-storage-preload-threads.patch
+
+**Why.** At start the D3D12 pipeline cache creates every pipeline in the storage file before the game runs (`InitializeShaderStorage`, blocking). It should start extra creation threads, up to one per logical processor besides the calling one, and then wait for all of them.
+- The loop that starts them compared the thread count with itself (`creation_thread_original_count` in place of `creation_thread_needed_count`), so it never ran.
+- The wait for the pipelines still being created sat in the branch that shuts the extra threads down, so it never ran either. The preload returned while the creation threads were still working on the last pipelines.
+- Xenia master has the same loop (`src/xenia/gpu/d3d12/pipeline_cache.cc` L580); xenia-canary compares with the needed count.
+
+**What it changes.** The extra threads are started (15 in place of 12 on a 16-thread CPU, plus the calling thread). A blocking preload waits for every pipeline being created, also when no extra thread was needed (CPUs with few logical processors).
+
+**Measured** on Windows, RTX 5080 and Ryzen 7 9800X3D. The pipelines were the user's 1,684 (RTV) from a copy of their storage, and the old behaviour sat behind a switch in a private measurement build. Alternating runs; for cold runs a shader salt made the driver's cache miss.
+- **Cold, 7 runs a side:** every pipeline created after 982 ms (median; 850–1,083) against 1,039 ms (948–1,133). Faster in all 7 pairs, by 1.4–15% (1.07× on average).
+- **The old preload returned too early:** in 6 of the 7 cold runs it returned with 2–9 pipelines still being created. The fixed one never did.
+- **Warm, 3 runs a side:** 48 ms against 50–52 ms, the old one returning with 3–7 still being created.
+
+**Upstream:** with the stutter changes (PR 5).
+
+| Change | Files | Affects |
+|---|---|---|
+| The storage preload's extra creation threads and its final wait | `src/graphics/d3d12/pipeline_cache.cpp` | D3D12 |

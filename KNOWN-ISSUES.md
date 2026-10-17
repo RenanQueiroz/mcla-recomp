@@ -159,6 +159,10 @@ Measurements and method: `launcher/dev/shader-stutter-2026-10-15.md`; details in
 
 **Not verified**: other GPUs and drivers.
 
+## D3D12: the shader storage preload used fewer threads and didn't wait for them (fixed 2026-10-17)
+
+At start, the D3D12 pipeline cache never started its extra creation threads (a loop compared the thread count with itself, as in Xenia), so it also never reached the wait for the pipelines still being created. Start-up went on with 2–9 pipelines still being created (cold driver cache, the user's 1,684). `rexglue-d3d12-storage-preload-threads.patch` starts them (15 threads in place of 12 here) and waits for every pipeline. The cold preload went from 1,039 to 982 ms (median of 7, faster in every pair), the warm one from 51 to 48 ms.
+
 ## Resolves dumped every sample to the EDRAM buffer first (fixed 2026-10-15)
 
 With host render targets, every resolve first copied every sample of the render targets over its area into the EDRAM buffer, and only then converted that into the destination. At 3x that dump was 60% of the resolve time: 1.35 ms of the GPU frame standing in the city by day on D3D12, 1.0 ms in the race.

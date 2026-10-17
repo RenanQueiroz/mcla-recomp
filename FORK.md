@@ -160,6 +160,7 @@ git apply ../../patches/rexglue-presenter-ui-overlay.patch
 git apply ../../patches/rexglue-frame-generation.patch
 git apply ../../patches/rexglue-vulkan-paint-pipeline-format.patch
 git apply ../../patches/rexglue-vulkan-present-semaphore-per-image.patch
+git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
 ```
 
 The fork's SDK patches are built and tested on Windows only. On Linux they

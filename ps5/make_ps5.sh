@@ -203,6 +203,7 @@ rexglue-presenter-ui-overlay.patch src/ui/vulkan/vulkan_presenter_ui_overlay.cpp
 rexglue-frame-generation.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp FramePacerThread
 rexglue-vulkan-paint-pipeline-format.patch src/ui/vulkan/vulkan_presenter.cpp swapchain_effect_pipeline.swapchain_format =
 rexglue-vulkan-present-semaphore-per-image.patch src/ui/vulkan/vulkan_presenter.cpp swapchain_present_semaphores.push_back
+rexglue-d3d12-storage-preload-threads.patch src/graphics/d3d12/pipeline_cache.cpp creation_threads_.size() < creation_thread_needed_count
 LATER
 
 # ---------------------------------------------------------------------------
