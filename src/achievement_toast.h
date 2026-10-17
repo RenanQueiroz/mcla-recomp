@@ -15,12 +15,13 @@
 // thread on the queue the GPU command thread submits to, halved the game's
 // frame rate for as long as a toast was shown.
 //
-// Ported from ForzaHorizon1-ReImagined (forza-recomp/src/platform/
-// achievement_toast.cpp, which has it from RecompiledHaloReach), under its
-// license:
+// From RecompiledHaloReach (reach-recomp/src/platform/achievement_toast.cpp),
+// by way of ForzaHorizon1-ReImagined (forza-recomp/src/platform/
+// achievement_toast.cpp), both by Dyotson, under their license:
 //
 //   MIT License
 //
+//   Copyright (c) 2026 Dyotson and RecompiledHaloReach contributors
 //   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
 //
 //   Permission is hereby granted, free of charge, to any person obtaining a copy
