@@ -327,6 +327,8 @@ While the SDK's F4 settings overlay or console was open, the UI thread presented
 - **Not checked on the PS5 or Linux:** it applies only where presenting doesn't wait for vertical sync (on Vulkan, the IMMEDIATE or MAILBOX present mode); with FIFO alone the previous way is kept.
 - **`--present_ui_overlay=false`** restores the previous way.
 
+On Vulkan the UI thread's paints also waited for the GPU every time, about two game frames each, so only about every other guest frame was shown; `rexglue-vulkan-paint-pipeline-format.patch` (2026-10-17) fixes that part. With it, every guest frame is presented while the overlay is open (`display-switches.pad` with validation, Vulkan IMMEDIATE and FIFO: all refreshes presented in the overlay steps); the game's own rate still falls, as on D3D12.
+
 ## Fullscreen switch hung the game with the F4 or console overlay open (fixed 2026-10-17)
 
 Switching FULLSCREEN in the pause menu's DISPLAY while the SDK's F4 settings overlay or console overlay was open hung the game for good. The SDK resized the window on the game's thread while holding the option registry's lock, and the window messages that sent waited for a UI thread that was itself waiting for that lock to draw the overlay. `patches/rexglue-fullscreen-setting-ui-thread.patch` makes the change on the UI thread instead (details and checks there). With no overlay open the switch worked before too, and HDR switches were never affected: an HDR toggle only looked like the cause because the pad that found it switched fullscreen right after one. `launcher/dev/scripts/display-switches.pad` covers HDR and fullscreen switches with and without either overlay.

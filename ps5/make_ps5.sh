@@ -201,6 +201,7 @@ rexglue-temporal-aa-shaders-vk.patch thirdparty/fidelityfx-shaders-vk/rexglue_fs
 rexglue-fullscreen-setting-ui-thread.patch src/ui/rex_app.cpp after the lock is released
 rexglue-presenter-ui-overlay.patch src/ui/vulkan/vulkan_presenter_ui_overlay.cpp CreateUIOverlayFromUIThread
 rexglue-frame-generation.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp FramePacerThread
+rexglue-vulkan-paint-pipeline-format.patch src/ui/vulkan/vulkan_presenter.cpp swapchain_effect_pipeline.swapchain_format =
 LATER
 
 # ---------------------------------------------------------------------------

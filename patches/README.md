@@ -990,3 +990,31 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 | The create flags and their check against the prebuilt set | `src/graphics/frame_generation_fsr.h`, `src/graphics/vulkan/temporal_aa.cpp` | Vulkan |
 | The pacer's queue and timeline semaphores | `include/rex/ui/vulkan/device.h`, `include/rex/ui/vulkan/functions/device_1_2_khr_timeline_semaphore.inc`, `src/ui/vulkan/vulkan_device.cpp` | Vulkan, Windows, with `frame_generation` on |
 | The present images and the pacer | `include/rex/ui/vulkan/presenter.h`, `src/ui/vulkan/vulkan_presenter.cpp`, `src/ui/vulkan/vulkan_presenter_frame_generation.cpp`, `src/ui/CMakeLists.txt` | Vulkan, Windows, with `frame_generation` on |
+
+## rexglue-vulkan-paint-pipeline-format.patch
+
+**Why.** The Vulkan presenter keeps the pipeline that draws the guest output into the swapchain with the format of the render pass it was made for, and makes it again when the swapchain's format changes (HDR on or off). That format was never recorded: `GuestOutputPaintPipeline::swapchain_format` stayed `VK_FORMAT_UNDEFINED`, so every paint after the first found the pipeline stale. It then waited on the CPU for the GPU to finish the paint before it (`AwaitSubmissionCompletion`), destroyed the pipeline and made it again.
+- That earlier paint is queued behind the game's own GPU work, so the wait grows with GPU load. On the GPU command thread (the default way of painting) it took about 4 ms of every frame at 3×.
+- On the UI thread it took about two game frames, and the guest output mailbox keeps only the newest frame, so only every other frame reached the screen. The UI thread paints while any UI drawer is registered: upstream's always-registered achievement toast, the F4 settings overlay or the console without `present_ui_overlay`, or Vulkan with FIFO.
+- The same code is in Xenia, which the presenter comes from: `src/xenia/ui/vulkan/vulkan_presenter.cc` L1700 in xenia-project/xenia master (fe1fd36, the file's last change), with the member declared at `src/xenia/ui/vulkan/vulkan_presenter.h` L328 and never assigned.
+
+**What it changes.** The format is recorded when the pipeline is made, so the pipeline is made again only when the swapchain's format changes.
+
+**Measured** on Windows, Vulkan, RTX 5080 and Ryzen 7 9800X3D, with a present log, as frames shown. The private measurement builds had the fix behind a switch, so each pair is the same build; one run each.
+- Fork `a6ee6d9`, race timedemo at 3×:
+  - The paint on the GPU command thread: 4.18 → 0.20 ms.
+  - The paint on the UI thread (`host_present_from_non_ui_thread=false`): 19.8 → 0.18 ms. Frames shown went from 50.5 a second (every other one of 101 made) to 100.2 (all of them).
+  - The default's frame rate didn't change (99.5 and 98.3 a second): the GPU is the limit there, busy 97% of the time with the wait or without it. At native one of the game's threads is the limit (145 either way).
+  - In HDR, the default: the paint 4.42 → 0.08 ms, frames shown 96 → 102 a second.
+- Upstream's SDK (`54a5569`), city free roam, frames shown a second at native and at 3×:
+  - With PR 1 (presenting from the GPU command thread): 61 → 67 and 36 → 41.
+  - Painting from the UI thread: 35 → 68 and 21 → 40.
+  - Upstream itself, with its always-registered achievement toast: 35 → 51 and 21 → 40. Its repaints now run at the monitor's rate, and at native they hold the game back as they do on D3D12.
+
+**Checked** on fork main with this patch (Windows, RTX 5080), with `launcher/dev/scripts/display-switches.pad` and the validation layers on. HDR off and on and fullscreen on and off, with no overlay, the F4 overlay and the console, on Vulkan with IMMEDIATE and with FIFO. Both runs ended by itself and swaps rose at every step. Every guest frame was presented in every step, the ones after each HDR switch (a new swapchain format) included, and with the overlays open, where the UI thread now presents 240 times a second. The validation layers reported nothing about pipelines or render passes. The present semaphore reuse they did report (`VUID-vkQueueSubmit-pSignalSemaphores-00067`, from before this patch) is the next patch's. On the race at 3× they reported nothing, in either way of painting.
+
+**Upstream:** belongs with the Vulkan performance changes (PR 4).
+
+| Change | Files | Affects |
+|---|---|---|
+| The final pipeline's swapchain format recorded | `src/ui/vulkan/vulkan_presenter.cpp` | Vulkan (all platforms) |
