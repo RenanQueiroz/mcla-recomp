@@ -46,6 +46,8 @@ std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
 void MclaDevPadConfigure(rex::RuntimeConfig& config);
 void MclaDevPadStart(rex::ui::Window* window, rex::ui::ImGuiDrawer* imgui_drawer);
 void MclaSaveMenuSettings();  // src/settings_menu.cpp
+bool MclaPrepareShadersIsRequested();  // src/shader_prepare.cpp
+void MclaPrepareShadersAfterPreload();
 void MclaMigrateAntiAliasing();  // src/perf_options.cpp
 
 #ifdef _WIN32
@@ -244,6 +246,10 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
 
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   config.audio_factory = &CreateMclaAudioSystem;
+  // Preparing shaders shows nothing: a window, not the full screen, hidden once the runtime is up.
+  if (MclaPrepareShadersIsRequested()) {
+    rex::cvar::SetFlagByName("fullscreen", "false");
+  }
   if (config.gpu_plugin.empty()) {
     config.gpu_plugin = "xenos";
   }
@@ -337,6 +343,11 @@ void MclaApp::FollowCursorSetting() {
                                                   hide ? "hidden during play" : "always shown");
                                       app_context().CallInUIThread([apply, hide] { apply(hide); });
                                     });
+}
+
+void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
+  (void)thread;
+  MclaPrepareShadersAfterPreload();
 }
 
 bool MclaApp::OnWindowCloseRequested() {

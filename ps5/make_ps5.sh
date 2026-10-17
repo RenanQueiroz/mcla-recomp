@@ -379,6 +379,10 @@ echo "game data to /data/mcla/game (6 GB the first time)"
 ( cd "$repo/game" && find . -type f | sed 's#^\./##' | sort ) | while read -r file; do
     put "$repo/game/$file" "/data/mcla/game/$file"
 done
+if [ -f "$repo/shaderpack/545407F8.shaderpack" ]; then
+    echo "shader pack to /data/mcla/shaderpack (for mcla_prepare_shaders = true in /data/mcla/mcla.toml)"
+    put "$repo/shaderpack/545407F8.shaderpack" "/data/mcla/shaderpack/545407F8.shaderpack" always
+fi
 echo "title to /data/homebrew/$title_id"
 ( cd "$out" && find . -type f | sed 's#^\./##' | sort ) | while read -r file; do
     put "$out/$file" "/data/homebrew/$title_id/$file" always

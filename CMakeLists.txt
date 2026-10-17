@@ -26,6 +26,8 @@ set(MCLA_SOURCES
     src/render_markers.cpp
     src/sampling_profiler.cpp
     src/code_pointer_scan.cpp
+    # --mcla_prepare_shaders: the shader storage from the shader pack.
+    src/shader_prepare.cpp
     # Development: scripted controller input, off by default (fork only).
     src/dev_pad.cpp
 )
@@ -41,4 +43,6 @@ rexglue_setup_target(mcla)
 if(WIN32)
     # timeBeginPeriod for the frame limiter.
     target_link_libraries(mcla PRIVATE winmm)
+    # --mcla_prepare_shaders: its memory figures (dxgi, psapi).
+    target_link_libraries(mcla PRIVATE dxgi psapi)
 endif()

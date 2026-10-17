@@ -78,7 +78,13 @@ kinds of changes on top of upstream's `main`:
   starts the game, the measurement tools in
   `launcher/dev/` (`launcher/README.md`), and scripted controller input for
   unattended runs and benchmarks (`src/dev_pad.cpp`, off unless its options
-  are set; `launcher/README.md`, "Scripted controller input").
+  are set; `launcher/README.md`, "Scripted controller input"), and shader
+  preparation: `mcla.exe --mcla_prepare_shaders` (`src/shader_prepare.cpp`)
+  rebuilds the shaders of the fork's shader pack (`shaderpack/`, fingerprints
+  and pipeline descriptions only) from the player's own game files, adds them
+  to the shader storage and creates every pipeline before the first start;
+  the launcher runs it after each build, and the SDK side is
+  `patches/rexglue-shader-storage-prepare.patch` (`KNOWN-ISSUES.md`).
 
 ## FSR 3.1 anti-aliasing
 

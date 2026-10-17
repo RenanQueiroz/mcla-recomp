@@ -167,6 +167,36 @@ At start, the D3D12 pipeline cache never started its extra creation threads (a l
 
 When the GPU or driver couldn't create some stored pipelines (features another device has), each start cut that many valid pipelines off the end of the storage file, and the next starts had fewer to create. `rexglue-vulkan-pipeline-storage-keep-unsupported.patch` keeps all of them and only skips the unsupported ones at load. A check that made a quarter of the user's 472 Vulkan pipelines unsupported: 358 left in the file before, all 472 now.
 
+## Shaders prepared before the first start (2026-10-17)
+
+The storage keeps every pipeline the game has created, for the next start, but the first time anything is drawn (a first run, places and races not seen yet) its pipeline is compiled while playing: the draw is left out meanwhile, so objects are missing for a moment, and frames can hitch. After a graphics driver update the stored pipelines are compiled again at the next start.
+
+The launcher now prepares shaders after every build and update, and from **More** › *Prepare shaders*. It runs `mcla.exe --mcla_prepare_shaders=true` (`src/shader_prepare.cpp`) with the options the game is started with, which:
+- reads the fork's shader pack, `shaderpack/545407F8.shaderpack`: 723 shaders and 5,533 pipeline descriptions (2,928 D3D12, 1,561 Vulkan, and those of D3D12's rasterizer-ordered views and Vulkan's fragment shader interlock), from the fork's test sessions and the fork owner's own;
+- rebuilds those shaders from your own game files, `default.xex` and the effects in `xarchive_cache.rpf`: pixel shaders as they are; vertex shaders bound to a mesh's vertex layout and to the pixel shader they feed by the game's own Direct3D code (recompiled, run as the game runs it), for layouts made from the effects' preset files, until the result is the shader the pack names;
+- adds them and the pipeline descriptions to the shader storage, keeping what it holds, and creates every stored pipeline for the current API and resolution, so that the driver compiles them now;
+- quits before the game starts, with its window hidden.
+
+The pack holds no game data: fingerprints (the storage's own XXH3 keys), two places in `default.xex` by address and length, and pipeline descriptions (render state and shader fingerprints), which the storage holds anyway. `launcher/dev/shaderpack/build_pack.py` refuses a pack with anything else, and accepts one only after `mcla.exe` rebuilt every shader in it. If the pack or your game's files don't match (another release, or a build of other storage versions), nothing is written: the launcher says why, and the game plays as before.
+
+Measured at 3x on the test machine, with the driver's cache cold (a new `tmp_shader_salt`, as after a driver update or on a first run):
+
+- **Pipelines compiled while playing** the race benchmark (the title, the map zoom-out, the menus and an arcade race): on D3D12 955 and 975 without preparation, none with it; on Vulkan 743 and 759, none. Nothing on that route is missing for a moment any more.
+- **Frame rate:** map zoom-out 1% low 24 to 26 FPS before, 29 to 30 after on D3D12, 14 to 24 before and 29 to 31 after on Vulkan; race 1% low 78 to 79 before, 84 to 86 after on D3D12, 62 to 65 before and 74 after on Vulkan. The slowest frames, 113 to 144 ms while the race loads, are the same either way.
+- **The preparation:** 3.4 to 3.9 s to rebuild the shaders (one thread), then the pipelines: on D3D12 2,928 in 1.2 to 1.3 s with the driver's cache cold, 0.09 s with it warm; on Vulkan 1,561 in 8.5 s cold, 0.17 s warm. With the game's start and exit, 8 s on D3D12 and 16 s on Vulkan the first time, 4 s when it runs again (the shaders are then already stored and aren't rebuilt).
+- **Memory** with every pipeline created, against the same point without them: D3D12 250 MB more process memory (300 MB right after a cold compile) and no more video memory; Vulkan 375 MB more (550 MB right after a cold compile) and 41 MB more video memory.
+- **The next normal start** creates the stored pipelines in 63 ms on D3D12 or 0.27 s on Vulkan, and none while playing the race.
+
+What it doesn't change:
+- Anything the pack doesn't cover still compiles the first time it is drawn, as before, and is stored from then on.
+- The pipelines are compiled for one API and resolution; after changing them, or after a driver update, *Prepare shaders* again (or the game's next start takes that time instead, before its logos).
+- All the pack's pipelines are created at every start: the same time the storage takes with them anyway (63 ms on D3D12, 0.27 s on Vulkan with the driver's cache warm), and more memory, as above.
+- The SDK side, `rexglue-shader-storage-prepare.patch`, makes the storage versions public and reports the start-up creation's progress (`shader_storage_progress`, off unless the preparation sets it).
+
+Method and all runs: `launcher/dev/shader-prepare-2026-10-17.md`.
+
+**Not verified**: other GPUs and drivers; other releases of the game, which the pack refuses; Linux and the PS5, where it was neither built nor run (only the hidden window and the memory figures are Windows-only). On Linux there is no launcher: `mcla --mcla_prepare_shaders=true` by hand. On the PS5, `mcla_prepare_shaders = true` in `/data/mcla/mcla.toml` prepares at every start and then plays (`make_ps5.sh` uploads the pack to `/data/mcla/shaderpack`).
+
 ## Resolves dumped every sample to the EDRAM buffer first (fixed 2026-10-15)
 
 With host render targets, every resolve first copied every sample of the render targets over its area into the EDRAM buffer, and only then converted that into the destination. At 3x that dump was 60% of the resolve time: 1.35 ms of the GPU frame standing in the city by day on D3D12, 1.0 ms in the race.

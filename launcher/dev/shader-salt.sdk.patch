@@ -1,0 +1,45 @@
+diff --git a/src/graphics/pipeline/shader/dxbc_translator.cpp b/src/graphics/pipeline/shader/dxbc_translator.cpp
+--- a/src/graphics/pipeline/shader/dxbc_translator.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator.cpp
+@@ -25,6 +25,7 @@
+ #include <rex/ui/graphics_provider.h>
+ 
+ REXCVAR_DEFINE_BOOL(dxbc_switch, true, "GPU/Shader", "Use switch statements in DXBC");
++REXCVAR_DEFINE_UINT32(tmp_shader_salt, 0, "GPU/Shader", "TMPSS: makes translated shaders differ for the driver's cache");  // TMPSS
+ 
+ REXCVAR_DEFINE_BOOL(dxbc_source_map, false, "GPU/Shader", "Generate source maps for DXBC");
+ 
+@@ -1998,7 +1999,8 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
+   // known.
+   shader_object_.resize(shader_object_.size() + sizeof(dxbc::RdefHeader) / sizeof(uint32_t));
+   // Generator name.
+-  dxbc::AppendAlignedString(shader_object_, "Xenia");
++  std::string tmpss_generator = REXCVAR_GET(tmp_shader_salt) ? "Xenia " + std::to_string(REXCVAR_GET(tmp_shader_salt)) : "Xenia";  // TMPSS
++  dxbc::AppendAlignedString(shader_object_, tmpss_generator.c_str());  // TMPSS
+ 
+   // ***************************************************************************
+   // Constant types
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -19,6 +19,8 @@
+ 
+ #include <SPIRV/GLSL.std.450.h>
+ #include <fmt/format.h>
++#include <rex/cvar.h>  // TMPSS
++REXCVAR_DECLARE(uint32_t, tmp_shader_salt);  // TMPSS
+ 
+ #include <rex/assert.h>
+ #include <rex/graphics/pipeline/shader/spirv.h>
+@@ -186,7 +188,10 @@ void SpirvShaderTranslator::StartTranslation() {
+   }
+   ext_inst_glsl_std_450_ = builder_->import("GLSL.std.450");
+   builder_->setMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+-  builder_->setSource(spv::SourceLanguageUnknown, 0);
++  builder_->setSource(spv::SourceLanguageUnknown, int(REXCVAR_GET(tmp_shader_salt)));  // TMPSS
++  if (REXCVAR_GET(tmp_shader_salt)) {  // TMPSS: an unused constant, not debug info the driver may skip
++    builder_->makeUintConstant(0x5A170000u + REXCVAR_GET(tmp_shader_salt));  // TMPSS
++  }  // TMPSS
+ 
+   type_void_ = builder_->makeVoidType();
+   type_bool_ = builder_->makeBoolType();

@@ -683,7 +683,8 @@ def run(a, tag=None):
                 TOML.write_bytes(toml_backup)
             else:
                 TOML.unlink(missing_ok=True)
-        proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env)
+        stdout_file = open(a.stdout, "wb") if getattr(a, "stdout", None) else None
+        proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env, stdout=stdout_file)
         if guard:
             guard.start(proc.pid)
         try:
@@ -697,6 +698,8 @@ def run(a, tag=None):
                 proc.kill()
                 proc.wait()
         restarts = follow_restarts(proc.pid, start + a.timeout)
+        if stdout_file:
+            stdout_file.close()
     finally:
         if proc is not None:
             end_games(proc)
@@ -1000,6 +1003,8 @@ def main():
                        "what the game saved is kept as mcla.toml.after in the run folder")
         p.add_argument("--record", help="record user 0's controller to this CSV")
         p.add_argument("--timeout", type=float, default=600)
+        p.add_argument("--stdout", help="the game's standard output to this file (as a front end "
+                       "that reads it gets it; otherwise the game, a GUI program, has none)")
         p.add_argument("--keep-open", action="store_true", help="don't quit when the script ends")
         p.add_argument("--track", action="store_true", help="log the car's path (pad.csv)")
         p.add_argument("--cache-root", help="shader storage folder (default: the shared one under "

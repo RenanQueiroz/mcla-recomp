@@ -76,6 +76,10 @@ uint64_t Ps5FaultCount();
 }
 extern const char* g_mcla_settings_path;  // src/settings_menu.cpp
 void MclaMigrateAntiAliasing();            // src/perf_options.cpp
+// src/shader_prepare.cpp
+bool MclaPrepareShadersBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* window,
+                                    bool then_play);
+void MclaPrepareShadersAfterPreload();
 namespace rex::ui::vulkan {
 uint64_t Ps5PresentCount();
 }
@@ -563,6 +567,11 @@ int main() {
 #endif
   rex::cvar::SetDefaultValue("edram_tiles", MCLA_STRINGIZE(MCLA_EDRAM_TILES));
   Line("settings: edram_tiles = %s", rex::cvar::GetFlagByName("edram_tiles").c_str());
+  // Shader preparation (src/shader_prepare.cpp), with mcla_prepare_shaders = true in
+  // /data/mcla/mcla.toml: the shader pack's shaders rebuilt from the game's files and added to
+  // the storage before it loads, then the game starts as usual (there is no launcher to run it
+  // apart). make_ps5.sh puts the pack here. Untested on the console.
+  rex::cvar::SetDefaultValue("mcla_shader_pack", (root / "shaderpack" / "545407F8.shaderpack").string());
   // An older mcla_msaa = false in the settings file still means no anti-aliasing.
   MclaMigrateAntiAliasing();
   // FSR 3.1 (rexglue-temporal-aa.patch) is untested on the console: the Vulkan
@@ -699,9 +708,13 @@ int main() {
 
 #if MCLA_STAGE >= 7
   if (runtime->graphics_system()) {
+    if (MclaPrepareShadersBeforeLaunch(runtime.get(), nullptr, /*then_play=*/true)) {
+      Line("PASS shaders prepared from %s", rex::cvar::GetFlagByName("mcla_shader_pack").c_str());
+    }
     NEXT("initialise shader storage under %s", cache_root.c_str());
     runtime->graphics_system()->InitializeShaderStorage(cache_root, runtime->kernel_state()->title_id(),
                                                         true);
+    MclaPrepareShadersAfterPreload();
   }
 #endif
 

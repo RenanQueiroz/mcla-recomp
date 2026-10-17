@@ -22,6 +22,11 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/xmemory.h>
 
+namespace rex::ui { class Window; }
+// src/shader_prepare.cpp
+bool MclaPrepareShadersBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* window,
+                                    bool then_play);
+
 REXCVAR_DEFINE_STRING(mcla_scan_code_pointers, "", "MCLA",
                       "Write unrecovered function-pointer candidates to this TOML file, then exit");
 
@@ -93,6 +98,7 @@ void MclaApp::OnPreLaunchModule() {
   std::string out_path = REXCVAR_GET(mcla_scan_code_pointers);
   if (out_path.empty()) {
     InstallCrashTrace();
+    MclaPrepareShadersBeforeLaunch(runtime(), window(), /*then_play=*/false);
     return;
   }
   auto* memory = runtime()->memory();

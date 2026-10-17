@@ -1,8 +1,8 @@
 # Third-party notices
 
 This fork is GPL-3.0-or-later (see [`LICENSE`](LICENSE)). Some of its changes are
-ported from projects under the MIT licence, whose notice has to travel with
-the code. They are listed here with that notice.
+ported from, or follow, projects under the MIT and zlib licences, whose notice
+has to travel with the code. They are listed here with that notice.
 
 ## ForzaHorizon1-ReImagined
 
@@ -134,4 +134,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+## puff (zlib)
+
+<https://github.com/madler/zlib/tree/develop/contrib/puff>
+
+`src/shader_prepare.cpp`'s raw deflate decoder (`Inflater`, for the game's
+archive when shaders are prepared) follows the design of Mark Adler's puff.c:
+canonical Huffman codes decoded from the count of codes of each length. It is
+rewritten for this file, not copied, and marked as such there.
+
+```
+Copyright (C) 2002-2013 Mark Adler, all rights reserved
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the author be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+Mark Adler    madler@alumni.caltech.edu
 ```
