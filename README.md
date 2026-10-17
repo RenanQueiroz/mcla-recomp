@@ -33,7 +33,7 @@ The game's PowerPC code is translated to C++ ahead of time by the [ReXGlue SDK](
 
 ## Windows
 
-You need Windows 10 or 11 (x86-64) with a Direct3D 12 graphics card, and about 20 GB of disk. The build checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++ workload) and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. The launcher also needs the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`).
+You need Windows 10 or 11 (x86-64) with a Direct3D 12 graphics card, and about 20 GB of disk. The build checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++ workload) and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. It also looks for the Vulkan SDK (`winget install KhronosGroup.VulkanSDK`, administrator rights too), which only the FSR anti-aliasing option needs on Vulkan: without it FSR is built for Direct3D 12 only, and the build goes on. FSR's runtime is built from the FidelityFX SDK's source, which the first build fetches from GitHub; without the network the game builds without FSR. The launcher also needs the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`).
 
 ### With the launcher (recommended)
 
@@ -256,6 +256,8 @@ CC=clang-20 CXX=clang++-20 cmake --preset linux-amd64-release -DCMAKE_PREFIX_PAT
 cmake --build --preset linux-amd64-release
 ./scripts/play_linux.sh
 ```
+
+The FSR 3.1 anti-aliasing option isn't offered on Linux yet: it is built only with `-DREXGLUE_ENABLE_FSR=ON` (left out above), needs Wine at build time to run FidelityFX's shader compiler, and has not been built or run there.
 
 On Wayland, put `vulkan_allow_present_mode_immediate = false` and `vulkan_allow_present_mode_mailbox = false` in `out/build/linux-amd64-release/mcla.toml`; without them the game presents about 1,000 times a second and keeps the GPU busy.
 

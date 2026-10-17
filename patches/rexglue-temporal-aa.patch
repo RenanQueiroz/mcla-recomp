@@ -62,18 +62,50 @@ index 0000000..379dd09
 +# the library doesn't need it.
 +set_source_files_properties("${FFX_ROOT}/ffx-api/src/resource/ffx_api_dll.rc"
 +    TARGET_DIRECTORY ${_target} PROPERTIES HEADER_FILE_ONLY ON)
+diff --git a/cmake/fidelityfx/soft_step.cmake b/cmake/fidelityfx/soft_step.cmake
+new file mode 100644
+index 0000000..b9f78c9
+--- /dev/null
++++ b/cmake/fidelityfx/soft_step.cmake
+@@ -0,0 +1,26 @@
++# A configure or build step of a FidelityFX runtime (cmake/rexglue_fsr.cmake)
++# that may fail without failing the SDK's build:
++#   cmake -DSTEP_SKIP=<marker> [-DSTEP_FIRST=1] -P soft_step.cmake -- <command>...
++# On failure the marker is written, a warning says the runtime is left out, and
++# the step succeeds; the steps after it are skipped while the marker exists.
++# The first step (the configure) starts afresh.
++set(command)
++set(after_separator FALSE)
++math(EXPR last "${CMAKE_ARGC} - 1")
++foreach(i RANGE 1 ${last})
++    if(after_separator)
++        list(APPEND command "${CMAKE_ARGV${i}}")
++    elseif(CMAKE_ARGV${i} STREQUAL "--")
++        set(after_separator TRUE)
++    endif()
++endforeach()
++if(STEP_FIRST)
++    file(REMOVE "${STEP_SKIP}")
++elseif(EXISTS "${STEP_SKIP}")
++    return()
++endif()
++execute_process(COMMAND ${command} RESULT_VARIABLE result)
++if(NOT result EQUAL 0)
++    file(WRITE "${STEP_SKIP}" "${result}\n")
++    message(WARNING "FSR: a FidelityFX runtime failed to build (${result}); it is left out, and FSR is unavailable for its graphics API")
++endif()
 diff --git a/cmake/rexglue_fsr.cmake b/cmake/rexglue_fsr.cmake
 new file mode 100644
-index 0000000..a2c5ea6
+index 0000000..6206344
 --- /dev/null
 +++ b/cmake/rexglue_fsr.cmake
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,205 @@
 +# rexglue_fsr.cmake - AMD FSR 3.1 for temporal anti-aliasing (rexglue-temporal-aa.patch)
 +#
 +# Builds ffx-api of the AMD FidelityFX SDK 1.1.4 (MIT) from source, as
 +# amd_fidelityfx_dx12 and amd_fidelityfx_vk shared libraries that the GPU plugin
-+# loads at run time from its own folder. The plugin compiles against the
-+# headers in thirdparty/fidelityfx-api; this file only builds the runtime.
++# loads at run time from the executable's folder. The plugin compiles against
++# the headers in thirdparty/fidelityfx-api; this file only builds the runtime.
 +#
 +# The source is fetched at a pinned commit of the ReXGlue fork (AMD's v1.1.4,
 +# c6efa6b, plus portability fixes) into the build tree, and checked against
@@ -81,9 +113,15 @@ index 0000000..a2c5ea6
 +# compiled is exactly what was reviewed. REXGLUE_FSR_SOURCE_DIR may point at an
 +# existing checkout of that commit instead (checked the same way).
 +#
++# FSR is optional: if the source can't be fetched or verified (no network, no
++# Git), or a runtime fails to configure or build, the SDK builds without it and
++# the GPU plugin reports FSR as unavailable. A fetch goes to a temporary folder
++# that is renamed only once verified, so a failed or partial fetch never stays
++# behind; a checkout that no longer verifies is fetched again once.
++#
 +# FidelityFX compiles its shaders at build time with its own FidelityFX_SC tool
-+# (from the same commit; Windows). The Vulkan library needs the Vulkan SDK
-+# (find_package(Vulkan)); without it only the D3D12 one is built.
++# (from the same commit; on Linux through Wine). The Vulkan library needs the
++# Vulkan SDK (find_package(Vulkan)); without it only the D3D12 one is built.
 +
 +if(NOT REXGLUE_ENABLE_FSR)
 +    return()
@@ -97,51 +135,103 @@ index 0000000..a2c5ea6
 +set(_rexglue_fsr_tree_ffx_api "cdcd115d3ea4f855251049dc3d5517b3ae448a46")
 +set(_rexglue_fsr_tree_sdk "47c22f65b682061792531316670251a5c8ae81e7")
 +
-+find_package(Git REQUIRED)
++find_package(Git QUIET)
++if(NOT GIT_FOUND)
++    message(WARNING "FSR: Git was not found; building without FSR")
++    return()
++endif()
 +
-+function(_rexglue_fsr_git dir)
++# Runs git in `dir`; `ok_var` is set to whether it succeeded, the output (or the
++# error) goes to _rexglue_fsr_git_output.
++function(_rexglue_fsr_git ok_var dir)
 +    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${dir}" ${ARGN}
 +                    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error
-+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
-+    if(NOT result EQUAL 0)
-+        message(FATAL_ERROR "FSR: git ${ARGN} failed in ${dir}:\n${error}")
++                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
++    if(result EQUAL 0)
++        set(${ok_var} TRUE PARENT_SCOPE)
++        set(_rexglue_fsr_git_output "${output}" PARENT_SCOPE)
++    else()
++        set(${ok_var} FALSE PARENT_SCOPE)
++        set(_rexglue_fsr_git_output "git ${ARGN}: ${error}" PARENT_SCOPE)
 +    endif()
-+    set(_rexglue_fsr_git_output "${output}" PARENT_SCOPE)
++endfunction()
++
++# Whether `dir` is the pinned commit's ffx-api and sdk, unmodified.
++function(_rexglue_fsr_verify ok_var dir)
++    set(${ok_var} FALSE PARENT_SCOPE)
++    if(NOT EXISTS "${dir}/.git")
++        set(_rexglue_fsr_why "no checkout" PARENT_SCOPE)
++        return()
++    endif()
++    _rexglue_fsr_git(ok "${dir}" rev-parse HEAD)
++    if(NOT ok OR NOT _rexglue_fsr_git_output STREQUAL _rexglue_fsr_commit)
++        set(_rexglue_fsr_why "not at ${_rexglue_fsr_commit} (${_rexglue_fsr_git_output})" PARENT_SCOPE)
++        return()
++    endif()
++    _rexglue_fsr_git(ok "${dir}" rev-parse HEAD:ffx-api HEAD:sdk)
++    string(REPLACE "\n" ";" trees "${_rexglue_fsr_git_output}")
++    if(NOT ok OR NOT trees STREQUAL "${_rexglue_fsr_tree_ffx_api};${_rexglue_fsr_tree_sdk}")
++        set(_rexglue_fsr_why "unexpected tree hashes (${trees})" PARENT_SCOPE)
++        return()
++    endif()
++    _rexglue_fsr_git(ok "${dir}" diff --quiet HEAD -- ffx-api sdk LICENSE.txt)
++    if(NOT ok)
++        set(_rexglue_fsr_why "modified files" PARENT_SCOPE)
++        return()
++    endif()
++    set(${ok_var} TRUE PARENT_SCOPE)
++endfunction()
++
++# Fetches the pinned commit (ffx-api, sdk and the licence only) into `dir`
++# through a temporary folder.
++function(_rexglue_fsr_fetch ok_var dir)
++    set(${ok_var} FALSE PARENT_SCOPE)
++    set(tmp "${dir}.tmp")
++    file(REMOVE_RECURSE "${tmp}")
++    file(MAKE_DIRECTORY "${tmp}")
++    foreach(step IN ITEMS "init;-q" "config;core.longpaths;true" "config;core.autocrlf;false"
++                          "remote;add;origin;${REXGLUE_FSR_REPOSITORY}"
++                          "sparse-checkout;set;--no-cone;/ffx-api/;/sdk/;/LICENSE.txt"
++                          "fetch;-q;--depth;1;--filter=blob:none;origin;${_rexglue_fsr_commit}"
++                          "checkout;-q;FETCH_HEAD")
++        _rexglue_fsr_git(ok "${tmp}" ${step})
++        if(NOT ok)
++            set(_rexglue_fsr_why "${_rexglue_fsr_git_output}" PARENT_SCOPE)
++            file(REMOVE_RECURSE "${tmp}")
++            return()
++        endif()
++    endforeach()
++    _rexglue_fsr_verify(ok "${tmp}")
++    if(NOT ok)
++        set(_rexglue_fsr_why "the fetched source: ${_rexglue_fsr_why}" PARENT_SCOPE)
++        file(REMOVE_RECURSE "${tmp}")
++        return()
++    endif()
++    file(REMOVE_RECURSE "${dir}")
++    file(RENAME "${tmp}" "${dir}")
++    set(${ok_var} TRUE PARENT_SCOPE)
 +endfunction()
 +
 +if(REXGLUE_FSR_SOURCE_DIR)
 +    set(_rexglue_fsr_src "${REXGLUE_FSR_SOURCE_DIR}")
++    _rexglue_fsr_verify(_rexglue_fsr_ok "${_rexglue_fsr_src}")
 +else()
-+    set(_rexglue_fsr_src "${CMAKE_BINARY_DIR}/_deps/fidelityfx-src")
-+    if(NOT EXISTS "${_rexglue_fsr_src}/.git")
-+        message(STATUS "FSR: fetching FidelityFX SDK ${_rexglue_fsr_commit} (ffx-api and sdk only)")
-+        file(MAKE_DIRECTORY "${_rexglue_fsr_src}")
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" init -q)
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" config core.longpaths true)
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" config core.autocrlf false)
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" remote add origin "${REXGLUE_FSR_REPOSITORY}")
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" sparse-checkout set --no-cone /ffx-api/ /sdk/ /LICENSE.txt)
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" fetch -q --depth 1 --filter=blob:none origin
-+                         "${_rexglue_fsr_commit}")
-+        _rexglue_fsr_git("${_rexglue_fsr_src}" checkout -q FETCH_HEAD)
++    set(_rexglue_fsr_src "${CMAKE_BINARY_DIR}/_deps/ffx")
++    _rexglue_fsr_verify(_rexglue_fsr_ok "${_rexglue_fsr_src}")
++    if(NOT _rexglue_fsr_ok)
++        if(EXISTS "${_rexglue_fsr_src}")
++            message(STATUS "FSR: ${_rexglue_fsr_src}: ${_rexglue_fsr_why}; fetching it again")
++        endif()
++        message(STATUS "FSR: fetching FidelityFX SDK ${_rexglue_fsr_commit} from ${REXGLUE_FSR_REPOSITORY}")
++        _rexglue_fsr_fetch(_rexglue_fsr_ok "${_rexglue_fsr_src}")
 +    endif()
 +endif()
-+
-+# What is built must be the pinned commit's ffx-api and sdk, unmodified.
-+_rexglue_fsr_git("${_rexglue_fsr_src}" rev-parse HEAD)
-+if(NOT _rexglue_fsr_git_output STREQUAL _rexglue_fsr_commit)
-+    message(FATAL_ERROR "FSR: ${_rexglue_fsr_src} is at ${_rexglue_fsr_git_output}, not ${_rexglue_fsr_commit}")
++if(NOT _rexglue_fsr_ok)
++    message(WARNING "FSR: the FidelityFX SDK source is unavailable (${_rexglue_fsr_why}); building without FSR")
++    return()
 +endif()
-+_rexglue_fsr_git("${_rexglue_fsr_src}" rev-parse HEAD:ffx-api HEAD:sdk)
-+string(REPLACE "\n" ";" _rexglue_fsr_trees "${_rexglue_fsr_git_output}")
-+if(NOT _rexglue_fsr_trees STREQUAL "${_rexglue_fsr_tree_ffx_api};${_rexglue_fsr_tree_sdk}")
-+    message(FATAL_ERROR "FSR: unexpected tree hashes in ${_rexglue_fsr_src}: ${_rexglue_fsr_trees}")
-+endif()
-+_rexglue_fsr_git("${_rexglue_fsr_src}" diff --quiet HEAD -- ffx-api sdk LICENSE.txt)
 +message(STATUS "FSR: FidelityFX SDK ${_rexglue_fsr_commit} verified (ffx-api ${_rexglue_fsr_tree_ffx_api}, sdk ${_rexglue_fsr_tree_sdk})")
 +
-+include(ExternalProject)
-+add_custom_target(rexglue_fsr_runtime)
 +set(_rexglue_fsr_apis)
 +if(REXGLUE_USE_D3D12)
 +    list(APPEND _rexglue_fsr_apis dx12)
@@ -151,39 +241,72 @@ index 0000000..a2c5ea6
 +    if(Vulkan_FOUND)
 +        list(APPEND _rexglue_fsr_apis vk)
 +    else()
-+        message(WARNING "FSR: the Vulkan SDK was not found; FSR is built for Direct3D 12 only")
++        message(WARNING "FSR: the Vulkan SDK was not found; FSR is built for Direct3D 12 only (set VULKAN_SDK, or install it, for Vulkan)")
 +    endif()
 +endif()
 +if(WIN32)
 +    set(_rexglue_fsr_library_prefix "")
 +    set(_rexglue_fsr_library_suffix ".dll")
++    set(_rexglue_fsr_install_dir "${CMAKE_INSTALL_BINDIR}")
 +else()
++    # Linux (untested): FidelityFX runs its Windows shader compiler through
++    # Wine (sdk/CMakeLists.txt); the library goes with the SDK's own.
++    find_program(_rexglue_fsr_wine wine)
++    if(NOT _rexglue_fsr_wine)
++        message(WARNING "FSR: Wine is needed to compile FidelityFX's shaders here; building without FSR")
++        return()
++    endif()
 +    set(_rexglue_fsr_library_prefix "lib")
 +    set(_rexglue_fsr_library_suffix ".so")
++    set(_rexglue_fsr_install_dir "${CMAKE_INSTALL_LIBDIR}")
 +endif()
++
++include(ExternalProject)
++add_custom_target(rexglue_fsr_runtime)
 +foreach(api IN LISTS _rexglue_fsr_apis)
 +    string(TOUPPER "${api}" api_upper)
-+    set(binary_dir "${CMAKE_BINARY_DIR}/_deps/fidelityfx-${api}")
++    set(binary_dir "${CMAKE_BINARY_DIR}/_deps/ffx-${api}")
++    # Each runtime's project from its own copy of the wrapper in the build
++    # tree: FidelityFX writes its static libraries under the top project's
++    # source folder (CMAKE_HOME_DIRECTORY/bin), which would otherwise be the
++    # SDK's own and shared by the two builds.
++    set(wrapper_dir "${CMAKE_BINARY_DIR}/_deps/ffx-${api}-p")
++    configure_file("${REXGLUE_ROOT}/cmake/fidelityfx/CMakeLists.txt" "${wrapper_dir}/CMakeLists.txt"
++                   COPYONLY)
++    configure_file("${REXGLUE_ROOT}/cmake/fidelityfx/soft_step.cmake" "${wrapper_dir}/soft_step.cmake"
++                   COPYONLY)
 +    set(library "${binary_dir}/bin/${_rexglue_fsr_library_prefix}amd_fidelityfx_${api}${_rexglue_fsr_library_suffix}")
++    # A runtime that fails to configure or build is left out with a warning
++    # (soft_step.cmake), and the SDK builds on without it.
++    set(soft "${CMAKE_COMMAND}" "-DSTEP_SKIP=${wrapper_dir}/failed" -P "${wrapper_dir}/soft_step.cmake")
++    # Built again when its library isn't there (an earlier attempt failed).
++    set(stamp_dir "${binary_dir}-stamp")
++    if(NOT EXISTS "${library}")
++        file(REMOVE_RECURSE "${stamp_dir}")
++    endif()
 +    ExternalProject_Add(rexglue_fsr_${api}
-+        SOURCE_DIR "${REXGLUE_ROOT}/cmake/fidelityfx"
++        SOURCE_DIR "${wrapper_dir}"
 +        BINARY_DIR "${binary_dir}"
-+        CMAKE_GENERATOR Ninja
-+        CMAKE_ARGS
++        STAMP_DIR "${stamp_dir}"
++        TMP_DIR "${binary_dir}-tmp"
++        CONFIGURE_COMMAND "${CMAKE_COMMAND}" "-DSTEP_SKIP=${wrapper_dir}/failed" -DSTEP_FIRST=1
++            -P "${wrapper_dir}/soft_step.cmake" --
++            "${CMAKE_COMMAND}" -S "${wrapper_dir}" -B "${binary_dir}" -G Ninja
 +            -DCMAKE_BUILD_TYPE=Release
 +            "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
 +            "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
++            "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
 +            "-DFFX_ROOT=${_rexglue_fsr_src}"
 +            -DFFX_API_BACKEND=${api_upper}_X64
-+        BUILD_COMMAND "${CMAKE_COMMAND}" --build "${binary_dir}" --target amd_fidelityfx_${api}
++        BUILD_COMMAND ${soft} -- "${CMAKE_COMMAND}" --build "${binary_dir}" --target amd_fidelityfx_${api}
 +        INSTALL_COMMAND ""
 +        BUILD_BYPRODUCTS "${library}"
 +        BUILD_ALWAYS OFF)
 +    add_dependencies(rexglue_fsr_runtime rexglue_fsr_${api})
-+    install(FILES "${library}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
++    install(FILES "${library}" DESTINATION "${_rexglue_fsr_install_dir}" OPTIONAL)
 +endforeach()
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 76794f4..01d290b 100644
+index 76794f4..79cd98a 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -188,6 +188,10 @@ class CommandProcessor {
@@ -197,7 +320,7 @@ index 76794f4..01d290b 100644
      kPhase = 0x100,     // diagnostics: value = a title-specific phase
    };
    virtual void OnGuestMarker(uint32_t kind, uint32_t value);
-@@ -341,7 +345,98 @@ class CommandProcessor {
+@@ -341,7 +345,128 @@ class CommandProcessor {
    // a while); they're made again when needed.
    virtual void HdrReleaseTextures() {}
  
@@ -227,6 +350,9 @@ index 76794f4..01d290b 100644
 +    // the textures, r their formats, n the shader's bindings, c FSR being
 +    // made, x FSR failed, + the pass ran.
 +    char status = '-';
++    // The reactive mask's snapshots of the scene's luminance taken (bit 0 at
++    // kSceneTranslucent, bit 1 at kSceneComposite).
++    uint32_t snapshots = 0;
 +  };
 +  TaaFrame taa_frame_;
 +  // The constants of the motion vector pass, for the draw TaaCheckDraw found.
@@ -266,6 +392,30 @@ index 76794f4..01d290b 100644
 +                          const uint32_t extent[2], float ndc_offset[3]);
 +  // Backend: whether the upscaler can run now (its context exists).
 +  virtual bool TaaReady() const { return false; }
++  // Backend, once when the first frame ends: whether FSR can run here (its
++  // runtime is next to the executable, the device has what it needs). Shown
++  // to titles as temporal_aa_available, which also turns false when FSR fails
++  // later (TaaSetUnavailable).
++  virtual bool TaaCheckAvailable() { return false; }
++  static void TaaSetUnavailable(const char* why);
++  // Backend, at the end of every frame (after the swap): destroying what was
++  // released once the GPU is done with it.
++  virtual void TaaFrameEnd() {}
++  // Set by the backend when FSR must be made again (another size) or given up
++  // (a failed dispatch): released at the end of the frame, never mid-frame.
++  bool taa_release_pending_ = false;
++  // Backend, for FSR's reactive mask: a snapshot of the luminance of the
++  // colour render target `color_target_key` (HdrColorTargetKey) into slot 0
++  // (at kSceneTranslucent: the opaque scene) or 1 (at kSceneComposite: with the
++  // translucent effects); false if it couldn't be taken (then there's no mask
++  // this frame).
++  virtual bool TaaSnapshot([[maybe_unused]] uint32_t slot,
++                           [[maybe_unused]] uint32_t color_target_key) {
++    return false;
++  }
++  // The reactive mask's curve (temporal_aa_reactive): scale (0: no mask),
++  // threshold and maximum.
++  static void TaaReactiveCurve(float curve_out[4]);
 +  // Backend: releases the upscaler and its textures once the GPU is done with
 +  // them (temporal_aa off for a while).
 +  virtual void TaaRelease() {}
@@ -285,22 +435,25 @@ index 76794f4..01d290b 100644
   private:
 +  bool TaaCheckDraw();
 +  void TaaEndFrame();
++  void TaaSceneMarker(uint32_t slot);
 +  uint32_t taa_jitter_index_ = 0;
 +  // When temporal_aa went off (host ticks; 0: on, or released).
 +  uint64_t taa_off_since_ = 0;
 +  bool taa_last_done_ = false;
 +  bool taa_have_last_camera_ = false;
 +  float taa_last_camera_[2][3] = {};
++  float taa_last_fov_ = 0.0f;
++  bool taa_availability_checked_ = false;
 +  uint64_t taa_last_time_ = 0;
 +  uint32_t taa_log_frames_ = 0;
    uint32_t HdrColorTargetKey(uint32_t rt_index) const;
    bool HdrBeforeDraw();
    void HdrBeforeResolve();
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
-index c82f666..f47b2ff 100644
+index c82f666..0f26e80 100644
 --- a/include/rex/graphics/d3d12/command_processor.h
 +++ b/include/rex/graphics/d3d12/command_processor.h
-@@ -671,6 +671,29 @@ class D3D12CommandProcessor : public CommandProcessor {
+@@ -671,6 +671,47 @@ class D3D12CommandProcessor : public CommandProcessor {
    Microsoft::WRL::ComPtr<ID3D12RootSignature> hdr_scene_root_signature_;
    Microsoft::WRL::ComPtr<ID3D12PipelineState> hdr_scene_pipeline_;
    Microsoft::WRL::ComPtr<ID3D12Resource> hdr_textures_[kHdrTextureCount];
@@ -311,15 +464,33 @@ index c82f666..f47b2ff 100644
 +  // and u0 a table each), FSR (an external callback in the deferred command
 +  // list) and the copy of its output into the scene texture.
 +  bool TaaReady() const override;
++  bool TaaCheckAvailable() override;
 +  void TaaRelease() override;
++  void TaaFrameEnd() override;
++  // Destroys what TaaRelease retired once the GPU is done with it (all: now,
++  // at shutdown, after waiting for the GPU).
++  void TaaCollectRetired(bool all);
 +  void TaaRun(const D3D12Shader& pixel_shader);
 +  bool TaaCreatePipeline();
 +  void TaaTakeGpuTime(double& ms_out, uint32_t& count_out) override;
 +  uint32_t TaaTimerBegin();
 +  void TaaTimerEnd(uint32_t slot);
 +  void TaaTimerCollect();
++  bool TaaSnapshot(uint32_t slot, uint32_t color_target_key) override;
++  bool TaaEnsureReactiveTextures();
++  void TaaRunReactive(const D3D12Shader::TextureBinding& stencil_binding);
 +  Microsoft::WRL::ComPtr<ID3D12RootSignature> taa_vectors_root_signature_;
 +  Microsoft::WRL::ComPtr<ID3D12PipelineState> taa_vectors_pipeline_;
++  // The reactive mask: taa_luma_snapshot.cs (4 constants, t0, u0) and
++  // taa_reactive_mcla.cs (8 constants, t0-t2, u0), a table each.
++  Microsoft::WRL::ComPtr<ID3D12RootSignature> taa_luma_root_signature_;
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> taa_luma_pipeline_;
++  Microsoft::WRL::ComPtr<ID3D12RootSignature> taa_reactive_root_signature_;
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> taa_reactive_pipeline_;
++  // temporal_aa_debug 5 and 6: taa_debug_view.cs (4 constants, t0-t2, u0).
++  Microsoft::WRL::ComPtr<ID3D12RootSignature> taa_debug_root_signature_;
++  Microsoft::WRL::ComPtr<ID3D12PipelineState> taa_debug_pipeline_;
++  void TaaRunDebugView(const D3D12Shader::TextureBinding& scene_binding, uint32_t mode);
 +  bool taa_pipeline_failed_ = false;
 +  // The upscaler and its textures (d3d12/temporal_aa.h).
 +  struct TaaFsr;
@@ -377,6 +548,25 @@ index 0469573..9dd18f3 100644
    struct DebugMarkerHeader {
      uint32_t label_length;
      // Followed by null-terminated label string.
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index 577356d..2b0940c 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -87,6 +87,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   bool HdrCopyColorTarget(uint32_t key, ID3D12Resource* dest, D3D12_RESOURCE_STATES dest_state,
+                           D3D12_RECT source, uint32_t dest_x, uint32_t dest_y);
+   bool HdrClearColorTarget(uint32_t key, D3D12_RECT rect);
++  // Temporal AA (rexglue-temporal-aa.patch): the 1x R16G16B16A16 float host
++  // render target of `key` (TaaFindColorTarget) moved to the non-pixel shader
++  // resource state (pushed), with an SRV of it written to `srv` and its size;
++  // false if there's none. TaaEndReadColorTarget pushes it back to the render
++  // target state.
++  bool TaaBeginReadColorTarget(uint32_t key, D3D12_CPU_DESCRIPTOR_HANDLE srv, uint32_t& width_out,
++                               uint32_t& height_out);
++  void TaaEndReadColorTarget(uint32_t key);
+   bool HdrRestoreColorTarget(uint32_t key, D3D12_GPU_DESCRIPTOR_HANDLE underlay_srv,
+                              D3D12_RECT rect);
+ 
 diff --git a/include/rex/graphics/d3d12/texture_cache.h b/include/rex/graphics/d3d12/texture_cache.h
 index 45305dc..11c3477 100644
 --- a/include/rex/graphics/d3d12/texture_cache.h
@@ -394,11 +584,40 @@ index 45305dc..11c3477 100644
  
    SamplerParameters GetSamplerParameters(const D3D12Shader::SamplerBinding& binding) const;
    void WriteSampler(SamplerParameters parameters, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 688fcb6..c1e405f 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -547,6 +547,24 @@ class RenderTargetCache {
+     auto it = render_targets_.find(rt_key);
+     return it != render_targets_.end() ? it->second : nullptr;
+   }
++  // Temporal AA (rexglue-temporal-aa.patch): the 1x colour host render target
++  // with the base, pitch and format (as stored) of `key`
++  // (CommandProcessor::HdrColorTargetKey), if it exists.
++  RenderTarget* TaaFindColorTarget(uint32_t key) const {
++    if (GetPath() != Path::kHostRenderTargets ||
++        xenos::MsaaSamples((key >> 12) & 3) != xenos::MsaaSamples::k1X) {
++      return nullptr;
++    }
++    RenderTargetKey rt_key;
++    rt_key.base_tiles = key & 0xFFF;
++    rt_key.msaa_samples = xenos::MsaaSamples::k1X;
++    rt_key.pitch_tiles_at_32bpp =
++        ((key >> 18) + xenos::kEdramTileWidthSamples - 1) / xenos::kEdramTileWidthSamples;
++    rt_key.resource_format =
++        uint32_t(GetColorResourceFormat(xenos::ColorRenderTargetFormat((key >> 14) & 0xF)));
++    auto it = render_targets_.find(rt_key);
++    return it != render_targets_.end() ? it->second : nullptr;
++  }
+   RenderTarget* const* last_update_accumulated_render_targets() const {
+     assert_true(GetPath() == Path::kHostRenderTargets);
+     return last_update_accumulated_render_targets_;
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 0e52617..692b1bf 100644
+index 0e52617..c51daf9 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
-@@ -817,6 +817,34 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -817,6 +817,60 @@ class VulkanCommandProcessor : public CommandProcessor {
    std::array<VkDescriptorSet, kMaxFramesInFlight> hdr_descriptors_scene_output_{};
    VkPipelineLayout hdr_scene_pipeline_layout_ = VK_NULL_HANDLE;
    VkPipeline hdr_scene_pipeline_ = VK_NULL_HANDLE;
@@ -410,7 +629,15 @@ index 0e52617..692b1bf 100644
 +  // callback in the deferred command buffer) and the copy of its output into
 +  // the scene texture.
 +  bool TaaReady() const override;
++  bool TaaCheckAvailable() override;
 +  void TaaRelease() override;
++  void TaaFrameEnd() override;
++  // Destroys the contexts TaaRelease retired once the GPU is done with them
++  // (all: now, at shutdown, after waiting for the GPU).
++  void TaaCollectRetired(bool all);
++  // The device and the runtime FSR needs (Vulkan 1.3, the storage formats);
++  // logged once when not.
++  bool TaaDeviceSupported();
 +  void TaaRun(const VulkanShader& pixel_shader);
 +  bool TaaCreatePipeline();
 +  void TaaTakeGpuTime(double& ms_out, uint32_t& count_out) override;
@@ -418,11 +645,29 @@ index 0e52617..692b1bf 100644
 +  void TaaTimerEnd(uint32_t slot);
 +  void TaaTimerCollect();
 +  void TaaDestroyPipeline();
++  bool TaaSnapshot(uint32_t slot, uint32_t color_target_key) override;
++  bool TaaEnsureReactiveTextures();
++  void TaaRunReactive(VkImageView stencil_view);
 +  VkDescriptorSetLayout taa_descriptor_set_layout_ = VK_NULL_HANDLE;
 +  VkDescriptorPool taa_descriptor_pool_ = VK_NULL_HANDLE;
 +  std::array<VkDescriptorSet, kMaxFramesInFlight> taa_descriptors_{};
 +  VkPipelineLayout taa_vectors_pipeline_layout_ = VK_NULL_HANDLE;
 +  VkPipeline taa_vectors_pipeline_ = VK_NULL_HANDLE;
++  // The reactive mask: taa_luma_snapshot.cs (the render target's sampled view
++  // as set 0, a transient storage image as set 1, 16 bytes of push constants)
++  // and taa_reactive_mcla.cs (three sampled images and a storage image, one set
++  // per frame in flight, 32 bytes of push constants).
++  VkPipelineLayout taa_luma_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipeline taa_luma_pipeline_ = VK_NULL_HANDLE;
++  VkDescriptorSetLayout taa_reactive_set_layout_ = VK_NULL_HANDLE;
++  std::array<VkDescriptorSet, kMaxFramesInFlight> taa_reactive_descriptors_{};
++  VkPipelineLayout taa_reactive_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipeline taa_reactive_pipeline_ = VK_NULL_HANDLE;
++  // temporal_aa_debug 5 and 6: taa_debug_view.cs (the reactive mask's set
++  // layout and pipeline layout, sets of its own).
++  std::array<VkDescriptorSet, kMaxFramesInFlight> taa_debug_descriptors_{};
++  VkPipeline taa_debug_pipeline_ = VK_NULL_HANDLE;
++  void TaaRunDebugView(VkImageView scene_view, uint32_t mode);
 +  bool taa_pipeline_failed_ = false;
 +  // The upscaler and its images (vulkan/temporal_aa.cpp).
 +  struct TaaFsr;
@@ -474,6 +719,25 @@ index 0a5ea7a..81aab6c 100644
  
    struct CommandHeader {
      Command command;
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 489dab4..7d98a4e 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -111,6 +111,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   bool HdrCopyColorTarget(uint32_t key, VkImageView dest, VkRect2D source, int32_t dest_x,
+                           int32_t dest_y);
+   bool HdrClearColorTarget(uint32_t key, VkRect2D rect);
++  // Temporal AA (rexglue-temporal-aa.patch): the 1x R16G16B16A16 float host
++  // render target of `key` (TaaFindColorTarget) made readable by compute shaders
++  // (the barrier pushed), its sampled view's descriptor set (the layout below)
++  // and its size; VK_NULL_HANDLE if there's none.
++  VkDescriptorSet TaaBeginReadColorTarget(uint32_t key, uint32_t& width_out, uint32_t& height_out);
++  VkDescriptorSetLayout descriptor_set_layout_sampled_image() const {
++    return descriptor_set_layout_sampled_image_;
++  }
+   bool HdrRestoreColorTarget(uint32_t key, VkImageView underlay_view, VkRect2D rect);
+ 
+   // Performs the resolve to a shared memory area according to the current
 diff --git a/include/rex/graphics/vulkan/texture_cache.h b/include/rex/graphics/vulkan/texture_cache.h
 index 354c68d..047ab5f 100644
 --- a/include/rex/graphics/vulkan/texture_cache.h
@@ -513,7 +777,7 @@ index 354c68d..047ab5f 100644
    };
  
 diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
-index 69aaf70..9161f3d 100644
+index 69aaf70..8007653 100644
 --- a/include/rex/ui/vulkan/device.h
 +++ b/include/rex/ui/vulkan/device.h
 @@ -168,6 +168,16 @@ class VulkanDevice {
@@ -522,14 +786,14 @@ index 69aaf70..9161f3d 100644
      bool nullDescriptor = false;
 +
 +    // Temporal anti-aliasing (rexglue-temporal-aa.patch): what FSR 3.1's
-+    // shaders use when the device has it (1.0, 1.1, 1.2 and 1.3 features).
++    // shaders use when the device has it (1.0, 1.1, 1.2 and 1.3 features),
++    // and what its own passes' storage images need.
 +
 +    bool shaderInt16 = false;
++    bool shaderStorageImageExtendedFormats = false;
 +    bool storageBuffer16BitAccess = false;
 +    bool shaderFloat16 = false;
 +    bool subgroupSizeControl = false;
-+    bool computeFullSubgroups = false;
-+    bool synchronization2 = false;
    };
  
    // Properties of the core API and enabled extensions, and enabled features.
@@ -579,7 +843,7 @@ index 6978e3f..580dfec 100644
      target_link_libraries(rexgpu-xenos PRIVATE
          d3d12
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index d7f2ad5..c6fcab5 100644
+index d7f2ad5..16b00e3 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -1043,6 +1043,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
@@ -590,13 +854,19 @@ index d7f2ad5..c6fcab5 100644
    // The HDR textures (about 200 MB at 3x) aren't kept while HDR output stays
    // off: released after two seconds or so at 60 FPS, once the GPU is done.
    if (ui::Presenter::IsHdrOutputActive()) {
-@@ -1061,8 +1062,17 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -1061,8 +1062,23 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
  
  void CommandProcessor::OnGuestMarker(uint32_t kind, [[maybe_unused]] uint32_t value) {
    switch (GuestMarkerKind(kind)) {
 +    case GuestMarkerKind::kSceneBegin:
 +      // Temporal AA: the scene's draws from here on are jittered.
 +      taa_frame_.in_scene = taa_frame_.mode != TaaMode::kOff;
++      break;
++    case GuestMarkerKind::kSceneTranslucent:
++      TaaSceneMarker(0);
++      break;
++    case GuestMarkerKind::kSceneComposite:
++      TaaSceneMarker(1);
 +      break;
 +    case GuestMarkerKind::kSceneEnd:
 +      taa_frame_.in_scene = false;
@@ -608,7 +878,7 @@ index d7f2ad5..c6fcab5 100644
        break;
      case GuestMarkerKind::kUIBegin:
        // Replayed once per tile in a tiled UI pass.
-@@ -2076,6 +2086,8 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -2076,6 +2092,8 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
        // HDR output: the UI layer (may change the alpha blend for this draw).
        bool hdr_blend_overridden = HdrBeforeDraw();
@@ -617,7 +887,7 @@ index d7f2ad5..c6fcab5 100644
        draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
                                   is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
        if (hdr_blend_overridden) {
-@@ -2085,6 +2097,7 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -2085,6 +2103,7 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
        hdr_pending_ = HdrPending::kNone;
        // Still set if the draw was left out (its pipeline not ready yet).
        hdr_scene_pending_ = false;
@@ -626,18 +896,19 @@ index d7f2ad5..c6fcab5 100644
          auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
          auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index bbe214a..8e33357 100644
+index bbe214a..6985c5a 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
-@@ -1785,6 +1785,7 @@ void D3D12CommandProcessor::ShutdownSubmissionThread() {
+@@ -1785,6 +1785,8 @@ void D3D12CommandProcessor::ShutdownSubmissionThread() {
  
  void D3D12CommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
 +  TaaRelease();
++  TaaCollectRetired(true);
    ShutdownSubmissionThread();
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
-@@ -2998,6 +2999,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2998,6 +3000,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
    texture_cache_->RequestTextures(used_texture_mask);
  
@@ -650,7 +921,7 @@ index bbe214a..8e33357 100644
    // Bind the pipeline after configuring it and doing everything that may bind
    // other pipelines.
    if (current_guest_pipeline_ != pipeline_handle) {
-@@ -3040,6 +3047,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -3040,6 +3048,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
      previous_viewport_info_ = viewport_info;
      viewport_cache_valid_ = true;
    }
@@ -677,12 +948,59 @@ index 13b49a2..086d5be 100644
        default:
          assert_unhandled_case(header.command);
          break;
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index e3851c0..5150ff5 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -5031,6 +5031,42 @@ ID3D12Resource* D3D12RenderTargetCache::HdrColorTarget(uint32_t key, D3D12_RECT&
+   return rect.right > rect.left && rect.bottom > rect.top ? rt->resource() : nullptr;
+ }
+ 
++bool D3D12RenderTargetCache::TaaBeginReadColorTarget(uint32_t key,
++                                                     D3D12_CPU_DESCRIPTOR_HANDLE srv,
++                                                     uint32_t& width_out, uint32_t& height_out) {
++  auto* rt = static_cast<D3D12RenderTarget*>(TaaFindColorTarget(key));
++  if (!rt) {
++    return false;
++  }
++  D3D12_RESOURCE_DESC desc = rt->resource()->GetDesc();
++  if (desc.SampleDesc.Count != 1 || (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT &&
++                                     desc.Format != DXGI_FORMAT_R16G16B16A16_TYPELESS)) {
++    return false;
++  }
++  command_processor_.PushTransitionBarrier(
++      rt->resource(), rt->SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
++      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
++  srv_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++  srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++  srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++  srv_desc.Texture2D.MipLevels = 1;
++  command_processor_.GetD3D12Provider().GetDevice()->CreateShaderResourceView(rt->resource(),
++                                                                               &srv_desc, srv);
++  width_out = uint32_t(desc.Width);
++  height_out = desc.Height;
++  return true;
++}
++
++void D3D12RenderTargetCache::TaaEndReadColorTarget(uint32_t key) {
++  auto* rt = static_cast<D3D12RenderTarget*>(TaaFindColorTarget(key));
++  if (rt) {
++    command_processor_.PushTransitionBarrier(
++        rt->resource(), rt->SetResourceState(D3D12_RESOURCE_STATE_RENDER_TARGET),
++        D3D12_RESOURCE_STATE_RENDER_TARGET);
++  }
++}
++
+ bool D3D12RenderTargetCache::HdrCopyColorTarget(uint32_t key, ID3D12Resource* dest,
+                                                 D3D12_RESOURCE_STATES dest_state,
+                                                 D3D12_RECT source, uint32_t dest_x,
 diff --git a/src/graphics/d3d12/temporal_aa.cpp b/src/graphics/d3d12/temporal_aa.cpp
 new file mode 100644
-index 0000000..415ff26
+index 0000000..eb2f1d0
 --- /dev/null
 +++ b/src/graphics/d3d12/temporal_aa.cpp
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,845 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch), Direct3D 12: see
 + * CommandProcessor::TaaFrame and D3D12CommandProcessor::TaaRun.
@@ -691,8 +1009,11 @@ index 0000000..415ff26
 +#include <atomic>
 +#include <chrono>
 +#include <cstring>
++#include <filesystem>
 +#include <thread>
++#include <vector>
 +
++#include <rex/filesystem.h>
 +#include <rex/graphics/d3d12/command_processor.h>
 +#include <rex/logging.h>
 +#include <rex/ui/d3d12/d3d12_util.h>
@@ -706,7 +1027,10 @@ index 0000000..415ff26
 +namespace rex::graphics::d3d12 {
 +
 +namespace shaders {
++#include "../shaders/bytecode/d3d12_5_1/taa_debug_view_cs.h"
++#include "../shaders/bytecode/d3d12_5_1/taa_luma_snapshot_cs.h"
 +#include "../shaders/bytecode/d3d12_5_1/taa_motion_vectors_mcla_cs.h"
++#include "../shaders/bytecode/d3d12_5_1/taa_reactive_mcla_cs.h"
 +}  // namespace shaders
 +
 +struct D3D12CommandProcessor::TaaFsr {
@@ -720,10 +1044,26 @@ index 0000000..415ff26
 +  Microsoft::WRL::ComPtr<ID3D12Resource> output;   // R16G16B16A16_FLOAT
 +  D3D12_RESOURCE_STATES vectors_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 +  D3D12_RESOURCE_STATES output_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++  // The reactive mask: the luminance snapshots (R16_FLOAT) and the mask
++  // (R8_UNORM), made with the first snapshot.
++  Microsoft::WRL::ComPtr<ID3D12Resource> luma[2];
++  Microsoft::WRL::ComPtr<ID3D12Resource> reactive;
++  D3D12_RESOURCE_STATES luma_state[2] = {D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
++  D3D12_RESOURCE_STATES reactive_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 +#if defined(REX_HAS_FSR) && REX_HAS_FSR
 +  FsrRuntime runtime;
 +  ffxContext context = nullptr;
 +#endif
++  // Set on the submission thread when FSR's dispatch failed.
++  std::atomic<bool> dispatch_failed{false};
++  // Released, destroyed once the submissions that may use them are done.
++  struct Retired {
++    uint64_t submission;
++    Microsoft::WRL::ComPtr<ID3D12Resource> resources[5];
++    void* context;
++  };
++  std::vector<Retired> retired;
 +  // temporal_aa_debug 4: timestamps around the passes, a pair per slot, each
 +  // slot read back once its submission is done.
 +  static constexpr uint32_t kTimerSlots = 8;
@@ -741,7 +1081,10 @@ index 0000000..415ff26
 +#if defined(REX_HAS_FSR) && REX_HAS_FSR
 +struct TaaFsrDispatch {
 +  PfnFfxDispatch dispatch;
-+  ffxContext* context;
++  // The context's handle as it was when recorded (a later one may replace it
++  // before this is executed).
++  ffxContext context;
++  std::atomic<bool>* failed;
 +  ffxDispatchDescUpscale desc;
 +};
 +
@@ -749,10 +1092,42 @@ index 0000000..415ff26
 +  TaaFsrDispatch dispatch;
 +  std::memcpy(&dispatch, data, sizeof(dispatch));
 +  dispatch.desc.commandList = command_list;
-+  ffxReturnCode_t result = dispatch.dispatch(dispatch.context, &dispatch.desc.header);
++  ffxContext context = dispatch.context;
++  ffxReturnCode_t result = dispatch.dispatch(&context, &dispatch.desc.header);
++  if (result == FFX_API_RETURN_OK) {
++    return;
++  }
++  // The scene as it was into the output, which is copied back into it next:
++  // the frame is left as it was (FSR is given up at the end of the frame).
++  dispatch.failed->store(true, std::memory_order_release);
++  auto* color = static_cast<ID3D12Resource*>(dispatch.desc.color.resource);
++  auto* output = static_cast<ID3D12Resource*>(dispatch.desc.output.resource);
++  const D3D12_RESOURCE_STATES color_state =
++      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++  D3D12_RESOURCE_BARRIER barriers[2] = {};
++  for (uint32_t i = 0; i < 2; ++i) {
++    barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++  }
++  barriers[0].Transition.pResource = color;
++  barriers[0].Transition.StateBefore = color_state;
++  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++  barriers[1].Transition.pResource = output;
++  barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++  command_list->ResourceBarrier(2, barriers);
++  D3D12_TEXTURE_COPY_LOCATION dest = {output, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
++  D3D12_TEXTURE_COPY_LOCATION source = {color, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
++  dest.SubresourceIndex = 0;
++  source.SubresourceIndex = 0;
++  command_list->CopyTextureRegion(&dest, 0, 0, 0, &source, nullptr);
++  for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
++    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
++  }
++  command_list->ResourceBarrier(2, barriers);
 +  static std::atomic<bool> failure_logged{false};
-+  if (result != FFX_API_RETURN_OK && !failure_logged.exchange(true)) {
-+    REXGPU_ERROR("Temporal AA: FSR's dispatch failed ({})", result);
++  if (!failure_logged.exchange(true)) {
++    REXGPU_ERROR("Temporal AA: FSR's dispatch failed ({}); giving FSR up", result);
 +  }
 +}
 +#endif
@@ -770,33 +1145,73 @@ index 0000000..415ff26
 +  return taa_fsr_ && taa_fsr_->state.load(std::memory_order_acquire) == TaaFsr::kReady;
 +}
 +
++bool D3D12CommandProcessor::TaaCheckAvailable() {
++#if defined(REX_HAS_FSR) && REX_HAS_FSR
++  std::error_code error;
++  return std::filesystem::exists(
++      rex::filesystem::GetExecutableFolder() / "amd_fidelityfx_dx12.dll", error);
++#else
++  return false;
++#endif
++}
++
 +void D3D12CommandProcessor::TaaRelease() {
 +  if (!taa_fsr_) {
 +    return;
 +  }
-+  if (taa_fsr_->thread.joinable()) {
-+    taa_fsr_->thread.join();
++  TaaFsr& fsr = *taa_fsr_;
++  if (fsr.thread.joinable()) {
++    fsr.thread.join();
 +  }
-+  // The GPU and the submission thread may still use the context and textures.
-+  if (taa_fsr_->vectors || taa_fsr_->output
++  // The GPU and the submission thread may still use the context and the
++  // textures: destroyed once the submissions so far are done.
++  TaaFsr::Retired retired = {submission_current_, {fsr.vectors, fsr.output, fsr.luma[0], fsr.luma[1],
++                                                   fsr.reactive}, nullptr};
 +#if defined(REX_HAS_FSR) && REX_HAS_FSR
-+      || taa_fsr_->context
++  retired.context = fsr.context;
++  fsr.context = nullptr;
 +#endif
-+  ) {
-+    AwaitAllQueueOperationsCompletion();
++  bool released = retired.context != nullptr;
++  for (const auto& resource : retired.resources) {
++    released |= resource != nullptr;
 +  }
-+#if defined(REX_HAS_FSR) && REX_HAS_FSR
-+  if (taa_fsr_->context) {
-+    taa_fsr_->runtime.destroy(&taa_fsr_->context, nullptr);
-+    taa_fsr_->context = nullptr;
++  if (released) {
++    fsr.retired.push_back(std::move(retired));
 +    REXGPU_INFO("Temporal AA: FSR released");
 +  }
++  fsr.vectors.Reset();
++  fsr.output.Reset();
++  fsr.luma[0].Reset();
++  fsr.luma[1].Reset();
++  fsr.reactive.Reset();
++  fsr.width = 0;
++  fsr.height = 0;
++  fsr.dispatch_failed.store(false, std::memory_order_relaxed);
++  fsr.state.store(TaaFsr::kNone, std::memory_order_release);
++}
++
++void D3D12CommandProcessor::TaaCollectRetired(bool all) {
++  if (!taa_fsr_) {
++    return;
++  }
++  TaaFsr& fsr = *taa_fsr_;
++  for (auto it = fsr.retired.begin(); it != fsr.retired.end();) {
++    if (!all && it->submission > GetCompletedSubmission()) {
++      ++it;
++      continue;
++    }
++#if defined(REX_HAS_FSR) && REX_HAS_FSR
++    if (it->context) {
++      ffxContext context = it->context;
++      fsr.runtime.destroy(&context, nullptr);
++    }
 +#endif
-+  taa_fsr_->vectors.Reset();
-+  taa_fsr_->output.Reset();
-+  taa_fsr_->width = 0;
-+  taa_fsr_->height = 0;
-+  taa_fsr_->state.store(TaaFsr::kNone, std::memory_order_release);
++    it = fsr.retired.erase(it);
++  }
++}
++
++void D3D12CommandProcessor::TaaFrameEnd() {
++  TaaCollectRetired(false);
 +}
 +
 +uint32_t D3D12CommandProcessor::TaaTimerBegin() {
@@ -890,39 +1305,234 @@ index 0000000..415ff26
 +}
 +
 +bool D3D12CommandProcessor::TaaCreatePipeline() {
-+  if (taa_vectors_pipeline_) {
++  if (taa_vectors_pipeline_ && taa_luma_pipeline_ && taa_reactive_pipeline_ &&
++      taa_debug_pipeline_) {
 +    return true;
 +  }
 +  if (taa_pipeline_failed_) {
 +    return false;
 +  }
 +  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
-+  D3D12_ROOT_PARAMETER parameters[4];
-+  D3D12_DESCRIPTOR_RANGE ranges[3];
-+  parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-+  parameters[0].Descriptor = {0, 0};
-+  parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-+  for (uint32_t i = 0; i < 3; ++i) {
-+    ranges[i] = {i < 2 ? D3D12_DESCRIPTOR_RANGE_TYPE_SRV : D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1,
-+                 i < 2 ? i : 0, 0, 0};
-+    parameters[1 + i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-+    parameters[1 + i].DescriptorTable = {1, &ranges[i]};
-+    parameters[1 + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-+  }
-+  D3D12_ROOT_SIGNATURE_DESC desc = {4, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
-+  *(taa_vectors_root_signature_.ReleaseAndGetAddressOf()) =
-+      ui::d3d12::util::CreateRootSignature(provider, desc);
-+  if (taa_vectors_root_signature_) {
-+    *(taa_vectors_pipeline_.ReleaseAndGetAddressOf()) = ui::d3d12::util::CreateComputePipeline(
-+        provider.GetDevice(), shaders::taa_motion_vectors_mcla_cs,
-+        sizeof(shaders::taa_motion_vectors_mcla_cs), taa_vectors_root_signature_.Get());
-+  }
-+  if (!taa_vectors_pipeline_) {
-+    REXGPU_ERROR("Temporal AA: failed to create the motion vector pipeline");
++  // The first parameter: constants (root constants, or a CBV if 0), then a
++  // table of one SRV for each texture and one of a UAV.
++  auto create = [&](uint32_t constant_count, uint32_t texture_count, const void* shader,
++                    size_t shader_size, Microsoft::WRL::ComPtr<ID3D12RootSignature>& root_signature,
++                    Microsoft::WRL::ComPtr<ID3D12PipelineState>& pipeline) {
++    D3D12_ROOT_PARAMETER parameters[5];
++    D3D12_DESCRIPTOR_RANGE ranges[4];
++    if (constant_count) {
++      parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++      parameters[0].Constants = {0, 0, constant_count};
++    } else {
++      parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
++      parameters[0].Descriptor = {0, 0};
++    }
++    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    for (uint32_t i = 0; i <= texture_count; ++i) {
++      bool uav = i == texture_count;
++      ranges[i] = {uav ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1,
++                   uav ? 0 : i, 0, 0};
++      parameters[1 + i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++      parameters[1 + i].DescriptorTable = {1, &ranges[i]};
++      parameters[1 + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    }
++    D3D12_ROOT_SIGNATURE_DESC desc = {texture_count + 2, parameters, 0, nullptr,
++                                      D3D12_ROOT_SIGNATURE_FLAG_NONE};
++    *(root_signature.ReleaseAndGetAddressOf()) =
++        ui::d3d12::util::CreateRootSignature(provider, desc);
++    if (root_signature) {
++      *(pipeline.ReleaseAndGetAddressOf()) = ui::d3d12::util::CreateComputePipeline(
++          provider.GetDevice(), shader, shader_size, root_signature.Get());
++    }
++    return bool(pipeline);
++  };
++  if (!create(0, 2, shaders::taa_motion_vectors_mcla_cs,
++              sizeof(shaders::taa_motion_vectors_mcla_cs), taa_vectors_root_signature_,
++              taa_vectors_pipeline_) ||
++      !create(4, 1, shaders::taa_luma_snapshot_cs, sizeof(shaders::taa_luma_snapshot_cs),
++              taa_luma_root_signature_, taa_luma_pipeline_) ||
++      !create(8, 3, shaders::taa_reactive_mcla_cs, sizeof(shaders::taa_reactive_mcla_cs),
++              taa_reactive_root_signature_, taa_reactive_pipeline_) ||
++      !create(4, 3, shaders::taa_debug_view_cs, sizeof(shaders::taa_debug_view_cs),
++              taa_debug_root_signature_, taa_debug_pipeline_)) {
++    REXGPU_ERROR("Temporal AA: failed to create the pipelines");
 +    taa_pipeline_failed_ = true;
 +    return false;
 +  }
 +  return true;
++}
++
++bool D3D12CommandProcessor::TaaEnsureReactiveTextures() {
++  TaaFsr& fsr = *taa_fsr_;
++  if (fsr.reactive) {
++    return true;
++  }
++  ID3D12Device* device = GetD3D12Provider().GetDevice();
++  D3D12_RESOURCE_DESC desc = {};
++  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++  desc.Width = fsr.width;
++  desc.Height = fsr.height;
++  desc.DepthOrArraySize = 1;
++  desc.MipLevels = 1;
++  desc.SampleDesc.Count = 1;
++  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
++  for (uint32_t i = 0; i < 3; ++i) {
++    desc.Format = i < 2 ? DXGI_FORMAT_R16_FLOAT : DXGI_FORMAT_R8_UNORM;
++    Microsoft::WRL::ComPtr<ID3D12Resource>& resource = i < 2 ? fsr.luma[i] : fsr.reactive;
++    if (FAILED(device->CreateCommittedResource(
++            &ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &desc,
++            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)))) {
++      REXGPU_ERROR("Temporal AA: failed to create the reactive mask's textures");
++      fsr.luma[0].Reset();
++      fsr.luma[1].Reset();
++      fsr.reactive.Reset();
++      return false;
++    }
++  }
++  fsr.luma[0]->SetName(L"Temporal AA opaque luminance");
++  fsr.luma[1]->SetName(L"Temporal AA composite luminance");
++  fsr.reactive->SetName(L"Temporal AA reactive mask");
++  fsr.luma_state[0] = fsr.luma_state[1] = fsr.reactive_state =
++      D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++  return true;
++}
++
++bool D3D12CommandProcessor::TaaSnapshot(uint32_t slot, uint32_t color_target_key) {
++  if (!TaaReady() || slot > 1 || !TaaCreatePipeline() || !TaaEnsureReactiveTextures() ||
++      !BeginSubmission(true)) {
++    return false;
++  }
++  TaaFsr& fsr = *taa_fsr_;
++  ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[2];
++  if (!RequestOneUseSingleViewDescriptors(2, descriptors)) {
++    return false;
++  }
++  uint32_t width, height;
++  if (!render_target_cache_->TaaBeginReadColorTarget(color_target_key, descriptors[0].first, width,
++                                                     height)) {
++    return false;
++  }
++  if (width < fsr.width || height < fsr.height) {
++    render_target_cache_->TaaEndReadColorTarget(color_target_key);
++    return false;
++  }
++  D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
++  uav_desc.Format = DXGI_FORMAT_R16_FLOAT;
++  uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++  GetD3D12Provider().GetDevice()->CreateUnorderedAccessView(fsr.luma[slot].Get(), nullptr,
++                                                            &uav_desc, descriptors[1].first);
++  PushTransitionBarrier(fsr.luma[slot].Get(), fsr.luma_state[slot],
++                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++  fsr.luma_state[slot] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++  SubmitBarriers();
++  uint32_t constants[4] = {fsr.width, fsr.height, 0, 0};
++  deferred_command_list_.D3DSetComputeRootSignature(taa_luma_root_signature_.Get());
++  SetExternalPipeline(taa_luma_pipeline_.Get());
++  deferred_command_list_.D3DSetComputeRoot32BitConstants(0, 4, constants, 0);
++  deferred_command_list_.D3DSetComputeRootDescriptorTable(1, descriptors[0].second);
++  deferred_command_list_.D3DSetComputeRootDescriptorTable(2, descriptors[1].second);
++  deferred_command_list_.D3DDispatch((fsr.width + 15) / 16, (fsr.height + 7) / 8, 1);
++  PushTransitionBarrier(fsr.luma[slot].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++  fsr.luma_state[slot] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++  // The draws that follow need it as a render target.
++  render_target_cache_->TaaEndReadColorTarget(color_target_key);
++  SubmitBarriers();
++  return true;
++}
++
++void D3D12CommandProcessor::TaaRunReactive(const D3D12Shader::TextureBinding& stencil_binding) {
++  TaaFsr& fsr = *taa_fsr_;
++  ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[4];
++  uint32_t one_use_count = bindless_resources_used_ ? 3 : 4;
++  if (!RequestOneUseSingleViewDescriptors(one_use_count, descriptors)) {
++    taa_frame_.snapshots = 0;
++    return;
++  }
++  ID3D12Device* device = GetD3D12Provider().GetDevice();
++  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
++  srv_desc.Format = DXGI_FORMAT_R16_FLOAT;
++  srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++  srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++  srv_desc.Texture2D.MipLevels = 1;
++  D3D12_GPU_DESCRIPTOR_HANDLE tables[4];
++  for (uint32_t i = 0; i < 2; ++i) {
++    device->CreateShaderResourceView(fsr.luma[i].Get(), &srv_desc, descriptors[i].first);
++    tables[i] = descriptors[i].second;
++  }
++  if (bindless_resources_used_) {
++    tables[2] = GetD3D12Provider().OffsetViewDescriptor(
++        view_bindless_heap_gpu_start_,
++        texture_cache_->GetActiveTextureBindlessSRVIndex(stencil_binding));
++  } else {
++    texture_cache_->WriteActiveTextureBindfulSRV(stencil_binding, descriptors[3].first);
++    tables[2] = descriptors[3].second;
++  }
++  D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
++  uav_desc.Format = DXGI_FORMAT_R8_UNORM;
++  uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++  device->CreateUnorderedAccessView(fsr.reactive.Get(), nullptr, &uav_desc, descriptors[2].first);
++  tables[3] = descriptors[2].second;
++  PushTransitionBarrier(fsr.reactive.Get(), fsr.reactive_state,
++                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++  fsr.reactive_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++  SubmitBarriers();
++  uint32_t constants[8] = {fsr.width, fsr.height, uint32_t(taa_vector_constants_.jitter[2]), 0};
++  TaaReactiveCurve(reinterpret_cast<float*>(&constants[4]));
++  deferred_command_list_.D3DSetComputeRootSignature(taa_reactive_root_signature_.Get());
++  SetExternalPipeline(taa_reactive_pipeline_.Get());
++  deferred_command_list_.D3DSetComputeRoot32BitConstants(0, 8, constants, 0);
++  for (uint32_t i = 0; i < 4; ++i) {
++    deferred_command_list_.D3DSetComputeRootDescriptorTable(1 + i, tables[i]);
++  }
++  deferred_command_list_.D3DDispatch((fsr.width + 15) / 16, (fsr.height + 7) / 8, 1);
++  PushTransitionBarrier(fsr.reactive.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++  fsr.reactive_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++}
++
++void D3D12CommandProcessor::TaaRunDebugView(const D3D12Shader::TextureBinding& scene_binding,
++                                            uint32_t mode) {
++  TaaFsr& fsr = *taa_fsr_;
++  ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[4];
++  if (!RequestOneUseSingleViewDescriptors(bindless_resources_used_ ? 3 : 4, descriptors)) {
++    return;
++  }
++  ID3D12Device* device = GetD3D12Provider().GetDevice();
++  D3D12_GPU_DESCRIPTOR_HANDLE tables[4];
++  if (bindless_resources_used_) {
++    tables[0] = GetD3D12Provider().OffsetViewDescriptor(
++        view_bindless_heap_gpu_start_, texture_cache_->GetActiveTextureBindlessSRVIndex(scene_binding));
++  } else {
++    texture_cache_->WriteActiveTextureBindfulSRV(scene_binding, descriptors[3].first);
++    tables[0] = descriptors[3].second;
++  }
++  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
++  srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++  srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++  srv_desc.Texture2D.MipLevels = 1;
++  srv_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
++  device->CreateShaderResourceView(fsr.vectors.Get(), &srv_desc, descriptors[0].first);
++  tables[1] = descriptors[0].second;
++  // No reactive mask this frame: a null view (zeros).
++  srv_desc.Format = DXGI_FORMAT_R8_UNORM;
++  device->CreateShaderResourceView(taa_frame_.snapshots == 3 ? fsr.reactive.Get() : nullptr,
++                                   &srv_desc, descriptors[1].first);
++  tables[2] = descriptors[1].second;
++  D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
++  uav_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++  uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++  device->CreateUnorderedAccessView(fsr.output.Get(), nullptr, &uav_desc, descriptors[2].first);
++  tables[3] = descriptors[2].second;
++  uint32_t constants[4] = {fsr.width, fsr.height, mode, 0};
++  deferred_command_list_.D3DSetComputeRootSignature(taa_debug_root_signature_.Get());
++  SetExternalPipeline(taa_debug_pipeline_.Get());
++  deferred_command_list_.D3DSetComputeRoot32BitConstants(0, 4, constants, 0);
++  for (uint32_t i = 0; i < 4; ++i) {
++    deferred_command_list_.D3DSetComputeRootDescriptorTable(1 + i, tables[i]);
++  }
++  deferred_command_list_.D3DDispatch((fsr.width + 15) / 16, (fsr.height + 7) / 8, 1);
++  PushUAVBarrier(fsr.output.Get());
 +}
 +
 +void D3D12CommandProcessor::TaaRun(const D3D12Shader& pixel_shader) {
@@ -930,12 +1540,14 @@ index 0000000..415ff26
 +  ID3D12Resource* scene = texture_cache_->GetActiveTextureResource(kTaaFetchScene);
 +  ID3D12Resource* depth = texture_cache_->GetActiveTextureResource(kTaaFetchDepth);
 +  taa_frame_.status = 't';
-+  if (!scene || !depth || !TaaCreatePipeline()) {
++  ID3D12Resource* stencil = texture_cache_->GetActiveTextureResource(kTaaFetchStencil);
++  if (!scene || !depth || !stencil || !TaaCreatePipeline()) {
 +    return;
 +  }
 +  taa_frame_.status = 'r';
 +  D3D12_RESOURCE_DESC scene_desc = scene->GetDesc();
 +  D3D12_RESOURCE_DESC depth_desc = depth->GetDesc();
++  D3D12_RESOURCE_DESC stencil_desc = stencil->GetDesc();
 +  uint32_t width = uint32_t(scene_desc.Width), height = scene_desc.Height;
 +  // The texture cache may make them typeless (for its loads' views); FSR is
 +  // given the formats they're sampled as.
@@ -943,7 +1555,8 @@ index 0000000..415ff26
 +       scene_desc.Format != DXGI_FORMAT_R16G16B16A16_TYPELESS) ||
 +      (depth_desc.Format != DXGI_FORMAT_R32_FLOAT &&
 +       depth_desc.Format != DXGI_FORMAT_R32_TYPELESS) ||
-+      depth_desc.Width != scene_desc.Width ||
++      depth_desc.Width != scene_desc.Width || stencil_desc.Width != scene_desc.Width ||
++      stencil_desc.Height != scene_desc.Height ||
 +      depth_desc.Height != scene_desc.Height) {
 +    static bool logged = false;
 +    if (!logged) {
@@ -955,12 +1568,17 @@ index 0000000..415ff26
 +    return;
 +  }
 +  const D3D12Shader::TextureBinding* bindings[2] = {};  // depth (t0), stencil (t1)
++  const D3D12Shader::TextureBinding* scene_binding = nullptr;
 +  for (const D3D12Shader::TextureBinding& binding :
 +       pixel_shader.GetTextureBindingsAfterTranslation()) {
 +    if (binding.fetch_constant == kTaaFetchDepth && !bindings[0]) {
 +      bindings[0] = &binding;
 +    } else if (binding.fetch_constant == kTaaFetchStencil && !bindings[1]) {
 +      bindings[1] = &binding;
++    } else if (binding.fetch_constant == kTaaFetchScene &&
++               (!scene_binding || (scene_binding->is_signed && !binding.is_signed))) {
++      // The unsigned binding if there are both.
++      scene_binding = &binding;
 +    }
 +  }
 +  if (!bindings[0] || !bindings[1]) {
@@ -976,14 +1594,23 @@ index 0000000..415ff26
 +  TaaFsr& fsr = *taa_fsr_;
 +  uint32_t state = fsr.state.load(std::memory_order_acquire);
 +  if (state != TaaFsr::kNone && (fsr.width != width || fsr.height != height)) {
-+    TaaRelease();
-+    state = TaaFsr::kNone;
++    // Made again for the new size, from the end of this frame (never released
++    // in the middle of one).
++    taa_release_pending_ = true;
++    return;
++  }
++  if (fsr.dispatch_failed.load(std::memory_order_acquire)) {
++    TaaSetUnavailable("its dispatch failed");
++    fsr.state.store(TaaFsr::kFailed, std::memory_order_release);
++    taa_release_pending_ = true;
++    return;
 +  }
 +  if (state == TaaFsr::kNone) {
 +    // A failure stays one for this size.
 +    fsr.width = width;
 +    fsr.height = height;
 +    if (!fsr.runtime.Load("dx12")) {
++      TaaSetUnavailable("amd_fidelityfx_dx12.dll couldn't be loaded");
 +      fsr.state.store(TaaFsr::kFailed, std::memory_order_release);
 +      return;
 +    }
@@ -1039,6 +1666,7 @@ index 0000000..415ff26
 +      if (result != FFX_API_RETURN_OK) {
 +        fsr.context = nullptr;
 +        REXGPU_ERROR("Temporal AA: creating FSR failed ({})", result);
++        TaaSetUnavailable("its context couldn't be created");
 +        fsr.state.store(TaaFsr::kFailed, std::memory_order_release);
 +        return;
 +      }
@@ -1126,6 +1754,12 @@ index 0000000..415ff26
 +  PushTransitionBarrier(fsr.vectors.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
 +                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 +  fsr.vectors_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++  // The reactive mask, from this frame's snapshots of the scene.
++  if (taa_frame_.snapshots == 3 && fsr.reactive) {
++    TaaRunReactive(*bindings[1]);
++  } else {
++    taa_frame_.snapshots = 0;
++  }
 +  PushTransitionBarrier(fsr.output.Get(), fsr.output_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 +  fsr.output_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 +  SubmitBarriers();
@@ -1136,12 +1770,17 @@ index 0000000..415ff26
 +    TaaTimerEnd(timer_slot);
 +    return;
 +  }
++  if (TaaDebug() >= 5 && scene_binding) {
++    // A development view instead of FSR's output.
++    TaaRunDebugView(*scene_binding, TaaDebug() - 5);
++  } else {
 +
 +  // FSR, recorded into the real command list where it falls (it restores the
 +  // states it was given), then the output into the scene texture.
 +  TaaFsrDispatch dispatch = {};
 +  dispatch.dispatch = fsr.runtime.dispatch;
-+  dispatch.context = &fsr.context;
++  dispatch.context = fsr.context;
++  dispatch.failed = &fsr.dispatch_failed;
 +  ffxDispatchDescUpscale& desc = dispatch.desc;
 +  desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
 +  desc.color = ffxApiGetResourceDX12(scene, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
@@ -1149,6 +1788,9 @@ index 0000000..415ff26
 +  desc.depth = ffxApiGetResourceDX12(depth, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
 +  desc.depth.description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT;
 +  desc.motionVectors = ffxApiGetResourceDX12(fsr.vectors.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
++  if (taa_frame_.snapshots == 3) {
++    desc.reactive = ffxApiGetResourceDX12(fsr.reactive.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
++  }
 +  desc.output = ffxApiGetResourceDX12(fsr.output.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
 +  float jitter[2];
 +  TaaFsrJitter(jitter);
@@ -1179,6 +1821,7 @@ index 0000000..415ff26
 +  current_external_pipeline_ = nullptr;
 +  current_graphics_root_signature_ = nullptr;
 +  current_graphics_root_up_to_date_ = 0;
++  }
 +
 +  texture_cache_->TransitionActiveTexture(kTaaFetchScene, D3D12_RESOURCE_STATE_COPY_DEST);
 +  PushTransitionBarrier(fsr.output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -1233,6 +1876,104 @@ index ffedac3..e9f209c 100644
  bool D3D12TextureCache::AreActiveTextureSRVKeysUpToDate(
      const TextureSRVKey* keys, const D3D12Shader::TextureBinding* host_shader_bindings,
      size_t host_shader_binding_count) const {
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/taa_debug_view_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/taa_debug_view_cs.h
+new file mode 100644
+index 0000000..7227c76
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/taa_debug_view_cs.h
+@@ -0,0 +1,63 @@
++// Generated from taa_debug_view.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t taa_debug_view_cs[] = {
++    0x43425844, 0x4981CAEF, 0xA44536E3, 0xE6BDEFDA, 0x8940A0E1, 0x00000001, 0x00000754, 0x00000003,
++    0x0000002C, 0x0000003C, 0x0000004C, 0x4E475349, 0x00000008, 0x00000000, 0x00000008, 0x4E47534F,
++    0x00000008, 0x00000000, 0x00000008, 0x58454853, 0x00000700, 0x00050051, 0x000001C0, 0x0100086A,
++    0x07000059, 0x00308E46, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x07004058,
++    0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000, 0x07001858, 0x00307E46,
++    0x00000001, 0x00000001, 0x00000001, 0x00005555, 0x00000000, 0x07001858, 0x00307E46, 0x00000002,
++    0x00000002, 0x00000002, 0x00005555, 0x00000000, 0x0700189C, 0x0031EE46, 0x00000000, 0x00000000,
++    0x00000000, 0x00005555, 0x00000000, 0x0200005F, 0x00020032, 0x02000068, 0x00000003, 0x0400009B,
++    0x00000010, 0x00000008, 0x00000001, 0x08000050, 0x00100032, 0x00000000, 0x00020046, 0x00308046,
++    0x00000000, 0x00000000, 0x00000000, 0x0700003C, 0x00100012, 0x00000000, 0x0010001A, 0x00000000,
++    0x0010000A, 0x00000000, 0x0304001F, 0x0010000A, 0x00000000, 0x0100003E, 0x01000015, 0x04000036,
++    0x00100032, 0x00000000, 0x00020046, 0x08000036, 0x001000C2, 0x00000000, 0x00004002, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x00100072, 0x00000001, 0x00100F46, 0x00000000,
++    0x00207E46, 0x00000000, 0x00000000, 0x0A002010, 0x00100012, 0x00000001, 0x00100246, 0x00000001,
++    0x00004002, 0x3E59B3D0, 0x3F371759, 0x3D93DD98, 0x00000000, 0x07000038, 0x00100012, 0x00000001,
++    0x0010000A, 0x00000001, 0x00004001, 0x3F000000, 0x0500001F, 0x0030802A, 0x00000000, 0x00000000,
++    0x00000000, 0x0800002D, 0x00100022, 0x00000001, 0x00100F46, 0x00000000, 0x00207936, 0x00000002,
++    0x00000002, 0x08000000, 0x00100012, 0x00000002, 0x8010001A, 0x00000041, 0x00000001, 0x00004001,
++    0x3F800000, 0x08000036, 0x001000C2, 0x00000001, 0x00004002, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x09000032, 0x00100072, 0x00000002, 0x00100006, 0x00000001, 0x00100006, 0x00000002,
++    0x00100796, 0x00000001, 0x01000012, 0x0800002D, 0x00100032, 0x00000000, 0x00100E46, 0x00000000,
++    0x00207E46, 0x00000001, 0x00000001, 0x0700000F, 0x00100042, 0x00000000, 0x00100046, 0x00000000,
++    0x00100046, 0x00000000, 0x0500004B, 0x00100042, 0x00000000, 0x0010002A, 0x00000000, 0x07000038,
++    0x00100042, 0x00000000, 0x0010002A, 0x00000000, 0x00004001, 0x3D800000, 0x07000033, 0x00100042,
++    0x00000000, 0x0010002A, 0x00000000, 0x00004001, 0x3F800000, 0x09000033, 0x00100082, 0x00000000,
++    0x8010000A, 0x00000081, 0x00000000, 0x8010001A, 0x00000081, 0x00000000, 0x09000034, 0x00100022,
++    0x00000001, 0x8010000A, 0x00000081, 0x00000000, 0x8010001A, 0x00000081, 0x00000000, 0x0A00000E,
++    0x00100022, 0x00000001, 0x00004002, 0x3F800000, 0x3F800000, 0x3F800000, 0x3F800000, 0x0010001A,
++    0x00000001, 0x07000038, 0x00100082, 0x00000000, 0x0010003A, 0x00000000, 0x0010001A, 0x00000001,
++    0x07000038, 0x00100022, 0x00000001, 0x0010003A, 0x00000000, 0x0010003A, 0x00000000, 0x09000032,
++    0x00100042, 0x00000001, 0x0010001A, 0x00000001, 0x00004001, 0x3CAAAE5F, 0x00004001, 0xBDAE5A36,
++    0x09000032, 0x00100042, 0x00000001, 0x0010001A, 0x00000001, 0x0010002A, 0x00000001, 0x00004001,
++    0x3E3876E2, 0x09000032, 0x00100042, 0x00000001, 0x0010001A, 0x00000001, 0x0010002A, 0x00000001,
++    0x00004001, 0xBEA91D04, 0x09000032, 0x00100022, 0x00000001, 0x0010001A, 0x00000001, 0x0010002A,
++    0x00000001, 0x00004001, 0x3F7FF738, 0x07000038, 0x00100042, 0x00000001, 0x0010003A, 0x00000000,
++    0x0010001A, 0x00000001, 0x09000031, 0x00100082, 0x00000001, 0x8010000A, 0x00000081, 0x00000000,
++    0x8010001A, 0x00000081, 0x00000000, 0x09000032, 0x00100042, 0x00000001, 0x0010002A, 0x00000001,
++    0x00004001, 0xC0000000, 0x00004001, 0x3FC90FDB, 0x07000001, 0x00100042, 0x00000001, 0x0010003A,
++    0x00000001, 0x0010002A, 0x00000001, 0x09000032, 0x00100082, 0x00000000, 0x0010003A, 0x00000000,
++    0x0010001A, 0x00000001, 0x0010002A, 0x00000001, 0x08000031, 0x00100022, 0x00000001, 0x0010000A,
++    0x00000000, 0x8010000A, 0x00000041, 0x00000000, 0x07000001, 0x00100022, 0x00000001, 0x0010001A,
++    0x00000001, 0x00004001, 0xC0490FDB, 0x07000000, 0x00100082, 0x00000000, 0x0010003A, 0x00000000,
++    0x0010001A, 0x00000001, 0x07000033, 0x00100022, 0x00000001, 0x0010000A, 0x00000000, 0x0010001A,
++    0x00000000, 0x07000034, 0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x0010001A, 0x00000000,
++    0x08000031, 0x00100022, 0x00000000, 0x0010001A, 0x00000001, 0x8010001A, 0x00000041, 0x00000001,
++    0x0800001D, 0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x8010000A, 0x00000041, 0x00000000,
++    0x07000001, 0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x0010001A, 0x00000000, 0x0A000037,
++    0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x8010003A, 0x00000041, 0x00000000, 0x0010003A,
++    0x00000000, 0x0F000032, 0x001000B2, 0x00000000, 0x00100006, 0x00000000, 0x00004002, 0x3E22F983,
++    0x3E22F983, 0x00000000, 0x3E22F983, 0x00004002, 0x3F000000, 0x3F955556, 0x00000000, 0x3F555556,
++    0x0500001A, 0x001000B2, 0x00000000, 0x00100C46, 0x00000000, 0x0F000032, 0x001000B2, 0x00000000,
++    0x00100C46, 0x00000000, 0x00004002, 0x40C00000, 0x40C00000, 0x00000000, 0x40C00000, 0x00004002,
++    0xC0400000, 0xC0400000, 0x00000000, 0xC0400000, 0x0B002000, 0x001000B2, 0x00000000, 0x80100C46,
++    0x00000081, 0x00000000, 0x00004002, 0xBF800000, 0xBF800000, 0x00000000, 0xBF800000, 0x08000000,
++    0x00100022, 0x00000001, 0x8010002A, 0x00000041, 0x00000000, 0x00004001, 0x3F800000, 0x07000038,
++    0x00100072, 0x00000000, 0x00100AA6, 0x00000000, 0x00100346, 0x00000000, 0x09000032, 0x00100072,
++    0x00000002, 0x00100006, 0x00000001, 0x00100556, 0x00000001, 0x00100246, 0x00000000, 0x01000015,
++    0x05000036, 0x00100082, 0x00000002, 0x00004001, 0x3F800000, 0x070000A4, 0x0021E0F2, 0x00000000,
++    0x00000000, 0x00020546, 0x00100E46, 0x00000002, 0x0100003E,
++};
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/taa_luma_snapshot_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/taa_luma_snapshot_cs.h
+new file mode 100644
+index 0000000..8ac50a7
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/taa_luma_snapshot_cs.h
+@@ -0,0 +1,23 @@
++// Generated from taa_luma_snapshot.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t taa_luma_snapshot_cs[] = {
++    0x43425844, 0x9368E4B5, 0xD2AE5522, 0xFBA1B4A1, 0xB35A17CF, 0x00000001, 0x00000250, 0x00000003,
++    0x0000002C, 0x0000003C, 0x0000004C, 0x4E475349, 0x00000008, 0x00000000, 0x00000008, 0x4E47534F,
++    0x00000008, 0x00000000, 0x00000008, 0x58454853, 0x000001FC, 0x00050051, 0x0000007F, 0x0100086A,
++    0x07000059, 0x00308E46, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x07001858,
++    0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000, 0x0700189C, 0x0031EE46,
++    0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000, 0x0200005F, 0x00020032, 0x02000068,
++    0x00000001, 0x0400009B, 0x00000010, 0x00000008, 0x00000001, 0x08000050, 0x00100032, 0x00000000,
++    0x00020046, 0x00308046, 0x00000000, 0x00000000, 0x00000000, 0x0700003C, 0x00100012, 0x00000000,
++    0x0010001A, 0x00000000, 0x0010000A, 0x00000000, 0x0304001F, 0x0010000A, 0x00000000, 0x0100003E,
++    0x01000015, 0x04000036, 0x00100032, 0x00000000, 0x00020046, 0x08000036, 0x001000C2, 0x00000000,
++    0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x00100072, 0x00000000,
++    0x00100E46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x0A000010, 0x00100012, 0x00000000,
++    0x00100246, 0x00000000, 0x00004002, 0x3E59B3D0, 0x3F371759, 0x3D93DD98, 0x00000000, 0x07000034,
++    0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x00004001, 0x00000000, 0x07000001, 0x00100022,
++    0x00000000, 0x0010000A, 0x00000000, 0x00004001, 0x7FFFFFFF, 0x07000050, 0x00100022, 0x00000000,
++    0x0010001A, 0x00000000, 0x00004001, 0x7F800000, 0x0304001F, 0x0010001A, 0x00000000, 0x05000036,
++    0x00100012, 0x00000000, 0x00004001, 0x00000000, 0x01000015, 0x07000033, 0x00100012, 0x00000000,
++    0x0010000A, 0x00000000, 0x00004001, 0x477FE000, 0x070000A4, 0x0021E0F2, 0x00000000, 0x00000000,
++    0x00020546, 0x00100006, 0x00000000, 0x0100003E,
++};
 diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/taa_motion_vectors_mcla_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/taa_motion_vectors_mcla_cs.h
 new file mode 100644
 index 0000000..fb592c0
@@ -1295,6 +2036,180 @@ index 0000000..fb592c0
 +    0x00000000, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x01000015, 0x070000A4,
 +    0x0021E0F2, 0x00000000, 0x00000000, 0x00020546, 0x00100046, 0x00000000, 0x0100003E,
 +};
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/taa_reactive_mcla_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/taa_reactive_mcla_cs.h
+new file mode 100644
+index 0000000..b661d79
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/taa_reactive_mcla_cs.h
+@@ -0,0 +1,36 @@
++// Generated from taa_reactive_mcla.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t taa_reactive_mcla_cs[] = {
++    0x43425844, 0x59AD4C9D, 0x2C8B27B8, 0xE87E17B7, 0x43D5D5ED, 0x00000001, 0x000003F0, 0x00000003,
++    0x0000002C, 0x0000003C, 0x0000004C, 0x4E475349, 0x00000008, 0x00000000, 0x00000008, 0x4E47534F,
++    0x00000008, 0x00000000, 0x00000008, 0x58454853, 0x0000039C, 0x00050051, 0x000000E7, 0x0100086A,
++    0x00001835, 0x00000012, 0x3F800000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3F800000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3F800000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x3F800000, 0x07000059, 0x00308E46, 0x00000000, 0x00000000, 0x00000000, 0x00000002,
++    0x00000000, 0x07001858, 0x00307E46, 0x00000000, 0x00000000, 0x00000000, 0x00005555, 0x00000000,
++    0x07001858, 0x00307E46, 0x00000001, 0x00000001, 0x00000001, 0x00005555, 0x00000000, 0x07004058,
++    0x00307E46, 0x00000002, 0x00000002, 0x00000002, 0x00005555, 0x00000000, 0x0700189C, 0x0031EE46,
++    0x00000000, 0x00000000, 0x00000000, 0x00001111, 0x00000000, 0x0200005F, 0x00020032, 0x02000068,
++    0x00000002, 0x0400009B, 0x00000010, 0x00000008, 0x00000001, 0x08000050, 0x00100032, 0x00000000,
++    0x00020046, 0x00308046, 0x00000000, 0x00000000, 0x00000000, 0x0700003C, 0x00100012, 0x00000000,
++    0x0010001A, 0x00000000, 0x0010000A, 0x00000000, 0x0304001F, 0x0010000A, 0x00000000, 0x0100003E,
++    0x01000015, 0x04000036, 0x00100032, 0x00000000, 0x00020046, 0x08000036, 0x001000C2, 0x00000000,
++    0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0800002D, 0x00100012, 0x00000001,
++    0x00100F46, 0x00000000, 0x00207E46, 0x00000000, 0x00000000, 0x0800002D, 0x00100022, 0x00000001,
++    0x00100F46, 0x00000000, 0x00207E16, 0x00000001, 0x00000001, 0x08000000, 0x00100042, 0x00000001,
++    0x8010000A, 0x00000041, 0x00000001, 0x0010001A, 0x00000001, 0x07000034, 0x00100012, 0x00000001,
++    0x0010000A, 0x00000001, 0x0010001A, 0x00000001, 0x07000034, 0x00100012, 0x00000001, 0x0010000A,
++    0x00000001, 0x00004001, 0x38D1B717, 0x0800000E, 0x00100012, 0x00000001, 0x8010002A, 0x00000081,
++    0x00000001, 0x0010000A, 0x00000001, 0x0A000000, 0x00100012, 0x00000001, 0x0010000A, 0x00000001,
++    0x8030801A, 0x00000041, 0x00000000, 0x00000000, 0x00000001, 0x09002038, 0x00100012, 0x00000001,
++    0x0010000A, 0x00000001, 0x0030800A, 0x00000000, 0x00000000, 0x00000001, 0x09000033, 0x00100012,
++    0x00000001, 0x0010000A, 0x00000001, 0x0030802A, 0x00000000, 0x00000000, 0x00000001, 0x0800002D,
++    0x001000F2, 0x00000000, 0x00100E46, 0x00000000, 0x00207E46, 0x00000002, 0x00000002, 0x07000036,
++    0x00100022, 0x00000001, 0x0030802A, 0x00000000, 0x00000000, 0x00000000, 0x08000011, 0x00100012,
++    0x00000000, 0x00100E46, 0x00000000, 0x00909E46, 0x0010001A, 0x00000001, 0x09000032, 0x00100012,
++    0x00000000, 0x0010000A, 0x00000000, 0x00004001, 0x437F0000, 0x00004001, 0x3F000000, 0x0500001C,
++    0x00100012, 0x00000000, 0x0010000A, 0x00000000, 0x07000055, 0x00100012, 0x00000000, 0x0010000A,
++    0x00000000, 0x00004001, 0x00000002, 0x0304001F, 0x0010000A, 0x00000000, 0x05000036, 0x00100012,
++    0x00000001, 0x00004001, 0x00000000, 0x01000015, 0x070000A4, 0x0021E0F2, 0x00000000, 0x00000000,
++    0x00020546, 0x00100006, 0x00000001, 0x0100003E,
++};
+diff --git a/src/graphics/shaders/taa_debug_view.cs.xesl b/src/graphics/shaders/taa_debug_view.cs.xesl
+new file mode 100644
+index 0000000..df68c15
+--- /dev/null
++++ b/src/graphics/shaders/taa_debug_view.cs.xesl
+@@ -0,0 +1,72 @@
++// Temporal anti-aliasing (rexglue-temporal-aa.patch), development views
++// (temporal_aa_debug 5 and 6), written instead of FSR's output: the reactive
++// mask in red over the scene in grey, or the motion vectors as colour (the hue
++// their direction, the brightness their length, full at 16 host pixels).
++
++#include "../../ui/shaders/xesl.xesli"
++
++#if SHADING_LANGUAGE_GLSL_XE
++  #define XeTaaDebugFormat rgba16f
++  #define XeTaaFrac fract
++  #define XeTaaAtan2 atan
++  #define XeTaaArray texture2DArray
++  #define XeTaaArrayFetch(texture_name, position) \
++      texelFetch(texture_name, int3_xe(position, 0), 0)
++#else
++  #define XeTaaDebugFormat float4_xe
++  #define XeTaaFrac frac
++  #define XeTaaAtan2 atan2
++  #define XeTaaArray Texture2DArray<float4_xe>
++  #define XeTaaArrayFetch(texture_name, position) \
++      ((texture_name).Load(int4_xe(position, 0, 0)))
++#endif
++
++push_const_begin_xe(b0, space0)
++  // x, y: the size; z: 0 the reactive mask, 1 the motion vectors.
++  uint4_xe xe_taa_debug_size_mode;
++push_const_end_xe
++
++#define LOCAL_SIZE_X_XE 16
++#define LOCAL_SIZE_Y_XE 8
++#define LOCAL_SIZE_Z_XE 1
++entry_bindings_begin_compute_xe
++  push_const_binding_xe(buffer(0))
++  entry_binding_next_xe
++  texture_xe(XeTaaArray, xe_taa_debug_scene, set=0, binding=0, t0, space0, texture(0))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_taa_debug_vectors, set=0, binding=1, t1, space0, texture(1))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_taa_debug_reactive, set=0, binding=2, t2, space0, texture(2))
++  entry_binding_next_xe
++  image_wo_xe(image_2d_xe, XeTaaDebugFormat, xe_taa_debug_dest, set=0, binding=3, u0,
++              space0, texture(3))
++entry_bindings_end_inputs_begin_compute_xe
++  entry_in_global_thread_id_xe
++entry_inputs_end_code_begin_compute_xe
++  uint2_xe pixel_index = in_global_thread_id_xe.xy;
++  uint4_xe size_mode = push_const_xe(xe_taa_debug_size_mode);
++  dont_flatten_xe
++  if (any(greater_than_equal_xe(pixel_index, size_mode.xy))) {
++    return;
++  }
++  float3_xe scene = XeTaaArrayFetch(xe_taa_debug_scene, pixel_index).rgb;
++  float grey = 0.5f * saturate_xe(dot(scene, float3_xe(0.2126f, 0.7152f, 0.0722f)));
++  float3_xe color;
++  if (size_mode.z == 0u) {
++    float reactive = texel_fetch_2d_xe(xe_taa_debug_reactive, int2_xe(pixel_index), 0).r;
++    color = float3_xe(grey, grey, grey) * (1.0f - reactive) + float3_xe(reactive, 0.0f, 0.0f);
++  } else {
++    float2_xe motion = texel_fetch_2d_xe(xe_taa_debug_vectors, int2_xe(pixel_index), 0).rg;
++    float length_ = saturate_xe(length(motion) / 16.0f);
++    float angle = XeTaaAtan2(motion.y, motion.x) * 0.159154943f + 0.5f;
++    float3_xe hue = saturate_xe(abs(XeTaaFrac(float3_xe(angle, angle, angle) +
++                                         float3_xe(0.0f, 2.0f / 3.0f, 1.0f / 3.0f)) * 6.0f -
++                                    3.0f) - 1.0f);
++    color = float3_xe(grey, grey, grey) * (1.0f - length_) + hue * length_;
++  }
++#if SHADING_LANGUAGE_GLSL_XE
++  imageStore(xe_taa_debug_dest, int2_xe(pixel_index), float4_xe(color, 1.0f));
++#else
++  xe_taa_debug_dest[pixel_index] = float4_xe(color, 1.0f);
++#endif
++entry_code_end_compute_xe
+diff --git a/src/graphics/shaders/taa_luma_snapshot.cs.xesl b/src/graphics/shaders/taa_luma_snapshot.cs.xesl
+new file mode 100644
+index 0000000..973d11e
+--- /dev/null
++++ b/src/graphics/shaders/taa_luma_snapshot.cs.xesl
+@@ -0,0 +1,48 @@
++// Temporal anti-aliasing (rexglue-temporal-aa.patch): the luminance of the
++// scene's render target (a 1x host render target, through its sampled view) at
++// a point in the frame, into an R16 float texture, for the reactive mask
++// (taa_reactive_mcla.cs.xesl). Values in the target's own units.
++
++#include "../../ui/shaders/xesl.xesli"
++
++#if SHADING_LANGUAGE_GLSL_XE
++  #define XeTaaLumaFormat r16f
++#else
++  #define XeTaaLumaFormat float
++#endif
++
++push_const_begin_xe(b0, space0)
++  // x, y: the size.
++  uint4_xe xe_taa_luma_size;
++push_const_end_xe
++
++#define LOCAL_SIZE_X_XE 16
++#define LOCAL_SIZE_Y_XE 8
++#define LOCAL_SIZE_Z_XE 1
++entry_bindings_begin_compute_xe
++  push_const_binding_xe(buffer(0))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_taa_luma_source, set=0, binding=0, t0, space0, texture(0))
++  entry_binding_next_xe
++  image_wo_xe(image_2d_xe, XeTaaLumaFormat, xe_taa_luma_dest, set=1, binding=0, u0, space0,
++              texture(1))
++entry_bindings_end_inputs_begin_compute_xe
++  entry_in_global_thread_id_xe
++entry_inputs_end_code_begin_compute_xe
++  uint2_xe pixel_index = in_global_thread_id_xe.xy;
++  dont_flatten_xe
++  if (any(greater_than_equal_xe(pixel_index, push_const_xe(xe_taa_luma_size).xy))) {
++    return;
++  }
++  float3_xe color = texel_fetch_2d_xe(xe_taa_luma_source, int2_xe(pixel_index), 0).rgb;
++  float luma = max(dot(color, float3_xe(0.2126f, 0.7152f, 0.0722f)), 0.0f);
++  // Not NaN or infinite (by the bits).
++  if ((float_bits_to_uint_xe(luma) & 0x7FFFFFFFu) >= 0x7F800000u) {
++    luma = 0.0f;
++  }
++#if SHADING_LANGUAGE_GLSL_XE
++  imageStore(xe_taa_luma_dest, int2_xe(pixel_index), float4_xe(min(luma, 65504.0f), 0.0f, 0.0f, 0.0f));
++#else
++  xe_taa_luma_dest[pixel_index] = min(luma, 65504.0f);
++#endif
++entry_code_end_compute_xe
 diff --git a/src/graphics/shaders/taa_motion_vectors_mcla.cs.xesl b/src/graphics/shaders/taa_motion_vectors_mcla.cs.xesl
 new file mode 100644
 index 0000000..d12faaf
@@ -1389,6 +2304,234 @@ index 0000000..d12faaf
 +  xe_taa_mv_dest[pixel_index] = motion;
 +#endif
 +entry_code_end_compute_xe
+diff --git a/src/graphics/shaders/taa_reactive_mcla.cs.xesl b/src/graphics/shaders/taa_reactive_mcla.cs.xesl
+new file mode 100644
+index 0000000..a14aac3
+--- /dev/null
++++ b/src/graphics/shaders/taa_reactive_mcla.cs.xesl
+@@ -0,0 +1,69 @@
++// Temporal anti-aliasing (rexglue-temporal-aa.patch): FSR's reactive mask for
++// Midnight Club: Los Angeles. What the scene's translucent effects changed
++// between the start of its translucent phase (0x100000) and its full-screen
++// composites (0x04000000), relative to the brighter of the two luminances:
++// rain, smoke, soft particles and light volumes, which have no motion vectors
++// of their own, so that FSR leans on the current frame there. Cars (a vehicle
++// ID in the stencil: their glass and decals, which are drawn in that window
++// but move with their vectors) are left out.
++
++#include "../../ui/shaders/xesl.xesli"
++
++#if SHADING_LANGUAGE_GLSL_XE
++  #define XeTaaArray texture2DArray
++  #define XeTaaArrayFetch(texture_name, position) \
++      texelFetch(texture_name, int3_xe(position, 0), 0)
++  #define XeTaaReactiveFormat r8
++#else
++  #define XeTaaArray Texture2DArray<float4_xe>
++  #define XeTaaArrayFetch(texture_name, position) \
++      ((texture_name).Load(int4_xe(position, 0, 0)))
++  #define XeTaaReactiveFormat unorm float
++#endif
++
++push_const_begin_xe(b0, space0)
++  // x, y: the size; z: the stencil view's component with the stencil.
++  uint4_xe xe_taa_reactive_size;
++  // x: the scale, y: the change below which nothing is reactive, z: the most.
++  float4_xe xe_taa_reactive_curve;
++push_const_end_xe
++
++#define LOCAL_SIZE_X_XE 16
++#define LOCAL_SIZE_Y_XE 8
++#define LOCAL_SIZE_Z_XE 1
++entry_bindings_begin_compute_xe
++  push_const_binding_xe(buffer(0))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_taa_reactive_opaque, set=0, binding=0, t0, space0, texture(0))
++  entry_binding_next_xe
++  texture_xe(texture_2d_xe, xe_taa_reactive_composite, set=0, binding=1, t1, space0,
++             texture(1))
++  entry_binding_next_xe
++  texture_xe(XeTaaArray, xe_taa_reactive_stencil, set=0, binding=2, t2, space0, texture(2))
++  entry_binding_next_xe
++  image_wo_xe(image_2d_xe, XeTaaReactiveFormat, xe_taa_reactive_dest, set=0, binding=3, u0,
++              space0, texture(3))
++entry_bindings_end_inputs_begin_compute_xe
++  entry_in_global_thread_id_xe
++entry_inputs_end_code_begin_compute_xe
++  uint2_xe pixel_index = in_global_thread_id_xe.xy;
++  uint4_xe size = push_const_xe(xe_taa_reactive_size);
++  dont_flatten_xe
++  if (any(greater_than_equal_xe(pixel_index, size.xy))) {
++    return;
++  }
++  float4_xe curve = push_const_xe(xe_taa_reactive_curve);
++  float opaque = texel_fetch_2d_xe(xe_taa_reactive_opaque, int2_xe(pixel_index), 0).r;
++  float composite = texel_fetch_2d_xe(xe_taa_reactive_composite, int2_xe(pixel_index), 0).r;
++  float change = abs(composite - opaque) / max(max(composite, opaque), 1.0e-4f);
++  float reactive = min(saturate_xe((change - curve.y) * curve.x), curve.z);
++  float stencil = XeTaaArrayFetch(xe_taa_reactive_stencil, pixel_index)[size.z];
++  if ((uint(stencil * 255.0f + 0.5f) >> 2u) != 0u) {
++    reactive = 0.0f;
++  }
++#if SHADING_LANGUAGE_GLSL_XE
++  imageStore(xe_taa_reactive_dest, int2_xe(pixel_index), float4_xe(reactive, 0.0f, 0.0f, 0.0f));
++#else
++  xe_taa_reactive_dest[pixel_index] = reactive;
++#endif
++entry_code_end_compute_xe
+diff --git a/src/graphics/shaders/vulkan_spirv/taa_debug_view_cs.h b/src/graphics/shaders/vulkan_spirv/taa_debug_view_cs.h
+new file mode 100644
+index 0000000..78e1175
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/taa_debug_view_cs.h
+@@ -0,0 +1,90 @@
++// Generated from taa_debug_view.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t taa_debug_view_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x000061C3, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
++    0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000F48, 0x00060010, 0x0000161F,
++    0x00000011, 0x00000010, 0x00000008, 0x00000001, 0x00040047, 0x00000F48, 0x0000000B, 0x0000001C,
++    0x00030047, 0x000003ED, 0x00000002, 0x00050048, 0x000003ED, 0x00000000, 0x00000023, 0x00000000,
++    0x00040047, 0x00000EFC, 0x00000021, 0x00000000, 0x00040047, 0x00000EFC, 0x00000022, 0x00000000,
++    0x00040047, 0x00000C86, 0x00000021, 0x00000002, 0x00040047, 0x00000C86, 0x00000022, 0x00000000,
++    0x00040047, 0x0000145D, 0x00000021, 0x00000001, 0x00040047, 0x0000145D, 0x00000022, 0x00000000,
++    0x00030047, 0x0000170E, 0x00000019, 0x00040047, 0x0000170E, 0x00000021, 0x00000003, 0x00040047,
++    0x0000170E, 0x00000022, 0x00000000, 0x00040047, 0x00000B0F, 0x0000000B, 0x00000019, 0x00020013,
++    0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00030016, 0x0000000D, 0x00000020, 0x00040017,
++    0x00000018, 0x0000000D, 0x00000003, 0x0004002B, 0x0000000D, 0x00000A0C, 0x00000000, 0x0004002B,
++    0x0000000D, 0x0000008A, 0x3F800000, 0x00040015, 0x0000000B, 0x00000020, 0x00000000, 0x00040017,
++    0x00000011, 0x0000000B, 0x00000002, 0x00040017, 0x00000014, 0x0000000B, 0x00000003, 0x00040020,
++    0x00000291, 0x00000001, 0x00000014, 0x0004003B, 0x00000291, 0x00000F48, 0x00000001, 0x00040017,
++    0x00000017, 0x0000000B, 0x00000004, 0x0003001E, 0x000003ED, 0x00000017, 0x00040020, 0x0000066A,
++    0x00000009, 0x000003ED, 0x0004003B, 0x0000066A, 0x00000CE9, 0x00000009, 0x00040015, 0x0000000C,
++    0x00000020, 0x00000001, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x00040020, 0x00000294,
++    0x00000009, 0x00000017, 0x00020014, 0x00000009, 0x00040017, 0x0000000F, 0x00000009, 0x00000002,
++    0x00090019, 0x000000D6, 0x0000000D, 0x00000001, 0x00000000, 0x00000001, 0x00000000, 0x00000001,
++    0x00000000, 0x00040020, 0x00000353, 0x00000000, 0x000000D6, 0x0004003B, 0x00000353, 0x00000EFC,
++    0x00000000, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x00040017, 0x00000016, 0x0000000C,
++    0x00000003, 0x00040017, 0x0000001D, 0x0000000D, 0x00000004, 0x0004002B, 0x0000000D, 0x000000FC,
++    0x3F000000, 0x0004002B, 0x0000000D, 0x000004ED, 0x3E59B3D0, 0x0004002B, 0x0000000D, 0x00000420,
++    0x3F371759, 0x0004002B, 0x0000000D, 0x00000427, 0x3D93DD98, 0x0006002C, 0x00000018, 0x0000089C,
++    0x000004ED, 0x00000420, 0x00000427, 0x0004002B, 0x0000000B, 0x00000A0A, 0x00000000, 0x00090019,
++    0x00000096, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000,
++    0x00040020, 0x00000313, 0x00000000, 0x00000096, 0x0004003B, 0x00000313, 0x00000C86, 0x00000000,
++    0x00040017, 0x00000013, 0x0000000D, 0x00000002, 0x0004003B, 0x00000313, 0x0000145D, 0x00000000,
++    0x0004002B, 0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B, 0x0000000D, 0x00000A68, 0x3E22F983,
++    0x0004002B, 0x0000000D, 0x000000D7, 0x3F2AAAAB, 0x0004002B, 0x0000000D, 0x00000149, 0x3EAAAAAB,
++    0x0006002C, 0x00000018, 0x00000929, 0x00000A0C, 0x000000D7, 0x00000149, 0x0004002B, 0x0000000D,
++    0x00000B30, 0x40C00000, 0x0004002B, 0x0000000D, 0x00000BA2, 0x40400000, 0x00090019, 0x000000A6,
++    0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x00000002, 0x00040020,
++    0x00000323, 0x00000000, 0x000000A6, 0x0004003B, 0x00000323, 0x0000170E, 0x00000000, 0x0004002B,
++    0x0000000B, 0x00000A3A, 0x00000010, 0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0006002C,
++    0x00000014, 0x00000B0F, 0x00000A3A, 0x00000A22, 0x00000A0D, 0x0006002C, 0x00000018, 0x00000780,
++    0x00000BA2, 0x00000BA2, 0x00000BA2, 0x0006002C, 0x00000018, 0x00000A16, 0x0000008A, 0x0000008A,
++    0x0000008A, 0x0006002C, 0x00000018, 0x00000A2C, 0x00000A0C, 0x00000A0C, 0x00000A0C, 0x0004002B,
++    0x0000000D, 0x00000252, 0x3D800000, 0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502,
++    0x000200F8, 0x00003B06, 0x000300F7, 0x00005445, 0x00000000, 0x000300FB, 0x00000A0A, 0x00003272,
++    0x000200F8, 0x00003272, 0x0004003D, 0x00000014, 0x000035C1, 0x00000F48, 0x0007004F, 0x00000011,
++    0x000054D5, 0x000035C1, 0x000035C1, 0x00000000, 0x00000001, 0x00050041, 0x00000294, 0x000061C2,
++    0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000017, 0x00002B72, 0x000061C2, 0x0007004F, 0x00000011,
++    0x00005263, 0x00002B72, 0x00002B72, 0x00000000, 0x00000001, 0x000500AE, 0x0000000F, 0x0000230C,
++    0x000054D5, 0x00005263, 0x0004009A, 0x00000009, 0x00006067, 0x0000230C, 0x000300F7, 0x0000477E,
++    0x00000002, 0x000400FA, 0x00006067, 0x000055E8, 0x0000477E, 0x000200F8, 0x000055E8, 0x000200F9,
++    0x00005445, 0x000200F8, 0x0000477E, 0x0004003D, 0x000000D6, 0x00005CBA, 0x00000EFC, 0x0004007C,
++    0x00000012, 0x000032C1, 0x000054D5, 0x00050051, 0x0000000C, 0x00005FB7, 0x000032C1, 0x00000000,
++    0x00050051, 0x0000000C, 0x0000359A, 0x000032C1, 0x00000001, 0x00060050, 0x00000016, 0x00003451,
++    0x00005FB7, 0x0000359A, 0x00000A0B, 0x0007005F, 0x0000001D, 0x00002424, 0x00005CBA, 0x00003451,
++    0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x000057A5, 0x00002424, 0x00002424, 0x00000000,
++    0x00000001, 0x00000002, 0x00050094, 0x0000000D, 0x000052C5, 0x000057A5, 0x0000089C, 0x0008000C,
++    0x0000000D, 0x00005036, 0x00000001, 0x0000002B, 0x000052C5, 0x00000A0C, 0x0000008A, 0x00050085,
++    0x0000000D, 0x00002BA7, 0x000000FC, 0x00005036, 0x00050051, 0x0000000B, 0x000049B0, 0x00002B72,
++    0x00000002, 0x000500AA, 0x00000009, 0x00004A44, 0x000049B0, 0x00000A0A, 0x000300F7, 0x00005120,
++    0x00000000, 0x000400FA, 0x00004A44, 0x0000349B, 0x00003B00, 0x000200F8, 0x0000349B, 0x0004003D,
++    0x00000096, 0x00001C5E, 0x00000C86, 0x0007005F, 0x0000001D, 0x000054D7, 0x00001C5E, 0x000032C1,
++    0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x00005174, 0x000054D7, 0x00000000, 0x00060050,
++    0x00000018, 0x00001A53, 0x00002BA7, 0x00002BA7, 0x00002BA7, 0x00050083, 0x0000000D, 0x00004D97,
++    0x0000008A, 0x00005174, 0x0005008E, 0x00000018, 0x00003175, 0x00001A53, 0x00004D97, 0x00060050,
++    0x00000018, 0x00002165, 0x00005174, 0x00000A0C, 0x00000A0C, 0x00050081, 0x00000018, 0x00003CB6,
++    0x00003175, 0x00002165, 0x000200F9, 0x00005120, 0x000200F8, 0x00003B00, 0x0004003D, 0x00000096,
++    0x000025AE, 0x0000145D, 0x0007005F, 0x0000001D, 0x00005167, 0x000025AE, 0x000032C1, 0x00000002,
++    0x00000A0B, 0x0007004F, 0x00000013, 0x000037E8, 0x00005167, 0x00005167, 0x00000000, 0x00000001,
++    0x0006000C, 0x0000000D, 0x0000462E, 0x00000001, 0x00000042, 0x000037E8, 0x00050085, 0x0000000D,
++    0x00001A46, 0x0000462E, 0x00000252, 0x0008000C, 0x0000000D, 0x0000390C, 0x00000001, 0x0000002B,
++    0x00001A46, 0x00000A0C, 0x0000008A, 0x00050051, 0x0000000D, 0x00002FE4, 0x00005167, 0x00000001,
++    0x00050051, 0x0000000D, 0x00005773, 0x00005167, 0x00000000, 0x0007000C, 0x0000000D, 0x00004591,
++    0x00000001, 0x00000019, 0x00002FE4, 0x00005773, 0x00050085, 0x0000000D, 0x000041B4, 0x00004591,
++    0x00000A68, 0x00050081, 0x0000000D, 0x0000348B, 0x000041B4, 0x000000FC, 0x00060050, 0x00000018,
++    0x000023F6, 0x0000348B, 0x0000348B, 0x0000348B, 0x00050081, 0x00000018, 0x00002CDA, 0x000023F6,
++    0x00000929, 0x0006000C, 0x00000018, 0x000020F0, 0x00000001, 0x0000000A, 0x00002CDA, 0x0005008E,
++    0x00000018, 0x00001B39, 0x000020F0, 0x00000B30, 0x00050083, 0x00000018, 0x00005881, 0x00001B39,
++    0x00000780, 0x0006000C, 0x00000018, 0x00005CE7, 0x00000001, 0x00000004, 0x00005881, 0x00050083,
++    0x00000018, 0x00002A5C, 0x00005CE7, 0x00000A16, 0x0008000C, 0x00000018, 0x00002EC5, 0x00000001,
++    0x0000002B, 0x00002A5C, 0x00000A2C, 0x00000A16, 0x00060050, 0x00000018, 0x00004A94, 0x00002BA7,
++    0x00002BA7, 0x00002BA7, 0x00050083, 0x0000000D, 0x0000500E, 0x0000008A, 0x0000390C, 0x0005008E,
++    0x00000018, 0x0000520E, 0x00004A94, 0x0000500E, 0x0005008E, 0x00000018, 0x00003C8C, 0x00002EC5,
++    0x0000390C, 0x00050081, 0x00000018, 0x00005E44, 0x0000520E, 0x00003C8C, 0x000200F9, 0x00005120,
++    0x000200F8, 0x00005120, 0x000700F5, 0x00000018, 0x00005154, 0x00003CB6, 0x0000349B, 0x00005E44,
++    0x00003B00, 0x0004003D, 0x000000A6, 0x00003BAB, 0x0000170E, 0x00050051, 0x0000000D, 0x00005927,
++    0x00005154, 0x00000000, 0x00050051, 0x0000000D, 0x00005BC8, 0x00005154, 0x00000001, 0x00050051,
++    0x0000000D, 0x00001FEF, 0x00005154, 0x00000002, 0x00070050, 0x0000001D, 0x00003E3B, 0x00005927,
++    0x00005BC8, 0x00001FEF, 0x0000008A, 0x00040063, 0x00003BAB, 0x000032C1, 0x00003E3B, 0x000200F9,
++    0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++};
+diff --git a/src/graphics/shaders/vulkan_spirv/taa_luma_snapshot_cs.h b/src/graphics/shaders/vulkan_spirv/taa_luma_snapshot_cs.h
+new file mode 100644
+index 0000000..2374dd0
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/taa_luma_snapshot_cs.h
+@@ -0,0 +1,51 @@
++// Generated from taa_luma_snapshot.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t taa_luma_snapshot_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x000061C3, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
++    0x00000031, 0x0006000B, 0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E,
++    0x00000000, 0x00000001, 0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000F48,
++    0x00060010, 0x0000161F, 0x00000011, 0x00000010, 0x00000008, 0x00000001, 0x00040047, 0x00000F48,
++    0x0000000B, 0x0000001C, 0x00030047, 0x000003ED, 0x00000002, 0x00050048, 0x000003ED, 0x00000000,
++    0x00000023, 0x00000000, 0x00040047, 0x00001513, 0x00000021, 0x00000000, 0x00040047, 0x00001513,
++    0x00000022, 0x00000000, 0x00030047, 0x000012C1, 0x00000019, 0x00040047, 0x000012C1, 0x00000021,
++    0x00000000, 0x00040047, 0x000012C1, 0x00000022, 0x00000001, 0x00040047, 0x00000B0F, 0x0000000B,
++    0x00000019, 0x00020013, 0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00040015, 0x0000000B,
++    0x00000020, 0x00000000, 0x00040017, 0x00000011, 0x0000000B, 0x00000002, 0x00040017, 0x00000014,
++    0x0000000B, 0x00000003, 0x00040020, 0x00000291, 0x00000001, 0x00000014, 0x0004003B, 0x00000291,
++    0x00000F48, 0x00000001, 0x00040017, 0x00000017, 0x0000000B, 0x00000004, 0x0003001E, 0x000003ED,
++    0x00000017, 0x00040020, 0x0000066A, 0x00000009, 0x000003ED, 0x0004003B, 0x0000066A, 0x00000CE9,
++    0x00000009, 0x00040015, 0x0000000C, 0x00000020, 0x00000001, 0x0004002B, 0x0000000C, 0x00000A0B,
++    0x00000000, 0x00040020, 0x00000294, 0x00000009, 0x00000017, 0x00020014, 0x00000009, 0x00040017,
++    0x0000000F, 0x00000009, 0x00000002, 0x00030016, 0x0000000D, 0x00000020, 0x00040017, 0x00000018,
++    0x0000000D, 0x00000003, 0x00090019, 0x00000096, 0x0000000D, 0x00000001, 0x00000000, 0x00000000,
++    0x00000000, 0x00000001, 0x00000000, 0x00040020, 0x00000313, 0x00000000, 0x00000096, 0x0004003B,
++    0x00000313, 0x00001513, 0x00000000, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x00040017,
++    0x0000001D, 0x0000000D, 0x00000004, 0x0004002B, 0x0000000D, 0x000004ED, 0x3E59B3D0, 0x0004002B,
++    0x0000000D, 0x00000420, 0x3F371759, 0x0004002B, 0x0000000D, 0x00000427, 0x3D93DD98, 0x0006002C,
++    0x00000018, 0x0000089C, 0x000004ED, 0x00000420, 0x00000427, 0x0004002B, 0x0000000D, 0x00000A0C,
++    0x00000000, 0x0004002B, 0x0000000B, 0x00000750, 0x7FFFFFFF, 0x0004002B, 0x0000000B, 0x000007C5,
++    0x7F800000, 0x00090019, 0x000000A6, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000,
++    0x00000002, 0x00000009, 0x00040020, 0x00000323, 0x00000000, 0x000000A6, 0x0004003B, 0x00000323,
++    0x000012C1, 0x00000000, 0x0004002B, 0x0000000D, 0x00000345, 0x477FE000, 0x0004002B, 0x0000000B,
++    0x00000A3A, 0x00000010, 0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0004002B, 0x0000000B,
++    0x00000A0D, 0x00000001, 0x0006002C, 0x00000014, 0x00000B0F, 0x00000A3A, 0x00000A22, 0x00000A0D,
++    0x0004002B, 0x0000000B, 0x00000A0A, 0x00000000, 0x00050036, 0x00000008, 0x0000161F, 0x00000000,
++    0x00000502, 0x000200F8, 0x00003B06, 0x000300F7, 0x00005445, 0x00000000, 0x000300FB, 0x00000A0A,
++    0x00003272, 0x000200F8, 0x00003272, 0x0004003D, 0x00000014, 0x000035C1, 0x00000F48, 0x0007004F,
++    0x00000011, 0x000054D5, 0x000035C1, 0x000035C1, 0x00000000, 0x00000001, 0x00050041, 0x00000294,
++    0x000061C2, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000017, 0x00002B72, 0x000061C2, 0x0007004F,
++    0x00000011, 0x00005263, 0x00002B72, 0x00002B72, 0x00000000, 0x00000001, 0x000500AE, 0x0000000F,
++    0x0000230C, 0x000054D5, 0x00005263, 0x0004009A, 0x00000009, 0x00006067, 0x0000230C, 0x000300F7,
++    0x0000477E, 0x00000002, 0x000400FA, 0x00006067, 0x000055E8, 0x0000477E, 0x000200F8, 0x000055E8,
++    0x000200F9, 0x00005445, 0x000200F8, 0x0000477E, 0x0004003D, 0x00000096, 0x00005DC4, 0x00001513,
++    0x0004007C, 0x00000012, 0x00002925, 0x000054D5, 0x0007005F, 0x0000001D, 0x00001A8A, 0x00005DC4,
++    0x00002925, 0x00000002, 0x00000A0B, 0x0008004F, 0x00000018, 0x000032DD, 0x00001A8A, 0x00001A8A,
++    0x00000000, 0x00000001, 0x00000002, 0x00050094, 0x0000000D, 0x00001B51, 0x000032DD, 0x0000089C,
++    0x0007000C, 0x0000000D, 0x00005C04, 0x00000001, 0x00000028, 0x00001B51, 0x00000A0C, 0x0004007C,
++    0x0000000B, 0x00003736, 0x00005C04, 0x000500C7, 0x0000000B, 0x00001E9C, 0x00003736, 0x00000750,
++    0x000500AE, 0x00000009, 0x00005C95, 0x00001E9C, 0x000007C5, 0x000600A9, 0x0000000D, 0x000048A8,
++    0x00005C95, 0x00000A0C, 0x00005C04, 0x0004003D, 0x000000A6, 0x00003CF0, 0x000012C1, 0x0007000C,
++    0x0000000D, 0x0000566F, 0x00000001, 0x00000025, 0x000048A8, 0x00000345, 0x00070050, 0x0000001D,
++    0x000057DE, 0x0000566F, 0x00000A0C, 0x00000A0C, 0x00000A0C, 0x00040063, 0x00003CF0, 0x00002925,
++    0x000057DE, 0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++};
 diff --git a/src/graphics/shaders/vulkan_spirv/taa_motion_vectors_mcla_cs.h b/src/graphics/shaders/vulkan_spirv/taa_motion_vectors_mcla_cs.h
 new file mode 100644
 index 0000000..511ff12
@@ -1502,12 +2645,89 @@ index 0000000..511ff12
 +    0x00003E3B, 0x00005914, 0x00005DDE, 0x00000A0C, 0x00000A0C, 0x00040063, 0x00003BAB, 0x000032C1,
 +    0x00003E3B, 0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
 +};
+diff --git a/src/graphics/shaders/vulkan_spirv/taa_reactive_mcla_cs.h b/src/graphics/shaders/vulkan_spirv/taa_reactive_mcla_cs.h
+new file mode 100644
+index 0000000..3e1a722
+--- /dev/null
++++ b/src/graphics/shaders/vulkan_spirv/taa_reactive_mcla_cs.h
+@@ -0,0 +1,71 @@
++// Generated from taa_reactive_mcla.cs.xesl with the xenia-project/xenia 0b2ffa3 shader
++// sources (see patches/README.md). Not disassembled to keep the patch small.
++const uint32_t taa_reactive_mcla_cs[] = {
++    0x07230203, 0x00010000, 0x0008000B, 0x000061C3, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
++    0x00000031, 0x0006000B, 0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E,
++    0x00000000, 0x00000001, 0x0006000F, 0x00000005, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000F48,
++    0x00060010, 0x0000161F, 0x00000011, 0x00000010, 0x00000008, 0x00000001, 0x00040047, 0x00000F48,
++    0x0000000B, 0x0000001C, 0x00030047, 0x0000042C, 0x00000002, 0x00050048, 0x0000042C, 0x00000000,
++    0x00000023, 0x00000000, 0x00050048, 0x0000042C, 0x00000001, 0x00000023, 0x00000010, 0x00040047,
++    0x00000F2A, 0x00000021, 0x00000000, 0x00040047, 0x00000F2A, 0x00000022, 0x00000000, 0x00040047,
++    0x00000F65, 0x00000021, 0x00000001, 0x00040047, 0x00000F65, 0x00000022, 0x00000000, 0x00040047,
++    0x00001423, 0x00000021, 0x00000002, 0x00040047, 0x00001423, 0x00000022, 0x00000000, 0x00030047,
++    0x00000C4E, 0x00000019, 0x00040047, 0x00000C4E, 0x00000021, 0x00000003, 0x00040047, 0x00000C4E,
++    0x00000022, 0x00000000, 0x00040047, 0x00000B0F, 0x0000000B, 0x00000019, 0x00020013, 0x00000008,
++    0x00030021, 0x00000502, 0x00000008, 0x00030016, 0x0000000D, 0x00000020, 0x0004002B, 0x0000000D,
++    0x00000A0C, 0x00000000, 0x0004002B, 0x0000000D, 0x0000008A, 0x3F800000, 0x00040015, 0x0000000B,
++    0x00000020, 0x00000000, 0x00040017, 0x00000011, 0x0000000B, 0x00000002, 0x00040017, 0x00000014,
++    0x0000000B, 0x00000003, 0x00040020, 0x00000291, 0x00000001, 0x00000014, 0x0004003B, 0x00000291,
++    0x00000F48, 0x00000001, 0x00040017, 0x00000017, 0x0000000B, 0x00000004, 0x00040017, 0x0000001D,
++    0x0000000D, 0x00000004, 0x0004001E, 0x0000042C, 0x00000017, 0x0000001D, 0x00040020, 0x000006A9,
++    0x00000009, 0x0000042C, 0x0004003B, 0x000006A9, 0x00000CE9, 0x00000009, 0x00040015, 0x0000000C,
++    0x00000020, 0x00000001, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x00040020, 0x00000294,
++    0x00000009, 0x00000017, 0x00020014, 0x00000009, 0x00040017, 0x0000000F, 0x00000009, 0x00000002,
++    0x0004002B, 0x0000000C, 0x00000A0E, 0x00000001, 0x00040020, 0x0000029A, 0x00000009, 0x0000001D,
++    0x00090019, 0x00000096, 0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000001,
++    0x00000000, 0x00040020, 0x00000313, 0x00000000, 0x00000096, 0x0004003B, 0x00000313, 0x00000F2A,
++    0x00000000, 0x00040017, 0x00000012, 0x0000000C, 0x00000002, 0x0004002B, 0x0000000B, 0x00000A0A,
++    0x00000000, 0x0004003B, 0x00000313, 0x00000F65, 0x00000000, 0x0004002B, 0x0000000D, 0x00000383,
++    0x38D1B717, 0x0004002B, 0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A10,
++    0x00000002, 0x00090019, 0x000000D6, 0x0000000D, 0x00000001, 0x00000000, 0x00000001, 0x00000000,
++    0x00000001, 0x00000000, 0x00040020, 0x00000353, 0x00000000, 0x000000D6, 0x0004003B, 0x00000353,
++    0x00001423, 0x00000000, 0x00040017, 0x00000016, 0x0000000C, 0x00000003, 0x0004002B, 0x0000000D,
++    0x00000540, 0x437F0000, 0x0004002B, 0x0000000D, 0x000000FC, 0x3F000000, 0x00090019, 0x000000A6,
++    0x0000000D, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x0000000F, 0x00040020,
++    0x00000323, 0x00000000, 0x000000A6, 0x0004003B, 0x00000323, 0x00000C4E, 0x00000000, 0x0004002B,
++    0x0000000B, 0x00000A3A, 0x00000010, 0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0006002C,
++    0x00000014, 0x00000B0F, 0x00000A3A, 0x00000A22, 0x00000A0D, 0x00050036, 0x00000008, 0x0000161F,
++    0x00000000, 0x00000502, 0x000200F8, 0x00003B06, 0x000300F7, 0x00005445, 0x00000000, 0x000300FB,
++    0x00000A0A, 0x00003272, 0x000200F8, 0x00003272, 0x0004003D, 0x00000014, 0x000035C1, 0x00000F48,
++    0x0007004F, 0x00000011, 0x000054D5, 0x000035C1, 0x000035C1, 0x00000000, 0x00000001, 0x00050041,
++    0x00000294, 0x000061C2, 0x00000CE9, 0x00000A0B, 0x0004003D, 0x00000017, 0x00002B72, 0x000061C2,
++    0x0007004F, 0x00000011, 0x00005263, 0x00002B72, 0x00002B72, 0x00000000, 0x00000001, 0x000500AE,
++    0x0000000F, 0x0000230C, 0x000054D5, 0x00005263, 0x0004009A, 0x00000009, 0x00006067, 0x0000230C,
++    0x000300F7, 0x0000401D, 0x00000002, 0x000400FA, 0x00006067, 0x000055E8, 0x0000401D, 0x000200F8,
++    0x000055E8, 0x000200F9, 0x00005445, 0x000200F8, 0x0000401D, 0x00050041, 0x0000029A, 0x0000504C,
++    0x00000CE9, 0x00000A0E, 0x0004003D, 0x0000001D, 0x0000446C, 0x0000504C, 0x0004003D, 0x00000096,
++    0x00005BE6, 0x00000F2A, 0x0004007C, 0x00000012, 0x00005D01, 0x000054D5, 0x0007005F, 0x0000001D,
++    0x00005D3A, 0x00005BE6, 0x00005D01, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x000033A7,
++    0x00005D3A, 0x00000000, 0x0004003D, 0x00000096, 0x00003A3B, 0x00000F65, 0x0007005F, 0x0000001D,
++    0x00004E67, 0x00003A3B, 0x00005D01, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000D, 0x0000262C,
++    0x00004E67, 0x00000000, 0x00050083, 0x0000000D, 0x000034DA, 0x0000262C, 0x000033A7, 0x0006000C,
++    0x0000000D, 0x000037B4, 0x00000001, 0x00000004, 0x000034DA, 0x0007000C, 0x0000000D, 0x00003F76,
++    0x00000001, 0x00000028, 0x0000262C, 0x000033A7, 0x0007000C, 0x0000000D, 0x00005C77, 0x00000001,
++    0x00000028, 0x00003F76, 0x00000383, 0x00050088, 0x0000000D, 0x00001CCD, 0x000037B4, 0x00005C77,
++    0x00050051, 0x0000000D, 0x00002AAD, 0x0000446C, 0x00000001, 0x00050083, 0x0000000D, 0x000051D3,
++    0x00001CCD, 0x00002AAD, 0x00050051, 0x0000000D, 0x0000243A, 0x0000446C, 0x00000000, 0x00050085,
++    0x0000000D, 0x00003013, 0x000051D3, 0x0000243A, 0x0008000C, 0x0000000D, 0x000039F1, 0x00000001,
++    0x0000002B, 0x00003013, 0x00000A0C, 0x0000008A, 0x00050051, 0x0000000D, 0x0000359D, 0x0000446C,
++    0x00000002, 0x0007000C, 0x0000000D, 0x000030FF, 0x00000001, 0x00000025, 0x000039F1, 0x0000359D,
++    0x0004003D, 0x000000D6, 0x000025BC, 0x00001423, 0x00050051, 0x0000000C, 0x000027BF, 0x00005D01,
++    0x00000000, 0x00050051, 0x0000000C, 0x00005D92, 0x00005D01, 0x00000001, 0x00060050, 0x00000016,
++    0x00003477, 0x000027BF, 0x00005D92, 0x00000A0B, 0x0007005F, 0x0000001D, 0x00001D85, 0x000025BC,
++    0x00003477, 0x00000002, 0x00000A0B, 0x00050051, 0x0000000B, 0x0000506E, 0x00002B72, 0x00000002,
++    0x0005004D, 0x0000000D, 0x00002D86, 0x00001D85, 0x0000506E, 0x00050085, 0x0000000D, 0x000034A9,
++    0x00002D86, 0x00000540, 0x00050081, 0x0000000D, 0x0000363F, 0x000034A9, 0x000000FC, 0x0004006D,
++    0x0000000B, 0x00002C22, 0x0000363F, 0x000500C2, 0x0000000B, 0x0000364D, 0x00002C22, 0x00000A10,
++    0x000500AB, 0x00000009, 0x00003C44, 0x0000364D, 0x00000A0A, 0x000600A9, 0x0000000D, 0x00001C10,
++    0x00003C44, 0x00000A0C, 0x000030FF, 0x0004003D, 0x000000A6, 0x00004000, 0x00000C4E, 0x00070050,
++    0x0000001D, 0x000053D0, 0x00001C10, 0x00000A0C, 0x00000A0C, 0x00000A0C, 0x00040063, 0x00004000,
++    0x00005D01, 0x000053D0, 0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
++};
 diff --git a/src/graphics/temporal_aa.cpp b/src/graphics/temporal_aa.cpp
 new file mode 100644
-index 0000000..5e3af80
+index 0000000..5b0a4e9
 --- /dev/null
 +++ b/src/graphics/temporal_aa.cpp
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,492 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch): the backend-independent
 + * part, see CommandProcessor::TaaFrame in command_processor.h.
@@ -1529,6 +2749,7 @@ index 0000000..5e3af80
 + */
 +
 +#include <algorithm>
++#include <atomic>
 +#include <cmath>
 +#include <cstring>
 +
@@ -1546,6 +2767,12 @@ index 0000000..5e3af80
 +                      " fsr: AMD FSR 3.1 at native resolution (Native AA)")
 +    .allowed({"off", "fsr"})
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(temporal_aa_available, "unknown", "GPU",
++                      "Temporal anti-aliasing, set by the GPU plugin when the first frame ends: "
++                      "whether FSR can run with this graphics API and device (yes: its runtime "
++                      "is there and it hasn't failed; no; unknown before)")
++    .allowed({"unknown", "yes", "no"})
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_DOUBLE(temporal_aa_sharpness, 0.2, "GPU",
 +                      "Temporal anti-aliasing: sharpening after FSR (RCAS), 0 (off) to 1")
 +    .range(0.0, 1.0)
@@ -1553,13 +2780,22 @@ index 0000000..5e3af80
 +REXCVAR_DEFINE_UINT32(temporal_aa_debug, 0, "GPU",
 +                      "Temporal anti-aliasing, development: 1 FSR's debug view, 2 no jitter, "
 +                      "3 jitter without the anti-aliasing (the raw input), 4 log every 120 frames "
-+                      "the jitter gate's counts, how far the pass got and its GPU time")
-+    .range(0, 4)
++                      "the jitter gate's counts, how far the pass got and its GPU time, 5 the "
++                      "reactive mask (red over the scene), 6 the motion vectors (hue: direction, "
++                      "brightness: length, full at 16 pixels)")
++    .range(0, 6)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_UINT32(temporal_aa_flip_jitter, 0, "GPU",
 +                      "Temporal anti-aliasing, development: the jitter FSR is told, x (1) and y (2) "
 +                      "flipped, for checking the convention (a still picture is sharpest unflipped)")
 +    .range(0, 3)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(temporal_aa_reactive, 0.0, "GPU",
++                      "Temporal anti-aliasing, experimental: how strongly the scene's translucent "
++                      "effects (rain, smoke, particles) make FSR lean on the current frame, the "
++                      "reactive mask's scale on their relative change of luminance (4 is a "
++                      "start); 0, the default: no reactive mask")
++    .range(0.0, 100.0)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_DOUBLE(temporal_aa_cut_distance, 25.0, "GPU",
 +                      "Temporal anti-aliasing: a camera move longer than this (game units) in "
@@ -1654,7 +2890,45 @@ index 0000000..5e3af80
 +  return REXCVAR_GET(temporal_aa_debug);
 +}
 +
++void CommandProcessor::TaaReactiveCurve(float curve_out[4]) {
++  // Changes below 3% (noise, the fog's edges) aren't reactive; at most 0.9,
++  // as AMD recommends.
++  curve_out[0] = float(REXCVAR_GET(temporal_aa_reactive));
++  curve_out[1] = 0.03f;
++  curve_out[2] = 0.9f;
++  curve_out[3] = 0.0f;
++}
++
++void CommandProcessor::TaaSceneMarker(uint32_t slot) {
++  // In the scene of a jittered frame (the pass ran in the one before, so FSR
++  // is ready); replayed per tile in a tiled scene, where the snapshots would
++  // be of one tile, so only the first is taken.
++  if (!taa_frame_.armed || !taa_frame_.in_scene || REXCVAR_GET(temporal_aa_reactive) <= 0.0 ||
++      (taa_frame_.snapshots & (1u << slot))) {
++    return;
++  }
++  if (slot && !(taa_frame_.snapshots & 1)) {
++    return;
++  }
++  if (TaaSnapshot(slot, HdrColorTargetKey(0))) {
++    taa_frame_.snapshots |= 1u << slot;
++  }
++}
++
++void CommandProcessor::TaaSetUnavailable(const char* why) {
++  static std::atomic<bool> logged{false};
++  if (!logged.exchange(true)) {
++    REXGPU_WARN("Temporal AA: FSR is unavailable ({})", why);
++  }
++  rex::cvar::SetFlagByName("temporal_aa_available", "no");
++}
++
 +void CommandProcessor::TaaFsrJitter(float jitter_out[2]) const {
++  // What the scene's draws were actually moved by (none were: none).
++  if (!taa_frame_.jittered_draws) {
++    jitter_out[0] = jitter_out[1] = 0.0f;
++    return;
++  }
 +  uint32_t flip = REXCVAR_GET(temporal_aa_flip_jitter);
 +  jitter_out[0] = (flip & 1) ? -taa_frame_.jitter[0] : taa_frame_.jitter[0];
 +  jitter_out[1] = (flip & 2) ? -taa_frame_.jitter[1] : taa_frame_.jitter[1];
@@ -1787,7 +3061,8 @@ index 0000000..5e3af80
 +      camera.fov_vertical = float(2.0 * std::atan(1.0 / std::abs(projection[1][1])));
 +    }
 +  }
-+  // A cut: the camera jumped, or turned by more than 30 degrees.
++  // A cut: the camera jumped, turned by more than 30 degrees, or zoomed by
++  // more than 5% (the replay cameras).
 +  float position[3] = {float(constant(15, 0)), float(constant(15, 1)), float(constant(15, 2))};
 +  float forward[3] = {float(constant(14, 0)), float(constant(14, 1)), float(constant(14, 2))};
 +  camera.reset = !taa_last_done_ || !taa_have_last_camera_;
@@ -1801,10 +3076,12 @@ index 0000000..5e3af80
 +                            forward[2] * forward[2];
 +    double cut = REXCVAR_GET(temporal_aa_cut_distance);
 +    if (std::sqrt(dx * dx + dy * dy + dz * dz) > cut ||
-+        forward_dot < 0.866f * forward_length2) {
++        forward_dot < 0.866f * forward_length2 ||
++        std::abs(camera.fov_vertical - taa_last_fov_) > 0.05f * taa_last_fov_) {
 +      camera.reset = true;
 +    }
 +  }
++  taa_last_fov_ = camera.fov_vertical;
 +  std::memcpy(taa_last_camera_[0], position, sizeof(position));
 +  std::memcpy(taa_last_camera_[1], forward, sizeof(forward));
 +  taa_have_last_camera_ = true;
@@ -1834,7 +3111,20 @@ index 0000000..5e3af80
 +        taa_frame_.jitter[0], taa_frame_.jitter[1], gpu_count ? gpu_ms / gpu_count : 0.0,
 +        gpu_count);
 +  }
++  if (!taa_availability_checked_) {
++    taa_availability_checked_ = true;
++    bool available = TaaCheckAvailable();
++    rex::cvar::SetFlagByName("temporal_aa_available", available ? "yes" : "no");
++    REXGPU_INFO("Temporal AA: FSR {}", available ? "available" : "unavailable");
++  }
 +  taa_last_done_ = taa_frame_.done;
++  // A release the frame asked for (the submission is closed now).
++  if (taa_release_pending_) {
++    taa_release_pending_ = false;
++    taa_last_done_ = false;
++    TaaRelease();
++  }
++  TaaFrameEnd();
 +  TaaFrame frame;
 +  // Under the option registry's lock: a title may set it from another thread.
 +  frame.mode = rex::cvar::GetFlagByName("temporal_aa") == "fsr" ? TaaMode::kFsr : TaaMode::kOff;
@@ -1843,14 +3133,15 @@ index 0000000..5e3af80
 +    taa_have_last_camera_ = false;
 +    taa_last_time_ = 0;
 +    // The upscaler (about 500 MB at 4K) isn't kept while it stays off for
-+    // 10 seconds (switching back and forth doesn't make it again each time).
-+    if (TaaReady() || taa_off_since_) {
++    // 10 seconds (switching back and forth doesn't make it again each time);
++    // released once the GPU is done with it.
++    if (taa_off_since_ != UINT64_MAX) {
 +      uint64_t now = rex::chrono::Clock::QueryHostTickCount();
 +      if (!taa_off_since_) {
 +        taa_off_since_ = now;
 +      } else if (now - taa_off_since_ > 10 * rex::chrono::Clock::QueryHostTickFrequency()) {
 +        TaaRelease();
-+        taa_off_since_ = 0;
++        taa_off_since_ = UINT64_MAX;
 +      }
 +    }
 +  } else {
@@ -1971,19 +3262,20 @@ index 0000000..5aa9ba7
 +
 +#endif  // REX_HAS_FSR
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index c56cd13..6e7d5cb 100644
+index c56cd13..1195069 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
-@@ -2185,6 +2185,8 @@ void VulkanCommandProcessor::ShutdownSubmissionThread() {
+@@ -2185,6 +2185,9 @@ void VulkanCommandProcessor::ShutdownSubmissionThread() {
  
  void VulkanCommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
 +  TaaRelease();
++  TaaCollectRetired(true);
 +  TaaDestroyPipeline();
    ShutdownSubmissionThread();
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
-@@ -4572,6 +4574,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4572,6 +4575,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
    texture_cache_->RequestTextures(used_texture_mask);
  
@@ -1996,7 +3288,7 @@ index c56cd13..6e7d5cb 100644
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
-@@ -4681,6 +4689,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4681,6 +4690,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        normalized_depth_control,
        host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader(),
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
@@ -2021,12 +3313,42 @@ index d4e7d09..4a71f37 100644
        default:
          assert_unhandled_case(header.command);
          break;
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index fc91bb7..c7d1540 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1747,6 +1747,25 @@ VulkanRenderTargetCache::VulkanRenderTarget* VulkanRenderTargetCache::HdrColorTa
+   return rect.extent.width && rect.extent.height ? rt : nullptr;
+ }
+ 
++VkDescriptorSet VulkanRenderTargetCache::TaaBeginReadColorTarget(uint32_t key, uint32_t& width_out,
++                                                                 uint32_t& height_out) {
++  auto* rt = static_cast<VulkanRenderTarget*>(TaaFindColorTarget(key));
++  if (!rt || GetColorVulkanFormat(xenos::ColorRenderTargetFormat(rt->key().resource_format)) !=
++                 VK_FORMAT_R16G16B16A16_SFLOAT) {
++    return VK_NULL_HANDLE;
++  }
++  command_processor_.PushImageMemoryBarrier(
++      rt->image(), ui::vulkan::util::InitializeSubresourceRange(), rt->current_stage_mask(),
++      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, rt->current_access_mask(), VK_ACCESS_SHADER_READ_BIT,
++      rt->current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  rt->SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
++               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  width_out = rt->key().GetWidth() * draw_resolution_scale_x();
++  height_out = GetRenderTargetHeight(rt->key().pitch_tiles_at_32bpp, rt->key().msaa_samples) *
++               draw_resolution_scale_y();
++  return rt->GetDescriptorSetTransferSource();
++}
++
+ bool VulkanRenderTargetCache::HdrCopyColorTarget(uint32_t key, VkImageView dest,
+                                                  VkRect2D source, int32_t dest_x,
+                                                  int32_t dest_y) {
 diff --git a/src/graphics/vulkan/temporal_aa.cpp b/src/graphics/vulkan/temporal_aa.cpp
 new file mode 100644
-index 0000000..5d4c128
+index 0000000..1460e1b
 --- /dev/null
 +++ b/src/graphics/vulkan/temporal_aa.cpp
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,1059 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch), Vulkan: see
 + * CommandProcessor::TaaFrame and VulkanCommandProcessor::TaaRun.
@@ -2036,8 +3358,11 @@ index 0000000..5d4c128
 +#include <atomic>
 +#include <chrono>
 +#include <cstring>
++#include <filesystem>
 +#include <thread>
++#include <vector>
 +
++#include <rex/filesystem.h>
 +#include <rex/graphics/vulkan/command_processor.h>
 +#include <rex/logging.h>
 +#include <rex/ui/vulkan/util.h>
@@ -2051,7 +3376,10 @@ index 0000000..5d4c128
 +namespace rex::graphics::vulkan {
 +
 +namespace shaders {
++#include "../shaders/vulkan_spirv/taa_debug_view_cs.h"
++#include "../shaders/vulkan_spirv/taa_luma_snapshot_cs.h"
 +#include "../shaders/vulkan_spirv/taa_motion_vectors_mcla_cs.h"
++#include "../shaders/vulkan_spirv/taa_reactive_mcla_cs.h"
 +}  // namespace shaders
 +
 +struct VulkanCommandProcessor::TaaFsr {
@@ -2063,10 +3391,19 @@ index 0000000..5d4c128
 +  uint32_t height = 0;
 +  HdrImage vectors;  // R16G16_SFLOAT
 +  HdrImage output;   // R16G16B16A16_SFLOAT
++  // The reactive mask: the luminance snapshots (R16_SFLOAT) and the mask
++  // (R8_UNORM), made with the first snapshot.
++  HdrImage luma[2];
++  HdrImage reactive;
 +#if defined(REX_HAS_FSR) && REX_HAS_FSR
 +  FsrRuntime runtime;
 +  ffxContext context = nullptr;
 +#endif
++  // Set on the submission thread when FSR's dispatch failed.
++  std::atomic<bool> dispatch_failed{false};
++  // Released contexts, destroyed once the submissions that may use them are
++  // done (the images go through the command processor's own queues).
++  std::vector<std::pair<uint64_t, void*>> retired;
 +  // temporal_aa_debug 4: timestamps around the passes, a pair per slot, each
 +  // slot read once its submission is done.
 +  static constexpr uint32_t kTimerSlots = 8;
@@ -2113,7 +3450,13 @@ index 0000000..5d4c128
 +
 +struct TaaFsrDispatch {
 +  PfnFfxDispatch dispatch;
-+  ffxContext* context;
++  // The context's handle as it was when recorded (a later one may replace it
++  // before this is executed).
++  ffxContext context;
++  std::atomic<bool>* failed;
++  // For the fallback copy of the scene into the output.
++  PFN_vkCmdPipelineBarrier pipeline_barrier;
++  PFN_vkCmdCopyImage copy_image;
 +  ffxDispatchDescUpscale desc;
 +};
 +
@@ -2121,10 +3464,51 @@ index 0000000..5d4c128
 +  TaaFsrDispatch dispatch;
 +  std::memcpy(&dispatch, data, sizeof(dispatch));
 +  dispatch.desc.commandList = command_buffer;
-+  ffxReturnCode_t result = dispatch.dispatch(dispatch.context, &dispatch.desc.header);
++  ffxContext context = dispatch.context;
++  ffxReturnCode_t result = dispatch.dispatch(&context, &dispatch.desc.header);
++  if (result == FFX_API_RETURN_OK) {
++    return;
++  }
++  // The scene as it was into the output, which is copied back into it next:
++  // the frame is left as it was (FSR is given up at the end of the frame).
++  dispatch.failed->store(true, std::memory_order_release);
++  auto color = static_cast<VkImage>(dispatch.desc.color.resource);
++  auto output = static_cast<VkImage>(dispatch.desc.output.resource);
++  VkImageMemoryBarrier barriers[2] = {};
++  for (uint32_t i = 0; i < 2; ++i) {
++    barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++    barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    barriers[i].subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
++  }
++  barriers[0].image = color;
++  barriers[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
++  barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++  barriers[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++  barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++  barriers[1].image = output;
++  barriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++  barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++  barriers[1].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
++  barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++  dispatch.pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
++  VkImageCopy region = {};
++  region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  region.extent = {dispatch.desc.renderSize.width, dispatch.desc.renderSize.height, 1};
++  dispatch.copy_image(command_buffer, color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, output,
++                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++  for (VkImageMemoryBarrier& barrier : barriers) {
++    std::swap(barrier.srcAccessMask, barrier.dstAccessMask);
++    std::swap(barrier.oldLayout, barrier.newLayout);
++  }
++  dispatch.pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 2,
++                            barriers);
 +  static std::atomic<bool> failure_logged{false};
-+  if (result != FFX_API_RETURN_OK && !failure_logged.exchange(true)) {
-+    REXGPU_ERROR("Temporal AA: FSR's dispatch failed ({})", result);
++  if (!failure_logged.exchange(true)) {
++    REXGPU_ERROR("Temporal AA: FSR's dispatch failed ({}); giving FSR up", result);
 +  }
 +}
 +
@@ -2261,6 +3645,68 @@ index 0000000..5d4c128
 +  return taa_fsr_ && taa_fsr_->state.load(std::memory_order_acquire) == TaaFsr::kReady;
 +}
 +
++bool VulkanCommandProcessor::TaaDeviceSupported() {
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  // FidelityFX picks its shaders from the physical device's features and
++  // extensions; the device enables the 16-bit and subgroup size features only
++  // as Vulkan 1.2 and 1.3 features (vulkan_device.cpp), not the extensions
++  // older devices have them as.
++  if (vulkan_device->properties().apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 0)) {
++    TaaSetUnavailable("FSR needs a Vulkan 1.3 device");
++    return false;
++  }
++  // The storage formats the passes write (FSR needs them too).
++  const ui::vulkan::VulkanInstance* instance = vulkan_device->vulkan_instance();
++  for (VkFormat format : {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R8_UNORM,
++                          VK_FORMAT_R16G16B16A16_SFLOAT}) {
++    VkFormatProperties properties;
++    instance->functions().vkGetPhysicalDeviceFormatProperties(vulkan_device->physical_device(),
++                                                              format, &properties);
++    if (!(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
++      TaaSetUnavailable("the device can't write a format FSR needs in shaders");
++      return false;
++    }
++  }
++  return true;
++}
++
++bool VulkanCommandProcessor::TaaCheckAvailable() {
++#if defined(REX_HAS_FSR) && REX_HAS_FSR
++  std::error_code error;
++#if REX_PLATFORM_WIN32
++  const char* name = "amd_fidelityfx_vk.dll";
++#else
++  const char* name = "libamd_fidelityfx_vk.so";
++#endif
++  return std::filesystem::exists(rex::filesystem::GetExecutableFolder() / name, error) &&
++         TaaDeviceSupported();
++#else
++  return false;
++#endif
++}
++
++void VulkanCommandProcessor::TaaCollectRetired(bool all) {
++  if (!taa_fsr_) {
++    return;
++  }
++  TaaFsr& fsr = *taa_fsr_;
++  for (auto it = fsr.retired.begin(); it != fsr.retired.end();) {
++    if (!all && it->first > GetCompletedSubmission()) {
++      ++it;
++      continue;
++    }
++#if defined(REX_HAS_FSR) && REX_HAS_FSR
++    ffxContext context = it->second;
++    fsr.runtime.destroy(&context, nullptr);
++#endif
++    it = fsr.retired.erase(it);
++  }
++}
++
++void VulkanCommandProcessor::TaaFrameEnd() {
++  TaaCollectRetired(false);
++}
++
 +void VulkanCommandProcessor::TaaRelease() {
 +  if (!taa_fsr_) {
 +    return;
@@ -2270,14 +3716,16 @@ index 0000000..5d4c128
 +  }
 +#if defined(REX_HAS_FSR) && REX_HAS_FSR
 +  if (taa_fsr_->context) {
-+    // The GPU and the submission thread may still use it.
-+    AwaitAllQueueOperationsCompletion();
-+    taa_fsr_->runtime.destroy(&taa_fsr_->context, nullptr);
++    // The GPU and the submission thread may still use it: destroyed once the
++    // submissions so far are done.
++    taa_fsr_->retired.emplace_back(GetCurrentSubmission(), taa_fsr_->context);
 +    taa_fsr_->context = nullptr;
 +    REXGPU_INFO("Temporal AA: FSR released");
 +  }
 +#endif
-+  for (HdrImage* image : {&taa_fsr_->vectors, &taa_fsr_->output}) {
++  taa_fsr_->dispatch_failed.store(false, std::memory_order_relaxed);
++  for (HdrImage* image : {&taa_fsr_->vectors, &taa_fsr_->output, &taa_fsr_->luma[0],
++                          &taa_fsr_->luma[1], &taa_fsr_->reactive}) {
 +    if (image->image != VK_NULL_HANDLE) {
 +      // Destroyed once the submissions that may use it are done.
 +      destroy_image_views_.emplace_back(GetCurrentSubmission(), image->view);
@@ -2302,31 +3750,39 @@ index 0000000..5d4c128
 +  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
 +  const VkDevice device = vulkan_device->device();
 +  taa_pipeline_failed_ = true;
-+  VkDescriptorSetLayoutBinding bindings[4] = {};
-+  for (uint32_t i = 0; i < 4; ++i) {
-+    bindings[i].binding = i;
-+    bindings[i].descriptorType = !i       ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-+                                 : i < 3 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
-+                                         : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-+    bindings[i].descriptorCount = 1;
-+    bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-+  }
-+  VkDescriptorSetLayoutCreateInfo layout_info = {
-+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-+  layout_info.bindingCount = 4;
-+  layout_info.pBindings = bindings;
-+  if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr,
-+                                      &taa_descriptor_set_layout_) != VK_SUCCESS) {
-+    REXGPU_ERROR("Temporal AA: failed to create the descriptor set layout");
++  if (!TaaDeviceSupported()) {
 +    return false;
++  }
++  // Set layouts: the vectors' (a uniform buffer, two sampled images, a storage
++  // image) and the reactive mask's (three sampled images, a storage image).
++  for (uint32_t set = 0; set < 2; ++set) {
++    VkDescriptorSetLayoutBinding bindings[4] = {};
++    for (uint32_t i = 0; i < 4; ++i) {
++      bindings[i].binding = i;
++      bindings[i].descriptorType = i == 3                   ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
++                                   : (!set && !i)           ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
++                                                            : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++      bindings[i].descriptorCount = 1;
++      bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
++    }
++    VkDescriptorSetLayoutCreateInfo layout_info = {
++        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
++    layout_info.bindingCount = 4;
++    layout_info.pBindings = bindings;
++    if (dfn.vkCreateDescriptorSetLayout(device, &layout_info, nullptr,
++                                        set ? &taa_reactive_set_layout_
++                                            : &taa_descriptor_set_layout_) != VK_SUCCESS) {
++      REXGPU_ERROR("Temporal AA: failed to create the descriptor set layouts");
++      return false;
++    }
 +  }
 +  VkDescriptorPoolSize pool_sizes[3] = {
 +      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxFramesInFlight},
-+      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
-+      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxFramesInFlight},
++      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8 * kMaxFramesInFlight},
++      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * kMaxFramesInFlight},
 +  };
 +  VkDescriptorPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-+  pool_info.maxSets = kMaxFramesInFlight;
++  pool_info.maxSets = 3 * kMaxFramesInFlight;
 +  pool_info.poolSizeCount = 3;
 +  pool_info.pPoolSizes = pool_sizes;
 +  if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &taa_descriptor_pool_) !=
@@ -2334,31 +3790,61 @@ index 0000000..5d4c128
 +    REXGPU_ERROR("Temporal AA: failed to create the descriptor pool");
 +    return false;
 +  }
-+  std::array<VkDescriptorSetLayout, kMaxFramesInFlight> layouts;
-+  layouts.fill(taa_descriptor_set_layout_);
-+  VkDescriptorSetAllocateInfo allocate_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-+  allocate_info.descriptorPool = taa_descriptor_pool_;
-+  allocate_info.descriptorSetCount = kMaxFramesInFlight;
-+  allocate_info.pSetLayouts = layouts.data();
-+  if (dfn.vkAllocateDescriptorSets(device, &allocate_info, taa_descriptors_.data()) !=
-+      VK_SUCCESS) {
-+    REXGPU_ERROR("Temporal AA: failed to allocate the descriptor sets");
++  for (uint32_t set = 0; set < 3; ++set) {
++    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> layouts;
++    layouts.fill(set ? taa_reactive_set_layout_ : taa_descriptor_set_layout_);
++    VkDescriptorSetAllocateInfo allocate_info = {
++        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
++    allocate_info.descriptorPool = taa_descriptor_pool_;
++    allocate_info.descriptorSetCount = kMaxFramesInFlight;
++    allocate_info.pSetLayouts = layouts.data();
++    VkDescriptorSet* sets = set == 2   ? taa_debug_descriptors_.data()
++                            : set == 1 ? taa_reactive_descriptors_.data()
++                                       : taa_descriptors_.data();
++    if (dfn.vkAllocateDescriptorSets(device, &allocate_info, sets) != VK_SUCCESS) {
++      REXGPU_ERROR("Temporal AA: failed to allocate the descriptor sets");
++      return false;
++    }
++  }
++  auto create = [&](uint32_t set_count, const VkDescriptorSetLayout* set_layouts,
++                    uint32_t push_constants_size, const uint32_t* shader, size_t shader_size,
++                    const char* name, VkPipelineLayout& layout, VkPipeline& pipeline) {
++    VkPushConstantRange push_constants = {VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size};
++    VkPipelineLayoutCreateInfo layout_info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
++    layout_info.setLayoutCount = set_count;
++    layout_info.pSetLayouts = set_layouts;
++    layout_info.pushConstantRangeCount = push_constants_size ? 1 : 0;
++    layout_info.pPushConstantRanges = &push_constants;
++    if (dfn.vkCreatePipelineLayout(device, &layout_info, nullptr, &layout) != VK_SUCCESS) {
++      return false;
++    }
++    pipeline = ui::vulkan::util::CreateComputePipeline(vulkan_device, layout, shader, shader_size);
++    if (pipeline == VK_NULL_HANDLE) {
++      return false;
++    }
++    vulkan_device->SetObjectName(VK_OBJECT_TYPE_PIPELINE, pipeline, name);
++    return true;
++  };
++  VkDescriptorSetLayout luma_sets[2] = {
++      render_target_cache_->descriptor_set_layout_sampled_image(),
++      GetSingleTransientDescriptorLayout(SingleTransientDescriptorLayout::kStorageImageCompute)};
++  if (!create(1, &taa_descriptor_set_layout_, 0, shaders::taa_motion_vectors_mcla_cs,
++              sizeof(shaders::taa_motion_vectors_mcla_cs), "Temporal AA motion vectors",
++              taa_vectors_pipeline_layout_, taa_vectors_pipeline_) ||
++      !create(2, luma_sets, 16, shaders::taa_luma_snapshot_cs,
++              sizeof(shaders::taa_luma_snapshot_cs), "Temporal AA luminance snapshot",
++              taa_luma_pipeline_layout_, taa_luma_pipeline_) ||
++      !create(1, &taa_reactive_set_layout_, 32, shaders::taa_reactive_mcla_cs,
++              sizeof(shaders::taa_reactive_mcla_cs), "Temporal AA reactive mask",
++              taa_reactive_pipeline_layout_, taa_reactive_pipeline_)) {
++    REXGPU_ERROR("Temporal AA: failed to create the pipelines");
 +    return false;
 +  }
-+  VkPipelineLayoutCreateInfo pipeline_layout_info = {
-+      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-+  pipeline_layout_info.setLayoutCount = 1;
-+  pipeline_layout_info.pSetLayouts = &taa_descriptor_set_layout_;
-+  if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr,
-+                                 &taa_vectors_pipeline_layout_) != VK_SUCCESS) {
-+    REXGPU_ERROR("Temporal AA: failed to create the pipeline layout");
-+    return false;
-+  }
-+  taa_vectors_pipeline_ = ui::vulkan::util::CreateComputePipeline(
-+      vulkan_device, taa_vectors_pipeline_layout_, shaders::taa_motion_vectors_mcla_cs,
-+      sizeof(shaders::taa_motion_vectors_mcla_cs));
-+  if (taa_vectors_pipeline_ == VK_NULL_HANDLE) {
-+    REXGPU_ERROR("Temporal AA: failed to create the motion vector pipeline");
++  taa_debug_pipeline_ = ui::vulkan::util::CreateComputePipeline(
++      vulkan_device, taa_reactive_pipeline_layout_, shaders::taa_debug_view_cs,
++      sizeof(shaders::taa_debug_view_cs));
++  if (taa_debug_pipeline_ == VK_NULL_HANDLE) {
++    REXGPU_ERROR("Temporal AA: failed to create the pipelines");
 +    return false;
 +  }
 +  taa_pipeline_failed_ = false;
@@ -2369,22 +3855,207 @@ index 0000000..5d4c128
 +  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
 +  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
 +  const VkDevice device = vulkan_device->device();
-+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, taa_vectors_pipeline_);
-+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
-+                                         taa_vectors_pipeline_layout_);
++  for (VkPipeline* pipeline : {&taa_vectors_pipeline_, &taa_luma_pipeline_,
++                               &taa_reactive_pipeline_, &taa_debug_pipeline_}) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, *pipeline);
++  }
++  for (VkPipelineLayout* layout : {&taa_vectors_pipeline_layout_, &taa_luma_pipeline_layout_,
++                                   &taa_reactive_pipeline_layout_}) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device, *layout);
++  }
 +  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorPool, device,
 +                                         taa_descriptor_pool_);
 +  taa_descriptors_.fill(VK_NULL_HANDLE);
++  taa_reactive_descriptors_.fill(VK_NULL_HANDLE);
++  taa_debug_descriptors_.fill(VK_NULL_HANDLE);
 +  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout, device,
 +                                         taa_descriptor_set_layout_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout, device,
++                                         taa_reactive_set_layout_);
 +  if (taa_fsr_) {
 +    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyQueryPool, device, taa_fsr_->timer_pool);
-+    for (HdrImage* image : {&taa_fsr_->vectors, &taa_fsr_->output}) {
++    for (HdrImage* image : {&taa_fsr_->vectors, &taa_fsr_->output, &taa_fsr_->luma[0],
++                            &taa_fsr_->luma[1], &taa_fsr_->reactive}) {
 +      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, image->view);
 +      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, device, image->image);
 +      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, image->memory);
 +    }
 +  }
++}
++
++bool VulkanCommandProcessor::TaaEnsureReactiveTextures() {
++  TaaFsr& fsr = *taa_fsr_;
++  if (fsr.reactive.image != VK_NULL_HANDLE) {
++    return true;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  static const char* const kNames[3] = {"Temporal AA opaque luminance",
++                                        "Temporal AA composite luminance",
++                                        "Temporal AA reactive mask"};
++  for (uint32_t i = 0; i < 3; ++i) {
++    HdrImage& image = i < 2 ? fsr.luma[i] : fsr.reactive;
++    VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++    image_info.imageType = VK_IMAGE_TYPE_2D;
++    image_info.format = i < 2 ? VK_FORMAT_R16_SFLOAT : VK_FORMAT_R8_UNORM;
++    image_info.extent = {fsr.width, fsr.height, 1};
++    image_info.mipLevels = 1;
++    image_info.arrayLayers = 1;
++    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
++    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
++    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
++    if (ui::vulkan::util::CreateDedicatedAllocationImage(
++            vulkan_device, image_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image.image,
++            image.memory)) {
++      view_info.image = image.image;
++      view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++      view_info.format = image_info.format;
++      view_info.subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
++    }
++    if (image.image == VK_NULL_HANDLE ||
++        dfn.vkCreateImageView(device, &view_info, nullptr, &image.view) != VK_SUCCESS) {
++      REXGPU_ERROR("Temporal AA: failed to create the reactive mask's images");
++      for (HdrImage* made : {&fsr.luma[0], &fsr.luma[1], &fsr.reactive}) {
++        ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, made->view);
++        ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, device, made->image);
++        ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, made->memory);
++        *made = HdrImage();
++      }
++      return false;
++    }
++    image.width = fsr.width;
++    image.height = fsr.height;
++    image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
++    vulkan_device->SetObjectName(VK_OBJECT_TYPE_IMAGE, image.image, kNames[i]);
++  }
++  return true;
++}
++
++bool VulkanCommandProcessor::TaaSnapshot(uint32_t slot, uint32_t color_target_key) {
++  if (!TaaReady() || slot > 1 || !TaaCreatePipeline() || !BeginSubmission(true) ||
++      !TaaEnsureReactiveTextures()) {
++    return false;
++  }
++  TaaFsr& fsr = *taa_fsr_;
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  VkDescriptorSet dest_set =
++      AllocateSingleTransientDescriptor(SingleTransientDescriptorLayout::kStorageImageCompute);
++  if (dest_set == VK_NULL_HANDLE) {
++    return false;
++  }
++  EndRenderPass();
++  uint32_t width, height;
++  VkDescriptorSet source_set =
++      render_target_cache_->TaaBeginReadColorTarget(color_target_key, width, height);
++  if (source_set == VK_NULL_HANDLE) {
++    return false;
++  }
++  if (width < fsr.width || height < fsr.height) {
++    return false;
++  }
++  VkDescriptorImageInfo dest_info = {VK_NULL_HANDLE, fsr.luma[slot].view, VK_IMAGE_LAYOUT_GENERAL};
++  VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
++  write.dstSet = dest_set;
++  write.descriptorCount = 1;
++  write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
++  write.pImageInfo = &dest_info;
++  dfn.vkUpdateDescriptorSets(vulkan_device->device(), 1, &write, 0, nullptr);
++  HdrTransitionImage(fsr.luma[slot], VK_IMAGE_LAYOUT_GENERAL);
++  SubmitBarriers(true);
++  BindExternalComputePipeline(taa_luma_pipeline_);
++  VkDescriptorSet sets[2] = {source_set, dest_set};
++  deferred_command_buffer_.CmdVkBindDescriptorSets(
++      VK_PIPELINE_BIND_POINT_COMPUTE, taa_luma_pipeline_layout_, 0, 2, sets, 0, nullptr);
++  uint32_t constants[4] = {fsr.width, fsr.height, 0, 0};
++  deferred_command_buffer_.CmdVkPushConstants(taa_luma_pipeline_layout_,
++                                              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
++                                              constants);
++  deferred_command_buffer_.CmdVkDispatch((fsr.width + 15) / 16, (fsr.height + 7) / 8, 1);
++  HdrTransitionImage(fsr.luma[slot], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  return true;
++}
++
++void VulkanCommandProcessor::TaaRunDebugView(VkImageView scene_view, uint32_t mode) {
++  TaaFsr& fsr = *taa_fsr_;
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  VkDescriptorSet set = taa_debug_descriptors_[frame_current_ % kMaxFramesInFlight];
++  // Without a reactive mask this frame: the vectors in its place (mode 1
++  // doesn't read it).
++  bool reactive = taa_frame_.snapshots == 3 && fsr.reactive.image != VK_NULL_HANDLE;
++  VkDescriptorImageInfo images[4] = {
++      {VK_NULL_HANDLE, scene_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++      {VK_NULL_HANDLE, fsr.vectors.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++      {VK_NULL_HANDLE, reactive ? fsr.reactive.view : fsr.vectors.view,
++       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++      {VK_NULL_HANDLE, fsr.output.view, VK_IMAGE_LAYOUT_GENERAL},
++  };
++  VkWriteDescriptorSet writes[2] = {};
++  for (uint32_t i = 0; i < 2; ++i) {
++    writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++    writes[i].dstSet = set;
++    writes[i].dstBinding = i ? 3 : 0;
++    writes[i].descriptorCount = i ? 1 : 3;
++    writes[i].descriptorType =
++        i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++    writes[i].pImageInfo = i ? &images[3] : images;
++  }
++  dfn.vkUpdateDescriptorSets(vulkan_device->device(), 2, writes, 0, nullptr);
++  SubmitBarriers(true);
++  BindExternalComputePipeline(taa_debug_pipeline_);
++  deferred_command_buffer_.CmdVkBindDescriptorSets(
++      VK_PIPELINE_BIND_POINT_COMPUTE, taa_reactive_pipeline_layout_, 0, 1, &set, 0, nullptr);
++  uint32_t constants[4] = {fsr.width, fsr.height, reactive || mode ? mode : 1, 0};
++  deferred_command_buffer_.CmdVkPushConstants(taa_reactive_pipeline_layout_,
++                                              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
++                                              constants);
++  deferred_command_buffer_.CmdVkDispatch((fsr.width + 15) / 16, (fsr.height + 7) / 8, 1);
++  VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT,
++                             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
++  deferred_command_buffer_.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++                                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
++                                                &barrier, 0, nullptr, 0, nullptr);
++}
++
++void VulkanCommandProcessor::TaaRunReactive(VkImageView stencil_view) {
++  TaaFsr& fsr = *taa_fsr_;
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  VkDescriptorSet set = taa_reactive_descriptors_[frame_current_ % kMaxFramesInFlight];
++  VkDescriptorImageInfo images[4] = {
++      {VK_NULL_HANDLE, fsr.luma[0].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++      {VK_NULL_HANDLE, fsr.luma[1].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++      {VK_NULL_HANDLE, stencil_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++      {VK_NULL_HANDLE, fsr.reactive.view, VK_IMAGE_LAYOUT_GENERAL},
++  };
++  VkWriteDescriptorSet writes[2] = {};
++  for (uint32_t i = 0; i < 2; ++i) {
++    writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++    writes[i].dstSet = set;
++    writes[i].dstBinding = i ? 3 : 0;
++    writes[i].descriptorCount = i ? 1 : 3;
++    writes[i].descriptorType =
++        i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++    writes[i].pImageInfo = i ? &images[3] : images;
++  }
++  dfn.vkUpdateDescriptorSets(vulkan_device->device(), 2, writes, 0, nullptr);
++  HdrTransitionImage(fsr.reactive, VK_IMAGE_LAYOUT_GENERAL);
++  SubmitBarriers(true);
++  BindExternalComputePipeline(taa_reactive_pipeline_);
++  deferred_command_buffer_.CmdVkBindDescriptorSets(
++      VK_PIPELINE_BIND_POINT_COMPUTE, taa_reactive_pipeline_layout_, 0, 1, &set, 0, nullptr);
++  uint32_t constants[8] = {fsr.width, fsr.height, uint32_t(taa_vector_constants_.jitter[2]), 0};
++  TaaReactiveCurve(reinterpret_cast<float*>(&constants[4]));
++  deferred_command_buffer_.CmdVkPushConstants(taa_reactive_pipeline_layout_,
++                                              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
++                                              constants);
++  deferred_command_buffer_.CmdVkDispatch((fsr.width + 15) / 16, (fsr.height + 7) / 8, 1);
++  HdrTransitionImage(fsr.reactive, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 +}
 +
 +void VulkanCommandProcessor::TaaRun(const VulkanShader& pixel_shader) {
@@ -2394,11 +4065,31 @@ index 0000000..5d4c128
 +  VkImage scene = texture_cache_->GetActiveTextureImage(kTaaFetchScene, scene_format, width, height);
 +  VkImage depth =
 +      texture_cache_->GetActiveTextureImage(kTaaFetchDepth, depth_format, depth_width, depth_height);
++  VkFormat stencil_format;
++  uint32_t stencil_width, stencil_height;
++  VkImage stencil = texture_cache_->GetActiveTextureImage(kTaaFetchStencil, stencil_format,
++                                                          stencil_width, stencil_height);
 +  taa_frame_.status = 't';
 +  if (scene == VK_NULL_HANDLE || depth == VK_NULL_HANDLE ||
 +      scene_format != VK_FORMAT_R16G16B16A16_SFLOAT || depth_format != VK_FORMAT_R32_SFLOAT ||
-+      depth_width != width || depth_height != height || !TaaCreatePipeline()) {
++      depth_width != width || depth_height != height || stencil == VK_NULL_HANDLE ||
++      stencil_width != width || stencil_height != height || !TaaCreatePipeline()) {
 +    return;
++  }
++  // The scene's view for the debug views: whichever of the unsigned and the
++  // signed view its fetch constant's signs made.
++  VkImageView scene_view = VK_NULL_HANDLE;
++  for (const VulkanShader::TextureBinding& binding :
++       pixel_shader.GetTextureBindingsAfterTranslation()) {
++    if (binding.fetch_constant == kTaaFetchScene) {
++      for (bool is_signed : {false, true}) {
++        if (scene_view == VK_NULL_HANDLE) {
++          scene_view = texture_cache_->GetActiveBindingOrNullImageView(
++              binding.fetch_constant, binding.dimension, is_signed);
++        }
++      }
++      break;
++    }
 +  }
 +  VkDescriptorImageInfo textures[2];  // depth (binding 1), stencil (binding 2)
 +  for (uint32_t i = 0; i < 2; ++i) {
@@ -2426,8 +4117,16 @@ index 0000000..5d4c128
 +  TaaFsr& fsr = *taa_fsr_;
 +  uint32_t state = fsr.state.load(std::memory_order_acquire);
 +  if (state != TaaFsr::kNone && (fsr.width != width || fsr.height != height)) {
-+    TaaRelease();
-+    state = TaaFsr::kNone;
++    // Made again for the new size, from the end of this frame (never released
++    // in the middle of one).
++    taa_release_pending_ = true;
++    return;
++  }
++  if (fsr.dispatch_failed.load(std::memory_order_acquire)) {
++    TaaSetUnavailable("its dispatch failed");
++    fsr.state.store(TaaFsr::kFailed, std::memory_order_release);
++    taa_release_pending_ = true;
++    return;
 +  }
 +  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
 +  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -2437,6 +4136,7 @@ index 0000000..5d4c128
 +    fsr.width = width;
 +    fsr.height = height;
 +    if (!fsr.runtime.Load("vk")) {
++      TaaSetUnavailable("the Vulkan FidelityFX runtime couldn't be loaded");
 +      fsr.state.store(TaaFsr::kFailed, std::memory_order_release);
 +      return;
 +    }
@@ -2480,6 +4180,8 @@ index 0000000..5d4c128
 +      image.width = width;
 +      image.height = height;
 +      image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
++      vulkan_device->SetObjectName(VK_OBJECT_TYPE_IMAGE, image.image,
++                                   i ? "Temporal AA output" : "Temporal AA motion vectors");
 +    }
 +    fsr.width = width;
 +    fsr.height = height;
@@ -2513,6 +4215,7 @@ index 0000000..5d4c128
 +      if (result != FFX_API_RETURN_OK) {
 +        fsr.context = nullptr;
 +        REXGPU_ERROR("Temporal AA: creating FSR failed ({})", result);
++        TaaSetUnavailable("its context couldn't be created");
 +        fsr.state.store(TaaFsr::kFailed, std::memory_order_release);
 +        return;
 +      }
@@ -2603,6 +4306,12 @@ index 0000000..5d4c128
 +                                                   nullptr);
 +  deferred_command_buffer_.CmdVkDispatch((width + 15) / 16, (height + 7) / 8, 1);
 +  HdrTransitionImage(fsr.vectors, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  // The reactive mask, from this frame's snapshots of the scene.
++  if (taa_frame_.snapshots == 3 && fsr.reactive.image != VK_NULL_HANDLE) {
++    TaaRunReactive(textures[1].imageView);
++  } else {
++    taa_frame_.snapshots = 0;
++  }
 +  SubmitBarriers(true);
 +  taa_frame_.done = true;
 +  taa_frame_.status = '+';
@@ -2611,12 +4320,25 @@ index 0000000..5d4c128
 +    TaaTimerEnd(timer_slot);
 +    return;
 +  }
++  static int debug_view_logged = -1;
++  if (TaaDebug() >= 5 && TaaDebug() != debug_view_logged) {
++    debug_view_logged = TaaDebug();
++    REXGPU_INFO("Temporal AA: debug view {}, the scene's view {}", TaaDebug(),
++                scene_view != VK_NULL_HANDLE ? "found" : "missing");
++  }
++  if (TaaDebug() >= 5 && scene_view != VK_NULL_HANDLE) {
++    // A development view instead of FSR's output.
++    TaaRunDebugView(scene_view, TaaDebug() - 5);
++  } else {
 +
 +  // FSR, recorded into the real command buffer where it falls (it restores
 +  // the states it was given), then the output into the scene texture.
 +  TaaFsrDispatch dispatch = {};
 +  dispatch.dispatch = fsr.runtime.dispatch;
-+  dispatch.context = &fsr.context;
++  dispatch.context = fsr.context;
++  dispatch.failed = &fsr.dispatch_failed;
++  dispatch.pipeline_barrier = dfn.vkCmdPipelineBarrier;
++  dispatch.copy_image = dfn.vkCmdCopyImage;
 +  ffxDispatchDescUpscale& desc = dispatch.desc;
 +  desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
 +  desc.color = TaaFsrResource(scene, scene_format, width, height,
@@ -2628,6 +4350,11 @@ index 0000000..5d4c128
 +  desc.motionVectors = TaaFsrResource(fsr.vectors.image, VK_FORMAT_R16G16_SFLOAT, width, height,
 +                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
 +                                      FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
++  if (taa_frame_.snapshots == 3) {
++    desc.reactive = TaaFsrResource(fsr.reactive.image, VK_FORMAT_R8_UNORM, width, height,
++                                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
++                                   FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
++  }
 +  desc.output = TaaFsrResource(fsr.output.image, VK_FORMAT_R16G16B16A16_SFLOAT, width, height,
 +                               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
 +                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -2656,6 +4383,7 @@ index 0000000..5d4c128
 +  current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
 +  current_external_graphics_pipeline_ = VK_NULL_HANDLE;
 +  current_graphics_descriptor_sets_bound_up_to_date_ = 0;
++  }
 +
 +  // FSR's reads of the scene (compute) before the transition below, whose
 +  // source scope is the guest shader stages, and the copy into it.
@@ -2744,7 +4472,7 @@ index 376305a..1fd3bd2 100644
  }
  
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index 3fdcf75..eb21028 100644
+index 3fdcf75..24fe2a7 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
 @@ -304,6 +304,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
@@ -2759,15 +4487,18 @@ index 3fdcf75..eb21028 100644
    VulkanFeatures<VkPhysicalDeviceVulkan12Features,
                   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES>
        features_1_2;
-@@ -340,6 +345,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -340,6 +345,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
  
    if (get_physical_device_properties2_supported) {
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
-+      features_1_1.Link(supported_features_2, device_create_info);
++      // Only for temporal AA's features below (not on the PS5).
++      if (!REX_PLATFORM_PS5) {
++        features_1_1.Link(supported_features_2, device_create_info);
++      }
        features_1_2.Link(supported_features_2, device_create_info);
      }
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
-@@ -659,6 +665,23 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -659,6 +668,23 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  
@@ -2777,14 +4508,14 @@ index 3fdcf75..eb21028 100644
 +  // built for it, so that its device stays as it was.
 +  if (with_gpu_emulation && !REX_PLATFORM_PS5) {
 +    XE_UI_VULKAN_FEATURE(shaderInt16)
++    // Its own passes write R16G16, R16 and R8 storage images.
++    XE_UI_VULKAN_FEATURE(shaderStorageImageExtendedFormats)
 +    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
 +      XE_UI_VULKAN_FEATURE_2(features_1_1, storageBuffer16BitAccess);
 +      XE_UI_VULKAN_FEATURE_2(features_1_2, shaderFloat16);
 +    }
 +    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
 +      XE_UI_VULKAN_FEATURE_2(features_1_3, subgroupSizeControl);
-+      XE_UI_VULKAN_FEATURE_2(features_1_3, computeFullSubgroups);
-+      XE_UI_VULKAN_FEATURE_2(features_1_3, synchronization2);
 +    }
 +  }
 +
@@ -2820,10 +4551,10 @@ index 0000000..3712e34
 +THE SOFTWARE.
 diff --git a/thirdparty/fidelityfx-api/README.md b/thirdparty/fidelityfx-api/README.md
 new file mode 100644
-index 0000000..2a3fad4
+index 0000000..b173afe
 --- /dev/null
 +++ b/thirdparty/fidelityfx-api/README.md
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,13 @@
 +# FidelityFX API headers (FSR 3.1)
 +
 +The ffx-api headers the GPU plugin compiles its FSR 3.1 calls against
@@ -2835,7 +4566,8 @@ index 0000000..2a3fad4
 +
 +The runtime (`amd_fidelityfx_dx12.dll`, `amd_fidelityfx_vk.dll`) is built from
 +that commit's source by `cmake/rexglue_fsr.cmake` when `REXGLUE_ENABLE_FSR` is on,
-+and loaded at run time from the plugin's folder.
++and loaded at run time from the executable's folder (where `scripts/make_pc.ps1`
++copies them, next to `mcla.exe` and the GPU plugin).
 diff --git a/thirdparty/fidelityfx-api/include/ffx_api/dx12/ffx_api_dx12.h b/thirdparty/fidelityfx-api/include/ffx_api/dx12/ffx_api_dx12.h
 new file mode 100644
 index 0000000..fd174ec

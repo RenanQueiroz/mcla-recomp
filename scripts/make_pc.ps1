@@ -115,13 +115,37 @@ try {
         # Only the project's own Clang counts: another one on the path may not
         # find the Microsoft headers (issue #9).
         if (-not (Test-Path "$root\tools\$llvmName\bin\clang.exe")) { $list += "Clang" }
+        # Optional: FSR 3.1's Vulkan runtime is built only with it.
+        if (-not (HasVulkanSdk)) { $list += "Vulkan SDK" }
         $list
     }
+    # The Vulkan SDK (its headers and loader library): VULKAN_SDK, as its
+    # installer sets it for the machine, or its usual folder.
+    function HasVulkanSdk {
+        $machine = [Environment]::GetEnvironmentVariable("VULKAN_SDK", "Machine")
+        if (-not $env:VULKAN_SDK -and $machine) { $env:VULKAN_SDK = $machine }
+        if ($env:VULKAN_SDK -and (Test-Path "$env:VULKAN_SDK\Include\vulkan\vulkan.h")) { return $true }
+        [bool](Get-ChildItem "C:\VulkanSDK\*\Include\vulkan\vulkan.h" -ErrorAction SilentlyContinue)
+    }
     $missing = @(MissingTools)
+    $required = @($missing | Where-Object { $_ -ne "Vulkan SDK" })
+    if ($missing -and -not $required -and -not $InstallTools) {
+        # Only the Vulkan SDK: the game builds without it, FSR then for
+        # Direct3D 12 only. Asked only when someone can answer (the
+        # launcher runs this with -NonInteractive).
+        $nonInteractive = [bool]([Environment]::GetCommandLineArgs() | Where-Object { $_ -like "-NonI*" })
+        $answer = if ($nonInteractive) { "n" } else {
+            Read-Host "The Vulkan SDK is missing: without it, the FSR anti-aliasing option is built for Direct3D 12 only. Install it now (from winget; it asks for administrator rights)? [y/N]"
+        }
+        if ($answer -notmatch '^[yY]') {
+            "going on without the Vulkan SDK: FSR on Vulkan will be unavailable"
+            $missing = @()
+        }
+    }
     if ($missing) {
         "missing: $($missing -join ', ')"
-        if (-not $InstallTools) {
-            $answer = Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights. [y/N]"
+        if ($required -and -not $InstallTools) {
+            $answer = Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights, and so does the Vulkan SDK. [y/N]"
             if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in README.md) and run this again, or run with -InstallTools" }
         }
         if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install the tools by hand (README.md, 'Windows')" }
@@ -145,9 +169,22 @@ try {
                     if ($LASTEXITCODE -eq 0) { tar.exe -xf $archive -C "$root\tools" }
                 }
                 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
+            } elseif ($name -eq "Vulkan SDK") {
+                # Not through Logged: the build goes on without it.
+                "installing the Vulkan SDK (for FSR on Vulkan; it asks for administrator rights)"
+                & {
+                    $ErrorActionPreference = "Continue"
+                    winget install --id KhronosGroup.VulkanSDK -e --accept-source-agreements --accept-package-agreements 2>&1 |
+                        ForEach-Object { "$_" } > "$logs\install-vulkan-sdk.log"
+                }
+                if ($LASTEXITCODE -ne 0) { "the Vulkan SDK was not installed (log: $logs\install-vulkan-sdk.log)" }
             }
         }
         $missing = @(MissingTools)
+        if ($missing -contains "Vulkan SDK") {
+            "the Vulkan SDK is missing: FSR anti-aliasing will be built for Direct3D 12 only (on Vulkan the game uses MSAA instead)"
+        }
+        $missing = @($missing | Where-Object { $_ -ne "Vulkan SDK" })
         if ($missing) { Fail "still missing after installing: $($missing -join ', '). A new PowerShell window may be needed; then run this again" }
     }
     "clang: $env:MCLA_CC ($((& $env:MCLA_CC --version | Select-Object -First 1)))"
@@ -237,7 +274,13 @@ try {
     # Get-Item otherwise, which would end the script under "Stop".
     $marker = Get-Item "$sdk\.mcla-patched" -Force
     $recompiler = Get-Item "$install\bin\rexglue.exe" -Force -ErrorAction SilentlyContinue
-    if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime) {
+    # FSR's runtime missing (an earlier build without the network, or the
+    # Vulkan SDK installed since): configured and built again, which fetches
+    # and builds it if it can (the rest of the SDK is up to date).
+    $fsrMissing = -not (Test-Path "$install\bin\amd_fidelityfx_dx12.dll") -or
+        ((HasVulkanSdk) -and -not (Test-Path "$install\bin\amd_fidelityfx_vk.dll"))
+    if ($fsrMissing -and $recompiler) { "FSR's runtime is missing from the SDK's build: building it again" }
+    if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime -or $fsrMissing) {
         # FSR 3.1 (temporal anti-aliasing) is built from the FidelityFX SDK's
         # source, fetched at a pinned commit (cmake\rexglue_fsr.cmake); its
         # Vulkan library needs the Vulkan SDK, found through VULKAN_SDK
@@ -260,6 +303,16 @@ try {
         "already installed: $install"
     }
     if (-not (Test-Path "$install\bin\rexglue.exe")) { Fail "the SDK was not installed" }
+    # FSR is optional: say plainly when it was left out, and what brings it back.
+    if (-not (Test-Path "$install\bin\amd_fidelityfx_dx12.dll")) {
+        "note: the FSR anti-aliasing option was not built this time: fetching the FidelityFX SDK needs the internet, or its build failed (out\logs\sdk-configure.log, sdk-build.log). The game offers MSAA and off; the next build (or Update) tries again."
+    } elseif (-not (Test-Path "$install\bin\amd_fidelityfx_vk.dll")) {
+        if (HasVulkanSdk) {
+            "note: FSR was built for Direct3D 12 only: its Vulkan runtime failed to build (out\logs\sdk-build.log). With Vulkan the game offers MSAA and off."
+        } else {
+            "note: FSR was built for Direct3D 12 only: its Vulkan runtime needs the Vulkan SDK (run with -InstallTools, or install it from vulkan.lunarg.com, then build again)."
+        }
+    }
 
     # -----------------------------------------------------------------------
     Step "4/6 your game: extract from the disc image"

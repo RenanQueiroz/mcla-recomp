@@ -26,6 +26,9 @@ SHADERS = {
     "hdr_rt_copy.cs": GPU,
     "hdr_rt_copy_4xmsaa.cs": GPU,
     "taa_motion_vectors_mcla.cs": GPU,
+    "taa_luma_snapshot.cs": GPU,
+    "taa_reactive_mcla.cs": GPU,
+    "taa_debug_view.cs": GPU,
 }
 # Built for Vulkan only.
 VULKAN_ONLY = {"hdr_rt_copy.cs", "hdr_rt_copy_4xmsaa.cs"}

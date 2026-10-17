@@ -69,6 +69,17 @@ kinds of changes on top of upstream's `main`:
   unattended runs and benchmarks (`src/dev_pad.cpp`, off unless its options
   are set; `launcher/README.md`, "Scripted controller input").
 
+## FSR 3.1 anti-aliasing
+
+`patches/rexglue-temporal-aa.patch` adds AMD FSR 3.1 at native resolution as an
+anti-aliasing option (MSAA stays the default). The SDK build fetches the
+FidelityFX SDK's source at a pinned, hash-checked commit and builds its runtime
+(`amd_fidelityfx_dx12.dll`, and `amd_fidelityfx_vk.dll` with the Vulkan SDK);
+without the network or the Vulkan SDK it builds without FSR (or without FSR on
+Vulkan), and the game offers MSAA and off only. Not yet on Linux or the PS5;
+a reactive mask for rain and smoke is in but experimental and off by default.
+KNOWN-ISSUES.md has the costs and limits.
+
 ## Testing so far
 
 Everything here was built and measured on **Windows only, with an NVIDIA RTX 5080**

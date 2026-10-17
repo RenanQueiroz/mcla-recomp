@@ -43,7 +43,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-EXE = REPO / "out" / "build" / "win-amd64-release" / "mcla.exe"
+# MCLA_EXE: another build to run (an A/B against a copy of an older one); its
+# folder holds its DLLs and, if any, its mcla.toml.
+EXE = Path(os.environ.get("MCLA_EXE") or REPO / "out" / "build" / "win-amd64-release" / "mcla.exe")
 TOML = EXE.with_name("mcla.toml")
 REAL_USER = Path(os.environ["USERPROFILE"]) / "Documents" / "mcla"
 # MCLA_DEV_ROOT: another scratch folder (save copy, shader storage, runs), for a
@@ -634,14 +636,26 @@ def run(a, tag=None):
     # Whatever happens from here (Ctrl+C, an exception), the games of this run
     # are closed and the real mcla.toml is put back before anything else.
     try:
-        if a.toml:
-            # The settings file the run starts with, instead of the real one;
-            # "none" for no file.
-            if a.toml == "none":
-                TOML.unlink(missing_ok=True)
+        while True:
+            # Again just before starting, and before the run's settings file
+            # goes in: a game that starts in between would read it, and its
+            # own saves would be lost with the restore.
+            wait_for_no_game(getattr(a, "game_wait", 7200))
+            if a.toml:
+                # The settings file the run starts with, instead of the real
+                # one; "none" for no file.
+                if a.toml == "none":
+                    TOML.unlink(missing_ok=True)
+                else:
+                    shutil.copyfile(a.toml, TOML)
+            if not a.toml or not mcla_running():
+                break
+            print("a game started while the run's mcla.toml went in; putting the real one back",
+                  flush=True)
+            if toml_backup is not None:
+                TOML.write_bytes(toml_backup)
             else:
-                shutil.copyfile(a.toml, TOML)
-        wait_for_no_game(getattr(a, "game_wait", 7200))  # again, just before starting
+                TOML.unlink(missing_ok=True)
         proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env)
         if guard:
             guard.start(proc.pid)

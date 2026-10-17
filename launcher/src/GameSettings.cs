@@ -21,20 +21,29 @@ sealed record GameSetting(string Key, string Header, SettingChoice[] Choices, ob
     /// What the game takes while the file doesn't set Key, when that depends
     /// on another of its lines (an older option); null for Default.
     public Func<IReadOnlyDictionary<string, string>, object?>? DefaultFrom { get; init; }
+    /// Whether a choice can be offered with the file's other settings (null:
+    /// all can). One that can't but is the file's value is shown with
+    /// Unavailable after it.
+    public Func<IReadOnlyDictionary<string, string>, object, bool>? Offered { get; init; }
+    public string Unavailable { get; init; } = "";
 
     /// The choices to show for the file's value, and which one it is. A value
     /// that isn't one of the choices (set by hand) is shown as one more.
     public (SettingChoice[] Choices, int Index) Show(IReadOnlyDictionary<string, string> file)
     {
+        var choices = Offered is null ? Choices : Choices.Where(c => Offered(file, c.Value)).ToArray();
         if (!file.TryGetValue(Key, out var raw))
         {
             var fallback = DefaultFrom?.Invoke(file) ?? Default;
-            return (Choices, Math.Max(0, Array.FindIndex(Choices, c => SettingValues.Same(c.Value, fallback))));
+            return (choices, Math.Max(0, Array.FindIndex(choices, c => SettingValues.Same(c.Value, fallback))));
         }
         var value = SettingValues.Parse(raw);
-        var index = Array.FindIndex(Choices, c => SettingValues.Same(c.Value, value));
-        if (index >= 0) return (Choices, index);
-        return ([.. Choices, new SettingChoice($"{SettingValues.Display(value)} (set in mcla.toml)", value)], Choices.Length);
+        var index = Array.FindIndex(choices, c => SettingValues.Same(c.Value, value));
+        if (index >= 0) return (choices, index);
+        var hidden = Array.Find(Choices, c => SettingValues.Same(c.Value, value));
+        var label = hidden is not null ? $"{hidden.Label} ({Unavailable})"
+                                       : $"{SettingValues.Display(value)} (set in mcla.toml)";
+        return ([.. choices, new SettingChoice(label, value)], choices.Length);
     }
 }
 
@@ -159,13 +168,25 @@ static class GameSettings
              + "the shine on cars. FSR 3.1 (AMD FidelityFX Super Resolution at native resolution) blends each "
              + "frame with the ones before it, which calms that shimmer too and gives the steadiest picture; "
              + "the price is a slightly softer image, possible faint trails behind fast-moving things, rain "
-             + "and smoke, and about 1 ms of GPU time per frame at 3× (more on slower graphics cards). Off is "
+             + "and smoke, and GPU time: its pass takes about 1.4 ms a frame at 3× on an RTX 5080, about "
+             + "1 ms more than MSAA (more on slower graphics cards). Off is "
              + "the fastest and the most jagged. Pick MSAA for the console's look, FSR if shimmer bothers you "
              + "more than a little softness, and Off only if your graphics card is struggling. All three "
              + "switch during play in the pause menu; FSR takes a moment to start the first time.",
         DefaultFrom = file => file.TryGetValue("mcla_msaa", out var raw) && SettingValues.Same(SettingValues.Parse(raw), false)
             ? "off" : null,
+        // FSR only where its runtime for the graphics API in use was built
+        // (the Vulkan one needs the Vulkan SDK at build time); otherwise the
+        // game uses MSAA.
+        Offered = (file, value) => !SettingValues.Same(value, "fsr") || FsrRuntimeBuilt(file),
+        Unavailable = "not built for this graphics API: the game uses MSAA",
     };
+    static bool FsrRuntimeBuilt(IReadOnlyDictionary<string, string> file)
+    {
+        var api = file.TryGetValue("mcla_gpu_backend", out var raw) ? SettingValues.Parse(raw) : "any";
+        var dll = SettingValues.Same(api, "vulkan") ? "amd_fidelityfx_vk.dll" : "amd_fidelityfx_dx12.dll";
+        return File.Exists(Path.Combine(Paths.BuildDir, dll));
+    }
     // temporal_aa_sharpness (the SDK's): FSR's own sharpening (RCAS) after it.
     public static readonly GameSetting FsrSharpness = new("temporal_aa_sharpness", "FSR sharpness",
         [new("Off", 0.0), new("0.2 (default)", 0.2), new("0.4", 0.4), new("0.6", 0.6), new("0.8", 0.8),

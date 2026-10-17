@@ -59,6 +59,7 @@ bool MclaRelaunchGame();  // src/mcla_app.cpp
 void MclaWaitForSaves();  // src/mcla_app.cpp
 #endif
 bool MclaSingleTileAvailable();  // src/render_perf.cpp
+bool MclaFsrAvailable();  // src/perf_options.cpp
 
 namespace {
 
@@ -614,7 +615,17 @@ bool LabelChanges(const ItemDef& item) {
   return RestartOnly(item.option) || std::strcmp(item.option, "hdr") == 0;
 }
 
+// FSR (the last anti-aliasing choice) is offered only where it can run
+// (src/perf_options.cpp); where it can't, the game uses MSAA instead.
+bool IsAntiAliasingWithoutFsr(const ItemDef& item) {
+  return item.kind == ItemKind::kStringChoice && !std::strcmp(item.option, "mcla_anti_aliasing") &&
+         !MclaFsrAvailable();
+}
+
 int ItemValueCount(const ItemDef& item) {
+  if (IsAntiAliasingWithoutFsr(item)) {
+    return item.value_count - 1;
+  }
   return item.kind == ItemKind::kToggle ? 2 : item.value_count;
 }
 
@@ -730,6 +741,9 @@ int ItemCurrentIndex(const ItemDef& item) {
     case ItemKind::kToggle:
       return value == "true" ? 1 : 0;
     case ItemKind::kStringChoice:
+      if (IsAntiAliasingWithoutFsr(item) && value == "fsr") {
+        return 1;  // MSAA, what the game uses then
+      }
       for (int i = 0; i < item.value_count; ++i) {
         if (value == item.values[i]) {
           return i;

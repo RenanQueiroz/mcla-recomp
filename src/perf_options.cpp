@@ -19,6 +19,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
+#include <rex/platform.h>
 #include <rex/runtime.h>
 #include <rex/system/xmemory.h>
 
@@ -195,10 +196,32 @@ constexpr uint32_t kMsaaMode = 384;
 constexpr uint32_t kMsaaNone = 1;
 constexpr uint32_t kMsaaGame = 2;
 
-// mcla_anti_aliasing, read under the option registry's lock (the pause menu
-// sets it from another thread).
+// Whether FSR can be used: the GPU plugin's temporal_aa_available (unknown
+// until the first frame has ended; no where its runtime isn't there, the
+// device lacks what it needs or it failed). Not on Linux before its port.
+bool FsrAvailable() {
+#if REX_PLATFORM_LINUX
+  return false;
+#else
+  const std::string available = rex::cvar::GetFlagByName("temporal_aa_available");
+  return available == "yes" || available == "unknown";
+#endif
+}
+
+// mcla_anti_aliasing as it applies, read under the option registry's lock
+// (the pause menu sets it from another thread): FSR where it can't run is
+// MSAA.
 std::string AntiAliasing() {
-  return rex::cvar::GetFlagByName("mcla_anti_aliasing");
+  std::string anti_aliasing = rex::cvar::GetFlagByName("mcla_anti_aliasing");
+  if (anti_aliasing == "fsr" && !FsrAvailable()) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXLOG_WARN("perf options: FSR is unavailable here; MSAA is used instead");
+    }
+    return "msaa";
+  }
+  return anti_aliasing;
 }
 
 void ApplyMsaa(uint8_t* base) {
@@ -377,6 +400,11 @@ void MclaTickPerfOptions() {
 // Before mcla_anti_aliasing, mcla_msaa = false turned anti-aliasing off: it
 // still does while mcla_anti_aliasing isn't set (its default becomes off, which
 // isn't saved as if the player had chosen it).
+// For the pause menu, which offers FSR only where it can run.
+bool MclaFsrAvailable() {
+  return FsrAvailable();
+}
+
 void MclaMigrateAntiAliasing() {
   if (rex::cvar::GetFlagSource("mcla_anti_aliasing") == rex::cvar::Source::kDefault &&
       !REXCVAR_GET(mcla_msaa)) {

@@ -75,6 +75,7 @@ namespace rex::arch {
 uint64_t Ps5FaultCount();
 }
 extern const char* g_mcla_settings_path;  // src/settings_menu.cpp
+void MclaMigrateAntiAliasing();            // src/perf_options.cpp
 namespace rex::ui::vulkan {
 uint64_t Ps5PresentCount();
 }
@@ -562,6 +563,8 @@ int main() {
 #endif
   rex::cvar::SetDefaultValue("edram_tiles", MCLA_STRINGIZE(MCLA_EDRAM_TILES));
   Line("settings: edram_tiles = %s", rex::cvar::GetFlagByName("edram_tiles").c_str());
+  // An older mcla_msaa = false in the settings file still means no anti-aliasing.
+  MclaMigrateAntiAliasing();
   rex::ui::SDLWindowedAppContext app_context;
   if (!app_context.Initialize()) {
     return Finish("the SDL application context did not initialise", 9);

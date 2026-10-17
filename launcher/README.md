@@ -148,12 +148,24 @@ monitor the TV ramp darkens the shadows: 8-bit levels 64, 128 and 192 come out
 as 48, 115 and 185. In a night scene the average brightness went from 46 to 60
 of 255 with *PC monitor* (`KNOWN-ISSUES.md`).
 
-*Anti-aliasing* is the game's 2× MSAA (`mcla_msaa`), and it switches during play
-too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, a 3× frame is 2 to 5%
-shorter than on with single-tile rendering (2.1 and 3.1% in the city by day on
-D3D12 and Vulkan, 2.7 and 5.3% in the race), for slightly more jagged thin edges
-such as pylons and billboard frames; the dithered foliage looks cleaner. Against
-anti-aliasing on in two tiles it was 8 to 18% (`dev\single-tile-2026-10-16.md`).
+*Anti-aliasing* (`mcla_anti_aliasing`) is the game's 2× MSAA (`msaa`, the
+default), AMD FSR 3.1 at native resolution (`fsr`) or none (`off`); all three
+switch during play too (the pause menu's PERFORMANCE > ANTI ALIASING). Off, a 3×
+frame is 2 to 5% shorter than with MSAA and single-tile rendering (2.1 and 3.1%
+in the city by day on D3D12 and Vulkan, 2.7 and 5.3% in the race), for slightly
+more jagged thin edges such as pylons and billboard frames; the dithered foliage
+looks cleaner. Against MSAA in two tiles it was 8 to 18%
+(`dev\single-tile-2026-10-16.md`). FSR blends each frame with the ones before
+it, which also calms the shimmer MSAA leaves (fences, power lines, trees, the
+shine on cars); its pass takes about 1.4 ms of GPU time a frame at 3× on an
+RTX 5080 (about 1 ms more than MSAA, which is off with it), and it can leave
+faint trails behind fast-moving things, rain and smoke. *FSR sharpness*
+(`temporal_aa_sharpness`, 0.2 by default) is its sharpening. FSR is offered
+only when its runtime for the graphics API in use was built
+(`amd_fidelityfx_dx12.dll`, `amd_fidelityfx_vk.dll` next to `mcla.exe`; the
+Vulkan one needs the Vulkan SDK when the game is built); where it isn't there
+or fails, the game uses MSAA. An older `mcla_msaa = false` still means off while
+`mcla_anti_aliasing` isn't set.
 
 *Single tile rendering* (`mcla_single_tile`, on by default) draws the scene with
 anti-aliasing on once instead of in the Xbox 360's two tiles, in the larger
