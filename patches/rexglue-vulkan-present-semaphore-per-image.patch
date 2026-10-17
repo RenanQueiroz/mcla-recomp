@@ -1,0 +1,67 @@
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index 35ece53..551b048 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -444,6 +444,12 @@ class VulkanPresenter final : public Presenter {
+     bool swapchain_is_fifo = false;
+     std::vector<VkImage> swapchain_images;
+     std::vector<SwapchainFramebuffer> swapchain_framebuffers;
++    // The semaphore a paint's submission signals and its present waits for, one
++    // per swapchain image: reused when the image is acquired again, which is after
++    // its previous present (one per paint submission could be signaled again
++    // while a present still waited for it, VUID-vkQueueSubmit-pSignalSemaphores-00067).
++    // Kept across swapchains (only added to), destroyed with the presenter.
++    std::vector<VkSemaphore> swapchain_present_semaphores;
+     // HDR output: what the connection was made for (IsHdrOutputWanted), and
+     // whether the swapchain is HDR10 (PQ, BT.2020).
+     uint32_t swapchain_hdr_wanted = 0;
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 641b432..041d9b2 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -351,6 +351,10 @@ VulkanPresenter::~VulkanPresenter() {
+   }
+   util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout, device,
+                              guest_output_paint_image_descriptor_set_layout_);
++  // After the swapchain and its presents (above).
++  for (VkSemaphore& semaphore : paint_context_.swapchain_present_semaphores) {
++    util::DestroyAndNullHandle(dfn.vkDestroySemaphore, device, semaphore);
++  }
+ }
+ 
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+@@ -1133,6 +1137,22 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+     return SurfacePaintConnectResult::kFailure;
+   }
+ 
++  // A present semaphore for each swapchain image (the old swapchain's last
++  // presents were awaited before it was destroyed).
++  while (paint_context_.swapchain_present_semaphores.size() <
++         paint_context_.swapchain_images.size()) {
++    VkSemaphoreCreateInfo semaphore_create_info = {};
++    semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
++    VkSemaphore semaphore;
++    if (dfn.vkCreateSemaphore(device, &semaphore_create_info, nullptr, &semaphore) !=
++        VK_SUCCESS) {
++      REXLOG_ERROR("VulkanPresenter: Failed to create a present semaphore");
++      paint_context_.DestroySwapchainAndVulkanSurface();
++      return SurfacePaintConnectResult::kFailure;
++    }
++    paint_context_.swapchain_present_semaphores.push_back(semaphore);
++  }
++
+   // Create the image views and the framebuffers.
+   assert_true(paint_context_.swapchain_framebuffers.empty());
+   paint_context_.swapchain_framebuffers.reserve(paint_context_.swapchain_images.size());
+@@ -2604,7 +2624,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     paint_context_.ui_setup_command_buffer_current_index = SIZE_MAX;
+   }
+   command_buffers[command_buffer_count++] = draw_command_buffer;
+-  VkSemaphore present_semaphore = paint_submission.present_semaphore();
++  VkSemaphore present_semaphore =
++      swapchain_image_index < paint_context_.swapchain_present_semaphores.size()
++          ? paint_context_.swapchain_present_semaphores[swapchain_image_index]
++          : paint_submission.present_semaphore();
+   VkSubmitInfo submit_info;
+   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   submit_info.pNext = nullptr;

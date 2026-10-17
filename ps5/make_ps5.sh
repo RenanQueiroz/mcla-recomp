@@ -202,6 +202,7 @@ rexglue-fullscreen-setting-ui-thread.patch src/ui/rex_app.cpp after the lock is 
 rexglue-presenter-ui-overlay.patch src/ui/vulkan/vulkan_presenter_ui_overlay.cpp CreateUIOverlayFromUIThread
 rexglue-frame-generation.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp FramePacerThread
 rexglue-vulkan-paint-pipeline-format.patch src/ui/vulkan/vulkan_presenter.cpp swapchain_effect_pipeline.swapchain_format =
+rexglue-vulkan-present-semaphore-per-image.patch src/ui/vulkan/vulkan_presenter.cpp swapchain_present_semaphores.push_back
 LATER
 
 # ---------------------------------------------------------------------------

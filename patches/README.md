@@ -1018,3 +1018,17 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 | Change | Files | Affects |
 |---|---|---|
 | The final pipeline's swapchain format recorded | `src/ui/vulkan/vulkan_presenter.cpp` | Vulkan (all platforms) |
+
+## rexglue-vulkan-present-semaphore-per-image.patch
+
+**Why.** A paint's submission signals a semaphore, and its `vkQueuePresentKHR` waits for it. The presenter had one per paint submission (three), so a paint could signal one again while the present three paints before still waited for it. Vulkan doesn't allow that (`VUID-vkQueueSubmit-pSignalSemaphores-00067`): nothing tells when a present's wait is done. It happened whenever the UI thread presents at the display's rate (the F4 overlay or the console open, FIFO), from Xenia's presenter.
+
+**What it changes.** One present semaphore per swapchain image, as the frame pacer's are. An image is acquired again only after its previous present, so its semaphore is free by then. They are kept across swapchains (a new swapchain only adds to them; the old one's presents are awaited before it's destroyed) and destroyed with the presenter.
+
+**Checked:** on fork main with both patches, with `display-switches.pad` and the validation layers on Vulkan with IMMEDIATE and with FIFO. `VUID-vkQueueSubmit-pSignalSemaphores-00067`, reported up to the layers' limit (10) in each run before, no longer appears. Both runs ended by themselves with swaps rising at every step. The layers' only other messages were the start-up `vkCmdEndQuery` ones from the GPU plugin, which were there before (Windows, RTX 5080).
+
+**Upstream:** with `rexglue-vulkan-paint-pipeline-format.patch`, in the Vulkan performance PR (PR 4).
+
+| Change | Files | Affects |
+|---|---|---|
+| A present semaphore per swapchain image | `include/rex/ui/vulkan/presenter.h`, `src/ui/vulkan/vulkan_presenter.cpp` | Vulkan (all platforms) |
