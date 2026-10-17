@@ -317,6 +317,10 @@ Costs and limits:
 
 **Not verified**: other HDR displays than the one the look was signed off on; switching Windows HDR on and off while the game runs; other GPUs; Linux (HDR10 on Wayland is planned; the presenter uses HDR10 where the surface offers it, but reads the display's levels only on Windows); the PS5, whose build applies the SDK patches but hasn't been compiled with them, and keeps SDR (no HDR rows in its menu).
 
+## The F4 settings overlay halves the game's frame rate while it is open (2026-10-17)
+
+While the SDK's F4 settings overlay is open, the UI thread presents at the monitor's rate (240 a second on a 240 Hz display) and the game itself falls from about 146 to 77 frames a second (Windows, D3D12 and Vulkan, native, uncapped, free roam; PresentMon and the presenter's log). It is the mechanism the achievement pop-ups had before `src/achievement_toast.h`: a dialog that repaints continuously keeps the UI thread painting, on the queue the GPU command thread submits to. Closing the overlay gives the rate back. Not fixed yet.
+
 ## Fullscreen switch hung the game with the F4 or console overlay open (fixed 2026-10-17)
 
 Switching FULLSCREEN in the pause menu's DISPLAY while the SDK's F4 settings overlay or console overlay was open hung the game for good. The SDK resized the window on the game's thread while holding the option registry's lock, and the window messages that sent waited for a UI thread that was itself waiting for that lock to draw the overlay. `patches/rexglue-fullscreen-setting-ui-thread.patch` makes the change on the UI thread instead (details and checks there). With no overlay open the switch worked before too, and HDR switches were never affected: an HDR toggle only looked like the cause because the pad that found it switched fullscreen right after one. `launcher/dev/scripts/display-switches.pad` covers HDR and fullscreen switches with and without either overlay.
