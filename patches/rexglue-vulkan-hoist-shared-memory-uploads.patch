@@ -213,7 +213,7 @@ index d49e9c3..1b8558b 100644
        REXGPU_ERROR(
            "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index fefb31e..56b2373 100644
+index fefb31e..dcbfa99 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -67,6 +67,12 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
@@ -271,12 +271,40 @@ index fefb31e..56b2373 100644
    }
  
    current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
-@@ -3295,6 +3317,64 @@ void VulkanCommandProcessor::EndRenderPass() {
+@@ -3295,6 +3317,92 @@ void VulkanCommandProcessor::EndRenderPass() {
    current_render_pass_ = VK_NULL_HANDLE;
    current_framebuffer_ = nullptr;
    in_render_pass_ = false;
 +  hoist_render_pass_ = false;
 +}
++
++// Shared memory uploads recorded before the render pass instead of ending it
++// (vulkan_hoist_shared_memory_uploads): ported from ForzaHorizon1-ReImagined's
++// patch 0036 (https://github.com/Dyotson/ForzaHorizon1-ReImagined,
++// patches/rexglue-sdk), extended to the byte-range uploads hot pages make,
++// under its licence:
++//
++//   MIT License
++//
++//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
++//
++//   Permission is hereby granted, free of charge, to any person obtaining a copy
++//   of this software and associated documentation files (the "Software"), to deal
++//   in the Software without restriction, including without limitation the rights
++//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++//   copies of the Software, and to permit persons to whom the Software is
++//   furnished to do so, subject to the following conditions:
++//
++//   The above copyright notice and this permission notice shall be included in all
++//   copies or substantial portions of the Software.
++//
++//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++//   SOFTWARE.
 +
 +bool VulkanCommandProcessor::CanHoistSharedMemoryUpload(
 +    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) const {
@@ -336,7 +364,7 @@ index fefb31e..56b2373 100644
  }
  
  VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
-@@ -4145,6 +4225,35 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4145,6 +4253,35 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        render_target_cache_->last_update_render_pass(),
        render_target_cache_->last_update_framebuffer());
  
@@ -372,7 +400,7 @@ index fefb31e..56b2373 100644
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
            PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
-@@ -5196,6 +5305,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5196,6 +5333,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      current_render_pass_ = VK_NULL_HANDLE;
      current_framebuffer_ = nullptr;
      in_render_pass_ = false;

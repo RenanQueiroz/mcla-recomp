@@ -139,7 +139,7 @@ index a56fb56..b9a9687 100644
    // written into the stream before (the shared memory uploads that
    // VulkanSharedMemory moves before the current render pass instead of ending
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 56b2373..cb64a07 100644
+index dcbfa99..e004daa 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -78,6 +78,17 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
@@ -169,10 +169,37 @@ index 56b2373..cb64a07 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -1937,8 +1950,143 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1937,8 +1950,170 @@ bool VulkanCommandProcessor::SetupContext() {
    return true;
  }
  
++// Command buffers recorded and submitted on a thread of their own
++// (vulkan_threaded_submission): ported from ForzaHorizon1-ReImagined's patch
++// 0038 (https://github.com/Dyotson/ForzaHorizon1-ReImagined,
++// patches/rexglue-sdk), under its licence:
++//
++//   MIT License
++//
++//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
++//
++//   Permission is hereby granted, free of charge, to any person obtaining a copy
++//   of this software and associated documentation files (the "Software"), to deal
++//   in the Software without restriction, including without limitation the rights
++//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++//   copies of the Software, and to permit persons to whom the Software is
++//   furnished to do so, subject to the following conditions:
++//
++//   The above copyright notice and this permission notice shall be included in all
++//   copies or substantial portions of the Software.
++//
++//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++//   SOFTWARE.
++
 +bool VulkanCommandProcessor::StartSubmissionThread() {
 +  if (submission_thread_) {
 +    return true;
@@ -313,7 +340,7 @@ index 56b2373..cb64a07 100644
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
  
-@@ -2962,6 +3110,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2962,6 +3137,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
          // presenter so it can submit its own commands for displaying it to the
          // queue, and also need to submit the release barrier.
          EndSubmission(true);
@@ -323,7 +350,7 @@ index 56b2373..cb64a07 100644
          return true;
        });
  
-@@ -3812,10 +3963,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3840,10 +4018,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // updates done previously must be performed again because the updates done
    // before the awaiting may be referencing objects destroyed by
    // CompletedSubmissionUpdated.
@@ -347,7 +374,7 @@ index 56b2373..cb64a07 100644
  
      // Process primitives.
      if (!primitive_processor_->Process(primitive_processing_result)) {
-@@ -5107,11 +5271,30 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5135,11 +5326,30 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      await_submission = GetCurrentSubmission() - 1;
    }
  
@@ -379,7 +406,7 @@ index 56b2373..cb64a07 100644
    size_t fences_awaited = 0;
    if (await_submission > submission_completed_) {
      // Await in a blocking way if requested.
-@@ -5285,6 +5468,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5313,6 +5523,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  
    if (!submission_open_) {
      submission_open_ = true;
@@ -387,7 +414,7 @@ index 56b2373..cb64a07 100644
  
      // Start a new deferred command buffer - will submit it to the real one in
      // the end of the submission (when async pipeline object creation requests
-@@ -5504,6 +5688,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5532,6 +5743,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        bind_sparse_info.pImageBinds = 0;
        bind_sparse_info.signalSemaphoreCount = 1;
        bind_sparse_info.pSignalSemaphores = &bind_sparse_semaphore;
@@ -397,7 +424,7 @@ index 56b2373..cb64a07 100644
        VkResult bind_sparse_result;
        {
          ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
-@@ -5527,68 +5714,97 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5555,68 +5769,97 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      assert_false(command_buffers_writable_.empty());
      CommandBuffer command_buffer = command_buffers_writable_.back();
