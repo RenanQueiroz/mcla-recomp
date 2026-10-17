@@ -65,7 +65,7 @@ kinds of changes on top of upstream's `main`:
     the UI thread (switching it with the F4 or console overlay open could hang
     the game), and UI overlay painting: every guest frame presented by the
     guest output thread while the presenter's own UI is shown, that UI drawn by
-    the UI thread into a layer put over the image (`present_ui_overlay`, off by
+    the UI thread into a layer put over the image (`present_ui_overlay`, on by
     default), and the groundwork of FSR 3.1 frame generation: FidelityFX's
     frame generation built on Windows, and on Vulkan a frame pacer that copies
     and presents each frame on a queue of its own (`frame_generation`, off by

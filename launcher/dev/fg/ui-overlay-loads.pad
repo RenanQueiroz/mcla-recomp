@@ -1,0 +1,76 @@
+# UI overlay painting's suspension through loads: F4 open over the title and the
+# career's load into the city, then over the load of a race (boot-to-race.pad).
+wait 8s
+key F4
+mark title_f4
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+key F4
+mark roam_f4_closed
+mark menu
+wait 1s 60f
+press start 4f
+wait 1500ms 90f
+# Pause -> Modes; Arcade; Ordered race; Sunset and Vine (the first of each).
+press rb 4f
+wait 1000ms 60f
+press a 4f
+wait 2500ms 150f
+press a 4f
+wait 1500ms 90f
+press a 4f
+wait 1500ms 90f
+# The race options start at the arcade defaults (the save copy's). A held
+# direction repeats after about 8 game updates, so presses last 4 updates
+# (one step each, capped or not) and the gaps are real time (the menus move
+# 30 times a second of real time).
+# Number of opponents 3 -> 7.
+press right 4f
+wait 300ms 18f
+press right 4f
+wait 300ms 18f
+press right 4f
+wait 300ms 18f
+press right 4f
+wait 300ms 18f
+# Difficulty Medium -> Easy, so the opponents stay in sight for longer.
+press down 4f
+wait 300ms 18f
+press left 4f
+wait 300ms 18f
+# Down to Weather (past Power ups: Off, Traffic: Normal).
+press down 4f
+wait 300ms 18f
+press down 4f
+wait 300ms 18f
+press down 4f
+wait 300ms 18f
+# Weather Dynamic -> Clear, Partly cloudy, Cloudy, Rainy.
+press right 4f
+wait 300ms 18f
+press right 4f
+wait 300ms 18f
+press right 4f
+wait 300ms 18f
+press right 4f
+wait 300ms 18f
+# Time of day Dynamic -> Midnight.
+press down 4f
+wait 300ms 18f
+press right 4f
+wait 800ms 48f
+# Start race. The game state is 3 (loading) from the arcade map until the race
+# is ready, so "roam" holds again when the intro starts.
+key F4
+mark load_f4
+wait 500ms
+press a 4f
+wait_until roam 120s
+mark race_intro
+wait 4s
+key F4
+mark race_f4_closed
+wait 3s
+mark end
+wait 1s

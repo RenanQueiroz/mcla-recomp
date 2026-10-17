@@ -169,7 +169,7 @@ index c355da2..4618570 100644
  
   private:
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index 5a6a72a..dbe3f1e 100644
+index 2c37992..df1cbea 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
 @@ -850,6 +850,18 @@ class Presenter {
@@ -191,14 +191,14 @@ index 5a6a72a..dbe3f1e 100644
   private:
    enum class PaintMode {
      // Don't paint at all.
-@@ -1130,6 +1142,7 @@ class Presenter {
+@@ -1135,6 +1147,7 @@ class Presenter {
    // Also with implicit vsync or presenting from the UI thread only (frame
    // generation, whose pacer presents).
    bool ui_overlay_paint_forced_ = false;
 +  bool frame_generation_wanted_ = false;
    // UI thread only.
    bool ui_overlay_paint_suspended_ = false;
-   // The steady clock (ns) at the last guest output refresh.
+   uint64_t ui_overlay_paint_suspended_ns_ = 0;
 diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
 index e1860c7..08749b8 100644
 --- a/include/rex/ui/vulkan/device.h
@@ -490,7 +490,7 @@ index 795337f..50656b5 100644
      vulkan/vulkan_provider.cpp
      vulkan/vulkan_submission_tracker.cpp
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 4144379..89fbb54 100644
+index 09669f1..9c630d3 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
 @@ -92,6 +92,13 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
@@ -504,10 +504,10 @@ index 4144379..89fbb54 100644
 +    .allowed({"off", "fsr"})
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +
- REXCVAR_DEFINE_BOOL(present_ui_overlay, false, "UI/Presenter",
+ REXCVAR_DEFINE_BOOL(present_ui_overlay, true, "UI/Presenter",
                      "The guest output thread presents every guest frame even while the "
                      "presenter's UI (overlays, dialogs, pop-ups) is shown: the UI thread draws "
-@@ -1118,10 +1125,21 @@ void Presenter::RequestUIPaintFromUIThread() {
+@@ -1212,10 +1219,21 @@ void Presenter::RequestUIPaintFromUIThread() {
  
  bool Presenter::InitializeCommonSurfaceIndependent() {
    HdrRegisterSettingCallbacks();

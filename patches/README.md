@@ -895,11 +895,13 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 
 ## rexglue-presenter-ui-overlay.patch
 
-**Why.** While any UI drawer is registered (an ImGui dialog such as the F4 settings overlay or the console, the achievement pop-up), the presenter paints from the UI thread. It presents at the display's rate and shows each guest frame when it gets to it, on the queue the GPU command thread submits to. With the F4 overlay open that halves the game's frame rate (`KNOWN-ISSUES.md`). Frame generation needs every guest frame painted by the guest output thread, in the queue right after the frame's own work. This patch adds that way of painting with the UI still shown: UI overlay painting.
+**Why.** While any UI drawer is registered (an ImGui dialog such as the F4 settings overlay or the console, the achievement pop-up), the SDK's presenter paints from the UI thread. It presents at the display's rate and shows each guest frame when it gets to it, on the queue the GPU command thread submits to. With the F4 overlay or the console open the game's frame rate fell by half or more (`KNOWN-ISSUES.md`). Frame generation needs every guest frame painted by the guest output thread, in the queue right after the frame's own work. This patch adds that way of painting with the UI still shown, UI overlay painting, and makes it the default.
 
 **What it adds.**
-- **`present_ui_overlay`** (off; restart), and frame generation, turn it on.
-  - **Where it applies:** where the guest output thread would present without UI too, so not with implicit vertical sync (Vulkan's FIFO) and not with `host_present_from_non_ui_thread` off. Frame generation forces it everywhere, since its pacer presents.
+- **`present_ui_overlay`** (on; restart). Frame generation turns it on too.
+  - **Where it applies:** where the guest output thread would present without UI too, so not with implicit vertical sync and not with `host_present_from_non_ui_thread` off. On Vulkan that means only with the IMMEDIATE or MAILBOX present mode; with FIFO alone the presenter paints as before. Frame generation forces it everywhere, since its pacer presents.
+  - **Not checked on the PS5 or Linux.** Both keep the previous way of painting where their swap chain offers only FIFO.
+  - **The UI's refresh rate:** the UI is shown with each guest frame, so it refreshes at the game's frame rate (30 a second at the launcher's default cap) instead of the display's. That is how a game's own menus behave; the mouse pointer, which Windows draws, stays smooth.
   - **The guest output thread** paints every guest frame, drawers or not.
   - **The UI thread** no longer presents. It keeps the connection (reconnecting when a paint finds it outdated, without taking the paint lock to find out). It draws the drawers into one of two overlay layers (8-bit, premultiplied, the swap chain's size) on a command list of its own, at its usual tick rate and again for each guest frame. The second is what the dialogs that ask for no repaints of their own (the achievement pop-up) rely on, as they do without the overlay.
   - **The layers** are made when the first drawer is shown, so a session with no presenter UI never allocates them.
@@ -907,22 +909,43 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
     - **Ordering:** the UI thread's drawing and the paints are on the same queue. On D3D12 the layer's transitions order them; on Vulkan, the layer render pass's dependencies.
     - **Nothing over the image** once the last drawer is gone, which covers a dialog that closed itself while being drawn.
 - **Fallbacks.**
-  - **No guest frame for 1 s while a drawer is registered,** also before the first guest frame (a hang on a load, a modal prompt, a long first boot): the UI thread paints and presents as before until a guest frame less than 100 ms old comes again. Logged both ways. `present_debug_stall_ms` makes the guest output thread sleep once, to test it.
+  - **No guest frame for 250 ms while a drawer is registered** (1 s with frame generation, whose pacer then stops presenting), also before the first guest frame: the UI thread paints and presents as before.
+    - **Resuming:** only once guest frames have come for 250 ms with no gap over 100 ms, so that a loading hitch can't switch it back and forth.
+    - **The switch back:** before the guest output thread paints again, the UI thread draws the overlay, then shows the latest guest frame with it if it hasn't been shown. That paint goes through the pacer with frame generation, and is thread r in the present log. So no frame goes without the UI or with the overlay from before the suspension.
+    - **Logs:** both switches are logged. `present_debug_stall_ms` makes the guest output thread sleep once, to test them.
   - **The overlay can't be drawn:** the UI thread paints as before until the next connection, logged.
 - **The present log** (`present_log=<csv>`, development):
   - one line per guest output refresh: the steady clock in ns, the refresh's number, 0 if not published;
-  - one line per paint: the refresh it showed, the painting thread, the result, its duration;
+  - one line per paint: the refresh it showed, the painting thread, the result, its duration, and the UI frame it showed (numbered by the UI thread whenever it draws the drawers, 0 for none);
+  - one line per suspension or resumption;
   - flushed about once a second.
 
-  `launcher/dev/presents.py` lines it up with the swaps of `frames.csv` and PresentMon's capture (`devrun.py --present-log --presentmon`). An implementation's pacer thread logs its presents as thread q (`LogPresentFromPacer`), with result -1 for a frame it dropped.
-- **Checked** with frame generation's phase 0, which is this way of painting (plus the pacer on Vulkan; `rexglue-frame-generation.patch` has the figures):
-  - every guest frame presented once with the F4 overlay open (146 a second, against 77 without it);
-  - the achievement pop-up shown;
-  - a dialog that closes itself from its own draw shown and then gone with nothing left behind (frames read back from the Vulkan pacer; `launcher/dev/fg/ui-overlay-check.pad`);
-  - the suspension during a forced 3 s stall;
-  - resizes and HDR switches.
+  `launcher/dev/presents.py` lines it up with the swaps of `frames.csv` and PresentMon's capture (`devrun.py --present-log --presentmon`).
+  - It counts the paints with UI per segment.
+  - Around each suspension and resumption it checks for paints without UI, paints with an older UI frame than one already shown, and guest frames shown twice after a resumption.
+  - An implementation's pacer thread logs its presents as thread q (`LogPresentFromPacer`), with result -1 for a frame it dropped.
+- **Checked** on Windows (RTX 5080, 1920x1080 window, 240 Hz display, PresentMon and the present log).
+  - **As the default:** on and off, `launcher/dev/fg/ui-overlay-eval.pad`, both APIs, native and 3×, HDR and SDR, with F4, the achievement pop-up and the console. With it on, every segment had presents per swap 1.0000 (one 1.0007), no guest frame never shown or shown twice, and no UI-thread paint.
 
-  On its own (`present_ui_overlay`) it is being evaluated as the default. It is not the default yet.
+    | Game frames a second, F4 / console open | On | Off (presents per swap) |
+    |---|---|---|
+    | D3D12 native, HDR / SDR | 146 / 146, 146 / 146 | 76 / 66 (x3.2 / x3.6), 77 / 60 (x3.1 / x4.0) |
+    | Vulkan native, HDR / SDR | 146 / 146, 146 / 146 | 60 / 101 (x4.0 / x2.4), 61 / 113 (x3.9 / x2.1) |
+    | D3D12 3×, HDR / SDR | 135 / 134, 142 / 145 | 134 / 135 (x1.5 / x1.5), 85 / 69 (x2.8 / x3.4) |
+    | Vulkan 3×, HDR / SDR | 125 / 124, 129 / 130 | 128 / 127, 133 / 134: half the guest frames never shown (x0.50), with the pop-up too |
+
+    - **No UI:** the same as off (40 s drive, native HDR): presents per swap 1.0000 on both, paint 0.20 / 0.21 ms (D3D12) and 0.17 / 0.17 ms (Vulkan), GPU 3.72 / 3.76 and 3.93 / 3.99 ms per frame.
+    - **The overlay's GPU cost:** 0.03 to 0.10 ms per game frame at 1080p, with a drawer open against just after it closed, where the GPU is the limit (3×).
+    - **At a 30 FPS cap:** the game held 30 either way. With F4 or the console open, off presented 8 times per game frame and kept the GPU 17 to 20% busy, against 12 to 13% on.
+    - **Shown correctly:** F4, the pop-up, the console and a dialog that closes itself from its own draw, captured on both APIs in HDR and SDR, the dialog gone after it closed with nothing left behind.
+  - **The suspension and resumption,** `launcher/dev/fg/ui-overlay-suspension.pad`, both APIs:
+    - with the console open from the start, before the first guest frame;
+    - with F4 open, a 400 ms hitch, four 300 ms hitches 150 ms apart (one suspension and one resumption, no switching back and forth), and a 3 s stall;
+    - the pause menu with F4 and the pop-up (no suspension: the game keeps drawing).
+
+    Around every switch the present log showed no paint without UI, none with an older UI frame and no guest frame shown twice after a resumption. In the 250 ms of steady frames before a resumption the UI thread paints as before, so some guest frames are shown twice there (15 to 20 after one hitch or stall, 42 to 51 over the series of four), none lost.
+  - **F4 open over the career's load into the city and a race's load,** `launcher/dev/fg/ui-overlay-loads.pad`, both APIs: no suspension (the game keeps drawing its loading screens). Every guest frame was presented once, with the UI.
+  - **With frame generation's pacer:** `launcher/dev/fg/fg-mode.pad`, below.
 
 | Change | Files | Affects |
 |---|---|---|
@@ -951,7 +974,7 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
   - **`frame_generation_dump=N`** (development) writes the next N presented images as PPM files.
 - **Checked** (Windows, RTX 5080, 1920x1080 window, uncapped, PresentMon and the present log, `launcher/dev/fg/fg-mode.pad`). On both APIs, with frame generation on:
   - **Every guest frame presented exactly once:** in steady driving, with the F4 overlay open and after a stall (146 a second with the overlay, against 77 on the default path).
-  - **The suspension:** during a forced 3 s stall the UI thread painted the overlay about 480 times, and the mode resumed afterwards.
+  - **The suspension** (after 1 s with frame generation): during a forced 3 s stall the UI thread painted the overlay about 540 times. The mode resumed 250 ms after guest frames came again, the frame at the switch going through the pacer, with no paint without UI around either switch.
   - **Reconnects:** each lost one guest frame per resize or HDR switch on D3D12, and up to five on Vulkan's fullscreen switches (the default path loses none at an HDR switch).
   - **No stale image after a switch:** the frames the Vulkan pacer presented right after fullscreen switches, read back, are whole frames at the new size.
   - **The pacer:**

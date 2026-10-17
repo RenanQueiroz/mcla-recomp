@@ -173,6 +173,7 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | The frame limiter waits at the swap, not before the update | frame-time standard deviation at a 60 cap 3.1 to 0.38 ms |
 | The 1 ms timer kept while the window is hidden | no 16 ms frames when minimized, covered or with the display asleep |
 | The achievement toast registered only while it shows | no repaints at the monitor's rate (240 a second on a 240 Hz display) |
+| The SDK's overlays (F4 settings, console, pop-ups) put over each game frame instead of presented by the UI thread | the game keeps its frame rate with them open: 146 a second instead of 60 to 113 (native, uncapped); they refresh at the game's rate |
 | The motorcycle's lean eased by elapsed time | matches the console at any frame rate (not verified by riding) |
 | The mouse pointer hidden during play | goes on controller input or after about 3 s still; back when the mouse moves |
 | Loading-screen pacing | uncapped free roam at native: mean 81 to 145 FPS; the fast intro speeds up only the start-up logos |

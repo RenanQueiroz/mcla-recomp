@@ -317,9 +317,15 @@ Costs and limits:
 
 **Not verified**: other HDR displays than the one the look was signed off on; switching Windows HDR on and off while the game runs; other GPUs; Linux (HDR10 on Wayland is planned; the presenter uses HDR10 where the surface offers it, but reads the display's levels only on Windows); the PS5, whose build applies the SDK patches but hasn't been compiled with them, and keeps SDR (no HDR rows in its menu).
 
-## The F4 settings overlay halves the game's frame rate while it is open (2026-10-17)
+## The F4 settings overlay halved the game's frame rate while it was open (fixed 2026-10-17)
 
-While the SDK's F4 settings overlay is open, the UI thread presents at the monitor's rate (240 a second on a 240 Hz display) and the game itself falls from about 146 to 77 frames a second (Windows, D3D12 and Vulkan, native, uncapped, free roam; PresentMon and the presenter's log). It is the mechanism the achievement pop-ups had before `src/achievement_toast.h`: a dialog that repaints continuously keeps the UI thread painting, on the queue the GPU command thread submits to. Closing the overlay gives the rate back. Not fixed yet.
+While the SDK's F4 settings overlay or console was open, the UI thread presented at the monitor's rate (240 a second on a 240 Hz display). The game itself fell from about 146 to 60 to 77 frames a second with F4 open, and to 60 to 113 with the console (Windows, D3D12 and Vulkan, native, uncapped, free roam; PresentMon and the presenter's log). It is the mechanism the achievement pop-ups had before `src/achievement_toast.h`: a dialog that repaints continuously keeps the UI thread painting, on the queue the GPU command thread submits to.
+
+`patches/rexglue-presenter-ui-overlay.patch` now draws the SDK's UI into a layer that is put over each game frame, so every frame is presented once with the overlays open (146 a second, both APIs; figures there).
+- **The overlays now refresh at the game's frame rate:** 30 a second at the launcher's default cap, instead of the display's. The mouse pointer stays smooth.
+- **The previous way of painting comes back** when no game frame comes for 250 ms with an overlay open (a hang, the time before the first frame), until frames have come steadily for 250 ms again.
+- **Not checked on the PS5 or Linux:** it applies only where presenting doesn't wait for vertical sync (on Vulkan, the IMMEDIATE or MAILBOX present mode); with FIFO alone the previous way is kept.
+- **`--present_ui_overlay=false`** restores the previous way.
 
 ## Fullscreen switch hung the game with the F4 or console overlay open (fixed 2026-10-17)
 

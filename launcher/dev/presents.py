@@ -7,15 +7,22 @@ A run folder may hold:
   present.csv    the SDK's present log (--present_log, src/ui/presenter.cpp): each
                  guest output refresh ("r", its number; 0 if not published) and each
                  paint ("p": the refresh it showed, the painting thread, the result,
-                 how long the paint took); in frame-generation mode on Vulkan the pacer's
-                 presents are "p" lines of thread q, and the GPU thread's paints only
-                 hand it frames
+                 how long the paint took, the UI frame it showed, 0 for none); in
+                 frame-generation mode on Vulkan the pacer's presents are "p" lines of
+                 thread q, and the GPU thread's paints only hand it frames; UI overlay
+                 painting's suspensions and resumptions ("s": 1 suspended, 0 resumed, 2
+                 resumed with no UI to show), and its resume paint (thread r, painted
+                 as the GPU thread paints)
   presentmon.csv PresentMon's capture of the process (--v2_metrics --qpc_time)
 
 Per segment between marks: swaps, refreshes, the refreshes presented once, more
-than once and never, the painting thread, and PresentMon's presents (how many,
-how many reached the display, their spacing). Shown frame rates and pacing come
-only from presents, never from swap times: the two can differ.
+than once and never, the painting thread, the paints with UI, and PresentMon's
+presents (how many, how many reached the display, their spacing, the GPU's busy
+time). Shown frame rates and pacing come only from presents, never from swap
+times: the two can differ. Then each suspension and resumption of UI overlay
+painting, with the paints around it: any without UI (while there is UI), any
+with an older UI frame than one already shown, and on resuming, any guest frame
+shown twice.
 
     python presents.py <run folder> [<run folder>...]
 """
@@ -59,7 +66,7 @@ def load_frames(folder):
 
 
 def load_present_log(folder):
-    refreshes, paints = [], []
+    refreshes, paints, switches = [], [], []
     path = folder / "present.csv"
     if not path.exists():
         return None
@@ -68,10 +75,51 @@ def load_present_log(folder):
             if row[0] == "r":
                 refreshes.append((int(row[1]), int(row[2])))
             elif row[0] == "p":
-                paints.append((int(row[1]), int(row[2]), row[3], int(row[4]), int(row[5])))
+                # The UI column is missing in logs of older builds.
+                ui = int(row[6]) if len(row) > 6 else None
+                paints.append((int(row[1]), int(row[2]), row[3], int(row[4]), int(row[5]), ui))
+            elif row[0] == "s":
+                switches.append((int(row[1]), int(row[2])))
         except (ValueError, IndexError):
             pass
-    return refreshes, paints
+    return refreshes, paints, switches
+
+
+def report_switches(t0, paints, switches):
+    """UI overlay painting's suspensions and resumptions, with the paints around each."""
+    if not switches:
+        return
+    print(f"  UI overlay painting: suspended {sum(1 for _, k in switches if k == 1)} times, "
+          f"resumed {sum(1 for _, k in switches if k != 1)}")
+    shown = [x for x in paints if x[2] != "q"]
+    for t, kind in switches:
+        name = {1: "suspended", 0: "resumed", 2: "resumed (no UI)"}.get(kind, str(kind))
+        window = [x for x in shown if t - 100_000_000 <= x[0] <= t + 300_000_000]
+        with_ui = kind != 2
+        blank = older = 0
+        newest = 0
+        for _, _, _, _, _, ui in window:
+            if ui is None:
+                continue
+            if with_ui and ui == 0 and newest:
+                blank += 1
+            if ui and ui < newest:
+                older += 1
+            newest = max(newest, ui or 0)
+        twice = 0
+        if kind != 1:
+            seen = set()
+            for pt, n, thread, result, _, _ in window:
+                if pt >= t and n and result in (0, 1):
+                    twice += n in seen
+                    seen.add(n)
+        threads = {}
+        for _, _, thread, _, _, _ in window:
+            threads[thread] = threads.get(thread, 0) + 1
+        at = f"{(t - t0) / 1e9:7.2f} s" if t0 else str(t)
+        print(f"    {name:>16} at {at}: paints from 100 ms before to 300 ms after "
+              f"{dict(sorted(threads.items()))}; without UI {blank}, with an older UI frame {older}"
+              + (f", guest frames shown twice after it {twice}" if kind != 1 else ""))
 
 
 def load_presentmon(folder):
@@ -138,7 +186,7 @@ def report(folder):
         line = f"  {name:>12}: {seconds:6.1f} s  swaps {n_swaps / seconds:7.2f}/s"
         details = []
         if log:
-            refreshes, paints = log
+            refreshes, paints, _ = log
             seg_r = [n for t, n in refreshes if begin < t <= end]
             published = [n for n in seg_r if n]
             presented = {}
@@ -146,10 +194,16 @@ def report(folder):
             paint_us = []
             # With a pacer, what was presented is what it presented (and the UI
             # thread's own paints while frame-generation mode is suspended).
-            pacer = any(thread == "q" for _, _, thread, _, _ in paints)
+            pacer = any(thread == "q" for _, _, thread, _, _, _ in paints)
             drops = 0
-            for t, n, thread, result, us in paints:
-                presents = thread != "g" if pacer else True
+            ui_paints = with_ui = 0
+            for t, n, thread, result, us, ui in paints:
+                # With a pacer, the GPU thread's paints and the resume paint (r)
+                # hand it frames; the UI thread's own paints present.
+                presents = thread not in ("g", "r") if pacer else True
+                if begin < t <= end and thread != "q" and ui is not None:
+                    ui_paints += 1
+                    with_ui += ui > 0
                 # PaintResult for threads g and u (presented, presented suboptimal);
                 # VkResult for the pacer (VK_SUCCESS, VK_SUBOPTIMAL_KHR), -1 for a frame
                 # it dropped.
@@ -169,7 +223,9 @@ def report(folder):
                      f"{len(shown)} ({100.0 * len(shown) / max(1, len(published)):.2f}%), never {never}, "
                      f"more than once {repeats}")
             details.append(f"paints: GPU thread {threads.get('g', 0)}, UI thread {threads.get('u', 0)}"
+                           + (f" (resume {threads['r']})" if threads.get("r") else "")
                            + (f", pacer presents {threads.get('q', 0)}, drops {drops}" if pacer else "")
+                           + (f", with UI {with_ui} of {ui_paints}" if ui_paints else "")
                            + "; "
                            f"paint us {percentiles(paint_us)}")
         if pm:
@@ -195,6 +251,8 @@ def report(folder):
         print(line)
         for d in details:
             print(f"  {'':>12}  {d}")
+    if log:
+        report_switches(t0, log[1], log[2])
 
 
 if __name__ == "__main__":

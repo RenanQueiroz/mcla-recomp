@@ -77,7 +77,7 @@ index 835a8f8..c355da2 100644
    // (ConnectOrReconnectPaintingToSurfaceFromUIThread,
    // DisconnectPaintingFromSurfaceFromUIThreadImpl) by the thread doing it, as
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index 2145477..5a6a72a 100644
+index 2145477..2c37992 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
 @@ -468,6 +468,8 @@ class Presenter {
@@ -124,7 +124,7 @@ index 2145477..5a6a72a 100644
   private:
    enum class PaintMode {
      // Don't paint at all.
-@@ -955,9 +985,16 @@ class Presenter {
+@@ -955,9 +985,21 @@ class Presenter {
      // There's no need to limit the frame rate manually if there is vertical
      // sync in the presentation already as that might result in inconsistent
      // frame pacing and potentially skipped vertical sync intervals.
@@ -134,15 +134,20 @@ index 2145477..5a6a72a 100644
 -           !surface_paint_connection_has_implicit_vsync_;
 +           (!surface_paint_connection_has_implicit_vsync_ || IsUIOverlayPaintModeActive());
    }
-+  // UI overlay painting, the UI thread's part of PaintFromUIThread.
-+  void PaintFromUIThreadInUIOverlayPaintMode(bool force_paint, bool draw_ui);
++  // UI overlay painting, the UI thread's part of PaintFromUIThread; resuming: the
++  // first since the suspension ended.
++  void PaintFromUIThreadInUIOverlayPaintMode(bool force_paint, bool draw_ui, bool resuming);
++  // Draws the drawers into the overlay for the next paints (false if the
++  // implementation couldn't; the UI thread then paints the UI itself).
++  bool RenderUIOverlayForPaintsFromUIThread();
 +  // Suspends UI overlay painting while the guest output thread has been silent
-+  // for a while with drawers to show, and resumes it when guest frames come again.
++  // for a while with drawers to show, and resumes it once guest frames have
++  // been coming steadily again.
 +  void UpdateUIOverlayPaintSuspensionFromUIThread(bool draw_ui);
    void UpdateUITicksNeededFromUIThread();
    void WaitForUITickFromUIThread();
    // May be called from any thread.
-@@ -1077,6 +1114,33 @@ class Presenter {
+@@ -1077,6 +1119,40 @@ class Presenter {
    // Accessible only by refreshing, whether the last refresh contained an image
    // rather than being blank.
    bool guest_output_active_last_refresh_ = false;
@@ -164,8 +169,15 @@ index 2145477..5a6a72a 100644
 +  bool ui_overlay_paint_forced_ = false;
 +  // UI thread only.
 +  bool ui_overlay_paint_suspended_ = false;
-+  // The steady clock (ns) at the last guest output refresh.
++  uint64_t ui_overlay_paint_suspended_ns_ = 0;
++  // The steady clock (ns) at the last guest output refresh, and since when guest
++  // output refreshes have been coming with no long gap between them.
 +  std::atomic<uint64_t> last_refresh_ns_{0};
++  std::atomic<uint64_t> guest_output_steady_since_ns_{0};
++  // The present log: UI frames drawn so far (UI thread), and the one in the
++  // overlay last published.
++  uint64_t ui_frames_drawn_ = 0;
++  std::atomic<uint64_t> ui_overlay_ui_frame_{0};
 +
 + protected:
 +  // Set by the UI thread when it has drawn the overlay with drawers, cleared when
@@ -514,7 +526,7 @@ index b422ef4..0a47a27 100644
    // Initialize connection-independent parts of the painting context.
  
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 1da5824..4144379 100644
+index 1da5824..09669f1 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
 @@ -15,6 +15,9 @@
@@ -527,15 +539,17 @@ index 1da5824..4144379 100644
  #include <thread>
  #include <utility>
  
-@@ -89,6 +92,104 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
+@@ -89,6 +92,125 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
                      "Enable output dithering in the final present pass")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
-+REXCVAR_DEFINE_BOOL(present_ui_overlay, false, "UI/Presenter",
++REXCVAR_DEFINE_BOOL(present_ui_overlay, true, "UI/Presenter",
 +                    "The guest output thread presents every guest frame even while the "
 +                    "presenter's UI (overlays, dialogs, pop-ups) is shown: the UI thread draws "
 +                    "it into a layer that the guest output thread's paint puts over the image, "
-+                    "instead of presenting at the display's rate itself")
++                    "instead of presenting at the display's rate itself (so the UI refreshes "
++                    "at the game's frame rate). Only where presents don't wait for vertical "
++                    "sync (on Vulkan, with the IMMEDIATE or MAILBOX present mode)")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +
 +REXCVAR_DEFINE_INT32(present_debug_stall_ms, 0, "UI/Presenter",
@@ -577,12 +591,23 @@ index 1da5824..4144379 100644
 +                 static_cast<unsigned long long>(refresh));
 +    FlushPeriodically(time);
 +  }
-+  void Paint(uint64_t time, uint64_t refresh, char thread, int result, uint64_t paint_ns) {
++  // ui: the number of the UI frame shown (counted by the UI thread whenever it
++  // draws the drawers, into the image or into the overlay), 0 for none.
++  void Paint(uint64_t time, uint64_t refresh, char thread, int result, uint64_t paint_ns,
++             uint64_t ui = 0) {
 +    std::lock_guard<std::mutex> lock(mutex_);
-+    std::fprintf(file_, "p,%llu,%llu,%c,%d,%llu\n", static_cast<unsigned long long>(time),
++    std::fprintf(file_, "p,%llu,%llu,%c,%d,%llu,%llu\n", static_cast<unsigned long long>(time),
 +                 static_cast<unsigned long long>(refresh), thread, result,
-+                 static_cast<unsigned long long>(paint_ns / 1000));
++                 static_cast<unsigned long long>(paint_ns / 1000),
++                 static_cast<unsigned long long>(ui));
 +    FlushPeriodically(time);
++  }
++  // UI overlay painting suspended (1), resumed (0), or resumed with no UI to
++  // show (2).
++  void Suspension(uint64_t time, int kind) {
++    std::lock_guard<std::mutex> lock(mutex_);
++    std::fprintf(file_, "s,%llu,%d\n", static_cast<unsigned long long>(time), kind);
++    std::fflush(file_);
 +  }
 +  ~PresentLog() {
 +    if (file_) {
@@ -608,7 +633,7 @@ index 1da5824..4144379 100644
 +      return;
 +    }
 +    std::setvbuf(file_, nullptr, _IOFBF, 1 << 20);
-+    std::fprintf(file_, "kind,ns,refresh,thread,result,paint_us\n");
++    std::fprintf(file_, "kind,ns,refresh,thread,result,paint_us,ui\n");
 +    REXLOG_INFO("present_log: {}", path);
 +  }
 +  // With mutex_ held.
@@ -627,22 +652,30 @@ index 1da5824..4144379 100644
 +// thread column; is_in_ui_thread_paint_ belongs to the UI thread, which may be
 +// drawing the overlay meanwhile with UI overlay painting).
 +thread_local bool tls_in_guest_output_thread_paint = false;
++// The UI thread's paint of a guest frame with the overlay when UI overlay
++// painting resumes (thread r in the present log: painted as the guest output
++// thread paints, through a pacer if there is one).
++thread_local bool tls_in_ui_overlay_resume_paint = false;
++
++// UI overlay painting's suspension: guest output refreshes count as steady while
++// no gap between two is longer than this.
++constexpr uint64_t kGuestOutputSteadyGapNs = 100'000'000;
 +}  // namespace
 +
  REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
                      "Allow overscan cutoff based on safe area settings")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-@@ -522,6 +623,18 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+@@ -522,6 +644,18 @@ void Presenter::PaintFromUIThread(bool force_paint) {
    // connection has become outdated and has requested the UI thread to
    // reconnect).
    bool draw_ui = !ui_drawers_.empty();
 +  if (ui_overlay_paint_mode_) {
-+    // While suspended, and for the paint that resumes it (so the guest frame
-+    // that ended the silence is shown), the UI thread paints as without it.
-+    bool was_suspended = ui_overlay_paint_suspended_;
++    // While suspended, the UI thread paints as without it.
++    const bool was_suspended = ui_overlay_paint_suspended_;
 +    UpdateUIOverlayPaintSuspensionFromUIThread(draw_ui);
-+    if (IsUIOverlayPaintModeActive() && !was_suspended) {
-+      PaintFromUIThreadInUIOverlayPaintMode(force_paint, draw_ui);
++    if (IsUIOverlayPaintModeActive()) {
++      PaintFromUIThreadInUIOverlayPaintMode(force_paint, draw_ui,
++                                            was_suspended && !ui_overlay_paint_suspended_);
 +      return;
 +    }
 +    // Painted here with the UI: the guest output thread puts no overlay on.
@@ -651,22 +684,26 @@ index 1da5824..4144379 100644
    bool do_paint = force_paint || draw_ui;
    // Reset ui_thread_paint_requested_ unconditionally also, regardless of
    // whether the UI needs to be drawn - the flag may be set to try reconnecting,
-@@ -626,10 +739,124 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+@@ -626,10 +760,197 @@ void Presenter::PaintFromUIThread(bool force_paint) {
    }
  }
  
-+void Presenter::PaintFromUIThreadInUIOverlayPaintMode([[maybe_unused]] bool force_paint,
-+                                                       bool draw_ui) {
++void Presenter::PaintFromUIThreadInUIOverlayPaintMode(bool force_paint, bool draw_ui,
++                                                       bool resuming) {
 +  // is_in_ui_thread_paint_ has been set by PaintFromUIThread. The guest output
 +  // thread paints every guest frame, so a forced or requested paint isn't done
-+  // here: only the connection is kept (the guest output thread can't reconnect),
-+  // and the drawers go into the overlay.
-+  ui_thread_paint_requested_.store(false, std::memory_order_relaxed);
++  // here (except once when resuming from the suspension): only the connection
++  // is kept (the guest output thread can't reconnect), and the drawers go into
++  // the overlay.
++  const bool paint_requested =
++      ui_thread_paint_requested_.exchange(false, std::memory_order_relaxed) || force_paint;
 +  // Set by the guest output thread's paint (under the paint lock) when it finds
 +  // the connection outdated; the state itself is read only once the UI thread
 +  // owns painting.
 +  const bool outdated = surface_paint_connection_outdated_.exchange(false, std::memory_order_acq_rel);
 +  bool request_repaint_immediately = false;
++  bool draw_overlay = draw_ui;
++  PaintResult paint_result = PaintResult::kNotPresented;
 +  if (outdated || paint_mode_ != PaintMode::kGuestOutputThreadImmediately) {
 +    // Take the painting over (waiting for a paint in progress) only for this;
 +    // a guest frame refreshed meanwhile is requested from the UI thread, which
@@ -681,27 +718,53 @@ index 1da5824..4144379 100644
 +        request_repaint_immediately = true;
 +      }
 +    }
++    if (resuming &&
++        surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable) {
++      // Back from the suspension, where the UI thread painted the UI into the
++      // image itself. Before the guest output thread paints again, the overlay
++      // is drawn (none of its frames goes without the UI, or with the overlay
++      // from before the suspension), and the latest guest frame, if it hasn't
++      // been shown, is shown with it from here, as the guest output thread
++      // would paint it.
++      SetPaintModeFromUIThread(PaintMode::kUIThreadOnRequest);
++      if (draw_ui) {
++        draw_overlay = false;
++        if (!RenderUIOverlayForPaintsFromUIThread()) {
++          request_repaint_immediately = true;
++        }
++      } else {
++        ui_overlay_active_.store(false, std::memory_order_release);
++      }
++      if (paint_requested && IsUIOverlayPaintModeActive()) {
++        tls_in_ui_overlay_resume_paint = true;
++        paint_result = PaintAndPresent(false);
++        tls_in_ui_overlay_resume_paint = false;
++        if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
++          request_repaint_immediately = true;
++        }
++      }
++    }
 +    SetPaintModeFromUIThread(GetDesiredPaintModeFromUIThread(
 +        surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable));
 +  }
-+  if (draw_ui && paint_mode_ != PaintMode::kNone) {
++  if (draw_overlay && paint_mode_ != PaintMode::kNone) {
 +    // As fast as the UI thread would paint (the overlay isn't presented here).
 +    WaitForUITickFromUIThread();
-+    const bool rendered = RenderUIOverlayFromUIThread();
-+    if (!rendered) {
-+      // The UI thread paints as before (presenting the UI) until the next
-+      // connection.
-+      ui_overlay_render_failed_ = true;
-+      REXLOG_WARN("Presenter: the UI overlay couldn't be drawn; the UI thread paints the UI");
++    if (!RenderUIOverlayForPaintsFromUIThread()) {
 +      request_repaint_immediately = true;
 +    }
-+    // A dialog that closed itself while drawn left its last frame in the
-+    // layer: with no drawers left, nothing is put over the image anymore.
-+    ui_overlay_active_.store(rendered && !ui_drawers_.empty(), std::memory_order_release);
 +  } else if (!draw_ui) {
 +    ui_overlay_active_.store(false, std::memory_order_release);
 +  }
 +  is_in_ui_thread_paint_ = false;
++  if (paint_result == PaintResult::kGpuLostExternally ||
++      paint_result == PaintResult::kGpuLostResponsible) {
++    if (host_gpu_loss_callback_) {
++      host_gpu_loss_callback_(paint_result == PaintResult::kGpuLostResponsible, true);
++    }
++    // The loss callback might have destroyed the presenter.
++    return;
++  }
 +  bool request_repaint_at_tick = false;
 +  if (paint_mode_ != PaintMode::kNone) {
 +    if (request_ui_paint_after_current_ui_thread_paint_ && !ui_drawers_.empty()) {
@@ -713,6 +776,23 @@ index 1da5824..4144379 100644
 +  if (request_repaint_at_tick || request_repaint_immediately) {
 +    RequestPaintOrConnectionRecoveryViaWindow(request_repaint_immediately);
 +  }
++}
++
++bool Presenter::RenderUIOverlayForPaintsFromUIThread() {
++  const uint64_t ui_frame = ++ui_frames_drawn_;
++  const bool rendered = RenderUIOverlayFromUIThread();
++  if (!rendered) {
++    // The UI thread paints as before (presenting the UI) until the next
++    // connection.
++    ui_overlay_render_failed_ = true;
++    REXLOG_WARN("Presenter: the UI overlay couldn't be drawn; the UI thread paints the UI");
++  } else {
++    ui_overlay_ui_frame_.store(ui_frame, std::memory_order_relaxed);
++  }
++  // A dialog that closed itself while drawn left its last frame in the layer:
++  // with no drawers left, nothing is put over the image anymore.
++  ui_overlay_active_.store(rendered && !ui_drawers_.empty(), std::memory_order_release);
++  return rendered;
 +}
 +
 +bool Presenter::IsUIOverlayPaintModeActive() const {
@@ -727,25 +807,43 @@ index 1da5824..4144379 100644
 +}
 +
 +void Presenter::UpdateUIOverlayPaintSuspensionFromUIThread(bool draw_ui) {
-+  constexpr uint64_t kSilentNs = 1'000'000'000;
-+  constexpr uint64_t kAliveNs = 100'000'000;
++  // No guest frame for this long with UI to show (the time before the first
++  // guest frame, a long load, a hang): the UI thread paints the UI itself, at
++  // the display's rate. Frame generation, whose pacer then stops presenting,
++  // keeps 1 s.
++  constexpr uint64_t kSilentNs = 250'000'000;
++  constexpr uint64_t kSilentForcedNs = 1'000'000'000;
++  // Resumed once guest frames have been coming for this long with no gap over
++  // kGuestOutputSteadyGapNs, so that a loading hitch doesn't switch back and
++  // forth.
++  constexpr uint64_t kSteadyNs = 250'000'000;
 +  const uint64_t now = PresentLog::Now();
-+  const uint64_t last = last_refresh_ns_.load(std::memory_order_relaxed);
++  const uint64_t last = last_refresh_ns_.load(std::memory_order_acquire);
++  const uint64_t steady_since = guest_output_steady_since_ns_.load(std::memory_order_relaxed);
 +  if (!ui_overlay_paint_suspended_) {
-+    // Something to show while the guest output thread is stuck or gone (a modal
-+    // prompt, the settings overlay during a hang): the UI thread paints again.
 +    // Before the first guest frame, silent since the presenter was set up.
 +    const uint64_t since = last ? last : ui_overlay_paint_start_ns_;
-+    if (draw_ui && now > since + kSilentNs) {
++    const uint64_t silent_ns = ui_overlay_paint_forced_ ? kSilentForcedNs : kSilentNs;
++    if (draw_ui && now > since + silent_ns) {
 +      ui_overlay_paint_suspended_ = true;
++      ui_overlay_paint_suspended_ns_ = now;
 +      ui_overlay_active_.store(false, std::memory_order_release);
 +      REXLOG_INFO("Presenter: no guest frame for {} ms with UI to show; UI overlay painting "
 +                  "suspended",
 +                  (now - since) / 1'000'000);
++      if (PresentLog::Get().enabled()) {
++        PresentLog::Get().Suspension(now, 1);
++      }
 +    }
-+  } else if (!draw_ui || (last && now < last + kAliveNs)) {
++  } else if (!draw_ui || (last && now < last + kGuestOutputSteadyGapNs && steady_since &&
++                          now >= steady_since + kSteadyNs)) {
 +    ui_overlay_paint_suspended_ = false;
-+    REXLOG_INFO("Presenter: UI overlay painting resumed");
++    REXLOG_INFO("Presenter: UI overlay painting resumed after {} ms{}",
++                (now - ui_overlay_paint_suspended_ns_) / 1'000'000,
++                draw_ui ? "" : " (no UI to show)");
++    if (PresentLog::Get().enabled()) {
++      PresentLog::Get().Suspension(now, draw_ui ? 0 : 2);
++    }
 +  }
 +}
 +
@@ -772,11 +870,19 @@ index 1da5824..4144379 100644
 +      }
 +    }
 +  }
-+  last_refresh_ns_.store(PresentLog::Now(), std::memory_order_relaxed);
++  {
++    // For UI overlay painting's suspension.
++    const uint64_t refresh_ns = PresentLog::Now();
++    const uint64_t previous_refresh_ns = last_refresh_ns_.load(std::memory_order_relaxed);
++    if (!previous_refresh_ns || refresh_ns - previous_refresh_ns > kGuestOutputSteadyGapNs) {
++      guest_output_steady_since_ns_.store(refresh_ns, std::memory_order_relaxed);
++    }
++    last_refresh_ns_.store(refresh_ns, std::memory_order_release);
++  }
    GuestOutputProperties& writable_properties =
        guest_output_properties_[guest_output_mailbox_writable_];
    writable_properties.frontbuffer_width = frontbuffer_width;
-@@ -637,6 +864,8 @@ bool Presenter::RefreshGuestOutput(
+@@ -637,6 +958,8 @@ bool Presenter::RefreshGuestOutput(
    writable_properties.display_aspect_ratio_x = display_aspect_ratio_x;
    writable_properties.display_aspect_ratio_y = display_aspect_ratio_y;
    writable_properties.is_8bpc = false;
@@ -785,7 +891,7 @@ index 1da5824..4144379 100644
    bool is_active = writable_properties.IsActive();
    if (is_active) {
      if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_, frontbuffer_width,
-@@ -645,6 +874,9 @@ bool Presenter::RefreshGuestOutput(
+@@ -645,6 +968,9 @@ bool Presenter::RefreshGuestOutput(
        // If failed to refresh, don't send the currently writable image to the
        // mailbox as it may be in an undefined state. Don't disable the guest
        // output either though because the failure may be something transient.
@@ -795,7 +901,7 @@ index 1da5824..4144379 100644
        return false;
      }
      guest_output_active_last_refresh_ = true;
-@@ -652,10 +884,14 @@ bool Presenter::RefreshGuestOutput(
+@@ -652,10 +978,14 @@ bool Presenter::RefreshGuestOutput(
      // Request presenting a blank image if there was a true image previously,
      // but not now.
      if (!guest_output_active_last_refresh_) {
@@ -810,7 +916,7 @@ index 1da5824..4144379 100644
  
    // Make the new image the next to present on the host (the "ready" one),
    // replacing the one already specified as the next (dropping it instead of
-@@ -673,6 +909,9 @@ bool Presenter::RefreshGuestOutput(
+@@ -673,6 +1003,9 @@ bool Presenter::RefreshGuestOutput(
        last_acquired_and_ready,
        (last_acquired_and_ready & 3) | (guest_output_mailbox_writable_ << 2),
        std::memory_order_acq_rel, std::memory_order_relaxed)) {}
@@ -820,7 +926,7 @@ index 1da5824..4144379 100644
    // Now, it's known that `ready == writable` on the host presentation side.
    // Take the next `writable` with this assumption about its current value in
    // mind.
-@@ -696,6 +935,9 @@ bool Presenter::RefreshGuestOutput(
+@@ -696,6 +1029,9 @@ bool Presenter::RefreshGuestOutput(
  
    // Trigger the presentation on the host.
    PaintResult paint_result = PaintResult::kNotPresented;
@@ -830,7 +936,7 @@ index 1da5824..4144379 100644
    {
      std::lock_guard<std::mutex> paint_mode_mutex_lock(paint_mode_mutex_);
      switch (paint_mode_) {
-@@ -709,9 +951,17 @@ bool Presenter::RefreshGuestOutput(
+@@ -709,9 +1045,17 @@ bool Presenter::RefreshGuestOutput(
        case PaintMode::kGuestOutputThreadImmediately:
          // Both painting and window paint requesting are accessible.
          if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable) {
@@ -848,7 +954,7 @@ index 1da5824..4144379 100644
            }
          }
          break;
-@@ -868,6 +1118,15 @@ void Presenter::RequestUIPaintFromUIThread() {
+@@ -868,6 +1212,15 @@ void Presenter::RequestUIPaintFromUIThread() {
  
  bool Presenter::InitializeCommonSurfaceIndependent() {
    HdrRegisterSettingCallbacks();
@@ -864,7 +970,7 @@ index 1da5824..4144379 100644
    {
      std::lock_guard<std::mutex> config_lock(guest_output_paint_config_mutex_);
      guest_output_paint_config_ = BuildGuestOutputPaintConfigFromCVar();
-@@ -926,6 +1185,8 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
+@@ -926,6 +1279,8 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
    // inactive.
    const GuestOutputProperties& properties = guest_output_properties_[mailbox_index];
    mailbox_index_or_max_if_inactive_out = properties.IsActive() ? mailbox_index : UINT32_MAX;
@@ -873,7 +979,7 @@ index 1da5824..4144379 100644
    if (properties_out) {
      *properties_out = properties;
    }
-@@ -1392,6 +1653,11 @@ Presenter::PaintMode Presenter::GetDesiredPaintModeFromUIThread(bool is_paintabl
+@@ -1392,6 +1747,11 @@ Presenter::PaintMode Presenter::GetDesiredPaintModeFromUIThread(bool is_paintabl
      // lifecycle.
      return PaintMode::kNone;
    }
@@ -885,7 +991,7 @@ index 1da5824..4144379 100644
    if (!REXCVAR_GET(host_present_from_non_ui_thread)) {
      return PaintMode::kUIThreadOnRequest;
    }
-@@ -1483,6 +1749,9 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
+@@ -1483,6 +1843,9 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
      }
    }
  
@@ -895,24 +1001,35 @@ index 1da5824..4144379 100644
    if (update_paint_mode_to_desired) {
      SetPaintModeFromUIThread(GetDesiredPaintModeFromUIThread(
          surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable));
-@@ -1582,7 +1851,16 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+@@ -1582,7 +1945,27 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
  Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
    assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
    assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
 +  const bool log_present = PresentLog::Get().enabled();
 +  const uint64_t paint_start = log_present ? PresentLog::Now() : 0;
++  // The UI frame this paint shows: drawn into the image now, or the overlay's.
++  uint64_t ui_frame = 0;
++  if (log_present) {
++    if (execute_ui_drawers) {
++      ui_frame = ui_drawers_.empty() ? 0 : ++ui_frames_drawn_;
++    } else if (ui_overlay_paint_mode_ && IsUIOverlayActive()) {
++      ui_frame = ui_overlay_ui_frame_.load(std::memory_order_relaxed);
++    }
++  }
    PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
 +  if (log_present) {
 +    const uint64_t paint_end = PresentLog::Now();
 +    PresentLog::Get().Paint(paint_end,
 +                            last_consumed_refresh_number_.load(std::memory_order_relaxed),
-+                            tls_in_guest_output_thread_paint ? 'g' : 'u', int(result),
-+                            paint_end - paint_start);
++                            tls_in_guest_output_thread_paint ? 'g'
++                            : tls_in_ui_overlay_resume_paint ? 'r'
++                                                             : 'u',
++                            int(result), paint_end - paint_start, ui_frame);
 +  }
    switch (result) {
      case PaintResult::kPresented:
        surface_paint_connection_was_optimal_at_successful_paint_ = true;
-@@ -1593,10 +1871,12 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+@@ -1593,10 +1976,12 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
        // very beginning.
        if (surface_paint_connection_was_optimal_at_successful_paint_) {
          surface_paint_connection_state_ = SurfacePaintConnectionState::kConnectedOutdated;

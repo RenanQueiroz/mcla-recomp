@@ -1,0 +1,56 @@
+# UI overlay painting's suspension (250 ms) and resumption (after 250 ms of
+# steady guest frames): the console open from the start, before the first guest
+# frame, through the title and the load into the city; then in the city with F4
+# open, guest output stalls: a 400 ms hitch, four 300 ms hitches 150 ms apart
+# (must not switch back and forth), a 3 s stall; then the pause menu with F4
+# and a toast.
+key Backtick
+mark console_boot
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark roam
+wait 3s
+key Backtick
+mark console_closed
+wait 3s
+key F4
+mark f4
+wait 3s
+set present_debug_stall_ms 400
+mark hitch400
+wait 2s
+set present_debug_stall_ms 300
+mark hitches300
+wait 450ms
+set present_debug_stall_ms 301
+wait 450ms
+set present_debug_stall_ms 302
+wait 450ms
+set present_debug_stall_ms 303
+wait 3s
+set present_debug_stall_ms 3000
+mark stall3s
+wait 6s
+key F4
+mark f4_closed
+wait 2s
+press start 4f
+mark pause
+wait 3s
+key F4
+mark pause_f4
+wait 3s
+toast
+mark pause_toast
+wait 4s
+key F4
+mark pause_f4_closed
+wait 2s
+press b 4f
+mark unpaused
+wait 3s
+mark end
+wait 1s
