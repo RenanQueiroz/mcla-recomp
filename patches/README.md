@@ -932,7 +932,9 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
     | D3D12 native, HDR / SDR | 146 / 146, 146 / 146 | 76 / 66 (x3.2 / x3.6), 77 / 60 (x3.1 / x4.0) |
     | Vulkan native, HDR / SDR | 146 / 146, 146 / 146 | 60 / 101 (x4.0 / x2.4), 61 / 113 (x3.9 / x2.1) |
     | D3D12 3×, HDR / SDR | 135 / 134, 142 / 145 | 134 / 135 (x1.5 / x1.5), 85 / 69 (x2.8 / x3.4) |
-    | Vulkan 3×, HDR / SDR | 125 / 124, 129 / 130 | 128 / 127, 133 / 134: half the guest frames never shown (x0.50), with the pop-up too |
+    | Vulkan 3×, HDR / SDR | 122 / 121, 127 / 125 | 124 / 122 (x1.5 / x1.5), 54 / 130 (x4.4 / x1.5; with the console 45 frames never shown) |
+
+    The Vulkan 3× row is with `rexglue-vulkan-paint-pipeline-format.patch`. Before it, off showed only half the guest frames with any drawer, the pop-up too, and the GPU thread's paint took 4.2 ms at 3× (now 0.08 ms in HDR, 0.16 ms in SDR, and frame generation's paint for the pacer 0.06 ms).
 
     - **No UI:** the same as off (40 s drive, native HDR): presents per swap 1.0000 on both, paint 0.20 / 0.21 ms (D3D12) and 0.17 / 0.17 ms (Vulkan), GPU 3.72 / 3.76 and 3.93 / 3.99 ms per frame.
     - **The overlay's GPU cost:** 0.03 to 0.10 ms per game frame at 1080p, with a drawer open against just after it closed, where the GPU is the limit (3×).
