@@ -66,10 +66,12 @@ kinds of changes on top of upstream's `main`:
     the game), and UI overlay painting: every guest frame presented by the
     guest output thread while the presenter's own UI is shown, that UI drawn by
     the UI thread into a layer put over the image (`present_ui_overlay`, on by
-    default), and the groundwork of FSR 3.1 frame generation: FidelityFX's
-    frame generation built on Windows, and on Vulkan a frame pacer that copies
-    and presents each frame on a queue of its own (`frame_generation`, off by
-    default; no frames are generated yet).
+    default), and FSR 3.1 frame generation in development (`frame_generation`,
+    off by default, no menu row yet): FidelityFX's frame generation built on
+    Windows; on Direct3D 12 with HDR and FSR anti-aliasing a frame generated
+    between every two, presented through AMD's frame interpolation swap chain;
+    on Vulkan a frame pacer that copies and presents each frame on a queue of
+    its own (not generating yet).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
   edits the game's settings in `mcla.toml` (shared with the pause menu) and

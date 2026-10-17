@@ -195,12 +195,14 @@ def report(folder):
             # With a pacer, what was presented is what it presented (and the UI
             # thread's own paints while frame-generation mode is suspended).
             pacer = any(thread == "q" for _, _, thread, _, _, _ in paints)
+            # The refreshes a pacer (or D3D12's frame generation callback) presented: the GPU
+            # thread's and the resume (r) paints of those only hand it frames.
+            paced = {n for _, n, thread, _, _, _ in paints if thread == "q"}
             drops = 0
             ui_paints = with_ui = 0
             for t, n, thread, result, us, ui in paints:
-                # With a pacer, the GPU thread's paints and the resume paint (r)
-                # hand it frames; the UI thread's own paints present.
-                presents = thread not in ("g", "r") if pacer else True
+                # The UI thread's own paints present.
+                presents = not (thread in ("g", "r") and n in paced)
                 if begin < t <= end and thread != "q" and ui is not None:
                     ui_paints += 1
                     with_ui += ui > 0

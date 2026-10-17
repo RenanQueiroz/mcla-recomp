@@ -1,0 +1,32 @@
+# Frame generation phase 1 (rexglue-frame-generation.patch): the real and
+# generated frames dumped while driving, turning and standing still (Direct3D 12,
+# --frame_generation=fsr --mcla_anti_aliasing=fsr --frame_generation_dump_path=<folder>;
+# launcher/dev/fg/fgcheck.py checks them).
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.6
+wait 3s
+mark drive
+set frame_generation_dump 8
+wait 2s
+set frame_generation_dump 0
+stick lx 0.6
+wait 1500ms
+mark turn
+set frame_generation_dump 8
+wait 2s
+set frame_generation_dump 0
+stick lx 0
+release all
+wait 4s
+mark still
+set frame_generation_dump 6
+wait 2s
+set frame_generation_dump 0
+mark end
+wait 1s

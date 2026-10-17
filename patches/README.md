@@ -39,6 +39,10 @@ git apply ../../patches/rexglue-temporal-aa-shaders-vk.patch
 git apply ../../patches/rexglue-fullscreen-setting-ui-thread.patch
 git apply ../../patches/rexglue-presenter-ui-overlay.patch
 git apply ../../patches/rexglue-frame-generation.patch
+git apply ../../patches/rexglue-vulkan-paint-pipeline-format.patch
+git apply ../../patches/rexglue-vulkan-present-semaphore-per-image.patch
+git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
+git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).
@@ -957,10 +961,37 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 
 ## rexglue-frame-generation.patch
 
-**Why.** AMD FSR 3.1 frame generation, an interpolated frame between every two the game renders. This is phase 0 of the plan: the build of FidelityFX's frame generation and the way frames are presented for it, without generating any yet. Windows only until frame generation is checked elsewhere (phase 5).
+**Why.** AMD FSR 3.1 frame generation, an interpolated frame between every two the game renders. In development, in phases:
+- **Phase 0:** the build of FidelityFX's frame generation and the way frames are presented for it.
+- **Phase 1 (this):** generation on Direct3D 12 with HDR output and FSR anti-aliasing.
+- **Still to come:** SDR, MSAA and anti-aliasing off (phase 2), Vulkan (3), the settings (4), Linux and the PS5 (5), low latency (6).
+
+Windows only until frame generation is checked elsewhere (phase 5). There is no menu row yet: `frame_generation` is a development option.
 
 **What it adds.**
-- **`frame_generation`** (off or fsr; restart, Windows). fsr turns on UI overlay painting (`rexglue-presenter-ui-overlay.patch`) and, on Vulkan, the frame pacer. Nothing is generated yet.
+- **`frame_generation`** (off or fsr; restart, Windows). fsr turns on UI overlay painting (`rexglue-presenter-ui-overlay.patch`). On Direct3D 12 it generates frames (below); on Vulkan it turns on the frame pacer, which doesn't generate yet.
+- **Direct3D 12 generation** (`src/ui/d3d12/d3d12_presenter_frame_generation.cpp`, `src/graphics/d3d12/frame_generation.cpp`).
+  - **AMD's frame interpolation swap chain** (ffx-api's, from `amd_fidelityfx_dx12.dll` next to the executable) replaces DXGI's when the connection is made.
+    - It presents on a queue of its own, half a frame apart, with its pacing (hybrid spin on, its fence waited with `WaitForSingleObject` when far off).
+    - Its `Present` for a frame waits until the previous frame's presents are composed: the guest output thread never runs more than a frame ahead, and no frame is dropped.
+    - Everything it presents is composed by the presenter's callback, from the presenter's images; its own back buffers stay unused while generating.
+  - **The inputs**, given by the refresher with each guest frame:
+    - the HUD-less image: `hdr_refresh_fg.cs`, the HDR refresher with one more output, the scene's code values before the UI, times 0.75 with a shoulder above 0.8 (optical flow keeps an 8-bit luma), as FP16;
+    - the depth, copied at the anti-aliasing draw (the UI may resolve into its memory before the swap);
+    - FSR anti-aliasing's motion vectors, jitter, camera and cut detection.
+  - **Per frame**, on the guest output thread right after the frame's work: the presenter's overlay is copied, generation is prepared, `ffxConfigure` takes the frame's ID and the callbacks, and the swap chain's `Present` calls the generation callback on that thread.
+  - **The generation callback:** FSR 3.1 frame interpolation from the previous HUD-less image to this one, then the generated frame's compose: `hdr_refresh_fg.cs` again, from the generated code values, with this frame's UI layer and levels. Both on AMD's command list for the game queue.
+  - **The generation size:** the guest output's, or the window's where that is smaller (3x in a 1080p window: generated and composed at 1920x1080, the HUD-less image averaged down to it, the UI layer averaged over each pixel's footprint).
+  - **The present callback:** real frames exactly as without generation (the refresher's output, scaled bilinearly), generated frames from their compose, the presenter's overlay over both.
+  - **Not generated** (the real frame shown in the generated one's place, and the next generation starts afresh):
+    - frames without the game's 3D scene (no tone map: menus drawn alone, logos, videos);
+    - the UI separation's fallbacks (the difference mask, the whole frame);
+    - the HDR debug views and the test pattern;
+    - frames without motion vectors (FSR anti-aliasing off: phase 2);
+    - the UI thread's paints (while the guest output thread is silent, generation is off on AMD's swap chain, and its presents copy the back buffer).
+  - **Presents:** tear-free by default (vertical sync, with variable refresh rate where the display has it); `frame_generation_present=tearing` lets them tear.
+  - **SDR:** presented through AMD's swap chain without generation (phase 2).
+  - **Development:** `frame_generation_dump=N` writes the next N frames' real and generated images (HDR10 codes, the generation size); `launcher/dev/fg/fgcheck.py` checks them. `frame_generation_debug`: 1 FidelityFX's tear lines, 2 its debug view, 3 only the generated frames presented.
 - **FidelityFX on Windows:**
   - **The provider:** the frame generation provider in the ffx-api runtimes (`FFX_API_ENABLE_FRAMEGEN_PROVIDER`), with frame interpolation and optical flow. Linux and the PS5 build upscaling only, as before, so their FSR anti-aliasing can't be lost to code they don't use yet.
   - **The Vulkan stub:** on Vulkan the frame interpolation swapchain is replaced by a stub (`cmake/fidelityfx/ffx_provider_framegenerationswapchain_vk_stub.cpp`). rexglue drives frame generation itself, and AMD's Vulkan swapchain at this commit doesn't build with Clang.
@@ -974,7 +1005,32 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
   - **Reconnects:** a resize or HDR switch pauses the pacer and drops the frames it hadn't taken. Every dropped frame is logged with why, counted per connection, and appears in the present log.
   - **No pacer for a connection** (no queue of its own that can present to the surface, or a swap chain that can't be copied into): it paints as without frame generation, logged. UI overlay painting isn't forced, so implicit vsync stays with the UI thread, and MAILBOX stays allowed. There is no colour-attachment fallback for such swap chains yet.
   - **`frame_generation_dump=N`** (development) writes the next N presented images as PPM files.
-- **Checked** (Windows, RTX 5080, 1920x1080 window, uncapped, PresentMon and the present log, `launcher/dev/fg/fg-mode.pad`). On both APIs, with frame generation on:
+- **Checked, phase 1** (Direct3D 12, HDR, FSR anti-aliasing; Windows, RTX 5080, 1920x1080 window, 240 Hz display, PresentMon and the present log).
+  - **Every guest frame presented, with one generated frame each:**
+    - native: 120 frames rendered and 240 shown a second (the display's rate, tear-free), presents per swap 2.0000, every real frame shown once, between presents 4.17 ms (p1 3.98, p99 4.35), all displayed;
+    - the race benchmark (`race.pad`): presents per swap 2.0000 through the menus, the race's loading and intro and the race (119 rendered, 238 shown);
+    - with F4, the achievement pop-up and the console open (`launcher/dev/fg/ui-overlay-eval.pad`): the same, and the overlay over every frame (captured).
+  - **3x in the 1920x1080 window** (GPU-bound, 40 s drive), generated at 1920x1080:
+
+    | | Rendered a second | Shown | GPU per rendered frame |
+    |---|---|---|---|
+    | Without generation | 118 | 118 | 8.48 ms |
+    | Generated at the guest output's size (3840x2160) | 83 | 166 | 12.02 ms |
+    | Generated at the window's size | 91 | 183 | 10.93 ms |
+
+    Shown frames are tear-free at 240 Hz without variable refresh rate here: displayed for 5.4 ms (p1 3.3, p99 8.2).
+  - **The generated frames** (`fgcheck.py` on dumps, `launcher/dev/fg/fgdump-d3d12.pad`):
+    - standing still: 100% of the pixels equal in both neighbours kept within 2 codes at native, 99.1 to 99.7% at 3x (compared at the window's size);
+    - driving and turning: at most 0.03% of the pixels outside what the neighbours hold within 6 pixels, so no garbage or wrong colours.
+    - Scaling the generated frame up from the window's size to compose it at 4K and back down left fine detail visibly softer than the real frames (only 82 to 84% kept); composing at the generation size fixed it.
+  - **Transitions** (`fg-mode.pad`):
+    - the 1 s suspension and its resumption;
+    - fullscreen and back: 5 to 7 frames not shown per switch;
+    - HDR off: presented without generation at 146 a second, presents per swap 1.0;
+    - HDR on again.
+  - **The Direct3D 12 debug layer** over the same: no errors. AMD's swap chain waits on fence value 0 at times (FENCE_ZERO_WAIT warnings).
+  - **Frame generation off:** the default path is unchanged (presents per swap 1.0000), and Vulkan's frame-generation mode still presents every frame once.
+- **Checked, phase 0** (Windows, RTX 5080, 1920x1080 window, uncapped, PresentMon and the present log, `launcher/dev/fg/fg-mode.pad`). On both APIs, with frame generation on (D3D12's then without generation):
   - **Every guest frame presented exactly once:** in steady driving, with the F4 overlay open and after a stall (146 a second with the overlay, against 77 on the default path).
   - **The suspension** (after 1 s with frame generation): during a forced 3 s stall the UI thread painted the overlay about 540 times. The mode resumed 250 ms after guest frames came again, the frame at the switch going through the pacer, with no paint without UI around either switch.
   - **Reconnects:** each lost one guest frame per resize or HDR switch on D3D12, and up to five on Vulkan's fullscreen switches (the default path loses none at an HDR switch).
@@ -987,7 +1043,10 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 
 | Change | Files | Affects |
 |---|---|---|
-| `frame_generation`; frame generation's flag in the presenter | `include/rex/ui/presenter.h`, `src/ui/presenter.cpp`, `include/rex/ui/d3d12/d3d12_presenter.h` | Windows |
+| `frame_generation`, `frame_generation_present`, `frame_generation_debug`; frame generation's flag in the presenter | `include/rex/ui/presenter.h`, `src/ui/presenter.cpp` | Windows |
+| Direct3D 12 generation: AMD's swap chain, the context, preparation, the callbacks, the dumps | `include/rex/ui/d3d12/d3d12_presenter.h`, `src/ui/d3d12/d3d12_presenter.cpp`, `src/ui/d3d12/d3d12_presenter_frame_generation.cpp`, `src/ui/CMakeLists.txt` | Direct3D 12, with `frame_generation` on |
+| Direct3D 12 inputs and the generated frame's compose | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp`, `src/graphics/d3d12/frame_generation.cpp`, `src/graphics/d3d12/temporal_aa.cpp`, `src/graphics/CMakeLists.txt` | Direct3D 12, with `frame_generation` on |
+| The HUD-less output and the compose (`hdr_refresh_fg.cs`), the HUD-less downscale, compiled | `src/graphics/shaders/hdr_refresh.cs.xesl`, `src/graphics/shaders/hdr_refresh_fg.cs.xesl`, `src/graphics/shaders/fg_hudless_downscale.cs.xesl`, their headers in `src/graphics/shaders/bytecode/d3d12_5_1/` and `src/graphics/shaders/vulkan_spirv/` | Direct3D 12 (the SPIR-V for phase 3) |
 | FidelityFX's frame generation provider and its build | `cmake/fidelityfx/CMakeLists.txt`, `cmake/fidelityfx/ffx_provider_framegenerationswapchain_vk_stub.cpp`, `cmake/rexglue_fsr.cmake`, `thirdparty/fidelityfx-api/` | where FSR is built (the provider on Windows) |
 | The create flags and their check against the prebuilt set | `src/graphics/frame_generation_fsr.h`, `src/graphics/vulkan/temporal_aa.cpp` | Vulkan |
 | The pacer's queue and timeline semaphores | `include/rex/ui/vulkan/device.h`, `include/rex/ui/vulkan/functions/device_1_2_khr_timeline_semaphore.inc`, `src/ui/vulkan/vulkan_device.cpp` | Vulkan, Windows, with `frame_generation` on |

@@ -21,6 +21,8 @@ SHADERS = {
     "hdr_ui_composite.ps": UI,
     "ui_overlay_composite.ps": UI,
     "hdr_refresh.cs": GPU,
+    "hdr_refresh_fg.cs": GPU,
+    "fg_hudless_downscale.cs": GPU,
     "hdr_fullscreen.vs": GPU,
     "hdr_underlay_restore.ps": GPU,
     "hdr_scene_mcla.cs": GPU,
@@ -34,7 +36,8 @@ SHADERS = {
 # Built for Vulkan only.
 VULKAN_ONLY = {"hdr_rt_copy.cs", "hdr_rt_copy_4xmsaa.cs"}
 INCLUDES = [("src/ui/shaders/hdr_output.xesli", "ui/shaders"),
-            ("src/graphics/shaders/hdr_rt_copy.cs.xesl", "gpu/shaders")]
+            ("src/graphics/shaders/hdr_rt_copy.cs.xesl", "gpu/shaders"),
+            ("src/graphics/shaders/hdr_refresh.cs.xesl", "gpu/shaders")]
 
 
 def words_header(name, words, src_name):
