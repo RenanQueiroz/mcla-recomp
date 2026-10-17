@@ -1,0 +1,56 @@
+# Regression for HDR and fullscreen switched during play (the pause menu's
+# DISPLAY rows set the same options, from the game's thread as the dev pad does),
+# with no host overlay, then with the F4 settings overlay open, then with the
+# console overlay open: both overlays read options from the UI thread every
+# frame, which deadlocked the fullscreen switch before
+# rexglue-fullscreen-setting-ui-thread.patch. Pass: the run ends by itself and
+# every mark's swap count is higher than the one before.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+set hdr on
+mark plain
+wait 3s
+set hdr off
+mark plain_hdr_off
+wait 3s
+set hdr on
+mark plain_hdr_on
+wait 3s
+set fullscreen true
+mark plain_fullscreen
+wait 3s
+set fullscreen false
+mark plain_windowed
+wait 3s
+key F4
+mark settings
+wait 3s
+set hdr off
+mark settings_hdr_off
+wait 3s
+set hdr on
+mark settings_hdr_on
+wait 3s
+set fullscreen true
+mark settings_fullscreen
+wait 3s
+set fullscreen false
+mark settings_windowed
+wait 3s
+key F4
+key Backtick
+mark console
+wait 3s
+set fullscreen true
+mark console_fullscreen
+wait 3s
+set fullscreen false
+mark console_windowed
+wait 3s
+key Backtick
+mark closed
+wait 3s
+mark end

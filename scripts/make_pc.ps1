@@ -259,6 +259,7 @@ try {
         @{ Patch = "rexglue-hdr-scene-mcla.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrPrepareScene" }
         @{ Patch = "rexglue-temporal-aa.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaJitterNdcOffset" }
         @{ Patch = "rexglue-temporal-aa-shaders-vk.patch"; File = "thirdparty\fidelityfx-shaders-vk\rexglue_fsr_shaders_vk.h"; Adds = "REXGLUE_FSR_SHADERS_VK_FLAGS" }
+        @{ Patch = "rexglue-fullscreen-setting-ui-thread.patch"; File = "src\ui\rex_app.cpp"; Adds = "after the lock is released" }
     )
     foreach ($later in $laterPatches) {
         # A patch that adds its file is not in while the file isn't there.

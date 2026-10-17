@@ -36,6 +36,7 @@ git apply ../../patches/rexglue-hdr-ui-layer.patch
 git apply ../../patches/rexglue-hdr-scene-mcla.patch
 git apply ../../patches/rexglue-temporal-aa.patch
 git apply ../../patches/rexglue-temporal-aa-shaders-vk.patch
+git apply ../../patches/rexglue-fullscreen-setting-ui-thread.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).
@@ -875,3 +876,15 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 | Change | Files | Affects |
 |---|---|---|
 | The prebuilt shaders, their flags, licence and README | `thirdparty/fidelityfx-shaders-vk/` | Linux, the PS5 (Windows only with `REXGLUE_FSR_PREBUILT_SHADERS=ON`) |
+
+## rexglue-fullscreen-setting-ui-thread.patch
+
+**Why.** The SDK applies a change of `fullscreen` in an option change callback, and those run on whatever thread sets the option, inside `SetFlagByName`, with the option registry's lock held. The game's pause menu sets it from the game's thread (FULLSCREEN in DISPLAY), as the dev pad does from its own. Changing the window from there sends window messages to the UI thread and waits for them (SDL's `SetWindowLongW`). While the F4 settings overlay or the console overlay is open, the UI thread reads options as it draws (`SettingsDialog::OnDraw`, `cvar::Query`), so it waited for the lock the setting thread held, and the game hung: the GPU thread stopped too, in its per-frame `GetFlagByName`. Found with a stack dump of the hung game (2026-10-17). Upstream's SDK has the same callback (`src/ui/rex_app.cpp`, v0.10.0).
+
+**What it changes.** The callback hands the change to the UI thread (`CallInUIThreadDeferred`), which makes it after the lock is released, as the game's `mcla_hide_cursor` callback already does. Changes are applied in the order they were made, and SDL's window functions are now called on the thread they belong to. The other option callbacks (`log_level`, `hdr`, `hdr_sdr_eotf`, `mcla_display_gamma`, `mcla_hide_cursor`) only store values or post to the UI thread, so they stay as they are; running every callback after the lock is released would let two threads' changes to one option apply out of order.
+
+**Checked** with `launcher/dev/scripts/display-switches.pad` (Windows, RTX 5080): HDR off and on, then fullscreen on and off, with no overlay, with the F4 settings overlay open, and with the console overlay open. It passed on D3D12, on Vulkan (IMMEDIATE) and on Vulkan with FIFO_RELAXED, where the UI thread paints every frame: every run ended by itself, swaps kept rising at every step, and every fullscreen switch resized the swap chain. Before the patch the same switch with the F4 overlay open hung D3D12 every time. With no overlay open it worked before as well.
+
+| Change | Files | Affects |
+|---|---|---|
+| `fullscreen` applied on the UI thread | `src/ui/rex_app.cpp` | all platforms with a window |

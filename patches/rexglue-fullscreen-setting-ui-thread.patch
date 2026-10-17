@@ -1,0 +1,27 @@
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index e72e3db..1263a8e 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -353,10 +353,19 @@ bool ReXApp::SetupPresentation() {
+   if (REXCVAR_GET(fullscreen)) {
+     window_->SetFullscreen(true);
+   }
++  // The callback runs on the thread that sets the option (the game's pause
++  // menu, a script), holding the option registry's lock. Changing the window
++  // from there sends window messages to the UI thread and waits for them, so a
++  // UI thread waiting for that lock (the settings or console overlay reading
++  // options as they draw) hung the game, and SDL's window functions belong on
++  // the UI thread anyway: the change is made there, after the lock is released.
+   rex::cvar::RegisterChangeCallback("fullscreen", [this](std::string_view, std::string_view value) {
+-    if (window_) {
+-      window_->SetFullscreen(rex::string::from_string<bool>(value, false));
+-    }
++    const bool fullscreen = rex::string::from_string<bool>(value, false);
++    app_context().CallInUIThreadDeferred([this, fullscreen] {
++      if (window_) {
++        window_->SetFullscreen(fullscreen);
++      }
++    });
+   });
+   window_->Open();
+ 

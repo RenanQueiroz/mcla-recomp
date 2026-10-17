@@ -198,6 +198,7 @@ rexglue-hdr-ui-layer.patch src/graphics/command_processor.cpp HdrBeforeResolve
 rexglue-hdr-scene-mcla.patch src/graphics/command_processor.cpp HdrPrepareScene
 rexglue-temporal-aa.patch include/rex/graphics/command_processor.h TaaJitterNdcOffset
 rexglue-temporal-aa-shaders-vk.patch thirdparty/fidelityfx-shaders-vk/rexglue_fsr_shaders_vk.h REXGLUE_FSR_SHADERS_VK_FLAGS
+rexglue-fullscreen-setting-ui-thread.patch src/ui/rex_app.cpp after the lock is released
 LATER
 
 # ---------------------------------------------------------------------------
