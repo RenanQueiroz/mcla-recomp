@@ -25,6 +25,7 @@
 #include <rex/filesystem.h>
 #include <rex/filesystem/vfs.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/runtime.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
@@ -284,13 +285,20 @@ void MclaApp::ApplyPcDefaults() {
   //   uploaded when drawn from instead of being write-protected again after
   //   every fault;
   // - an EDRAM of 4,096 tiles, so that the scene fits in one tile with 2x MSAA
-  //   (mcla_single_tile, src/render_perf.cpp).
+  //   (mcla_single_tile, src/render_perf.cpp);
+  // - on Windows, HDR output whenever the display is in HDR mode (the SDK's
+  //   own default stays off, for other titles). Not on Linux, where the
+  //   display's HDR state isn't read yet, so auto would never turn it on
+  //   (on would), nor on the PS5, whose host doesn't apply these.
   constexpr std::pair<const char*, const char*> kDefaults[] = {
       {"clear_memory_page_state", "false"},
       {"execute_unclipped_draw_vs_on_cpu", "true"},
       {"shared_memory_hot_page_faults", "4"},
       {"shared_memory_hot_page_ms", "10000"},
       {"edram_tiles", "4096"},
+#if REX_PLATFORM_WIN32
+      {"hdr", "auto"},
+#endif
   };
   for (const auto& [name, value] : kDefaults) {
     const bool user_set = rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault;

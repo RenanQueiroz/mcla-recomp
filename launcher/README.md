@@ -117,7 +117,8 @@ as if it had.
 *HDR*, *HDR peak brightness*, *HDR paper white* and *HDR highlights* are the
 game's HDR output (`hdr`, `hdr_peak_nits`, `hdr_paper_white_nits`,
 `mcla_hdr_highlights`; the pause menu's DISPLAY rows of the same names; all
-change during play). Below them the launcher shows what Windows reports for
+change during play; *HDR* is *Auto* unless `mcla.toml` says otherwise, the
+game's default on Windows). Below them the launcher shows what Windows reports for
 the main display when it opens: whether HDR is on, the peak the Windows HDR
 Calibration app measured (DXGI's `IDXGIOutput6::GetDesc1`, as the game reads
 it) and the SDR content brightness (DisplayConfig's SDR white level), which

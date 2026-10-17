@@ -65,12 +65,13 @@ static class GameSettings
         [new("Follow the controller", "auto"), new("Xbox", "xbox"), new("PlayStation", "playstation")], "auto");
 
     // HDR output (the SDK's presenter; the game's scene in HDR from
-    // rexglue-hdr-scene-mcla.patch). Auto turns it on when Windows has HDR
+    // rexglue-hdr-scene-mcla.patch). Auto, the game's default on Windows
+    // (src/mcla_app.cpp, ApplyPcDefaults), turns it on when Windows has HDR
     // on for the display; the levels' Auto is what Windows reports (the HDR
     // Calibration app's peak, the SDR content brightness slider). All change
     // during play too, in the pause menu's DISPLAY settings.
     public static readonly GameSetting Hdr = new("hdr", "HDR",
-        [new("Off", "off"), new("Auto (when Windows HDR is on)", "auto"), new("On", "on")], "off");
+        [new("Off", "off"), new("Auto (when Windows HDR is on)", "auto"), new("On", "on")], "auto");
     public static readonly GameSetting HdrPeak = new("hdr_peak_nits", "HDR peak brightness",
         [new("Auto (what the display reports)", 0L), new("400 nits", 400L), new("600 nits", 600L),
          new("800 nits", 800L), new("1000 nits", 1000L), new("1500 nits", 1500L), new("2000 nits", 2000L)], 0L);

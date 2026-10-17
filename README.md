@@ -58,7 +58,7 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `mcla_fps` (0 for uncapped) | DISPLAY › FPS TARGET |
 | Display | Fullscreen, Windowed | `fullscreen` = `true` or `false` | DISPLAY › FULLSCREEN |
 | Display gamma | TV (as on the console), PC monitor (sRGB, brighter shadows) | `mcla_display_gamma` = `tv` or `pc` | DISPLAY › DISPLAY GAMMA |
-| HDR | Off, Auto (when Windows HDR is on), On | `hdr` = `off`, `auto` or `on` | DISPLAY › HDR |
+| HDR | Off, Auto (when Windows HDR is on; the default), On | `hdr` = `off`, `auto` or `on` | DISPLAY › HDR |
 | HDR peak brightness | Auto (what the display reports), 400 to 2000 nits | `hdr_peak_nits` (0 for auto) | DISPLAY › PEAK BRIGHTNESS |
 | HDR paper white | Auto (Windows' SDR content brightness), 100 to 300 nits | `hdr_paper_white_nits` (0 for auto) | DISPLAY › PAPER WHITE |
 | HDR highlights | Normal, Bright, Brighter, Brightest | `mcla_hdr_highlights` = `1`, `1.5`, `2` or `3` | DISPLAY › HIGHLIGHTS |
@@ -71,7 +71,7 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 
 *Display gamma* is the ramp the picture goes through on its way to the screen, as the console's display hardware applied it. The game writes sRGB-encoded colour; *TV*, the default, is the console's ramp for an HDTV (BT.709), which on a PC monitor makes the shadows darker than the game drew them (8-bit levels 64, 128 and 192 show as 48, 115 and 185). *PC monitor* leaves the game's output as it is, as an sRGB monitor expects. It changes during play, from the launcher or the pause menu ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#display-gamma-for-pc-monitors-2026-10-16)).
 
-*HDR* shows the game in HDR on a display in HDR mode (Windows' *Use HDR*): the game's HUD, menus and movies at the SDR level, as on the desktop, and its scene from its own tone map's inputs, the same as in SDR up to the game's white and brighter above it (lights at night, the sun, a dusk sky, headlights). It is off by default for now. *Auto* turns it on whenever Windows has HDR on for the display. *Peak brightness* and *paper white* default to what Windows reports: the peak the Windows HDR Calibration app measured, and the *SDR content brightness* slider, where the game's white lands; set the peak by hand if your display's HDR mode clips earlier (the launcher shows what Windows reports). *Highlights* sets how far above the game's white bright things go. DISPLAY GAMMA keeps its meaning in HDR. All of them change during play ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#hdr-output-2026-10-16)).
+*HDR* shows the game in HDR on a display in HDR mode (Windows' *Use HDR*): the game's HUD, menus and movies at the SDR level, as on the desktop, and its scene from its own tone map's inputs, the same as in SDR up to the game's white and brighter above it (lights at night, the sun, a dusk sky, headlights). The default on Windows is *Auto*, which turns it on whenever Windows has HDR on for the display (with HDR off in Windows the game stays SDR as before); the look was signed off on an ASUS ROG Swift PG32UCDP (WOLED, Gaming HDR mode, Uniform Brightness on), 2026-10-16. *Off* keeps SDR always. *Peak brightness* and *paper white* default to what Windows reports: the peak the Windows HDR Calibration app measured, and the *SDR content brightness* slider, where the game's white lands; set the peak by hand if your display's HDR mode clips earlier (the launcher shows what Windows reports). *Highlights* sets how far above the game's white bright things go. DISPLAY GAMMA keeps its meaning in HDR. All of them change during play ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#hdr-output-2026-10-16)).
 
 The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. The game turns vsync off by itself (the pause menu's DISPLAY › VSYNC turns it on): with it on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly.
 
@@ -220,7 +220,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | HUD at the console's pace | `--mcla_ui_hud_rate=0` advances it with every frame | Default 30 a second; also 60 or 120. The launcher's *HUD updates*, and DISPLAY › HUD UPDATES in the pause menu. |
 | Mouse pointer hidden during play | `--mcla_hide_cursor=false` | Or CONTROLS › HIDE MOUSE POINTER in the pause menu, which takes effect at once. |
 | Camera-flight warp fix (upstream's) | `--mcla_warp_fix=false` | |
-| HDR output | `--hdr=off` | The default for now; or the launcher's *HDR*, or DISPLAY › HDR in the pause menu, during play. |
+| HDR output (Windows default `auto`) | `--hdr=off` | Or `hdr = "off"` in `mcla.toml`, the launcher's *HDR*, or DISPLAY › HDR in the pause menu, during play. It only acts while Windows has HDR on for the display. |
 | The HUD and menus apart from the scene in HDR | `--hdr_ui_layer=false` | The whole frame as SDR content in HDR. |
 | The scene in HDR | `--mcla_hdr_scene=false` | The scene as the game's 8-bit picture, under the separate UI. |
 | Render markers | `--mcla_render_markers=false` | HDR then shows the whole frame as SDR. |
@@ -311,7 +311,7 @@ If you hand this to an AI agent: it needs your disc image's path and the console
 - On a first run, in new places, or after a driver update, objects can be missing for a moment while their shaders compile, where the game used to hold the frame until they were ready.
 - The HUD's gauges and the song title under the speedometer move in the same steps. At *HUD updates* 30 per second (the default) the title scrolls at its original speed and the needles move 30 times a second; at 60 or 120 the needles are smoother and the title scrolls two or four times as fast.
 - Not verified by hand: the motorcycle lean (it needs a bike in play).
-- HDR is new and off by default: its look hasn't been judged on a display yet, it outputs HDR10 only (no scRGB), it works on Windows only for now (the PS5 keeps SDR; Linux on Wayland comes later), and the garage, photo mode and cutscenes weren't reached in the tests. Screenshots taken in HDR come out as SDR, with the highlights clipped.
+- HDR is new: on by default on Windows whenever Windows has HDR on for the display (signed off on one display, an ASUS ROG Swift PG32UCDP (WOLED, Gaming HDR mode, Uniform Brightness on), 2026-10-16), it outputs HDR10 only (no scRGB), it works on Windows only for now (the PS5 keeps SDR; Linux on Wayland comes later), and the garage, photo mode and cutscenes weren't reached in the tests. Screenshots taken in HDR come out as SDR, with the highlights clipped.
 
 ## Missed functions
 
