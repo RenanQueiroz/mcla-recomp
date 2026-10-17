@@ -185,6 +185,13 @@ def report(folder):
                          f"displayed {100.0 * len(displayed) / len(seg):.1f}%")
                 details.append(f"PresentMon: mode {modes}, tearing {tearing}; between presents (FrameTime) ms "
                                f"{percentiles(between)}; displayed for (DisplayedTime) ms {percentiles(change)}")
+                # The process's GPU work between one present and the next (PresentMon 2's GPUBusy):
+                # its share of the segment, and per swap of the game.
+                busy = [v for v in (number(r, "GPUBusy", "MsGPUActive") for r in seg) if v is not None]
+                if busy:
+                    details.append(f"GPU busy {sum(busy) / (seconds * 10.0):.1f}% of the time, "
+                                   f"{sum(busy) / max(1, n_swaps):.3f} ms per swap; per present ms "
+                                   f"{percentiles(busy)}")
         print(line)
         for d in details:
             print(f"  {'':>12}  {d}")
