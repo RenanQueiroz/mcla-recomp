@@ -58,6 +58,10 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Frame rate | 30, 40, 45, 50, 60, 120 FPS, Uncapped | `mcla_fps` (0 for uncapped) | DISPLAY › FPS TARGET |
 | Display | Fullscreen, Windowed | `fullscreen` = `true` or `false` | DISPLAY › FULLSCREEN |
 | Display gamma | TV (as on the console), PC monitor (sRGB, brighter shadows) | `mcla_display_gamma` = `tv` or `pc` | DISPLAY › DISPLAY GAMMA |
+| HDR | Off, Auto (when Windows HDR is on), On | `hdr` = `off`, `auto` or `on` | DISPLAY › HDR |
+| HDR peak brightness | Auto (what the display reports), 400 to 2000 nits | `hdr_peak_nits` (0 for auto) | DISPLAY › PEAK BRIGHTNESS |
+| HDR paper white | Auto (Windows' SDR content brightness), 100 to 300 nits | `hdr_paper_white_nits` (0 for auto) | DISPLAY › PAPER WHITE |
+| HDR highlights | Normal, Bright, Brighter, Brightest | `mcla_hdr_highlights` = `1`, `1.5`, `2` or `3` | DISPLAY › HIGHLIGHTS |
 | Anti-aliasing | On (2× MSAA), Off (2 to 5% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
 | Single tile rendering | On (the scene drawn once instead of in two tiles: 9 to 20% faster at 3×), Off (two tiles, as on the console) | `mcla_single_tile` = `true` or `false` | PERFORMANCE › SINGLE TILE RENDERING |
 | HUD updates | 30 per second (as on the console), 60 per second, 120 per second, Every frame | `mcla_ui_hud_rate` = `30`, `60`, `120` or `0` | DISPLAY › HUD UPDATES |
@@ -66,6 +70,8 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Button prompts | Follow the controller, Xbox, PlayStation | `mcla_button_prompts` = `auto`, `xbox` or `playstation` | CONTROLS › BUTTON PROMPTS |
 
 *Display gamma* is the ramp the picture goes through on its way to the screen, as the console's display hardware applied it. The game writes sRGB-encoded colour; *TV*, the default, is the console's ramp for an HDTV (BT.709), which on a PC monitor makes the shadows darker than the game drew them (8-bit levels 64, 128 and 192 show as 48, 115 and 185). *PC monitor* leaves the game's output as it is, as an sRGB monitor expects. It changes during play, from the launcher or the pause menu ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#display-gamma-for-pc-monitors-2026-10-16)).
+
+*HDR* shows the game in HDR on a display in HDR mode (Windows' *Use HDR*): the game's HUD, menus and movies at the SDR level, as on the desktop, and its scene from its own tone map's inputs, the same as in SDR up to the game's white and brighter above it (lights at night, the sun, a dusk sky, headlights). It is off by default for now. *Auto* turns it on whenever Windows has HDR on for the display. *Peak brightness* and *paper white* default to what Windows reports: the peak the Windows HDR Calibration app measured, and the *SDR content brightness* slider, where the game's white lands; set the peak by hand if your display's HDR mode clips earlier (the launcher shows what Windows reports). *Highlights* sets how far above the game's white bright things go. DISPLAY GAMMA keeps its meaning in HDR. All of them change during play ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#hdr-output-2026-10-16)).
 
 The 40 to 50 FPS caps are for G-Sync and FreeSync displays: a cap the game holds even in its heaviest scenes gives constant frame times. The game turns vsync off by itself (the pause menu's DISPLAY › VSYNC turns it on): with it on, the GPU plugin's emulated 60 Hz vblank caps the game at 60 and paces it unevenly.
 
@@ -151,6 +157,14 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | An optional pipeline cache file (off) | for drivers without a disk cache of their own |
 | The per-frame counters (draws and the rest) counted on Vulkan too | |
 
+**HDR output, both APIs**
+
+| Change | Effect |
+|---|---|
+| HDR10 output: the swap chain, the display's levels from Windows, HDR10 metadata, the presenter's own UI as SDR on top | the game at the SDR level in HDR; DISPLAY GAMMA, captures and the ImGui windows work as in SDR |
+| The game's HUD and menus kept apart from the scene, and its frame put back for what it reads | the UI at the SDR level over an HDR scene, translucent panels blended as the game blends them |
+| The scene from the game's tone map inputs, with a shoulder above its white instead of its clip | up to 0.8 to 1.2 thousand nits on a 1300-nit display; the same as SDR up to the game's white; 0.5 ms of GPU time at 3x |
+
 **Game fixes**
 
 | Change | Effect |
@@ -206,6 +220,10 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | HUD at the console's pace | `--mcla_ui_hud_rate=0` advances it with every frame | Default 30 a second; also 60 or 120. The launcher's *HUD updates*, and DISPLAY › HUD UPDATES in the pause menu. |
 | Mouse pointer hidden during play | `--mcla_hide_cursor=false` | Or CONTROLS › HIDE MOUSE POINTER in the pause menu, which takes effect at once. |
 | Camera-flight warp fix (upstream's) | `--mcla_warp_fix=false` | |
+| HDR output | `--hdr=off` | The default for now; or the launcher's *HDR*, or DISPLAY › HDR in the pause menu, during play. |
+| The HUD and menus apart from the scene in HDR | `--hdr_ui_layer=false` | The whole frame as SDR content in HDR. |
+| The scene in HDR | `--mcla_hdr_scene=false` | The scene as the game's 8-bit picture, under the separate UI. |
+| Render markers | `--mcla_render_markers=false` | HDR then shows the whole frame as SDR. |
 
 Without a setting: the timer kept at 1 ms while the window is hidden, the achievement toast and its repaints, the loading-screen pacing, the inline bit helpers, Vulkan's memory export check and per-frame counters, watched pages kept out of the hot set (it matters only with hot pages on), and the 4x MSAA depth fix, which replaces the EDRAM path's shaders.
 
@@ -293,6 +311,7 @@ If you hand this to an AI agent: it needs your disc image's path and the console
 - On a first run, in new places, or after a driver update, objects can be missing for a moment while their shaders compile, where the game used to hold the frame until they were ready.
 - The HUD's gauges and the song title under the speedometer move in the same steps. At *HUD updates* 30 per second (the default) the title scrolls at its original speed and the needles move 30 times a second; at 60 or 120 the needles are smoother and the title scrolls two or four times as fast.
 - Not verified by hand: the motorcycle lean (it needs a bike in play).
+- HDR is new and off by default: its look hasn't been judged on a display yet, it outputs HDR10 only (no scRGB), it works on Windows only for now (the PS5 keeps SDR; Linux on Wayland comes later), and the garage, photo mode and cutscenes weren't reached in the tests. Screenshots taken in HDR come out as SDR, with the highlights clipped.
 
 ## Missed functions
 

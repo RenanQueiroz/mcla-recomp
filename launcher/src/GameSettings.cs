@@ -64,7 +64,24 @@ static class GameSettings
     public static readonly GameSetting Prompts = new("mcla_button_prompts", "Button prompts",
         [new("Follow the controller", "auto"), new("Xbox", "xbox"), new("PlayStation", "playstation")], "auto");
 
+    // HDR output (the SDK's presenter; the game's scene in HDR from
+    // rexglue-hdr-scene-mcla.patch). Auto turns it on when Windows has HDR
+    // on for the display; the levels' Auto is what Windows reports (the HDR
+    // Calibration app's peak, the SDR content brightness slider). All change
+    // during play too, in the pause menu's DISPLAY settings.
+    public static readonly GameSetting Hdr = new("hdr", "HDR",
+        [new("Off", "off"), new("Auto (when Windows HDR is on)", "auto"), new("On", "on")], "off");
+    public static readonly GameSetting HdrPeak = new("hdr_peak_nits", "HDR peak brightness",
+        [new("Auto (what the display reports)", 0L), new("400 nits", 400L), new("600 nits", 600L),
+         new("800 nits", 800L), new("1000 nits", 1000L), new("1500 nits", 1500L), new("2000 nits", 2000L)], 0L);
+    public static readonly GameSetting HdrPaperWhite = new("hdr_paper_white_nits", "HDR paper white",
+        [new("Auto (Windows' SDR content brightness)", 0L), new("100 nits", 100L), new("150 nits", 150L),
+         new("200 nits", 200L), new("250 nits", 250L), new("300 nits", 300L)], 0L);
+    public static readonly GameSetting HdrHighlights = new("mcla_hdr_highlights", "HDR highlights",
+        [new("Normal", 1.0), new("Bright", 1.5), new("Brighter", 2.0), new("Brightest", 3.0)], 1.0);
+
     public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, DisplayGamma, AntiAliasing, SingleTile, HudRate, GraphicsApi];
+    public static readonly GameSetting[] HdrSettings = [Hdr, HdrPeak, HdrPaperWhite, HdrHighlights];
     public static readonly GameSetting[] Game = [Intro, Prompts];
 
     /// Started by the launcher, from its own shortcut, or again by its pause

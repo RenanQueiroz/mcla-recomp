@@ -21,8 +21,9 @@ kinds of changes on top of upstream's `main`:
     console's TV ramp or sRGB for PC monitors, switched during play; and
     single-tile rendering that takes effect: the main scene with 2x MSAA drawn
     as one tile instead of two, in a 4,096-tile EDRAM the game asks the SDK
-    for on PC and on the PS5 (untested on the console), switched during play
-    (`KNOWN-ISSUES.md`).
+    for on PC and on the PS5 (untested on the console), switched during play;
+    and HDR output: render markers in the GPU command stream and the DISPLAY
+    rows HDR, PEAK BRIGHTNESS, PAPER WHITE and HIGHLIGHTS (`KNOWN-ISSUES.md`).
   - SDK, as patches in `patches/` that `scripts/make_pc.ps1` and
     `ps5/make_ps5.sh` apply (`patches/README.md`): GPU register writes in bulk,
     ImGui dialogs that need no repaints of their own, inline bit helpers,
@@ -56,7 +57,10 @@ kinds of changes on top of upstream's `main`:
     only what changed while running), and loaded statement by statement when
     one is bad, and an EDRAM of 4,096 tiles as an option (`edram_tiles`, the
     console's 2,048 by default), for titles patched to draw more at once than
-    the console's EDRAM held.
+    the console's EDRAM held, and HDR output: the title's markers read from the
+    command stream, HDR10 swap chains with the display's levels, the guest's UI
+    kept as a separate layer, and this game's scene in HDR from its tone map's
+    inputs (`patches/README.md`, `launcher/dev/hdr-2026-10-16.md`).
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
   edits the game's settings in `mcla.toml` (shared with the pause menu) and

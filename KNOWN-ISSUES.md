@@ -278,4 +278,24 @@ Checked on Windows, RTX 5080, with `devrun.py`, in the city at 23:30 (time of da
 - **Starting with `pc`** in `mcla.toml` (through `--toml`): the first frame already had the identity ramp.
 - **D3D12 debug layer:** no errors, only the usual warnings (buffer initial states, MIN/MAX blend factors, live objects at exit). **Vulkan validation** with synchronization validation: only what it reports without this change (`vkCmdEndQuery` 07007 and 01923, `ShaderOutputNotConsumed`, and 10 write-after-write hazards between texture-load dispatches during start-up, before any switch).
 
-**Not verified**: other GPUs, Linux and the PS5 (the option is in the PS5's menu too); HDR output, which this fork doesn't have yet.
+**Not verified**: other GPUs, Linux and the PS5 (the option is in the PS5's menu too). In HDR (below) the same table is applied, so the setting keeps its meaning.
+
+## HDR output (2026-10-16)
+
+The game in HDR on a display in HDR mode: its HUD, menus, movies and legal screens at the SDR level (as Windows shows SDR on an HDR desktop), and its scene from its own tone map's inputs, the same as in SDR up to the game's white and brighter above it. Settings: the launcher's *HDR*, *HDR peak brightness*, *HDR paper white* and *HDR highlights*, the pause menu's DISPLAY › HDR, PEAK BRIGHTNESS, PAPER WHITE and HIGHLIGHTS, and `hdr`, `hdr_peak_nits`, `hdr_paper_white_nits`, `mcla_hdr_highlights` in `mcla.toml`; all change during play. `hdr` is `off` by default until the look has been judged on a display.
+
+How it works (`launcher/dev/hdr-2026-10-16.md` has the details and the measurements; `patches/README.md` the SDK patches):
+- **Markers.** The game writes NOP markers into its GPU command stream where its 3D scene ends, its tone map and its UI start (`src/render_markers.cpp`, `mcla_render_markers`, on). They draw nothing: screenshots with them on and off are identical. Past the command buffer's limit a marker makes room the way the game's own writers do.
+- **Output.** HDR10 (PQ, BT.2020), on both APIs. The game's 8-bit colour still goes through its display table, so DISPLAY GAMMA means the same in HDR. Peak and paper white default to what Windows reports (the HDR Calibration app's peak, the SDR content brightness slider), read about once a second while HDR isn't off; above 0.75 of the peak, light rolls off towards it.
+- **UI.** The HUD and menus are separated from the scene as they are drawn, and the game's own 8-bit frame is put back for what it reads; the UI is then blended over the scene as the game blends it. Every scene reached took this path: legal screens and logos (as SDR), the intro and attract movies, title, map zoom-out, play, pause and GPS map with their fades, race menus, loading, intro, countdown, race, race pause, replay confirmation and replay, the race-over screen.
+- **Scene.** After the game's tone map draw, its operator runs again on the GPU from the same inputs, with a shoulder above the game's white towards the peak instead of the clip; the light glows the game adds after it at night come over too. *Highlights* (Normal, Bright, Brighter, Brightest) scales how fast the shoulder rises and the glows' gain: at dusk the brightest pixel goes from 785 to 1209 nits on the test display, with the midtones unchanged.
+
+Costs and limits:
+- **GPU time:** about 0.5 ms a frame at 3x (0.48 on D3D12, 0.56 on Vulkan), against 0.04 ms for SDR's gamma pass.
+- **The first time HDR is on,** a few new UI pipelines compile; in the tests no draw was left out for them.
+- **Screenshots** (the dev pad's, captures) are SDR: highlights are clipped, and the roll-off is not undone.
+- **HDR10 only;** no scRGB output yet.
+- **Not reached in the tests:** the garage, photo mode and cutscenes. Photo-mode freeze frames would show as SDR (they don't go through the tone map). A UI drawn with a blend this doesn't know falls back for that frame (logged once): the UI is told from the scene by comparing with the picture under it, or the frame is shown as SDR.
+- **With HDR off** nothing of this runs except the markers and a check per draw; a few small pipelines are created at start-up, and pipelines made for HDR in an earlier session are recreated from the pipeline storage. The picture is unchanged: boot frames are byte-identical to the build without it.
+
+**Not verified**: the look on a real HDR display (the user's PG32UCDP: paper white against the desktop, the test pattern's clip with `hdr_test_pattern = true`, the highlight steps, banding in skies, DISPLAY GAMMA in HDR, switching HDR during play and in Windows, G-Sync with HDR); other GPUs; Linux (HDR10 on Wayland is planned; the presenter uses HDR10 where the surface offers it, but reads the display's levels only on Windows); the PS5, whose build applies the SDK patches but hasn't been compiled with them, and keeps SDR (no HDR rows in its menu).

@@ -267,11 +267,13 @@ saving, but only after the SDK project above.
   2 = every call), then `scripts\build.ps1 -NoCodegen`. It was written for the
   old hook and no longer applies; it is in the history at commit `1600751`.
 - **GPU timestamps by phase and tile.** On D3D12, apply `gpu-timestamps.sdk.patch`
-  and `frame-log.sdk.patch` with `render-markers.patch`, as in
-  `frame-structure-2026-10-16.md`. On Vulkan, apply
-  `gpu-timestamps-vulkan.sdk.patch`. Run with:
+  and `frame-log.sdk.patch`, as in `frame-structure-2026-10-16.md`. On Vulkan,
+  apply `gpu-timestamps-vulkan.sdk.patch`. Run with:
   - `--tmp_frame_log_dir=<dir>`;
-  - `--mcla_dev_render_markers=true`;
+  - `--mcla_render_markers_all_phases=true` (every phase's marker; the
+    markers are in the build since 2026-10-16, `src/render_markers.cpp`;
+    this note's runs used the development `render-markers.patch` and
+    `--mcla_dev_render_markers=true`, which they replaced);
   - on Vulkan, `--env MCLA_GT_EVERY=1 --env MCLA_GT_DIR=<dir>`.
 
   A tile's scene time runs from one phase 0x800 marker to the next. The

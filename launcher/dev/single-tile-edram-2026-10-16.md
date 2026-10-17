@@ -264,7 +264,8 @@ the segment starts after that.
 - **Frame:** the median swap interval without each segment's first 40 swaps,
   and the 1% low.
 - **GPU:** D3D12 timestamped frames (`frame-log.sdk.patch` on
-  `gpu-timestamps.sdk.patch`, with `render-markers.patch`), 18 to 24 a mode,
+  `gpu-timestamps.sdk.patch`, with the development `render-markers.patch`,
+  since replaced by `src/render_markers.cpp`), 18 to 24 a mode,
   idle gaps over 0.5 ms left out; the scene is phases 0x800 to 0x04000000.
   Vulkan: whole-frame timestamps (`gpu-timestamps-vulkan.sdk.patch`), one a
   second. Both include the timestamps' own cost.

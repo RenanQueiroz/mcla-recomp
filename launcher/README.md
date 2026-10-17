@@ -114,6 +114,15 @@ rate, 30 per second unless set.
 If `settings.json` can't be saved, the launcher says so instead of carrying on
 as if it had.
 
+*HDR*, *HDR peak brightness*, *HDR paper white* and *HDR highlights* are the
+game's HDR output (`hdr`, `hdr_peak_nits`, `hdr_paper_white_nits`,
+`mcla_hdr_highlights`; the pause menu's DISPLAY rows of the same names; all
+change during play). Below them the launcher shows what Windows reports for
+the main display when it opens: whether HDR is on, the peak the Windows HDR
+Calibration app measured (DXGI's `IDXGIOutput6::GetDesc1`, as the game reads
+it) and the SDR content brightness (DisplayConfig's SDR white level), which
+is what *Auto* uses (`src\DisplayHdr.cs`).
+
 *Display gamma* (`mcla_display_gamma`) picks the gamma ramp the picture goes
 through on its way to the screen, and it switches during play too (the pause
 menu's DISPLAY > DISPLAY GAMMA). *TV* (`tv`, the default) is the console's ramp
@@ -238,6 +247,11 @@ during a build:
   it changes has moved since.
 - `draw-cost.py`: fits frame time = fixed + per draw x draws over a run's
   `REX_PERF_LOG_CSV` output.
+- `hdr-2026-10-16.md` and `hdr\`: the HDR output, how it was checked, and the
+  scripts: `scenes.py` (which composite each `log SCENE` marker of a pad run
+  got), `restore_err.py`, `nits.py` (levels from `hdr_debug_ui 8` captures),
+  `identboot.py` (boot frames of two builds) and `build_shaders.py` (the HDR
+  shaders from their XeSL sources).
 - `dropped-patches\`: patches that were measured and not kept: specialized
   system constant updates, sampler fetch-constant prefetch, reused texture
   request queues, skipping the clock in shared-memory requests, keeping bindings

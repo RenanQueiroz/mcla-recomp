@@ -11,7 +11,8 @@ Two development patches, applied, built, used and reversed (both are in this
 folder):
 
 - **`render-markers.patch`** (game, `src/render_perf.cpp`, cvar
-  `mcla_dev_render_markers`) writes a PM4 type-3 NOP (`'MCPH'`, kind, value)
+  `mcla_dev_render_markers`; since replaced by `src/render_markers.cpp`, see
+  "Reproducing") writes a PM4 type-3 NOP (`'MCPH'`, kind, value)
   into the game's command buffer in three places:
   - where each render phase starts: an override of `sub_822E55D0`, which the
     phase loop calls with the phase bit in r4;
@@ -402,21 +403,26 @@ Larger levers that showed up:
 
 ## Reproducing
 
+The markers are part of the build since 2026-10-16 (`src/render_markers.cpp`,
+`'REXM'` packets read by `rexglue-guest-markers.patch`; the kinds are the SDK's
+`GuestMarkerKind`: 1 and 2 the frame, 3 the scene's end, 4 the tone map, 5 the
+UI, 6 the render loop's end, 0x100 a phase bit with
+`mcla_render_markers_all_phases`), so `render-markers.patch` and
+`--mcla_dev_render_markers` are gone, and `frame-log.sdk.patch` logs the
+`'REXM'` markers as `M kind=... value=...` lines.
+
 ```
 cd third_party\rexglue-sdk
 git apply ..\..\launcher\dev\gpu-timestamps.sdk.patch
 git apply ..\..\launcher\dev\frame-log.sdk.patch
-cd ..\..
-git apply launcher\dev\render-markers.patch
 ```
 
 Then:
 1. Rebuild the SDK (`cmake --build` and `--install` in the SDK's
-   `out\build\win-amd64`) and the game (`scripts\build.ps1 -NoCodegen`); copy
-   `rexgpu-xenos.dll`.
+   `out\build\win-amd64`); copy `rexgpu-xenos.dll`.
 2. Run with `devrun.py run --script <pad> --res 3 --extra
-   --tmp_frame_log_dir=<dir> --mcla_dev_render_markers=true
+   --tmp_frame_log_dir=<dir> --mcla_render_markers_all_phases=true
    [--dump_shaders=<dir>] [--d3d12_threaded_submission_split_draws=0]`.
 3. In the pad script: `set tmp_frame_log_quiet true|false`, then
    `set tmp_frame_log <label>`.
-4. Reverse the three patches and run `build-game.ps1 -ResetSdk`.
+4. Reverse the two patches and run `build-game.ps1 -ResetSdk`.

@@ -551,6 +551,11 @@ sealed class LauncherApp : Component
             ScrollViewer(VStack(12,
                 Subtitle("Graphics"),
                 Pairs(GameSettings.Graphics.Select(SettingCombo).ToArray()),
+                Subtitle("HDR"),
+                Pairs(GameSettings.HdrSettings.Select(SettingCombo).ToArray()),
+                DisplayHdr.Main.Value is { } display
+                    ? TextBlock(display.Describe()).Foreground(Theme.SecondaryText)
+                    : Empty(),
                 Subtitle("Game"),
                 Pairs(GameSettings.Game.Select(SettingCombo).ToArray()),
                 // Lines short enough for the window: in this scroll viewer a

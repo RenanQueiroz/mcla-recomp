@@ -34,6 +34,7 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
@@ -369,7 +370,7 @@ struct ItemDef {
   const char* option;
   const char* label;
   const char* const* values = nullptr;        // kStringChoice: option values
-  const char* const* value_labels = nullptr;  // kStringChoice: display text
+  const char* const* value_labels = nullptr;  // display text (kNumberChoice: optional)
   const double* numbers = nullptr;            // kNumberChoice
   int value_count = 0;
   const char* number_format = nullptr;
@@ -414,6 +415,18 @@ constexpr const char* kIntroLabels[] = {"NORMAL", "FAST", "SKIP (NO LOGO)"};
 // or sRGB for a PC monitor; applied at the next swap.
 constexpr const char* kGammaValues[] = {"tv", "pc"};
 constexpr const char* kGammaLabels[] = {"TV", "PC MONITOR"};
+#if !REX_PLATFORM_PS5
+// HDR output (the SDK's presenter, rexglue-hdr-*.patch): off, auto (when the
+// display is in HDR mode) or on; peak and paper white in nits, AUTO for what
+// the display reports; the highlights' reach above the game's white
+// (mcla_hdr_highlights). All change during play.
+constexpr const char* kHdrValues[] = {"off", "auto", "on"};
+constexpr const char* kHdrLabels[] = {"OFF", "AUTO", "ON"};
+constexpr double kHdrPeaks[] = {0.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0};
+constexpr double kHdrPaperWhites[] = {0.0, 100.0, 150.0, 200.0, 250.0, 300.0};
+constexpr double kHdrHighlights[] = {1.0, 1.5, 2.0, 3.0};
+constexpr const char* kHdrHighlightLabels[] = {"NORMAL", "BRIGHT", "BRIGHTER", "BRIGHTEST"};
+#endif
 
 const ItemDef kDisplayItems[] = {
     {"PM_MxFps", ItemKind::kNumberChoice, "mcla_fps", "FPS TARGET", nullptr, nullptr, kFpsTargets,
@@ -434,6 +447,15 @@ const ItemDef kDisplayItems[] = {
 #endif
     {"PM_MxGamma", ItemKind::kStringChoice, "mcla_display_gamma", "DISPLAY GAMMA", kGammaValues,
      kGammaLabels, nullptr, 2},
+#if !REX_PLATFORM_PS5
+    {"PM_MxHdr", ItemKind::kStringChoice, "hdr", "HDR", kHdrValues, kHdrLabels, nullptr, 3},
+    {"PM_MxHdrPeak", ItemKind::kNumberChoice, "hdr_peak_nits", "PEAK BRIGHTNESS", nullptr, nullptr,
+     kHdrPeaks, 7, "%.0f NITS", "AUTO"},
+    {"PM_MxHdrPaper", ItemKind::kNumberChoice, "hdr_paper_white_nits", "PAPER WHITE", nullptr,
+     nullptr, kHdrPaperWhites, 6, "%.0f NITS", "AUTO"},
+    {"PM_MxHdrHighlights", ItemKind::kNumberChoice, "mcla_hdr_highlights", "HIGHLIGHTS", nullptr,
+     kHdrHighlightLabels, kHdrHighlights, 4},
+#endif
     {"PM_MxMotionBlur", ItemKind::kToggle, "mcla_motion_blur", "MOTION BLUR"},
     {"PM_MxDof", ItemKind::kToggle, "mcla_depth_of_field", "DEPTH OF FIELD"},
 };
@@ -514,6 +536,16 @@ std::string RowLabel(const ItemDef& item, bool pending) {
   if (std::strcmp(item.option, "mcla_single_tile") == 0 && !MclaSingleTileAvailable()) {
     label += " (UNAVAILABLE)";
   }
+#if !REX_PLATFORM_PS5
+  // HDR while the display says it isn't in HDR mode (known only while HDR
+  // isn't off): the picture stays SDR.
+  if (std::strcmp(item.option, "hdr") == 0) {
+    const rex::ui::Presenter::HdrDisplayInfo display = rex::ui::Presenter::GetLastHdrDisplayInfo();
+    if (display.known && !display.hdr_enabled) {
+      label += " (NOT AVAILABLE)";
+    }
+  }
+#endif
   return label;
 }
 
@@ -535,6 +567,9 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
     case ItemKind::kStringChoice:
       return item.value_labels[index];
     case ItemKind::kNumberChoice: {
+      if (item.value_labels) {
+        return item.value_labels[index];
+      }
       if (item.zero_label && item.numbers[index] == 0.0) {
         return item.zero_label;
       }
