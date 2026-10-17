@@ -62,8 +62,9 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | HDR peak brightness | Auto (what the display reports), or 200 to 4,000 nits in steps of 50 | `hdr_peak_nits` (0 for auto) | DISPLAY › PEAK BRIGHTNESS |
 | HDR paper white | Auto (Windows' SDR content brightness), or 80 to 480 nits in steps of 10 | `hdr_paper_white_nits` (0 for auto) | DISPLAY › PAPER WHITE |
 | HDR highlights | Normal, Bright, Brighter (the default), Brightest | `mcla_hdr_highlights` = `1`, `1.5`, `2` or `3` | DISPLAY › HIGHLIGHTS |
-| Anti-aliasing | On (2× MSAA), Off (2 to 5% faster at 3×) | `mcla_msaa` = `true` or `false` | PERFORMANCE › ANTI ALIASING |
-| Single tile rendering | On (the scene drawn once instead of in two tiles: 9 to 20% faster at 3×), Off (two tiles, as on the console) | `mcla_single_tile` = `true` or `false` | PERFORMANCE › SINGLE TILE RENDERING |
+| Anti-aliasing | MSAA 2× (as on the console; the default), FSR 3.1 native AA (AMD FSR at native resolution: steadiest, a little softer), Off (2 to 5% faster at 3× than MSAA) | `mcla_anti_aliasing` = `msaa`, `fsr` or `off` (an older `mcla_msaa = false` still means off while it isn't set) | PERFORMANCE › ANTI ALIASING |
+| FSR sharpness | Off, 0.2 (the default), 0.4, 0.6, 0.8, 1.0; FSR only | `temporal_aa_sharpness` | PERFORMANCE › FSR SHARPNESS |
+| Single tile rendering | With MSAA: On (the scene drawn once instead of in two tiles: 9 to 20% faster at 3×), Off (two tiles, as on the console); no difference with FSR or Off | `mcla_single_tile` = `true` or `false` | PERFORMANCE › SINGLE TILE RENDERING |
 | HUD updates | 30 per second (as on the console), 60 per second (the default), 120 per second, Every frame | `mcla_ui_hud_rate` = `30`, `60`, `120` or `0` | DISPLAY › HUD UPDATES |
 | Graphics API | Automatic (Direct3D 12 first), Direct3D 12, Vulkan | `mcla_gpu_backend` = `any`, `d3d12` or `vulkan` | DISPLAY › GRAPHICS API (next start) |
 | Intro | Normal, Fast, Skip (hides the title logo) | `mcla_intro` = `normal`, `fast` or `skip` | CONTROLS › INTRO (next start) |

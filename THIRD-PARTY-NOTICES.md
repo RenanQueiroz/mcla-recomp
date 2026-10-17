@@ -52,3 +52,43 @@ The shaders the fork adds to the SDK (direct texture loads, direct resolves
 and the fixed 4x MSAA resolve) are built from Xenia's shader sources, and some
 changes follow xenia-canary's approach. Both are under Xenia's BSD-3-Clause
 licence, whose notice the ReXGlue SDK already carries in its `LICENSE`.
+
+## AMD FidelityFX SDK (FSR 3.1)
+
+<https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK>, version 1.1.4, as
+carried by the ReXGlue fork <https://github.com/rexglue/FidelityFX-SDK> at commit
+`eee08db1688ac3d1275a70b728f4a8ba22914213` (AMD's v1.1.4 plus portability fixes).
+
+Used for the FSR 3.1 anti-aliasing option (`patches/rexglue-temporal-aa.patch`):
+
+- the ffx-api headers, unmodified, in the patch as
+  `thirdparty/fidelityfx-api/include` of the SDK, with this notice beside them
+  (`thirdparty/fidelityfx-api/LICENSE.txt`);
+- `amd_fidelityfx_dx12.dll` and `amd_fidelityfx_vk.dll`, built from that
+  commit's source when the SDK is built (`cmake/rexglue_fsr.cmake` fetches it
+  and checks its tree hashes) and installed next to `mcla.exe`. No FidelityFX
+  binaries are in this repository.
+
+```
+This file is part of the FidelityFX SDK.
+
+Copyright (C) 2024 Advanced Micro Devices, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files(the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions :
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```

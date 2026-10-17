@@ -193,6 +193,7 @@ rexglue-guest-markers.patch include/rex/graphics/command_processor.h OnGuestMark
 rexglue-hdr-output.patch src/ui/presenter.cpp IsHdrOutputWanted
 rexglue-hdr-ui-layer.patch src/graphics/command_processor.cpp HdrBeforeResolve
 rexglue-hdr-scene-mcla.patch src/graphics/command_processor.cpp HdrPrepareScene
+rexglue-temporal-aa.patch include/rex/graphics/command_processor.h TaaJitterNdcOffset
 LATER
 
 # ---------------------------------------------------------------------------

@@ -498,6 +498,20 @@ const ItemDef kDisplayItems[] = {
 // shipped by default (src/perf_options.cpp). Options the game reads once, when
 // it starts, are kRequiresRestart, and their rows say "(NEXT START)" (RowLabel).
 constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
+// mcla_anti_aliasing (src/perf_options.cpp): none, the game's 2x MSAA, or AMD
+// FSR 3.1 at native resolution (the SDK's temporal_aa, rexglue-temporal-aa.patch),
+// with its sharpening (temporal_aa_sharpness). All change during play; FSR
+// starts once it is ready (half a second or so the first time).
+#if REX_PLATFORM_PS5
+// FSR isn't built for the console yet.
+constexpr const char* kAntiAliasingValues[] = {"off", "msaa"};
+constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X"};
+#else
+constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr"};
+constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE AA"};
+#endif
+constexpr int kAntiAliasingCount = int(sizeof(kAntiAliasingValues) / sizeof(kAntiAliasingValues[0]));
+constexpr double kSharpness[] = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
 constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
 constexpr double kTrafficDistances[] = {250.0, 325.0, 400.0};
 
@@ -520,7 +534,12 @@ const ItemDef kPerformanceItems[] = {
     {"PM_MxFastCarShadows", ItemKind::kToggle, "mcla_fast_car_shadows", "SIMPLE CAR SHADOWS"},
     {"PM_MxImpostors", ItemKind::kToggle, "mcla_foliage_impostors", "DISTANT TREES"},
     {"PM_MxFsBlur", ItemKind::kToggle, "mcla_fullscreen_blur", "FULLSCREEN BLUR"},
-    {"PM_MxMsaa", ItemKind::kToggle, "mcla_msaa", "ANTI ALIASING"},
+    {"PM_MxAntiAliasing", ItemKind::kStringChoice, "mcla_anti_aliasing", "ANTI ALIASING",
+     kAntiAliasingValues, kAntiAliasingLabels, nullptr, kAntiAliasingCount},
+#if !REX_PLATFORM_PS5
+    {"PM_MxFsrSharpness", ItemKind::kNumberChoice, "temporal_aa_sharpness", "FSR SHARPNESS",
+     nullptr, nullptr, kSharpness, 6, "%.1f", "OFF"},
+#endif
 };
 
 const ItemDef kControlItems[] = {

@@ -18,13 +18,19 @@ sealed record SettingChoice(string Label, object Value);
 sealed record GameSetting(string Key, string Header, SettingChoice[] Choices, object Default)
 {
     public string Info { get; init; } = "";
+    /// What the game takes while the file doesn't set Key, when that depends
+    /// on another of its lines (an older option); null for Default.
+    public Func<IReadOnlyDictionary<string, string>, object?>? DefaultFrom { get; init; }
 
     /// The choices to show for the file's value, and which one it is. A value
     /// that isn't one of the choices (set by hand) is shown as one more.
     public (SettingChoice[] Choices, int Index) Show(IReadOnlyDictionary<string, string> file)
     {
         if (!file.TryGetValue(Key, out var raw))
-            return (Choices, Math.Max(0, Array.FindIndex(Choices, c => SettingValues.Same(c.Value, Default))));
+        {
+            var fallback = DefaultFrom?.Invoke(file) ?? Default;
+            return (Choices, Math.Max(0, Array.FindIndex(Choices, c => SettingValues.Same(c.Value, fallback))));
+        }
         var value = SettingValues.Parse(raw);
         var index = Array.FindIndex(Choices, c => SettingValues.Same(c.Value, value));
         if (index >= 0) return (Choices, index);
@@ -139,23 +145,49 @@ static class GameSettings
              + "Either is fine on any screen; pick the look you prefer. It applies in HDR too, and switches "
              + "during play in the pause menu.",
     };
-    public static readonly GameSetting AntiAliasing = new("mcla_msaa", "Anti-aliasing",
-        [new("On (2× MSAA)", true), new("Off (2 to 5% faster at 3× with single tile rendering on)", false)], true)
+    // mcla_anti_aliasing (src/perf_options.cpp): the game's 2× MSAA, AMD FSR
+    // 3.1 at native resolution (the SDK's temporal_aa,
+    // rexglue-temporal-aa.patch), or none; all three change during play too.
+    // Before it, mcla_msaa = false meant none, and still does while
+    // mcla_anti_aliasing isn't in the file.
+    public static readonly GameSetting AntiAliasing = new("mcla_anti_aliasing", "Anti-aliasing",
+        [new("MSAA 2× (as on the console)", "msaa"), new("FSR 3.1 native AA (steadiest, softer)", "fsr"),
+         new("Off (2 to 5% faster at 3× than MSAA)", "off")], "msaa")
     {
-        Info = "Smooths jagged edges (2× MSAA). Keep it on unless your graphics card is struggling: off is only "
-             + "2 to 5% faster at 3×, with slightly more jagged thin edges such as poles and sign frames.",
+        Info = "Smooths jagged edges. MSAA 2× (the default) is the console's own: it smooths the outlines of "
+             + "cars and buildings, but not the shimmer on fine detail such as fences, power lines, trees and "
+             + "the shine on cars. FSR 3.1 (AMD FidelityFX Super Resolution at native resolution) blends each "
+             + "frame with the ones before it, which calms that shimmer too and gives the steadiest picture; "
+             + "the price is a slightly softer image, possible faint trails behind fast-moving things, rain "
+             + "and smoke, and about 1 ms of GPU time per frame at 3× (more on slower graphics cards). Off is "
+             + "the fastest and the most jagged. Pick MSAA for the console's look, FSR if shimmer bothers you "
+             + "more than a little softness, and Off only if your graphics card is struggling. All three "
+             + "switch during play in the pause menu; FSR takes a moment to start the first time.",
+        DefaultFrom = file => file.TryGetValue("mcla_msaa", out var raw) && SettingValues.Same(SettingValues.Parse(raw), false)
+            ? "off" : null,
     };
-    // With anti-aliasing on, the scene drawn once instead of in the Xbox 360's
-    // two tiles, in the larger EDRAM the game sets up on PC
-    // (src/render_perf.cpp); it changes during play too. It does nothing with
-    // anti-aliasing off (one tile anyway); edram_tiles = 2048 in mcla.toml
-    // goes back to the console's EDRAM altogether.
-    public static readonly GameSetting SingleTile = new("mcla_single_tile", "Single tile rendering",
-        [new("On (with anti-aliasing: 9 to 20% faster at 3×)", true), new("Off (two tiles, as on the console)", false)], true)
+    // temporal_aa_sharpness (the SDK's): FSR's own sharpening (RCAS) after it.
+    public static readonly GameSetting FsrSharpness = new("temporal_aa_sharpness", "FSR sharpness",
+        [new("Off", 0.0), new("0.2 (default)", 0.2), new("0.4", 0.4), new("0.6", 0.6), new("0.8", 0.8),
+         new("1.0 (sharpest)", 1.0)], 0.2)
     {
-        Info = "With anti-aliasing on, draws each frame's 3D scene in one go instead of in two halves as the "
-             + "Xbox 360 did, which is 9 to 20% faster at 3×. Keep it on; turn it off only for troubleshooting. "
-             + "It makes no difference with anti-aliasing off.",
+        Info = "Only with FSR anti-aliasing: how much FSR sharpens its picture. Its blending of frames softens "
+             + "fine detail a little, and sharpening brings it back. 0.2 (the default) is mild; higher looks "
+             + "crisper, but makes edges, noise and any trails stand out more; Off shows FSR as it is. Changes "
+             + "during play in the pause menu.",
+    };
+    // With MSAA, the scene drawn once instead of in the Xbox 360's two
+    // tiles, in the larger EDRAM the game sets up on PC (src/render_perf.cpp);
+    // it changes during play too. It does nothing with anti-aliasing off or
+    // FSR (one tile anyway); edram_tiles = 2048 in mcla.toml goes back to the
+    // console's EDRAM altogether.
+    public static readonly GameSetting SingleTile = new("mcla_single_tile", "Single tile rendering",
+        [new("On (with MSAA: 9 to 20% faster at 3×)", true), new("Off (two tiles, as on the console)", false)], true)
+    {
+        Info = "Only matters with MSAA anti-aliasing: draws each frame's 3D scene in one go instead of in two "
+             + "halves as the Xbox 360 did, which is 9 to 20% faster at 3×. Keep it on; turn it off only for "
+             + "troubleshooting. With FSR or anti-aliasing off the scene is drawn in one go anyway, so it "
+             + "makes no difference.",
     };
     // 60 a second by default since 2026-10-16 (the user's choice after
     // playing at 30 and 60; src/frame_timing.cpp).
@@ -234,7 +266,7 @@ static class GameSettings
              + "matter of taste: Brighter is the default, and Normal is the mildest.",
     };
 
-    public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, DisplayGamma, AntiAliasing, SingleTile, HudRate, GraphicsApi];
+    public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, DisplayGamma, AntiAliasing, FsrSharpness, SingleTile, HudRate, GraphicsApi];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Intro, Prompts];
@@ -667,7 +699,8 @@ static class SettingsMigration
     static readonly object?[] OldFpsList0 = [null, 30L, 60L, 120L, 0L];  // before 40, 45 and 50
     static readonly object?[] OldIntro = [null, "normal", "fast", "skip"];
     static readonly object?[] OldPrompts = [null, "auto", "xbox", "playstation"];
-    static readonly object?[] OldAntiAliasing = [null, true, false];
+    // Written as mcla_anti_aliasing (the old launcher's On and Off).
+    static readonly object?[] OldAntiAliasing = [null, "msaa", "off"];
     static readonly object?[] OldGraphicsApi = [null, "d3d12", "vulkan"];
     static readonly object?[] OldHudRate = [30L, 60L, 120L, 0L];
 

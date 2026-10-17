@@ -40,7 +40,15 @@ REXCVAR_DEFINE_BOOL(mcla_foliage_impostors, true, "MCLA",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_fullscreen_blur, true, "MCLA", "The full-screen blur pass (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA", "Multisample anti-aliasing (2x)");
+REXCVAR_DEFINE_STRING(mcla_anti_aliasing, "msaa", "MCLA",
+                      "Anti-aliasing:\n"
+                      " off: none\n"
+                      " msaa: the game's own 2x multisampling (the default)\n"
+                      " fsr: AMD FSR 3.1 at native resolution, temporal (no MSAA)")
+    .allowed({"off", "msaa", "fsr"});
+REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA",
+                    "Before mcla_anti_aliasing: false (no anti-aliasing) is still taken while "
+                    "mcla_anti_aliasing isn't set");
 REXCVAR_DEFINE_DOUBLE(mcla_city_lod, 1.0, "MCLA",
                       "Scale of the distance at which the city switches to less detail")
     .range(0.1, 4.0);
@@ -187,11 +195,30 @@ constexpr uint32_t kMsaaMode = 384;
 constexpr uint32_t kMsaaNone = 1;
 constexpr uint32_t kMsaaGame = 2;
 
+// mcla_anti_aliasing, read under the option registry's lock (the pause menu
+// sets it from another thread).
+std::string AntiAliasing() {
+  return rex::cvar::GetFlagByName("mcla_anti_aliasing");
+}
+
 void ApplyMsaa(uint8_t* base) {
   static int applied = -1;
   static uint32_t game_mode = kMsaaGame;
   static int held = 0;
-  const int want = REXCVAR_GET(mcla_msaa) ? 1 : 0;
+  const std::string anti_aliasing = AntiAliasing();
+  // Temporal anti-aliasing (the SDK's temporal_aa, rexglue-temporal-aa.patch):
+  // its jitter starts with the next frame, once FSR is ready (it is made in
+  // the background the first time, half a second or so).
+  static std::string applied_temporal;
+  const char* temporal = anti_aliasing == "fsr" ? "fsr" : "off";
+  if (applied_temporal != temporal) {
+    rex::cvar::SetFlagByName("temporal_aa", temporal);
+    if (!applied_temporal.empty() || anti_aliasing == "fsr") {
+      REXLOG_INFO("perf options: FSR {}", anti_aliasing == "fsr" ? "on" : "off");
+    }
+    applied_temporal = temporal;
+  }
+  const int want = anti_aliasing == "msaa" ? 1 : 0;
   if (want == applied) {
     held = 0;
     return;
@@ -347,6 +374,17 @@ void MclaTickPerfOptions() {
   ApplyAmbientIfChanged(base);
 }
 
+// Before mcla_anti_aliasing, mcla_msaa = false turned anti-aliasing off: it
+// still does while mcla_anti_aliasing isn't set (its default becomes off, which
+// isn't saved as if the player had chosen it).
+void MclaMigrateAntiAliasing() {
+  if (rex::cvar::GetFlagSource("mcla_anti_aliasing") == rex::cvar::Source::kDefault &&
+      !REXCVAR_GET(mcla_msaa)) {
+    rex::cvar::SetDefaultValue("mcla_anti_aliasing", "off");
+    REXLOG_INFO("perf options: anti-aliasing off (mcla_msaa = false)");
+  }
+}
+
 // At every swap, between two frames: the anti-aliasing option's mode.
 void MclaApplyMsaaAtSwap() {
   if (uint8_t* base = Base()) {
@@ -387,7 +425,7 @@ bool mcla_foliage_shadows(PPCRegister& r11) {
 }
 
 bool mcla_msaa(PPCRegister& r11) {
-  if (REXCVAR_GET(mcla_msaa)) {
+  if (AntiAliasing() == "msaa") {
     return false;
   }
   r11.u64 = 1;

@@ -4,9 +4,14 @@
 //
 // The frame is drawn by sub_822C0980, whose render phase loop (sub_822E6408)
 // walks the renderer's phase bits and calls sub_822E55D0 at the start of each
-// phase it runs (r4 = the bit). Phase 0x08000000 is post-processing, 0x10000000
-// the tone map (then the night light glows), 0x20000000 the HUD and menus
-// (launcher/dev/frame-structure-2026-10-16.md). At those calls a marker is
+// phase it runs (r4 = the bit). Phase 0x800 starts the main view's 3D scene
+// (everything before it draws into its own targets: reflections, shadows),
+// 0x100000 its translucent effects, 0x04000000 its full-screen composites (the
+// fog), 0x08000000 is post-processing, 0x10000000 the tone map (then the night
+// light glows), 0x20000000 the HUD and menus
+// (launcher/dev/frame-structure-2026-10-16.md). Temporal anti-aliasing
+// (rexglue-temporal-aa.patch) jitters the scene's draws between the first and
+// post-processing. At those calls a marker is
 // written into Direct3D's command buffer: a PM4 type-3 NOP of 3 words, 'REXM',
 // kind, value. The GPU skips NOPs, so the picture does not change; the SDK
 // (rexglue-guest-markers.patch, CommandProcessor::OnGuestMarker) reads them
@@ -59,10 +64,16 @@ enum MarkerKind : uint32_t {
   kTonemapBegin = 4,
   kUIBegin = 5,
   kRenderEnd = 6,
+  kSceneBegin = 7,
+  kSceneTranslucent = 8,
+  kSceneComposite = 9,
   kPhase = 0x100,
 };
 
 // The render phases that mean something for the markers.
+constexpr uint32_t kPhaseScene = 0x800;
+constexpr uint32_t kPhaseTranslucent = 0x100000;
+constexpr uint32_t kPhaseComposite = 0x04000000;
 constexpr uint32_t kPhasePost = 0x08000000;
 constexpr uint32_t kPhaseTonemap = 0x10000000;
 constexpr uint32_t kPhaseUI = 0x20000000;
@@ -150,7 +161,13 @@ extern "C" REX_FUNC(sub_822E6408) {
 // The start of a render phase (r3 = the renderer, r4 = the phase bit).
 extern "C" REX_FUNC(sub_822E55D0) {
   const uint32_t phase = ctx.r4.u32;
-  if (phase == kPhasePost) {
+  if (phase == kPhaseScene) {
+    EmitMarker(ctx, base, kSceneBegin, phase);
+  } else if (phase == kPhaseTranslucent) {
+    EmitMarker(ctx, base, kSceneTranslucent, phase);
+  } else if (phase == kPhaseComposite) {
+    EmitMarker(ctx, base, kSceneComposite, phase);
+  } else if (phase == kPhasePost) {
     EmitMarker(ctx, base, kSceneEnd, phase);
   } else if (phase == kPhaseTonemap) {
     EmitMarker(ctx, base, kTonemapBegin, phase);

@@ -46,6 +46,7 @@ std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
 void MclaDevPadConfigure(rex::RuntimeConfig& config);
 void MclaDevPadStart(rex::ui::Window* window);
 void MclaSaveMenuSettings();  // src/settings_menu.cpp
+void MclaMigrateAntiAliasing();  // src/perf_options.cpp
 
 #ifdef _WIN32
 // The pause menu's RESTART GAME (src/settings_menu.cpp) starts the game again
@@ -264,6 +265,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
     config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);
   }
   ApplyPcDefaults();
+  MclaMigrateAntiAliasing();
 
   // Development: scripted controller input (src/dev_pad.cpp), off by default.
   MclaDevPadConfigure(config);

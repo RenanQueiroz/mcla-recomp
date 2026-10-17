@@ -220,6 +220,7 @@ try {
         @{ Patch = "rexglue-hdr-output.patch"; File = "src\ui\presenter.cpp"; Adds = "IsHdrOutputWanted" }
         @{ Patch = "rexglue-hdr-ui-layer.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrBeforeResolve" }
         @{ Patch = "rexglue-hdr-scene-mcla.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrPrepareScene" }
+        @{ Patch = "rexglue-temporal-aa.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaJitterNdcOffset" }
     )
     foreach ($later in $laterPatches) {
         if (-not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
@@ -237,11 +238,21 @@ try {
     $marker = Get-Item "$sdk\.mcla-patched" -Force
     $recompiler = Get-Item "$install\bin\rexglue.exe" -Force -ErrorAction SilentlyContinue
     if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime) {
+        # FSR 3.1 (temporal anti-aliasing) is built from the FidelityFX SDK's
+        # source, fetched at a pinned commit (cmake\rexglue_fsr.cmake); its
+        # Vulkan library needs the Vulkan SDK, found through VULKAN_SDK
+        # (without it, FSR is built for Direct3D 12 only).
+        if (-not $env:VULKAN_SDK) {
+            $vulkanSdk = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
+                Sort-Object { [version]$_.Name } | Select-Object -Last 1
+            if ($vulkanSdk) { $env:VULKAN_SDK = $vulkanSdk.FullName }
+        }
         Push-Location $sdk
         try {
             # The compilers by full path; a build folder configured earlier
             # with another Clang is then configured again from scratch.
-            Logged "sdk-configure" { cmake --preset win-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF "-DCMAKE_C_COMPILER=$env:MCLA_CC" "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX" }
+            Logged "sdk-configure" { cmake --preset win-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON "-DCMAKE_C_COMPILER=$env:MCLA_CC" "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX" }
             Logged "sdk-build" { cmake --build out\build\win-amd64 --config Release }
             Logged "sdk-install" { cmake --install out\build\win-amd64 --config Release }
         } finally { Pop-Location }
@@ -267,6 +278,9 @@ try {
     $build = "$root\out\build\$Preset"
     if (-not (Test-Path "$build\mcla.exe")) { Fail "mcla.exe was not built (log: $root\out\build.log)" }
     Copy-Item "$install\bin\rexgpu-xenos.dll" $build -Force
+    # FSR 3.1's runtime (MIT, THIRD-PARTY-NOTICES.md), which the plugin loads.
+    Get-ChildItem "$install\bin" -Filter "amd_fidelityfx_*.dll" -ErrorAction SilentlyContinue |
+        ForEach-Object { Copy-Item $_.FullName $build -Force }
 
     # -----------------------------------------------------------------------
     Step "6/6 done"

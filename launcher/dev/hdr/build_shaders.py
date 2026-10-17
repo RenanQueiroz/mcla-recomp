@@ -1,4 +1,4 @@
-"""Builds the HDR shaders of the fork's SDK patches: copies the XeSL sources
+"""Builds the HDR and temporal AA shaders of the fork's SDK patches: copies the XeSL sources
 from the SDK tree into the xenia 0b2ffa3 shader tree of the toolchain, compiles
 DXBC (fxc cs/ps_5_1 /O3) and SPIR-V (glslang + spirv-opt -O -O
 --canonicalize-ids --strip-debug), and writes compact headers (32-bit words, no
@@ -25,6 +25,7 @@ SHADERS = {
     "hdr_scene_mcla.cs": GPU,
     "hdr_rt_copy.cs": GPU,
     "hdr_rt_copy_4xmsaa.cs": GPU,
+    "taa_motion_vectors_mcla.cs": GPU,
 }
 # Built for Vulkan only.
 VULKAN_ONLY = {"hdr_rt_copy.cs", "hdr_rt_copy_4xmsaa.cs"}
