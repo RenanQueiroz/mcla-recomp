@@ -46,7 +46,12 @@ REPO = HERE.parents[1]
 EXE = REPO / "out" / "build" / "win-amd64-release" / "mcla.exe"
 TOML = EXE.with_name("mcla.toml")
 REAL_USER = Path(os.environ["USERPROFILE"]) / "Documents" / "mcla"
-DEV = Path(os.environ["LOCALAPPDATA"]) / "mcla-dev"
+# MCLA_DEV_ROOT: another scratch folder (save copy, shader storage, runs), for a
+# second checkout whose runs must not share one with this one.
+DEV = Path(os.environ.get("MCLA_DEV_ROOT") or Path(os.environ["LOCALAPPDATA"]) / "mcla-dev")
+# MCLA_GAME_DATA: the extracted game, for a checkout whose game\ folder holds only
+# default.xex (for codegen).
+GAME_DATA = os.environ.get("MCLA_GAME_DATA", "")
 PRISTINE = DEV / "pristine"
 WORK = DEV / "work"
 CACHE = DEV / "cache"
@@ -557,6 +562,7 @@ def gpu_watch(seconds, threshold):
 def game_args(a, out):
     args = [
         f"--user_data_root={WORK}",
+        *([f"--game_data_root={GAME_DATA}"] if GAME_DATA else []),
         f"--cache_root={Path(a.cache_root).resolve() if a.cache_root else CACHE}",
         f"--log_file={out / 'game.log'}",
         f"--mcla_gpu_backend={a.backend}",
@@ -586,13 +592,27 @@ def game_args(a, out):
     return args
 
 
+def mcla_running():
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mcla.exe", "/NH"],
+                         capture_output=True, text=True).stdout
+    return any(line.lower().startswith("mcla.exe") for line in out.splitlines())
+
+
+def wait_for_no_game(limit_s):
+    start = time.monotonic()
+    while mcla_running():
+        if time.monotonic() - start > limit_s:
+            raise SystemExit(f"another mcla.exe is still running after {limit_s:.0f} s")
+        print("another mcla.exe is running; waiting 20 s", flush=True)
+        time.sleep(20)
+
+
 def run(a, tag=None):
     if not EXE.exists():
         raise SystemExit(f"{EXE} is not built")
-    for p in subprocess.run(["tasklist", "/FI", "IMAGENAME eq mcla.exe", "/NH"],
-                            capture_output=True, text=True).stdout.splitlines():
-        if p.lower().startswith("mcla.exe"):
-            raise SystemExit("mcla.exe is already running")
+    # Another game (the user's, or another checkout's run) would share the GPU and
+    # the screen: wait for it to close, never touch it.
+    wait_for_no_game(getattr(a, "game_wait", 7200))
     prepare()
     restore_work()
     guard = GpuGuard(a.gpu_threshold) if a.gpu_guard else None
@@ -621,6 +641,7 @@ def run(a, tag=None):
                 TOML.unlink(missing_ok=True)
             else:
                 shutil.copyfile(a.toml, TOML)
+        wait_for_no_game(getattr(a, "game_wait", 7200))  # again, just before starting
         proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env)
         if guard:
             guard.start(proc.pid)
@@ -867,6 +888,9 @@ def add_gpu_options(p, wait=0):
                    help="another process's GPU use (3D and compute engines, %% of one engine) "
                    f"over the run or any {GPU_WINDOW:g} s that marks the run as contaminated "
                    "(default %(default)s)")
+    p.add_argument("--game-wait", type=float, default=7200, metavar="SECONDS",
+                   help="while another mcla.exe runs, wait up to this long (polling every 20 s) "
+                   "before starting (default %(default)s)")
     p.add_argument("--gpu-wait", type=float, default=wait, metavar="SECONDS",
                    help="if another process is busy on the GPU before a run, wait up to this "
                    "long for it to stop, then run anyway (default %(default)s)")

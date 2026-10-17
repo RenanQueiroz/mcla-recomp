@@ -93,6 +93,10 @@ REXCVAR_DEFINE_INT32(mcla_fixed_dt, 0, "MCLA",
                      "Development: every game update advances exactly 1/N s (0 = measured "
                      "time). Uncapped this is a timedemo; for A/B measurements only")
     .range(0, 1000);
+REXCVAR_DEFINE_BOOL(mcla_freeze, false, "MCLA",
+                    "Development: every game update advances one timer tick (20 ns), so the "
+                    "world stands still while frames are still drawn; for comparing frames "
+                    "of one moment (A/B of rendering options, temporal AA convergence)");
 
 bool MclaSaveInProgress();  // src/mcla_app.cpp
 
@@ -1985,6 +1989,9 @@ void MclaDevPadFrame(uint64_t& ticks) {
   }
   if (const int32_t fixed = REXCVAR_GET(mcla_fixed_dt); fixed > 0) {
     ticks = rex::chrono::Clock::guest_tick_frequency() / static_cast<uint64_t>(fixed);
+  }
+  if (REXCVAR_GET(mcla_freeze)) {
+    ticks = 1;
   }
   if (!g_enabled) {
     return;
