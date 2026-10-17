@@ -28,8 +28,11 @@ REXCVAR_DEFINE_BOOL(mcla_race_shadows, true, "MCLA",
 REXCVAR_DEFINE_BOOL(mcla_fast_car_shadows, false, "MCLA",
                     "A simple blob shadow under cars instead of the real-time one (next start)");
 REXCVAR_DEFINE_BOOL(mcla_foliage_shadows, true, "MCLA", "Shadows cast by distant foliage");
+// The impostor render targets are created with the world, once, at start-up
+// (sub_82305230 -> sub_8230C388 -> sub_8230B778, where noimpostors is read):
+// starting or quitting a race does not build them again.
 REXCVAR_DEFINE_BOOL(mcla_foliage_impostors, true, "MCLA",
-                    "Billboards for distant trees (applies at the next load of the city)");
+                    "Billboards for distant trees (applies at the next start of the game)");
 REXCVAR_DEFINE_BOOL(mcla_fullscreen_blur, true, "MCLA", "The full-screen blur pass (next start)");
 REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA", "Multisample anti-aliasing (next start)");
 REXCVAR_DEFINE_DOUBLE(mcla_city_lod, 1.0, "MCLA",
