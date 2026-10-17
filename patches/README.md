@@ -1129,3 +1129,20 @@ Windows only until frame generation is checked elsewhere (phase 5). There is no 
 | Change | Files | Affects |
 |---|---|---|
 | Unsupported pipeline descriptions kept in the storage | `src/graphics/vulkan/pipeline_cache.cpp` | Vulkan (all platforms) |
+
+## rexglue-shader-storage-prepare.patch
+
+**Why.** The fork's shader preparation (`mcla.exe --mcla_prepare_shaders`, `src/shader_prepare.cpp`) adds shaders and pipeline descriptions to the player's shader storage, then lets the SDK create every stored pipeline, and needs two things from the SDK:
+- the versions the storage files must carry: a file whose header holds another one is emptied at start, so the game checks its shader pack against them before it writes anything;
+- how far the start-up creation of the stored pipelines got, for the launcher's progress line.
+
+**What it changes.**
+- `include/rex/graphics/shader_storage.h`: the shader storage's and both pipeline storages' versions, as public constants. The D3D12 and Vulkan pipeline caches `static_assert` that they equal their own.
+- `shader_storage_progress` (0, off, by default): while the stored pipelines are created at start, `SHADERPREP preload <done> <total>` on standard output every that many pipelines, and `SHADERPREP preload-done <created> <total> <ms>` at the end. D3D12 counts every stored description (created, failed, or skipped because its shaders aren't there) during a blocking preload; Vulkan counts the pipelines it creates. Nothing else changes with it off.
+
+**Upstream:** fork-only for now (it serves the fork's shader pack).
+
+| Change | Files | Affects |
+|---|---|---|
+| The storage versions, public | `include/rex/graphics/shader_storage.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | all platforms |
+| Progress of the stored pipelines' creation | `src/graphics/shader_storage_progress.h`, `src/graphics/command_processor.cpp`, `include/rex/graphics/d3d12/pipeline_cache.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | D3D12, Vulkan (all platforms) |
