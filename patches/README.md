@@ -1054,3 +1054,19 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 | Change | Files | Affects |
 |---|---|---|
 | The storage preload's extra creation threads and its final wait | `src/graphics/d3d12/pipeline_cache.cpp` | D3D12 |
+
+## rexglue-vulkan-pipeline-storage-keep-unsupported.patch
+
+**Why.** At start the Vulkan pipeline cache reads the pipeline descriptions in the storage file and skips those the device can't create (`ArePipelineRequirementsMet`: features another GPU or driver has), so that the file stays shareable. It then truncated the file to the number it kept. So for every unsupported description anywhere in the file, a valid one was cut off its end, at every start, and the whole list if none was supported.
+
+**What it changes.** The file is truncated only after the last valid description (a corrupted one still cuts the rest). Unsupported descriptions stay in it for devices that can create them, and are only skipped at load.
+
+**Checked** with a private switch that made every stored description whose hash is divisible by 4 unsupported at load: 114 of the user's 472 Vulkan pipelines, from a copy of their storage.
+- **Before:** the first start cut the file to 358 descriptions. 86 of the 114 lost were supported ones, and the next normal start created 358.
+- **With this patch:** the file kept all 472. The first start created 358 and the next one all 472.
+
+**Upstream:** with the stutter changes (PR 5).
+
+| Change | Files | Affects |
+|---|---|---|
+| Unsupported pipeline descriptions kept in the storage | `src/graphics/vulkan/pipeline_cache.cpp` | Vulkan (all platforms) |

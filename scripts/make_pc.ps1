@@ -265,6 +265,7 @@ try {
         @{ Patch = "rexglue-vulkan-paint-pipeline-format.patch"; File = "src\ui\vulkan\vulkan_presenter.cpp"; Adds = "swapchain_effect_pipeline.swapchain_format =" }
         @{ Patch = "rexglue-vulkan-present-semaphore-per-image.patch"; File = "src\ui\vulkan\vulkan_presenter.cpp"; Adds = "swapchain_present_semaphores.push_back" }
         @{ Patch = "rexglue-d3d12-storage-preload-threads.patch"; File = "src\graphics\d3d12\pipeline_cache.cpp"; Adds = "creation_threads_.size() < creation_thread_needed_count" }
+        @{ Patch = "rexglue-vulkan-pipeline-storage-keep-unsupported.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "pipeline_storage_valid_count" }
     )
     foreach ($later in $laterPatches) {
         # A patch that adds its file is not in while the file isn't there.

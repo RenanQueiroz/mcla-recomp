@@ -163,6 +163,10 @@ Measurements and method: `launcher/dev/shader-stutter-2026-10-15.md`; details in
 
 At start, the D3D12 pipeline cache never started its extra creation threads (a loop compared the thread count with itself, as in Xenia), so it also never reached the wait for the pipelines still being created. Start-up went on with 2–9 pipelines still being created (cold driver cache, the user's 1,684). `rexglue-d3d12-storage-preload-threads.patch` starts them (15 threads in place of 12 here) and waits for every pipeline. The cold preload went from 1,039 to 982 ms (median of 7, faster in every pair), the warm one from 51 to 48 ms.
 
+## Vulkan: valid pipelines cut from the shader storage when some weren't supported (fixed 2026-10-17)
+
+When the GPU or driver couldn't create some stored pipelines (features another device has), each start cut that many valid pipelines off the end of the storage file, and the next starts had fewer to create. `rexglue-vulkan-pipeline-storage-keep-unsupported.patch` keeps all of them and only skips the unsupported ones at load. A check that made a quarter of the user's 472 Vulkan pipelines unsupported: 358 left in the file before, all 472 now.
+
 ## Resolves dumped every sample to the EDRAM buffer first (fixed 2026-10-15)
 
 With host render targets, every resolve first copied every sample of the render targets over its area into the EDRAM buffer, and only then converted that into the destination. At 3x that dump was 60% of the resolve time: 1.35 ms of the GPU frame standing in the city by day on D3D12, 1.0 ms in the race.
