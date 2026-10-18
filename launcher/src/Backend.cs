@@ -75,6 +75,24 @@ static class GameOptions
         return string.Join(' ', items.Select(item => item.Text));
     }
 
+    /// The value an option has in these arguments (the last one given), or null when it isn't
+    /// there: "--name=value", "--name value", "--name" (true) or "--no-name" (false).
+    internal static string? Value(string arguments, string name)
+    {
+        string? value = null;
+        var tokens = Tokenize(arguments);
+        for (int i = 0; i < tokens.Count; ++i)
+        {
+            var token = tokens[i];
+            if (OptionKey(token) != name) continue;
+            int equals = token.IndexOf('=');
+            if (equals >= 0) value = token[(equals + 1)..].Trim('"');
+            else if (i + 1 < tokens.Count && !tokens[i + 1].StartsWith('-')) value = tokens[++i].Trim('"');
+            else value = token.StartsWith("--no-") ? "false" : "true";
+        }
+        return value;
+    }
+
     static string? OptionKey(string token)
     {
         if (!token.StartsWith("--"))
@@ -150,6 +168,10 @@ sealed record LauncherSettings
     public bool CheckForUpdates { get; init; } = true;
     public bool CloseOnLaunch { get; init; } = true;
     public bool AutoPlay { get; init; }
+    // The pack (its fingerprint) an automatic shader preparation last failed for, other than
+    // "in use": not tried again before every Play until the pack changes or More > Prepare
+    // shaders succeeds.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ShaderPrepSkipPack { get; init; }
 
     /// The launcher's settings; the first time, the old choices also go into
     /// the game's mcla.toml (SettingsMigration, which keeps a copy first). A

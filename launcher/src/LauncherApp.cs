@@ -61,6 +61,8 @@ sealed class LauncherApp : Component
         var (prepProgress, setPrepProgress) = UseState<ShaderPrepProgress?>(null, threadSafe: true);
         var (prepResult, setPrepResult) = UseState<int?>(null, threadSafe: true);
         var prepRef = UseRef<ShaderPrepRun?>(null);
+        // The game starts once the preparation that runs before it ends (PrepareKind.BeforePlay).
+        var playAfterPrepRef = UseRef(false);
         var initialRunning = UseMemo(GameIsRunning, Array.Empty<object>());
         var (gameRunning, setGameRunning) = UseState(initialRunning, threadSafe: true);
         var runningRef = UseRef(initialRunning);
@@ -101,34 +103,52 @@ sealed class LauncherApp : Component
             }
         }
 
-        // Fills the shader storage from the shader pack and compiles every pipeline, with the
-        // options the game is started with (ShaderPrep.cs). Quietly does nothing in a version
-        // without a pack.
-        void StartPrepare(bool afterBuild)
+        // Adds what the shader storage lacks of the shader pack and compiles every stored
+        // pipeline, with the options the game is started with (ShaderPrep.cs). Quietly does
+        // nothing in a version without a pack. Returns whether it started.
+        bool StartPrepare(PrepareKind kind, string? reason = null)
         {
-            if (prepRef.Current is { Completion.IsCompleted: false }) return;
+            if (prepRef.Current is { Completion.IsCompleted: false }) return false;
+            var manual = kind == PrepareKind.Manual;
             if (!File.Exists(ShaderPrepRun.PackFile(Paths.Repo)) || !File.Exists(Paths.GameExe))
             {
-                if (!afterBuild) setNotice("This version has no shader pack, so there are no shaders to prepare.");
-                return;
+                if (manual) setNotice("This version has no shader pack, so there are no shaders to prepare.");
+                return false;
             }
             if (GameIsRunning())
             {
-                if (!afterBuild) setNotice("Close the game first: shaders are prepared while it isn't running.");
-                return;
+                if (manual) setNotice("Close the game first: shaders are prepared while it isn't running.");
+                return false;
             }
+            // Nothing else starts the game meanwhile.
+            setCountdown(null);
             setPrepResult(null);
             setPrepProgress(null);
             try
             {
-                var run = new ShaderPrepRun(Paths.GameExe, GameOptions.Arguments(settingsRef.Current), setPrepProgress, Paths.LogsDir);
+                var run = new ShaderPrepRun(Paths.GameExe, GameOptions.Arguments(settingsRef.Current), setPrepProgress, Paths.LogsDir,
+                                            reason, retry: manual);
+                var pack = ShaderStamp.PackHash(ShaderPrepRun.PackFile(Paths.Repo));
                 prepRef.Current = run;
+                playAfterPrepRef.Current = kind == PrepareKind.BeforePlay;
                 setPrep(run);
-                _ = run.Completion.ContinueWith(task => setPrepResult(task.Result), TaskScheduler.Default);
+                _ = run.Completion.ContinueWith(task =>
+                {
+                    var exit = task.IsFaulted ? -1 : task.Result;
+                    // A failure other than "in use" isn't tried again before every Play for the
+                    // same pack; a success clears that, and so does asking for it.
+                    if (exit == 0 || manual)
+                        updateSettings(s => s.ShaderPrepSkipPack == null ? s : s with { ShaderPrepSkipPack = null });
+                    else if (!ShaderPrepRun.IsTransient(exit) && pack != null)
+                        updateSettings(s => s with { ShaderPrepSkipPack = pack });
+                    setPrepResult(exit);
+                }, TaskScheduler.Default);
+                return true;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
-                setNotice($"Couldn't prepare shaders: {ex.Message}");
+                if (manual) setNotice($"Couldn't prepare shaders: {ex.Message}");
+                return false;
             }
         }
 
@@ -166,11 +186,24 @@ sealed class LauncherApp : Component
             {
                 setBuildResult(task.Result);
                 _ = CheckAsync(fetch: false);
-                if (task.Result == 0 && !run.StopRequested) StartPrepare(afterBuild: true);
+                if (task.Result == 0 && !run.StopRequested) StartPrepare(PrepareKind.AfterBuild);
             }, TaskScheduler.Default);
         }
 
+        // Play: first, when the stamp says the driver, the settings or the storage changed since
+        // the shaders were last prepared, prepare them (with a line saying why), then start.
         void Play()
+        {
+            setCountdown(null);
+            // Never beside a preparation (the countdown included).
+            if (prepRef.Current is { Completion.IsCompleted: false }) return;
+            var check = ShaderStamp.Check(Paths.Repo, GameOptions.Arguments(settings), ReadGameSettings(), settings.ShaderPrepSkipPack);
+            Debug.WriteLine($"shader check: {check.Reason ?? "nothing to prepare"} ({check.Milliseconds} ms)");
+            if (check.Reason != null && StartPrepare(PrepareKind.BeforePlay, check.Reason)) return;
+            StartGame();
+        }
+
+        void StartGame()
         {
             setCountdown(null);
             try
@@ -300,10 +333,13 @@ sealed class LauncherApp : Component
             if (window == null) return () => { };
             void OnClosing(object? sender, WindowClosingEventArgs e)
             {
-                // Preparing shaders just stops: the storage is only ever replaced whole, and the
-                // next preparation (or the game's next start) does what is left.
-                prepRef.Current?.Stop();
-                if (exitingRef.Current || buildRef.Current is not { Completion.IsCompleted: false }) return;
+                if (exitingRef.Current || buildRef.Current is not { Completion.IsCompleted: false })
+                {
+                    // Closing: preparing shaders just stops. The storage is only ever replaced
+                    // whole, and the game's next start undoes an unfinished import.
+                    prepRef.Current?.Stop();
+                    return;
+                }
                 e.Cancel = true;
                 setConfirmExit(true);
             }
@@ -408,6 +444,15 @@ sealed class LauncherApp : Component
             setCountdown(3);
         }, readyToPlay);
 
+        // The game starts once the preparation Play asked for has ended, whatever its result: the
+        // game plays either way.
+        UseEffect(() =>
+        {
+            if (prepResult is null || !playAfterPrepRef.Current) return;
+            playAfterPrepRef.Current = false;
+            StartGame();
+        }, prepResult);
+
         UseEffect(() =>
         {
             if (countdown is not int seconds) return () => { };
@@ -458,7 +503,7 @@ sealed class LauncherApp : Component
                    MenuItem("Rebuild the game", () => StartBuild(BuildKind.Build)),
                    MenuItem("Re-patch and rebuild the SDK", () => StartBuild(BuildKind.ResetSdk)),
                    MenuItem("Run the build in a terminal", BuildInTerminal),
-                   MenuItem("Prepare shaders", () => StartPrepare(afterBuild: false)),
+                   MenuItem("Prepare shaders", () => StartPrepare(PrepareKind.Manual)),
                    MenuSeparator(),
                    MenuItem("Open the game folder", () => Open(Paths.BuildDir)),
                    MenuItem("Open the launcher logs", () => Open(Paths.LogsDir)),
@@ -489,7 +534,9 @@ sealed class LauncherApp : Component
             if (failed)
                 return Info("The build failed", "The output below shows where. Play still starts the last version that built.", InfoBarSeverity.Error);
             if (preparing)
-                return Info("Preparing shaders", prepProgress?.Describe() ?? "Starting…", InfoBarSeverity.Informational);
+                return Info(prep?.Reason is string why ? $"Preparing shaders: {why}" : "Preparing shaders",
+                            (prepProgress?.Describe() ?? "Starting…") + (playAfterPrepRef.Current ? ". The game starts when it's done." : ""),
+                            InfoBarSeverity.Informational);
             if (checking || status == null)
                 return Empty();
             if (status.UpdateAvailable)
@@ -505,9 +552,11 @@ sealed class LauncherApp : Component
                 return Info("The last build didn't finish", "Rebuild to finish it. Play starts the last version that built.", InfoBarSeverity.Warning);
             if (prep != null && prepResult is int prepExit)
                 return prepExit == 0
-                    ? Info(ShaderPrepRun.Describe(0, null), prep.PipelinesCreated > 0
+                    ? Info(ShaderPrepRun.Describe(0, null), (prep.PipelinesCreated > 0
                            ? $"{prep.PipelinesCreated:N0} pipelines are compiled for the current settings."
-                           : "The shader storage is ready.", InfoBarSeverity.Success)
+                           : "The shader storage is ready.")
+                           + (prep.ImportDisabled ? " The shader pack wasn't added: it stopped the game's start twice. More > Prepare shaders tries again." : ""),
+                           prep.ImportDisabled ? InfoBarSeverity.Warning : InfoBarSeverity.Success)
                     : Info("Shaders weren't prepared", ShaderPrepRun.Describe(prepExit, prep.ErrorMessage)
                            + ". The game still plays, compiling shaders as it meets them.", InfoBarSeverity.Warning);
             if (buildResult == 0)

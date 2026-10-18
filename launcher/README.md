@@ -243,31 +243,57 @@ screens later.
 
 ## Preparing shaders
 
-After a build or update that succeeded, and from *More* › **Prepare shaders**,
-the launcher runs `mcla.exe --mcla_prepare_shaders=true` with the options it
+The launcher runs `mcla.exe --mcla_prepare_shaders=true` with the options it
 starts the game with (*More mcla.exe options*; the rest comes from `mcla.toml`,
-as when playing), which:
+as when playing):
 
-1. checks the shader pack (`shaderpack\545407F8.shaderpack`) against the
-   game's files and the SDK's storage versions;
-2. rebuilds the pack's shaders from `game\` and adds them, with the pack's
-   pipeline descriptions, to the shader storage
-   (`Documents\mcla\cache\shaders\shareable`), keeping what the files already
+- after a build or update that succeeded;
+- before Play, when the game's record of its shader storage (the stamp,
+  `<cache>\shaders\local\545407F8.stamp.json`, written after every start and every
+  preparation) says the shaders aren't compiled for the next start: the
+  graphics driver was updated or the card changed (the display adapters'
+  drivers, as DXGI reports them), the API or the resolution scale the game will
+  start with differs, the shader pack changed, the storage files shrank or
+  vanished, or the last start ended while it was adding the pack's shaders.
+  The check (`ShaderStamp.cs`) reads a few small files and lists the display
+  adapters, in a few milliseconds, and never starts `mcla.exe`; when it finds
+  nothing, the game starts at once. The status line says why it prepares, and
+  the game starts when it's done, whatever the result;
+- from *More* › **Prepare shaders**, which also tries again a pack whose
+  import was turned off after it stopped the game's start twice.
+
+The run:
+
+1. takes the storage's session lock (exit code 7, *in use*, when a game holds
+   it: tried again at the next Play);
+2. undoes an import the game's last start didn't finish (the journal,
+   `<cache>\shaders\local\545407F8.import`);
+3. checks the shader pack (`shaderpack\545407F8.shaderpack`) against the game's
+   files and the SDK's storage versions, rebuilds from `game\` the shaders the
+   storage lacks and adds them, with the pack's pipeline descriptions, to the
+   shader storage (`<cache>\shaders\shareable`), keeping what the files already
    hold; each file is written beside the old one and renamed over it;
-3. creates every stored pipeline for the current API and resolution, as a start
-   of the game does, so the graphics driver compiles them now;
-4. quits, before the game would start; its window stays hidden.
+4. creates every stored pipeline for the current API and resolution, as a start
+   of the game does, so the graphics driver compiles them now, then closes the
+   storage (a driver pipeline cache is saved) and writes the stamp;
+5. quits, before the game would start; its window stays hidden, and a crash
+   ends it without an error dialog.
 
 The status line shows its progress, read from the lines it prints
-(`SHADERPREP <step> ...`, `ShaderPrep.cs`), and its log is
-`logs\prepare-shaders-*.log`. Play is greyed out meanwhile. Closing the
-launcher stops it: what it had added stays, and the game's next start creates
-the rest. If the pack or the game's files don't match, it says so and nothing
-is written; the game then plays as before, compiling shaders as it meets them.
-Run it again after a graphics driver update, which empties the driver's own
-cache, or after changing the resolution or the API, so that the game's next
-start doesn't spend the time instead (`KNOWN-ISSUES.md`, "Shaders prepared
-before the first start").
+(`SHADERPREP <step> ...`, `ShaderPrep.cs`). Its log is
+`logs\prepare-shaders-*.log` (the last ten), and the game's own log of the run
+`logs\prepare-shaders-game.log` (a `--log_file` of yours isn't touched). Play,
+the countdown of *start the game right away* and the settings wait meanwhile;
+the restart prompt after a launcher update shows once it's done. Closing the
+launcher stops it, and a launcher that dies takes it along (a job object); a
+run that hangs is ended after 15 minutes. If the pack or the game's files
+don't match, it says so and nothing is written; the game then plays as before,
+compiling shaders as it meets them. An automatic preparation that failed for
+another reason than *in use* isn't run again before every Play for the same
+pack (`settings.json`, `ShaderPrepSkipPack`) until *Prepare shaders* succeeds
+or the pack changes. Without the launcher the game adds what its storage lacks
+of the pack at every start anyway (`KNOWN-ISSUES.md`, "Shaders prepared before
+the first start, and kept prepared").
 
 ## Rebuilding the launcher
 
@@ -400,7 +426,12 @@ during a build:
   and the race benchmark through `devrun.py`. `shader-salt.sdk.patch` is the
   salt part of `shader-stutter-timers.sdk.patch`, for a cold driver cache.
   `devrun.py --stdout <file>` gives the game a standard output, as the
-  launcher does.
+  launcher does. `test_storage.py` tests the import's protections (a file
+  held by another program, packs with lists this build doesn't take, the
+  session lock, the rollback after a crash and the pack disabled after two)
+  and the import at a start, through `devrun.py`; `launcher-check\` builds the
+  launcher's shader logic without its window (`dotnet build`), to run the check
+  before Play against a stamp and a preparation run against a stand-in game.
 - `direct-resolve-2026-10-15.md`: resolves that read the render target
   directly instead of dumping it into the EDRAM buffer
   (`rexglue-direct-resolve.patch`) at any resolution scale, and the 4x MSAA

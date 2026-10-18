@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Development only: the launcher's shader logic (ShaderStamp.cs, ShaderPrep.cs) without its
+       window, for tests (Program.cs). Not part of the launcher's build. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>MclaLauncher</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\..\src\Backend.cs" />
+    <Compile Include="..\..\..\src\GameSettings.cs" />
+    <Compile Include="..\..\..\src\ShaderStamp.cs" />
+    <Compile Include="..\..\..\src\ShaderPrep.cs" />
+    <Compile Include="..\..\..\src\DisplayHdr.cs" />
+  </ItemGroup>
+
+</Project>
