@@ -5,7 +5,8 @@
       second one on the same storage (driver cache warm for its pipelines)
   python measure.py race --backend vulkan --res 3 --salt 102 [--prepared]
       the race benchmark (race.pad, timedemo) on a new storage; with --prepared, the storage is
-      prepared first with the same salt, as a player's would be after the launcher's step
+      prepared first with the same salt, as a player's would be after the launcher's step;
+      without it the import at start is off too (--mcla_shader_pack_auto=false)
 
 --salt: the dev patch's tmp_shader_salt (launcher/dev/shader-salt.sdk.patch), which makes the
 translated shaders new to the driver's cache, as after a driver update: use a new value per
@@ -52,8 +53,11 @@ def prepare(backend, res, salt, cache, tag):
          "progress_lines": sum(1 for line in out.splitlines() if line.startswith("SHADERPREP preload "))}
     for line in out.splitlines():
         if line.startswith("SHADERPREP done "):
-            rb, pl, priv, gpu = line.split()[2:6]
+            fields = line.split()[2:]
+            rb, pl, priv, gpu = fields[:4]
             r.update(rebuild_ms=int(rb), preload_ms=int(pl), private_mb=float(priv), gpu_mb=float(gpu))
+            if len(fields) > 4:
+                r["process_ms"] = int(fields[4])  # from the process's creation to the report
         elif line.startswith("SHADERPREP preload-done "):
             created, total, ms = line.split()[2:5]
             r.update(created=int(created), total=int(total), create_ms=int(ms))
@@ -68,10 +72,12 @@ def prepare(backend, res, salt, cache, tag):
     return r
 
 
-def race(backend, res, salt, cache, tag):
+def race(backend, res, salt, cache, tag, auto_import):
+    # Without the pack: its import at start off too (it is on by default).
     out, folder = run_devrun(["--script", str(HERE.parent / "scripts" / "race.pad"), "--backend", backend,
                               "--res", str(res), "--fixed-dt", "60", "--cache-root", str(cache),
-                              "--timeout", "900", "--extra", f"--tmp_shader_salt={salt}"], tag)
+                              "--timeout", "900", "--extra", f"--tmp_shader_salt={salt}",
+                              f"--mcla_shader_pack_auto={'true' if auto_import else 'false'}"], tag)
     return race_result(folder, tag, cache)
 
 
@@ -134,7 +140,8 @@ def main():
     else:
         if a.prepared:
             results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}"))
-        results.append(race(a.backend, a.res, a.salt, cache, f"race-{a.backend}-{a.salt}-{'pack' if a.prepared else 'none'}"))
+        results.append(race(a.backend, a.res, a.salt, cache, f"race-{a.backend}-{a.salt}-{'pack' if a.prepared else 'none'}",
+                            auto_import=a.prepared))
     for r in results:
         print(json.dumps(r))
     with open(root / "measure-results.jsonl", "a", encoding="utf-8") as f:

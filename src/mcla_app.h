@@ -23,8 +23,9 @@ class MclaApp : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override;
   void OnPostSetup() override;
   void OnPreLaunchModule() override;
-  // --mcla_prepare_shaders: the storage is prepared before the module starts, the SDK creates its
-  // pipelines, and the game quits here instead of starting (src/shader_prepare.cpp).
+  // The shader storage: the pack's import is done before the module starts (OnPreLaunchModule),
+  // the stamp written once the SDK created the stored pipelines, and a preparation run
+  // (--mcla_prepare_shaders) quits here instead of starting (src/shader_prepare.cpp).
   void OnPostLaunchModule(rex::system::XThread* thread) override;
   // Saves what was changed in the pause menu's settings, in case the window is
   // closed while one of its submenus is open (src/settings_menu.cpp).

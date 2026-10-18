@@ -37,7 +37,7 @@ The pack holds no game data: per shader its fingerprint, its kind, its source (a
 
 From an empty storage unless noted; "rebuild" includes reading the pack and the game's files, "pipelines" is the SDK's creation of the stored pipelines of the API in use; memory at the end, with every pipeline created (process private bytes, and the adapter's local video memory in use).
 
-| API | Driver's cache | Rebuild | Pipelines | Whole run | Private memory | Video memory | Salt |
+| API | Driver's cache | Rebuild | Pipelines | devrun's run (see below) | Private memory | Video memory | Salt |
 |---|---|---|---|---|---|---|---|
 | D3D12 | cold | 3.43, 3.40, 3.66 s | 2,928 in 1.16, 1.20, 1.29 s | 8 s | 1,068, 1,079, 1,076 MB | 238 MB | 7002, 7005, 7011 |
 | D3D12 | warm | 3.92 s | 2,928 in 0.09 s | | 1,018 MB | 238 MB | 7002 again |
@@ -48,6 +48,7 @@ From an empty storage unless noted; "rebuild" includes reading the pack and the 
 | Vulkan | warm, storage already prepared | 0.04 s | 1,561 in 0.12 s | 4 s | 1,240 MB | 328 MB | 7003 |
 | Vulkan | pack without pipelines (baseline) | 3.58 s | 0 | | 864 MB | 287 MB | 7008 |
 
+- The "devrun's run" column is the measuring script's own time for the whole run, rounded to the second, its waiting before and after the game included: not the preparation's. The preparation's own times, from the process's creation to its report, were measured later the same day (below): D3D12 7.5 s and Vulkan 15.2 s cold, 2.7 and 2.8 s again on a prepared storage.
 - Each preparation added 723 shaders and 5,533 pipeline descriptions to an empty storage (all four lists, so a later change of API finds its pipelines stored too), and nothing to a storage it had prepared.
 - With every pipeline resident: D3D12 about 250 MB more process memory than without them (300 MB right after a cold compile) and no more video memory; Vulkan about 375 MB more (550 MB right after a cold compile) and 41 MB more video memory.
 - The rebuild runs on one thread; on a slower CPU it takes longer in proportion. The pipelines are created on the SDK's creation threads, as at any start.
@@ -89,3 +90,70 @@ The last run started with an `mcla.toml` (`fullscreen = true`, `mcla_fps = 60`, 
 ### Frame generation
 
 The frame generation gate (`fg/present-gate.pad`, D3D12, native, 120 FPS cap, `--frame_generation=fsr --mcla_anti_aliasing=fsr`, HDR) on the build with these changes: frame generation started through AMD's swap chain, and in the 40 s steady drive every one of the 4,801 guest frames was presented once (none twice, none dropped). PresentMon needs an elevated prompt here to capture, so the shown-frame rate (2.0 presents per swap on 2026-10-17) wasn't measured again; nothing in these changes reaches the presenter.
+
+## Later the same day: the review's fixes, and the import at every start
+
+The review of the first version (no high findings, four medium, eight low) and the user's request for automatic re-preparation changed it:
+
+- **The import at every start** (`mcla_shader_pack_auto`, on): before the storage loads, every start adds what the storage lacks of the pack. Nothing missing: the pack and the storage files are read and checked, 1 ms here. Everything missing (an empty or deleted storage): 3.5 s here for the 723 shaders (one thread), 1.5 s for 422. It replaces the PS5's opt-in preparation at every start, and covers starts without the launcher.
+- **M1:** files are read with `CreateFileW` (POSIX `open`): a file that exists but can't be read throws, "in use" (exit 7) on a sharing or lock violation, an I/O error (6) otherwise, before anything is written. Only "not found" counts as missing.
+- **M2:** a fixed table of the four lists, with headers built from the SDK's constants and their record sizes; a pack list of another name, header, record size, or given twice, is refused (3). File names never come from the pack.
+- **M3:** a session lock (`shaders/local/545407F8.lock`, `LockFileEx` on a byte past the owner text, `flock` on POSIX), taken by every `mcla.exe` before it reads the storage and held until it ends, with its owner ("game <pid>", "prepare <pid>") in the file. A preparation that can't take it exits 7 at once; a start waits up to 2 minutes while a preparation holds it, and doesn't wait (or import) beside another game. Temporary files are `<file>.<pid>.tmp`, and ones left by a process that ended mid-write are removed under the lock.
+- **M4:** a journal (`shaders/local/545407F8.import`) with each file's valid length before the import, written before the first rename; phase `rebuild` before the shaders are rebuilt, `merged` before the files are replaced, `done` once the stored pipelines were all created. A start that finds `merged` cuts the files back (a file the import created or replaced is removed); one that finds `rebuild` counts it too. Two such starts in a row with the same pack disable its import (the player's own entries are used); `--mcla_prepare_shaders_retry` (More > Prepare shaders) or deleting the journal tries again. A failure while replacing files puts back the ones already replaced at once.
+- **L1:** `CreateFileW`, `WriteFile`, a checked `FlushFileBuffers`, then `MoveFileExW` with retries for 2 s on sharing or access errors; the temporary file removed on any failure; `fsync` of the file and its folder on POSIX.
+- **L2:** the archive walk visits each entry once, takes only child ranges inside the table and after their folder, caps sizes by the archive's and decompression by the stated size, and needs at least one entry; the program scan and the range checks are in 64 bits; a vertex shader's fetch count is at most 32 and its fetch table must lie inside the header (in the game's own programs it can end exactly at the data, so the review's extra 31 words don't hold), and the binder's area check adds the 16-byte alignment.
+- **L3:** a preparation run sets `SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX)`: a crash ends it at once. A crash in the game's code while rebuilding counts as a failed start (the journal's `rebuild` phase).
+- **L4:** Play returns while a preparation runs, and starting one cancels the countdown; the hidden `mcla.exe` is in a job object that kills it with the launcher; log writes catch `IOException`, a faulted run reports -1; the progress lines are split fully (`preload-done` shows its count); code 3 shows the game's message; the run's game log is `logs/prepare-shaders-game.log`, not the user's `--log_file`; closing the launcher while a build asks for confirmation no longer stops a preparation.
+- **L5:** `mcla_prepare_shaders` is taken only from the command line (a line in `mcla.toml` is logged and ignored).
+- **L6:** `fullscreen = false` and `shader_storage_progress = 50` are set as command-line values, which `mcla.toml` never saves.
+- **L7:** the preparation ends with `ShaderStorageReport(shutdown)`, which closes the storage first: with `vulkan_pipeline_cache_file`, `shaders/local/545407F8.vk.bin` (27 MB here) is written by the preparation.
+- **L8:** a program's own type must match the pack's pixel flag; an empty cache folder (or `store_shaders` off) refuses; the stray `preload 0 N` of D3D12's non-blocking preload is gone.
+- **Exit codes:** 7 is "in use, try again later" (the launcher tries again at the next Play); 2 to 6 are permanent (not tried again before every Play for the same pack).
+
+**The stamp and the check before Play.** After every start and every preparation the game writes `shaders/local/545407F8.stamp.json`: the pack, the storage versions, the SDK's report (the API, the pipeline storage file, its descriptions and the pipelines created, the adapter with its driver: D3D12's user-mode driver version, Vulkan's `driverVersion` and `pipelineCacheUUID`, the resolution scale, the EDRAM size), the settings, each file's size (and record count), and the display adapters with their drivers as DXGI reports them. At Play, `ShaderStamp.cs` compares it with the pack in the checkout, the API and resolution scale of the next start (the launcher's options, `REX_` environment variables, `mcla.toml`; "any" takes whichever API was used), the display drivers now and the files now. Checked with `launcher-check` (the launcher's code without its window) on a stamp from a real start, each case on its own:
+
+| Case | Reason | Time (new process / again) |
+|---|---|---|
+| unchanged | none | 25 / 0 ms |
+| `--resolution_scale=2` | the resolution changed | 12 / 0 ms |
+| `--mcla_gpu_backend=vulkan` | the graphics API changed | 12 / 0 ms |
+| `any` | none | 23 / 0 ms |
+| no resolution set (1) | none | 23 / 0 ms |
+| the recorded driver 31.0.15.1111 | the graphics driver was updated | 24 / 0 ms |
+| the recorded device another | the graphics card changed | 22 / 0 ms |
+| the recorded pack another | the shader pack changed | 11 / 0 ms |
+| the same, the pack skipped after a failure | none | 1 / 0 ms |
+| the D3D12 list cut to 100,000 bytes | the shader cache was reset | 12 / 0 ms |
+| the D3D12 list deleted | the shader cache was deleted | 12 / 0 ms |
+| the journal at `merged` | the last start ended while shaders were being added | 8 / 0 ms |
+| no stamp | shaders haven't been prepared yet | 8 / 0 ms |
+| a damaged stamp | the shader storage's record can't be read | 12 / 0 ms |
+| `mcla.toml` with `resolution_scale = 3`, `mcla_gpu_backend = "vulkan"` | the graphics API changed | |
+
+The preparation's own handling, on a stand-in game (`launcher-check`'s stand-in mode): the progress lines, exit 0 with the count of pipelines, exit 3 and 7 with their messages, `import-disabled`, the user's `--log_file` replaced by the run's own, and a launcher process killed mid-run taking the stand-in with it (the job object).
+
+**Tests** (`launcher/dev/shaderpack/test_storage.py`, through `devrun.py`, on the clean build): all 22 pass.
+- M1: a preparation with the shader file held exits 7, nothing written, no journal; a start with a list held starts, without an import.
+- M2: lists named `xsh` or `/../../../a.b`, a record size of 68 for `rtv`, another header, a list given twice: exit 3, nothing written anywhere.
+- M3: a preparation beside a game's lock exits 7 within its 2 s; a start beside another game neither waits nor imports; a start during a preparation's lock waits for it (12 s), then imports.
+- M4: a crash right after the import (`--mcla_shader_pack_test_crash=1`, exit 99) leaves `phase merged`; the next start cuts 5 files back and (crashing again) records one failure; the next disables the pack, the storage back to the player's byte for byte; a normal start keeps it disabled; the retry imports again (422 shaders, 4,533 pipelines) and resets the count. A crash while rebuilding (`=2`) counts too.
+- At a start: an empty storage filled with the pack and the stamp written; nothing missing in 1 ms; files cut mid-record completed; a shader file of another version replaced.
+
+**Re-measured** (3x, `tmp_shader_salt` 8001 and 8002, the preparation's own times from the process's creation to its report):
+
+| API | Storage, driver's cache | Rebuild | Pipelines | Process | Private memory | Video memory |
+|---|---|---|---|---|---|---|
+| D3D12 | empty, cold | 3.54 s | 2,928 in 1.29 s | 7.53 s | 1,074 MB | 238 MB |
+| D3D12 | prepared, warm | 1 ms (nothing missing) | 2,928 in 0.08 s | 2.69 s | 1,020 MB | 238 MB |
+| D3D12 | empty, warm | 3.55 s | 2,928 in 0.07 s | 6.28 s | 1,019 MB | 238 MB |
+| D3D12 | pack without pipelines | 3.59 s | 0 | 6.26 s | 767 MB | 238 MB |
+| Vulkan | empty, cold | 3.54 s | 1,561 in 8.92 s | 15.18 s | 1,398 MB | 328 MB |
+| Vulkan | prepared, warm | 1 ms | 1,561 in 0.12 s | 2.80 s | 1,236 MB | 328 MB |
+| Vulkan | empty, warm | 3.54 s | 1,561 in 0.12 s | 6.38 s | 1,232 MB | 328 MB |
+| Vulkan | pack without pipelines | 3.53 s | 0 | 6.21 s | 859 MB | 287 MB |
+
+About 2.6 s of every run is the game's own start (window, graphics device, the executable loaded). A normal D3D12 start on that storage with the driver's cache cold: nothing missing (1 ms), then 2,928 pipelines in 1.32 s before the logos.
+
+**Not done: retiring an old pack's entries.** The import only adds. An entry of an older pack that a newer pack no longer has stays, created at every start: about 85 KB of process memory each on D3D12, 240 KB and 26 KB of video memory on Vulkan (from the figures above). Retiring them needs a record of which entries each pack added (nothing records it yet), a rewrite that removes them without touching the player's own, and a rollback for that rewrite (the journal's lengths only undo appends). Left for when a pack drops entries.
+
+**Frame generation, again** (`fg/present-gate.pad`, the clean build): through AMD's swap chain, HDR, 4,800 of 4,800 guest frames presented once in the 40 s drive, none dropped.

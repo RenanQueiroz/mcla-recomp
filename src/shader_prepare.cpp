@@ -1,9 +1,15 @@
-// Shader preparation: mcla.exe --mcla_prepare_shaders
+// Shader preparation and the shader pack's import
 //
-// Fills this player's shader storage (<cache>/shaders/shareable) from the shader pack that comes
-// with the fork (shaderpack/545407F8.shaderpack), then has the GPU create every stored pipeline
-// with the settings the game is played with, and quits. Afterwards, places and effects the pack
-// covers no longer compile shaders while playing.
+// The storage (<cache>/shaders/shareable) keeps every pipeline the game has created, for the next
+// start. The shader pack the fork ships (shaderpack/545407F8.shaderpack) lets a player's storage
+// start out with what the fork's test sessions reached:
+// - at every start (mcla_shader_pack_auto, on by default), before the storage loads, whatever of
+//   the pack the storage lacks is rebuilt from the player's own game files and added (about 5 ms
+//   when nothing is missing, a few seconds when shaders must be rebuilt);
+// - with --mcla_prepare_shaders=true (the launcher, after a build, before Play when the driver,
+//   settings or storage changed, and from More), the same, then every stored pipeline is created
+//   with the settings the game is played with, so the graphics driver compiles them now, and the
+//   game quits before its code starts.
 //
 // The pack holds no game data: only fingerprints (XXH3 hashes), offsets and lengths into the
 // player's own default.xex, and the pipeline descriptions (render state and shader hashes) that
@@ -18,22 +24,45 @@
 // - three shaders of the console's own Direct3D, at a known place in default.xex.
 // Every shader rebuilt is checked against its fingerprint; one that doesn't match is left out.
 //
-// Standard output gets lines for the launcher, all starting with "SHADERPREP ":
-//   start <entries>                          rebuild <done> <total>
-//   rebuild-done <ok> <failed> <ms>          merge <shaders added> <pipelines added>
-//   preload <done> <total>  /  preload-done <created> <total> <ms>   (from the GPU plugin)
-//   done <rebuild ms> <preload ms> <private MB> <GPU MB>
-//   error <code> <message>                   (then the process ends with that code)
-// Exit codes: 0 done, 2 no pack, 3 bad pack, 4 game files don't match, 5 pack for another
-// version of the graphics code, 6 storage not writable or another error.
+// The player's storage is protected:
+// - Every mcla process holds a session lock (<cache>/shaders/local/545407F8.lock) from before it
+//   reads the storage until it ends: a preparation refuses to run beside a game (code 7), and a
+//   game started during a preparation waits for it.
+// - A file that exists but can't be read stops the import before anything is written: it is
+//   never taken for a missing one.
+// - The pack's lists are accepted only as the four this build knows (names, headers and record
+//   sizes from the SDK's own constants); paths never come from the pack.
+// - Entries already in a file stay, in their order; each file is written beside the old one,
+//   flushed and renamed over it.
+// - A journal (<cache>/shaders/local/545407F8.import) records each file's length before an import.
+//   If the process ends after the import and before the stored pipelines were all created, the
+//   next start cuts the files back to those lengths. After two such failed starts with the same
+//   pack, importing that pack is disabled (the player's own entries stay); More > Prepare shaders
+//   (--mcla_prepare_shaders_retry) or deleting the journal tries again.
+// - After the stored pipelines were created, a stamp (<cache>/shaders/local/545407F8.stamp.json)
+//   records what was loaded: the pack, the storage versions, the API, the pipeline storage file
+//   in use (which also says the EDRAM path), the resolution scale, the adapter and its driver,
+//   the files' sizes. The launcher compares it with the current driver, settings and files to
+//   decide whether to prepare again before Play.
 //
-// Nothing is written to the storage before every check passed, and nothing else is written: not
-// mcla.toml, not the save. Files are replaced by writing a new one and renaming it; entries
-// already in a file stay, in their order.
+// Standard output gets lines for the launcher, all starting with "SHADERPREP ":
+//   start <shaders to rebuild>               rebuild <done> <total>
+//   rebuild-done <ok> <failed> <ms>          merge <shaders added> <pipelines added>
+//   rollback <files cut back>                import-disabled <pack> <failed starts>
+//   preload <done> <total>  /  preload-done <created> <total> <ms>   (from the GPU plugin)
+//   done <rebuild ms> <preload ms> <private MB> <GPU MB> <process ms>
+//   error <code> <message>                   (then the process ends with that code)
+// Exit codes: 0 done; permanent: 2 no pack, 3 damaged pack, 4 game files don't match, 5 pack for
+// another version of the graphics code, 6 storage can't be read or written; transient: 7 storage
+// in use by another program (try again later).
+//
+// Nothing else is written: not mcla.toml (the overrides here are command-line values, which the
+// settings file never saves), not the save.
 
 #include "generated/default/mcla_init.h"
 
 #include "mcla_app.h"
+#include "shader_storage_files.h"
 
 #include <algorithm>
 #include <array>
@@ -42,10 +71,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -62,6 +93,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
+#include <rex/system/interfaces/graphics.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/window.h>
@@ -73,18 +105,33 @@
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <psapi.h>
+#else
+#include <unistd.h>
 #endif
 
 REXCVAR_DEFINE_BOOL(mcla_prepare_shaders, false, "MCLA",
                     "Prepare the shader storage from the shader pack, create every stored "
-                    "pipeline with the current settings, then quit (the launcher runs this)")
+                    "pipeline with the current settings, then quit (the launcher runs this; on PC "
+                    "only taken from the command line)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_prepare_shaders_retry, false, "MCLA",
+                    "With --mcla_prepare_shaders: also import a shader pack whose import was "
+                    "disabled after failed starts (the launcher's More > Prepare shaders)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_shader_pack_auto, true, "MCLA",
+                    "At every start, add whatever of the shader pack the shader storage lacks "
+                    "before it loads")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_shader_pack, "", "MCLA",
-                      "Shader pack for --mcla_prepare_shaders (default: "
-                      "shaderpack/545407F8.shaderpack in the repository the game is built in)")
+                      "The shader pack (default: shaderpack/545407F8.shaderpack in the repository "
+                      "the game is built in)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(mcla_shader_pack_test_crash, 0, "MCLA",
+                     "Development: end the process as a crash would, 1 right after the pack's "
+                     "import, 2 while its shaders are rebuilt (tests the rollback)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_prepare_shaders_check, "", "MCLA",
-                      "Development: with --mcla_prepare_shaders, rebuild the pack's shaders, "
+                      "Development: with --mcla_prepare_shaders, rebuild all the pack's shaders, "
                       "write whether each one was rebuilt to this file and quit, without "
                       "changing the storage")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -95,9 +142,18 @@ REX_EXTERN(sub_82424EB0);
 
 namespace {
 
+namespace ss = rex::graphics::shader_storage;
+using mcla::shader_storage::Failure;
+using mcla::shader_storage::kBadPack;
+using mcla::shader_storage::kInUse;
+using mcla::shader_storage::kIoError;
+using mcla::shader_storage::kNoPack;
+using mcla::shader_storage::kOtherGame;
+using mcla::shader_storage::kOtherVersions;
 using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kTitleId = 0x545407F8;
+constexpr char kTitle[] = "545407F8";
 constexpr uint32_t kImageBase = 0x82000000;
 constexpr uint32_t kImageSize = 0x009E0000;
 // In the decrypted default.xex (title update 0.0.0.8): the key of the archives' file tables, and
@@ -106,11 +162,8 @@ constexpr uint32_t kRpfKeyAddress = 0x827D8AC4;
 constexpr uint32_t kDeclTypeTableAddress = 0x827D42B0;
 // The folder of the effects' preset files (.sps), by its name's hash: its name isn't known.
 constexpr uint32_t kPresetFolderHash = 0x6D1F986C;
-
-struct Failure {
-  int code;
-  std::string message;
-};
+// Failed starts with the same pack after which its import is disabled.
+constexpr uint32_t kFailuresBeforeDisabling = 2;
 
 void Line(const std::string& text) {
   std::fprintf(stdout, "SHADERPREP %s\n", text.c_str());
@@ -167,15 +220,6 @@ uint32_t NameHash(std::string_view name) {
   return h;
 }
 
-bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file) return false;
-  file.seekg(0, std::ios::end);
-  out.resize(size_t(file.tellg()));
-  file.seekg(0);
-  return bool(file.read(reinterpret_cast<char*>(out.data()), std::streamsize(out.size())));
-}
-
 // ---------------------------------------------------------------------------------------------
 // Raw deflate (RFC 1951), for the archive's compressed files. After Mark Adler's puff.c (zlib's
 // contrib/puff, zlib licence; THIRD-PARTY-NOTICES.md): canonical Huffman codes decoded from the
@@ -183,7 +227,9 @@ bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
 
 class Inflater {
  public:
-  Inflater(const uint8_t* in, size_t size) : in_(in), size_(size) {}
+  // max_out: the size the output must not pass (the file's size in the archive's table).
+  Inflater(const uint8_t* in, size_t size, size_t max_out)
+      : in_(in), size_(size), max_out_(max_out) {}
 
   bool Run(std::vector<uint8_t>& out) {
     out_ = &out;
@@ -258,7 +304,7 @@ class Inflater {
     uint32_t len = in_[pos_] | (in_[pos_ + 1] << 8);
     uint32_t nlen = in_[pos_ + 2] | (in_[pos_ + 3] << 8);
     pos_ += 4;
-    if (len != (~nlen & 0xFFFF) || pos_ + len > size_) return false;
+    if (len != (~nlen & 0xFFFF) || pos_ + len > size_ || out_->size() + len > max_out_) return false;
     out_->insert(out_->end(), in_ + pos_, in_ + pos_ + len);
     pos_ += len;
     return true;
@@ -279,6 +325,7 @@ class Inflater {
     for (;;) {
       int symbol = Decode(lengthcode);
       if (symbol < 0) return false;
+      if (out_->size() >= max_out_ && symbol != 256) return false;
       if (symbol < 256) {
         out_->push_back(uint8_t(symbol));
       } else if (symbol == 256) {
@@ -290,7 +337,7 @@ class Inflater {
         int dsym = Decode(distcode);
         if (dsym < 0 || dsym >= 30) return false;
         size_t dist = kDistBase[dsym] + Bits(kDistExtra[dsym]);
-        if (failed_ || dist > out_->size()) return false;
+        if (failed_ || dist > out_->size() || out_->size() + len > max_out_) return false;
         size_t from = out_->size() - dist;
         for (size_t i = 0; i < len; ++i) out_->push_back((*out_)[from + i]);
       }
@@ -348,6 +395,7 @@ class Inflater {
 
   const uint8_t* in_;
   size_t size_;
+  size_t max_out_;
   size_t pos_ = 0;
   uint32_t bit_buffer_ = 0;
   int bit_count_ = 0;
@@ -456,43 +504,63 @@ void DecryptTable(std::vector<uint8_t>& table, const uint8_t key[32]) {
   }
 }
 
-// The plain (not resource) files under shaders/: the effects and the preset files.
+// The plain (not resource) files under shaders/: the effects and the preset files. Defensive
+// against a damaged or unusual archive: every child range inside the table and after its parent,
+// each entry visited once, sizes within the archive, decompression bounded by the stated size.
 std::vector<std::pair<ArchiveFile, std::vector<uint8_t>>> ReadShaderFiles(
     const std::filesystem::path& archive_path, const uint8_t key[32]) {
   std::ifstream file(archive_path, std::ios::binary);
-  if (!file) throw Failure{4, "can't open " + archive_path.string()};
+  if (!file) throw Failure{kOtherGame, "can't open " + archive_path.string()};
+  file.seekg(0, std::ios::end);
+  const uint64_t archive_size = uint64_t(std::max<std::streamoff>(file.tellg(), 0));
+  file.seekg(0);
   uint8_t header[20];
   if (!file.read(reinterpret_cast<char*>(header), 20) || std::memcmp(header, "RPF3", 4) != 0)
-    throw Failure{4, archive_path.filename().string() + " is not the expected archive"};
+    throw Failure{kOtherGame, archive_path.filename().string() + " is not the expected archive"};
   const uint32_t table_size = Le32(header + 4), count = Le32(header + 8);
-  if (table_size > (64u << 20) || uint64_t(count) * 16 > table_size)
-    throw Failure{4, archive_path.filename().string() + " has an unexpected file table"};
+  if (count == 0 || table_size > (64u << 20) || uint64_t(count) * 16 > table_size ||
+      0x800 + uint64_t(table_size) > archive_size)
+    throw Failure{kOtherGame, archive_path.filename().string() + " has an unexpected file table"};
   std::vector<uint8_t> table(table_size);
   file.seekg(0x800);
   if (!file.read(reinterpret_cast<char*>(table.data()), table_size))
-    throw Failure{4, "can't read the file table of " + archive_path.filename().string()};
+    throw Failure{kOtherGame, "can't read the file table of " + archive_path.filename().string()};
   if (Le32(header + 16)) DecryptTable(table, key);
   auto entry = [&](uint32_t i) {
     std::array<uint32_t, 4> e;
-    for (int k = 0; k < 4; ++k) e[k] = Le32(table.data() + i * 16 + k * 4);
+    for (int k = 0; k < 4; ++k) e[k] = Le32(table.data() + size_t(i) * 16 + k * 4);
     return e;
   };
+  // A folder's children: inside the table, after the folder itself.
+  auto children = [&](uint32_t index, const std::array<uint32_t, 4>& e, uint32_t& first,
+                      uint32_t& n) {
+    first = e[2] & 0x7FFFFFFF;
+    n = e[3];
+    return first > index && uint64_t(first) + n <= count;
+  };
   const auto root = entry(0);
-  if (!(root[2] & 0x80000000u)) throw Failure{4, "the archive's file table can't be read"};
+  uint32_t first = 0, n = 0;
+  if (!(root[2] & 0x80000000u) || !children(0, root, first, n))
+    throw Failure{kOtherGame, "the archive's file table can't be read"};
   const uint32_t shaders = NameHash("shaders");
   std::vector<std::pair<ArchiveFile, std::vector<uint8_t>>> out;
+  std::vector<bool> visited(count, false);
+  visited[0] = true;
   // Depth-first from shaders/, at most three levels below it.
   std::vector<std::pair<uint32_t, std::vector<uint32_t>>> stack;
-  for (uint32_t c = root[2] & 0x7FFFFFFF, n = 0; n < root[3] && c < count; ++c, ++n) {
+  for (uint32_t c = first; c < first + n; ++c) {
     if (entry(c)[0] == shaders) stack.push_back({c, {shaders}});
   }
+  constexpr uint32_t kMaxFileSize = 64u << 20;
   while (!stack.empty()) {
     auto [index, path] = stack.back();
     stack.pop_back();
+    if (visited[index]) continue;
+    visited[index] = true;
     const auto e = entry(index);
     if (e[2] & 0x80000000u) {
-      if (path.size() > 4) continue;
-      for (uint32_t c = e[2] & 0x7FFFFFFF, n = 0; n < e[3] && c < count; ++c, ++n) {
+      if (path.size() > 4 || !children(index, e, first, n)) continue;
+      for (uint32_t c = first; c < first + n; ++c) {
         auto child = path;
         child.push_back(entry(c)[0]);
         stack.push_back({c, std::move(child)});
@@ -501,19 +569,23 @@ std::vector<std::pair<ArchiveFile, std::vector<uint8_t>>> ReadShaderFiles(
     }
     const uint32_t kind = e[3] >> 30;
     if (kind & 2) continue;  // a resource: not needed
+    const uint64_t stored_size = kind == 1 ? (e[3] & 0x3FFFFFFF) : e[1];
+    if (e[1] > kMaxFileSize || uint64_t(e[2]) + stored_size > archive_size)
+      throw Failure{kOtherGame, "a file in " + archive_path.filename().string() + " is damaged"};
     std::vector<uint8_t> data;
     file.seekg(std::streamoff(e[2]));
     if (kind == 1) {
-      std::vector<uint8_t> packed(e[3] & 0x3FFFFFFF);
+      std::vector<uint8_t> packed(static_cast<size_t>(stored_size));
       if (!file.read(reinterpret_cast<char*>(packed.data()), std::streamsize(packed.size())))
-        throw Failure{4, "can't read " + archive_path.filename().string()};
-      Inflater inflater(packed.data(), packed.size());
+        throw Failure{kOtherGame, "can't read " + archive_path.filename().string()};
+      Inflater inflater(packed.data(), packed.size(), e[1]);
       if (!inflater.Run(data) || data.size() != e[1])
-        throw Failure{4, "a file in " + archive_path.filename().string() + " doesn't decompress"};
+        throw Failure{kOtherGame,
+                      "a file in " + archive_path.filename().string() + " doesn't decompress"};
     } else {
       data.resize(e[1]);
       if (!file.read(reinterpret_cast<char*>(data.data()), std::streamsize(data.size())))
-        throw Failure{4, "can't read " + archive_path.filename().string()};
+        throw Failure{kOtherGame, "can't read " + archive_path.filename().string()};
     }
     ArchiveFile f;
     f.path = path;
@@ -527,7 +599,7 @@ std::vector<std::pair<ArchiveFile, std::vector<uint8_t>>> ReadShaderFiles(
 // Shader programs: the Xbox 360 compiled shader blobs inside the effects and default.xex.
 // Header (big-endian): magic 0x102A1100 (pixel) or 0x102A1101 (vertex), the offset and size of
 // the data (literal constants, then the microcode), ..., at +24 the offset of the program info,
-// which starts with the literals' and the microcode's sizes.
+// which starts with the literals' and the microcode's sizes. Every offset is checked in 64 bits.
 
 struct Program {
   const uint8_t* blob = nullptr;  // the blob's header part [0, data offset), then its data
@@ -538,10 +610,11 @@ struct Program {
   // A vertex shader's inputs: (usage, usage index) each, from the program info's input table.
   std::vector<std::pair<uint8_t, uint8_t>> Inputs() const {
     std::vector<std::pair<uint8_t, uint8_t>> inputs;
+    if (uint64_t(info_offset) + 32 > data_offset) return inputs;
     const uint8_t* info = blob + info_offset;
-    const uint32_t count = Be32(info + 28), first = Be32(info + 24) + 9;
-    if (info_offset + (first + count) * 4 > data_offset) return inputs;
-    for (uint32_t i = 0; i < count; ++i) {
+    const uint64_t count = Be32(info + 28), first = uint64_t(Be32(info + 24)) + 9;
+    if (count > 32 || uint64_t(info_offset) + (first + count) * 4 > data_offset) return inputs;
+    for (uint64_t i = 0; i < count; ++i) {
       const uint32_t e = Be32(info + (first + i) * 4);
       inputs.push_back({uint8_t((e >> 12) & 15), uint8_t((e >> 16) & 15)});
     }
@@ -559,8 +632,8 @@ void FindPrograms(const uint8_t* data, size_t size, std::unordered_map<uint64_t,
     p.data_size = Be32(data + b + 8);
     p.info_offset = Be32(data + b + 24);
     if (p.data_offset < 0x24 || p.data_offset >= 0x10000 || !p.data_size ||
-        p.data_size >= 0x40000 || b + p.data_offset + p.data_size > size ||
-        p.info_offset + 8 > p.data_offset) {
+        p.data_size >= 0x40000 || uint64_t(b) + p.data_offset + p.data_size > size ||
+        uint64_t(p.info_offset) + 8 > p.data_offset) {
       continue;
     }
     p.literal_bytes = Be32(p.blob + p.info_offset);
@@ -745,12 +818,17 @@ class GuestBinder {
   bool ok() const { return scratch_ != 0; }
 
   // Builds the vertex shader object (as D3DDevice_CreateVertexShader would), the pixel shader
-  // object, and keeps copies to start every attempt from.
+  // object, and keeps copies to start every attempt from. False for a program whose header the
+  // game's code can't take safely: only the microcode is covered by the fingerprint, and the
+  // header's counts drive the guest's writes (at most 32 vertex fetches, the info's tables inside
+  // the header).
   bool Prepare(const Program& vs, const Program* ps) {
     vs_ = &vs;
+    if (!HeaderIsSafe(vs) || (ps && !HeaderIsSafe(*ps))) return false;
     const uint32_t object_size = 872 + vs.data_offset;
     const uint32_t ps_size = ps ? 40 + ps->data_offset : 0;
-    if (object_size + vs.data_size + ps_size + 0x1000 > kObjectArea) return false;
+    // 4 KB alignment of the data, 16 bytes of the pixel shader object.
+    if (uint64_t(object_size) + vs.data_size + ps_size + 0x1010 > kObjectArea) return false;
     vs_object_ = scratch_;
     vs_data_ = (vs_object_ + object_size + 0xFFF) & ~0xFFFu;
     ps_object_ = ps ? (vs_data_ + vs.data_size + 0xF) & ~0xFu : 0;
@@ -806,6 +884,16 @@ class GuestBinder {
   }
 
  private:
+  static bool HeaderIsSafe(const Program& p) {
+    const uint8_t* info = p.blob + p.info_offset;
+    if (uint64_t(p.info_offset) + 32 > p.data_offset) return false;
+    if (!p.vertex) return true;
+    // A vertex shader's fetch table, which the constructor copies 12 bytes an entry from: at most
+    // 32 entries, inside the header (in the game's own programs it can end right at the data).
+    const uint64_t fetches = Be32(info + 28), first = Be32(info + 24);
+    return fetches <= 32 && uint64_t(p.info_offset) + 4 * (9 + first + fetches) <= p.data_offset;
+  }
+
   static constexpr uint32_t kObjectArea = 0x10000;
   static constexpr uint32_t kScratchSize = kObjectArea + 0x2000 + 0x10000;  // + decl, + stack
 
@@ -831,6 +919,52 @@ class GuestBinder {
   alignas(64) PPCContext ctx_{};
 };
 
+
+// ---------------------------------------------------------------------------------------------
+// The storage's files. The pipeline lists this build knows, with the header the SDK writes:
+// 'XEPS', the API's magic, the version byte-swapped; then records of an XXH3 and a description.
+// Nothing about a list (its file name, header or record size) is ever taken from the pack.
+
+struct ListSpec {
+  const char* name;
+  uint32_t magic_api;
+  uint32_t version;
+  uint32_t record_size;
+};
+constexpr ListSpec kLists[] = {
+    {"rtv.d3d12.xpso", 0x54525844, ss::kD3D12PipelineStorageVersion, 72},   // 'DXRT'
+    {"rov.d3d12.xpso", 0x4F525844, ss::kD3D12PipelineStorageVersion, 72},   // 'DXRO'
+    {"fbo.vk.xpso", 0, ss::kVulkanPipelineStorageVersion, 68},              // framebuffer path
+    {"fsi.vk.xpso", 1, ss::kVulkanPipelineStorageVersion, 68},              // interlock path
+};
+constexpr size_t kListCount = std::size(kLists);
+
+std::array<uint8_t, 12> ListHeader(const ListSpec& spec) {
+  std::array<uint8_t, 12> h{};
+  const uint32_t words[3] = {0x53504558, spec.magic_api, ByteSwap32(spec.version)};
+  for (int w = 0; w < 3; ++w)
+    for (int i = 0; i < 4; ++i) h[w * 4 + i] = uint8_t(words[w] >> (8 * i));
+  return h;
+}
+
+// The files the import writes, by their name after "<title>.".
+std::vector<std::string> StorageFileNames() {
+  std::vector<std::string> names = {"xsh"};
+  for (const ListSpec& spec : kLists) names.push_back(spec.name);
+  return names;
+}
+
+struct Folders {
+  std::filesystem::path shareable;  // the storage the SDK loads
+  std::filesystem::path local;      // this machine's: lock, journal, stamp
+  std::filesystem::path File(const std::string& name) const {
+    return shareable / (std::string(kTitle) + "." + name);
+  }
+  std::filesystem::path Local(const std::string& name) const {
+    return local / (std::string(kTitle) + "." + name);
+  }
+};
+
 // ---------------------------------------------------------------------------------------------
 // The pack (shaderpack/545407F8.shaderpack, made by launcher/dev/shaderpack/build_pack.py).
 
@@ -843,37 +977,61 @@ struct PackShader {
   std::vector<uint64_t> pixel_shaders;
 };
 struct PackList {
-  std::string name;
-  std::array<uint8_t, 12> header;
-  uint32_t record_size;
+  size_t spec;  // in kLists
   std::vector<std::vector<uint8_t>> records;
 };
 struct Pack {
-  uint64_t rpf_key_fingerprint, decl_types_fingerprint;
-  uint32_t versions[3];
+  uint64_t hash = 0;  // the XXH3 the file ends with
+  uint64_t rpf_key_fingerprint = 0, decl_types_fingerprint = 0;
+  uint32_t versions[3] = {};
   std::vector<PackShader> shaders;
   std::vector<PackList> lists;
 };
 
+std::filesystem::path FindPack() {
+  std::string option = rex::cvar::GetFlagByName("mcla_shader_pack");
+  if (!option.empty()) return std::filesystem::path(option);
+  std::filesystem::path folder = rex::filesystem::GetExecutableFolder();
+  const auto relative = std::filesystem::path("shaderpack") / (std::string(kTitle) + ".shaderpack");
+  for (int level = 0; level < 6 && !folder.empty(); ++level) {
+    std::error_code error;
+    if (std::filesystem::exists(folder / relative, error)) return folder / relative;
+    if (folder == folder.parent_path()) break;
+    folder = folder.parent_path();
+  }
+  return rex::filesystem::GetExecutableFolder() / relative;
+}
+
 Pack ReadPack(const std::filesystem::path& path) {
   std::vector<uint8_t> d;
-  if (!ReadFile(path, d)) throw Failure{2, "no shader pack at " + path.string()};
-  auto bad = [] { return Failure{3, "the shader pack is damaged"}; };
+  if (!mcla::shader_storage::ReadWholeFile(path, d))
+    throw Failure{kNoPack, "no shader pack at " + path.string()};
+  auto bad = [] { return Failure{kBadPack, "the shader pack is damaged"}; };
   if (d.size() < 64 || std::memcmp(d.data(), "MCLASPK1", 8) != 0) throw bad();
-  if (Hash(d.data(), d.size() - 8) != Le64(d.data() + d.size() - 8)) throw bad();
+  Pack pack;
+  pack.hash = Le64(d.data() + d.size() - 8);
+  if (Hash(d.data(), d.size() - 8) != pack.hash) throw bad();
   size_t p = 8;
-  auto need = [&](size_t n) {
+  auto need = [&](uint64_t n) {
     if (p + n > d.size() - 8) throw bad();
   };
   need(44);
-  if (Le32(d.data() + p) != 1) throw Failure{3, "the shader pack's format is newer than this game"};
-  if (Le32(d.data() + p + 4) != kTitleId) throw Failure{3, "the shader pack is for another game"};
-  Pack pack;
+  if (Le32(d.data() + p) != 1)
+    throw Failure{kBadPack, "the shader pack's format is newer than this game's"};
+  if (Le32(d.data() + p + 4) != kTitleId) throw Failure{kBadPack, "the shader pack is for another game"};
   for (int i = 0; i < 3; ++i) pack.versions[i] = Le32(d.data() + p + 8 + 4 * i);
+  if (pack.versions[0] != ss::kShaderStorageVersion ||
+      pack.versions[1] != ss::kD3D12PipelineStorageVersion ||
+      pack.versions[2] != ss::kVulkanPipelineStorageVersion) {
+    throw Failure{kOtherVersions,
+                  "the shader pack was made for another version of the graphics code; update "
+                  "the game, or wait for a pack for this version"};
+  }
   pack.rpf_key_fingerprint = Le64(d.data() + p + 20);
   pack.decl_types_fingerprint = Le64(d.data() + p + 28);
   const uint32_t shader_count = Le32(d.data() + p + 36), list_count = Le32(d.data() + p + 40);
   p += 44;
+  std::unordered_set<uint64_t> seen;
   for (uint32_t i = 0; i < shader_count; ++i) {
     need(24);
     PackShader s;
@@ -884,24 +1042,38 @@ Pack ReadPack(const std::filesystem::path& path) {
     s.dwords = Le32(d.data() + p + 12);
     s.source = Le64(d.data() + p + 16);
     p += 24;
-    need(8 * size_t(ps_count));
+    need(8 * uint64_t(ps_count));
     for (uint8_t k = 0; k < ps_count; ++k, p += 8) s.pixel_shaders.push_back(Le64(d.data() + p));
-    if (s.kind > 2 || s.pixel > 1) throw bad();
+    if (s.kind > 2 || s.pixel > 1 || !s.dwords || s.dwords > (1u << 16) || !seen.insert(s.hash).second)
+      throw bad();
     pack.shaders.push_back(std::move(s));
   }
+  if (list_count > kListCount) throw bad();
+  bool list_seen[kListCount] = {};
   for (uint32_t i = 0; i < list_count; ++i) {
     need(16 + 12 + 8);
-    PackList l;
-    l.name.assign(reinterpret_cast<const char*>(d.data() + p), strnlen(reinterpret_cast<const char*>(d.data() + p), 16));
-    std::memcpy(l.header.data(), d.data() + p + 16, 12);
-    l.record_size = Le32(d.data() + p + 28);
+    // Only the lists this build knows, each once, with the SDK's header and record size.
+    const std::string name(reinterpret_cast<const char*>(d.data() + p),
+                           strnlen(reinterpret_cast<const char*>(d.data() + p), 16));
+    size_t spec = kListCount;
+    for (size_t k = 0; k < kListCount; ++k)
+      if (name == kLists[k].name) spec = k;
+    if (spec == kListCount || list_seen[spec]) throw bad();
+    list_seen[spec] = true;
+    const auto header = ListHeader(kLists[spec]);
+    if (std::memcmp(header.data(), d.data() + p + 16, 12) != 0 ||
+        Le32(d.data() + p + 28) != kLists[spec].record_size) {
+      throw bad();
+    }
+    const uint32_t record_size = kLists[spec].record_size;
     const uint32_t records = Le32(d.data() + p + 32);
     p += 36;
-    if (l.record_size != 72 && l.record_size != 68) throw bad();
-    need(size_t(records) * l.record_size);
-    for (uint32_t r = 0; r < records; ++r, p += l.record_size) {
-      l.records.emplace_back(d.data() + p, d.data() + p + l.record_size);
-      if (Hash(l.records.back().data() + 8, l.record_size - 8) != Le64(l.records.back().data()))
+    need(uint64_t(records) * record_size);
+    PackList l;
+    l.spec = spec;
+    for (uint32_t r = 0; r < records; ++r, p += record_size) {
+      l.records.emplace_back(d.data() + p, d.data() + p + record_size);
+      if (Hash(l.records.back().data() + 8, record_size - 8) != Le64(l.records.back().data()))
         throw bad();
     }
     pack.lists.push_back(std::move(l));
@@ -911,29 +1083,23 @@ Pack ReadPack(const std::filesystem::path& path) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The storage files.
+// What the storage holds: each file's valid part as the GPU loads it (up to the first record
+// whose hash doesn't match), and its keys. A file that exists but can't be read throws (it is
+// never taken for a missing one).
 
-struct Rebuilt {
-  uint64_t hash;
-  bool pixel;
-  std::vector<uint8_t> ucode;  // big-endian, as the storage holds it
+struct StoredFile {
+  bool present = false;
+  bool header_ok = false;
+  std::vector<uint8_t> valid;          // the header and the valid records
+  std::unordered_set<uint64_t> keys;   // shader hashes, or description hashes
 };
 
-// A file of records after a 12- (pipelines) or 8-byte (shaders) header: the valid ones as they
-// are (as the GPU loads them: up to the first one whose hash doesn't match), and their keys.
-struct StorageFile {
-  bool exists = false, header_ok = false;
-  std::vector<uint8_t> valid;  // header and valid records
-  std::unordered_set<uint64_t> shader_hashes;
-  std::set<std::vector<uint8_t>> records;
-};
-
-StorageFile ReadShaderStorage(const std::filesystem::path& path) {
-  StorageFile f;
+StoredFile ReadShaderStorage(const std::filesystem::path& path) {
+  StoredFile f;
   std::vector<uint8_t> d;
-  f.exists = ReadFile(path, d);
-  if (!f.exists || d.size() < 8 || Le32(d.data()) != 0x48534558 ||
-      Be32(d.data() + 4) != rex::graphics::shader_storage::kShaderStorageVersion) {
+  f.present = mcla::shader_storage::ReadWholeFile(path, d);
+  if (!f.present || d.size() < 8 || Le32(d.data()) != 0x48534558 ||
+      Be32(d.data() + 4) != ss::kShaderStorageVersion) {
     return f;
   }
   f.header_ok = true;
@@ -941,103 +1107,188 @@ StorageFile ReadShaderStorage(const std::filesystem::path& path) {
   while (p + 12 <= d.size()) {
     const uint64_t hash = Le64(d.data() + p);
     const uint32_t dwords = Le32(d.data() + p + 8) & 0x7FFFFFFF;
-    if (p + 12 + size_t(dwords) * 4 > d.size() || Hash(d.data() + p + 12, size_t(dwords) * 4) != hash)
+    if (p + 12 + uint64_t(dwords) * 4 > d.size() ||
+        Hash(d.data() + p + 12, size_t(dwords) * 4) != hash)
       break;
-    f.shader_hashes.insert(hash);
+    f.keys.insert(hash);
     p += 12 + size_t(dwords) * 4;
   }
   f.valid.assign(d.begin(), d.begin() + p);
   return f;
 }
 
-StorageFile ReadPipelineStorage(const std::filesystem::path& path, const uint8_t header[12],
-                                uint32_t record_size) {
-  StorageFile f;
+StoredFile ReadPipelineStorage(const std::filesystem::path& path, const ListSpec& spec) {
+  StoredFile f;
   std::vector<uint8_t> d;
-  f.exists = ReadFile(path, d);
-  if (!f.exists || d.size() < 12 || std::memcmp(d.data(), header, 12) != 0) return f;
+  f.present = mcla::shader_storage::ReadWholeFile(path, d);
+  const auto header = ListHeader(spec);
+  if (!f.present || d.size() < 12 || std::memcmp(d.data(), header.data(), 12) != 0) return f;
   f.header_ok = true;
   size_t p = 12;
-  while (p + record_size <= d.size() &&
-         Hash(d.data() + p + 8, record_size - 8) == Le64(d.data() + p)) {
-    f.records.emplace(d.data() + p, d.data() + p + record_size);
-    p += record_size;
+  while (p + spec.record_size <= d.size() &&
+         Hash(d.data() + p + 8, spec.record_size - 8) == Le64(d.data() + p)) {
+    f.keys.insert(Le64(d.data() + p));
+    p += spec.record_size;
   }
   f.valid.assign(d.begin(), d.begin() + p);
   return f;
 }
 
-void WriteAtomically(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
-  auto temp = path;
-  temp += ".prepare.tmp";
-  {
-    std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-    if (!out || !out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size())))
-      throw Failure{6, "can't write " + temp.string()};
-    out.flush();
-    if (!out) throw Failure{6, "can't write " + temp.string()};
+// ---------------------------------------------------------------------------------------------
+// The journal of imports (<local>/545407F8.import), a text file:
+//   pack <XXH3 of the pack, 16 hex digits>
+//   phase <rebuild | merged | done | rolled-back>
+//   failures <failed starts with this pack in a row>
+//   disabled <0 | 1>
+//   unbuildable <hash> ...       (shaders of this pack that couldn't be rebuilt here)
+//   file <name> <length before> <length after>     (one per file the last import changed)
+
+struct JournalFile {
+  std::string name;
+  uint64_t before = 0, after = 0;
+};
+struct Journal {
+  uint64_t pack = 0;
+  std::string phase;
+  uint32_t failures = 0;
+  bool disabled = false;
+  std::unordered_set<uint64_t> unbuildable;
+  std::vector<JournalFile> files;
+};
+
+bool ReadJournal(const std::filesystem::path& path, Journal& journal) {
+  std::vector<uint8_t> d;
+  if (!mcla::shader_storage::ReadWholeFile(path, d)) return false;
+  std::istringstream in(std::string(d.begin(), d.end()));
+  std::string line;
+  while (std::getline(in, line)) {
+    std::istringstream words(line);
+    std::string key;
+    words >> key;
+    if (key == "pack") {
+      std::string hex;
+      words >> hex;
+      journal.pack = std::strtoull(hex.c_str(), nullptr, 16);
+    } else if (key == "phase") {
+      words >> journal.phase;
+    } else if (key == "failures") {
+      words >> journal.failures;
+    } else if (key == "disabled") {
+      int v = 0;
+      words >> v;
+      journal.disabled = v != 0;
+    } else if (key == "unbuildable") {
+      std::string hex;
+      while (words >> hex) journal.unbuildable.insert(std::strtoull(hex.c_str(), nullptr, 16));
+    } else if (key == "file") {
+      JournalFile f;
+      words >> f.name >> f.before >> f.after;
+      // Only the storage's own files.
+      const auto names = StorageFileNames();
+      if (words && std::find(names.begin(), names.end(), f.name) != names.end())
+        journal.files.push_back(f);
+    }
   }
-#ifdef _WIN32
-  if (HANDLE h = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-      h != INVALID_HANDLE_VALUE) {
-    FlushFileBuffers(h);
-    CloseHandle(h);
+  return true;
+}
+
+void WriteJournal(const std::filesystem::path& path, const Journal& journal) {
+  std::string text = fmt::format("pack {:016X}\nphase {}\nfailures {}\ndisabled {}\n", journal.pack,
+                                 journal.phase, journal.failures, journal.disabled ? 1 : 0);
+  if (!journal.unbuildable.empty()) {
+    text += "unbuildable";
+    for (uint64_t h : journal.unbuildable) text += fmt::format(" {:016X}", h);
+    text += "\n";
   }
-  if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    throw Failure{6, "can't replace " + path.string()};
-#else
-  std::error_code error;
-  std::filesystem::rename(temp, path, error);
-  if (error) throw Failure{6, "can't replace " + path.string()};
-#endif
+  for (const JournalFile& f : journal.files)
+    text += fmt::format("file {} {} {}\n", f.name, f.before, f.after);
+  mcla::shader_storage::WriteFileAtomically(path, std::vector<uint8_t>(text.begin(), text.end()));
 }
 
 // ---------------------------------------------------------------------------------------------
+// The process's state between the module launch and the end of the preload.
+
+enum class Mode { kOff, kAuto, kPrepare };
 
 struct State {
-  bool active = false;
-  bool then_play = false;  // the PS5: the game goes on after preparing (there is no launcher)
+  Mode mode = Mode::kOff;
+  bool storage = false;  // the storage is in use (cache root, store_shaders, session lock)
+  Folders folders;
+  Journal journal;
+  bool journal_dirty = false;
+  bool merged = false;   // this process imported something
+  uint64_t pack_hash = 0;
+  std::string import_state = "off";  // for the stamp: on, off, disabled, unavailable
   Clock::time_point preload_start;
   long long rebuild_ms = 0;
 };
 State g_state;
 
-std::filesystem::path FindPack() {
-  std::string option = REXCVAR_GET(mcla_shader_pack);
-  if (!option.empty()) return std::filesystem::path(option);
-  std::filesystem::path folder = rex::filesystem::GetExecutableFolder();
-  const auto relative = std::filesystem::path("shaderpack") / "545407F8.shaderpack";
-  for (int level = 0; level < 6 && !folder.empty(); ++level) {
-    std::error_code error;
-    if (std::filesystem::exists(folder / relative, error)) return folder / relative;
-    if (folder == folder.parent_path()) break;
-    folder = folder.parent_path();
+// The previous run ended after an import and before the stored pipelines were all created (a
+// crash, a hang that was ended, a power cut): the files are cut back to their lengths before it.
+// Two such starts in a row with the same pack disable its import.
+void RecoverInterruptedImport() {
+  Journal& j = g_state.journal;
+  if (j.phase != "merged" && j.phase != "rebuild") return;
+  size_t cut = 0;
+  if (j.phase == "merged") {
+    for (const JournalFile& f : j.files) {
+      const auto path = g_state.folders.File(f.name);
+      const int64_t size = mcla::shader_storage::FileSizeOrAbsent(path);
+      if (size < 0) continue;
+      if (f.before == 0) {
+        // Created (or replaced, being of another version) by the import.
+        mcla::shader_storage::RemoveFile(path);
+        ++cut;
+      } else if (uint64_t(size) >= f.before) {
+        if (uint64_t(size) != f.before) {
+          mcla::shader_storage::TruncateFile(path, f.before);
+          ++cut;
+        }
+      } else {
+        REXLOG_WARN("shader pack: {} is shorter than before the interrupted import; left as it is",
+                    path.string());
+      }
+    }
   }
-  return rex::filesystem::GetExecutableFolder() / relative;
+  ++j.failures;
+  if (j.failures >= kFailuresBeforeDisabling) j.disabled = true;
+  REXLOG_WARN(
+      "shader pack: the last start ended {} the import of pack {:016X} was finished; {} file(s) "
+      "cut back to their lengths before it. {}",
+      j.phase == "merged" ? "after the import and before" : "before", j.pack, cut,
+      j.disabled ? "Its import is now disabled: More > Prepare shaders in the launcher (or "
+                   "deleting shaders/local/545407F8.import) tries again."
+                 : "It will be tried once more.");
+  if (g_state.mode == Mode::kPrepare) Line(fmt::format("rollback {}", cut));
+  j.phase = "rolled-back";
+  j.files.clear();
+  WriteJournal(g_state.folders.Local("import"), j);
 }
 
-void Prepare(rex::Runtime* runtime) {
-  const auto start = Clock::now();
-  const std::filesystem::path pack_path = FindPack();
-  const Pack pack = ReadPack(pack_path);
-  namespace ss = rex::graphics::shader_storage;
-  if (pack.versions[0] != ss::kShaderStorageVersion ||
-      pack.versions[1] != ss::kD3D12PipelineStorageVersion ||
-      pack.versions[2] != ss::kVulkanPipelineStorageVersion) {
-    throw Failure{5, "the shader pack was made for another version of the graphics code; "
-                     "update the game, or wait for a pack for this version"};
-  }
-  Line("start " + std::to_string(pack.shaders.size()));
-  REXLOG_INFO("prepare shaders: {} ({} shaders, {} pipeline lists)", pack_path.string(),
-              pack.shaders.size(), pack.lists.size());
+// ---------------------------------------------------------------------------------------------
+// The import.
 
+struct Rebuilt {
+  uint64_t hash;
+  bool pixel;
+  std::vector<uint8_t> ucode;  // big-endian, as the storage holds it
+};
+
+struct Import {
+  Pack pack;
+  StoredFile shaders;
+  StoredFile lists[kListCount];
+  std::vector<const PackShader*> missing_shaders;
+  size_t missing_records = 0;
+};
+
+// Rebuilds the given shaders from the game's files: what could be rebuilt, the rest in failed.
+std::vector<Rebuilt> RebuildShaders(rex::Runtime* runtime,
+                                    const std::vector<const PackShader*>& wanted,
+                                    std::vector<std::pair<uint64_t, bool>>& results) {
   auto* memory = runtime->memory();
   uint8_t* const base = memory->virtual_membase();
-  if (Hash(base + kRpfKeyAddress, 32) != pack.rpf_key_fingerprint ||
-      Hash(base + kDeclTypeTableAddress, 64) != pack.decl_types_fingerprint) {
-    throw Failure{4, "this default.xex is not the one the shader pack was made for "
-                     "(Midnight Club: Los Angeles Complete Edition, USA/Europe)"};
-  }
   uint8_t key[32];
   std::memcpy(key, base + kRpfKeyAddress, 32);
   uint32_t decl_types[kTypes];
@@ -1045,8 +1296,7 @@ void Prepare(rex::Runtime* runtime) {
     decl_types[t] = Be32(base + kDeclTypeTableAddress + 4 * kTypeTableIndex[t]);
 
   // The player's effects and presets, and the programs in them and in default.xex.
-  const auto files =
-      ReadShaderFiles(runtime->game_data_root() / "xarchive_cache.rpf", key);
+  const auto files = ReadShaderFiles(runtime->game_data_root() / "xarchive_cache.rpf", key);
   const uint32_t fxl_final = NameHash("fxl_final");
   std::unordered_map<uint64_t, Program> programs;
   std::vector<uint32_t> preset_masks;
@@ -1059,7 +1309,7 @@ void Prepare(rex::Runtime* runtime) {
       size_t i = 0;
       while (i < data.size() && data[i] == ' ') ++i;
       bool digits = false;
-      for (; i < data.size() && data[i] >= '0' && data[i] <= '9'; ++i, digits = true)
+      for (; i < data.size() && data[i] >= '0' && data[i] <= '9' && mask < 0x10000000; ++i, digits = true)
         mask = mask * 10 + (data[i] - '0');
       if (digits && mask && std::find(preset_masks.begin(), preset_masks.end(), mask) == preset_masks.end())
         preset_masks.push_back(mask);
@@ -1069,45 +1319,41 @@ void Prepare(rex::Runtime* runtime) {
   // The executable's image: the effects built into the game, and the console's own shaders.
   FindPrograms(base + kImageBase, kImageSize, programs);
   if (programs.empty() || preset_masks.empty())
-    throw Failure{4, "no shaders found in the game's files"};
-  REXLOG_INFO("prepare shaders: {} programs and {} vertex layouts of presets in the game's files",
+    throw Failure{kOtherGame, "no shaders found in the game's files"};
+  REXLOG_INFO("shader pack: {} programs and {} vertex layouts of presets in the game's files",
               programs.size(), preset_masks.size());
 
+  mcla::shader_storage::Failure no_memory{kIoError, "no guest memory for binding shaders"};
   GuestBinder binder(memory, decl_types);
-  if (!binder.ok()) throw Failure{6, "no guest memory for binding shaders"};
-
-  // Shaders already in the storage (an earlier preparation, or play) aren't rebuilt again; the
-  // development check rebuilds all of them.
-  const bool check_only = !std::string(REXCVAR_GET(mcla_prepare_shaders_check)).empty();
-  const auto folder = runtime->cache_root() / "shaders" / "shareable";
-  const std::string title = fmt::format("{:08X}", kTitleId);
-  std::unordered_set<uint64_t> stored;
-  if (!check_only) stored = ReadShaderStorage(folder / (title + ".xsh")).shader_hashes;
+  if (!binder.ok()) throw no_memory;
 
   std::vector<Rebuilt> rebuilt;
-  std::vector<std::pair<uint64_t, bool>> results;
-  size_t done = 0, failed = 0;
-  const size_t total = pack.shaders.size();
-  for (const PackShader& s : pack.shaders) {
+  size_t done = 0;
+  const size_t total = wanted.size();
+  for (const PackShader* sp : wanted) {
+    const PackShader& s = *sp;
     bool ok = false;
-    if (stored.count(s.hash)) {
-      ok = true;
-    } else if (s.kind == 1) {
+    if (s.kind == 1) {
       auto it = programs.find(s.source);
-      if (it != programs.end() && it->second.ucode_bytes == s.dwords * 4 &&
+      // The pack's pixel flag must be the program's own.
+      if (it != programs.end() && it->second.vertex == !s.pixel &&
+          it->second.ucode_bytes == uint64_t(s.dwords) * 4 &&
           Hash(it->second.ucode(), it->second.ucode_bytes) == s.hash) {
         rebuilt.push_back({s.hash, bool(s.pixel), {it->second.ucode(), it->second.ucode() + it->second.ucode_bytes}});
         ok = true;
       }
     } else if (s.kind == 2) {
-      if (s.source >= kImageBase && s.source + uint64_t(s.dwords) * 4 <= uint64_t(kImageBase) + kImageSize &&
-          Hash(base + s.source, size_t(s.dwords) * 4) == s.hash) {
-        rebuilt.push_back({s.hash, bool(s.pixel), {base + s.source, base + s.source + s.dwords * 4}});
+      const uint64_t bytes = uint64_t(s.dwords) * 4;
+      if (s.source >= kImageBase && s.source <= uint64_t(kImageBase) + kImageSize &&
+          bytes <= uint64_t(kImageBase) + kImageSize - s.source &&
+          Hash(base + s.source, size_t(bytes)) == s.hash) {
+        rebuilt.push_back({s.hash, bool(s.pixel), {base + s.source, base + s.source + bytes}});
         ok = true;
       }
     } else {
       auto vs = programs.find(s.source);
-      if (vs != programs.end() && vs->second.vertex && vs->second.ucode_bytes == s.dwords * 4) {
+      if (!s.pixel && vs != programs.end() && vs->second.vertex &&
+          vs->second.ucode_bytes == uint64_t(s.dwords) * 4) {
         const auto inputs = vs->second.Inputs();
         for (uint64_t ps_hash : s.pixel_shaders.empty() ? std::vector<uint64_t>{0} : s.pixel_shaders) {
           const Program* ps = nullptr;
@@ -1141,40 +1387,69 @@ void Prepare(rex::Runtime* runtime) {
         }
       }
     }
-    failed += !ok;
     results.push_back({s.hash, ok});
-    if (++done % 25 == 0 && done < total) Line("rebuild " + std::to_string(done) + " " + std::to_string(total));
+    if (g_state.mode == Mode::kPrepare && ++done % 25 == 0 && done < total)
+      Line("rebuild " + std::to_string(done) + " " + std::to_string(total));
   }
-  g_state.rebuild_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
-  Line("rebuild-done " + std::to_string(total - failed) + " " + std::to_string(failed) + " " +
-       std::to_string(g_state.rebuild_ms));
-  REXLOG_INFO("prepare shaders: {} of {} shaders rebuilt in {} ms", total - failed, total,
-              g_state.rebuild_ms);
+  return rebuilt;
+}
 
-  // Development: the reachability check of a new pack (launcher/dev/shaderpack).
-  if (std::string report = REXCVAR_GET(mcla_prepare_shaders_check); !report.empty()) {
-    std::ofstream out(report, std::ios::trunc);
-    for (auto [hash, ok] : results) out << fmt::format("{:016X} {}\n", hash, ok ? "ok" : "failed");
-    out.close();
-    Quit(out ? 0 : 6);
+// Reads the pack and the storage and works out what is missing. Throws Failure.
+Import PlanImport(rex::Runtime* runtime, bool all_shaders) {
+  Import im;
+  im.pack = ReadPack(FindPack());
+  g_state.pack_hash = im.pack.hash;
+  uint8_t* const base = runtime->memory()->virtual_membase();
+  if (Hash(base + kRpfKeyAddress, 32) != im.pack.rpf_key_fingerprint ||
+      Hash(base + kDeclTypeTableAddress, 64) != im.pack.decl_types_fingerprint) {
+    throw Failure{kOtherGame,
+                  "this default.xex is not the one the shader pack was made for (Midnight Club: "
+                  "Los Angeles Complete Edition, USA/Europe)"};
   }
+  im.shaders = ReadShaderStorage(g_state.folders.File("xsh"));
+  for (size_t k = 0; k < kListCount; ++k)
+    im.lists[k] = ReadPipelineStorage(g_state.folders.File(kLists[k].name), kLists[k]);
+  const Journal& j = g_state.journal;
+  std::unordered_set<uint64_t> available = im.shaders.header_ok ? im.shaders.keys
+                                                                : std::unordered_set<uint64_t>{};
+  for (const PackShader& s : im.pack.shaders) {
+    const bool stored = available.count(s.hash) != 0;
+    const bool unbuildable = j.pack == im.pack.hash && j.unbuildable.count(s.hash);
+    if (all_shaders || (!stored && !unbuildable)) im.missing_shaders.push_back(&s);
+  }
+  for (const PackShader* s : im.missing_shaders) available.insert(s->hash);
+  for (const PackList& l : im.pack.lists) {
+    const StoredFile& f = im.lists[l.spec];
+    for (const auto& r : l.records) {
+      const uint64_t vs = Le64(r.data() + 8), ps = Le64(r.data() + 24);
+      if ((!f.header_ok || !f.keys.count(Le64(r.data()))) && available.count(vs) &&
+          (!ps || available.count(ps))) {
+        ++im.missing_records;
+      }
+    }
+  }
+  return im;
+}
 
-  // Merge into the storage.
-  std::error_code error;
-  std::filesystem::create_directories(folder, error);
+// Adds what was rebuilt and the pack's descriptions whose shaders are stored to the storage.
+// The journal is written first, with each file's length before; files are replaced atomically,
+// the shaders first. A failure while replacing cuts the files already replaced back at once.
+void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
+  struct Out {
+    std::string name;
+    std::vector<uint8_t> data;
+    uint64_t before;
+  };
+  std::vector<Out> outs;
   size_t shaders_added = 0, pipelines_added = 0;
-  std::unordered_set<uint64_t> available;
+  std::unordered_set<uint64_t> available = im.shaders.header_ok ? im.shaders.keys
+                                                                : std::unordered_set<uint64_t>{};
   {
-    const auto path = folder / (title + ".xsh");
-    StorageFile f = ReadShaderStorage(path);
-    std::vector<uint8_t> out = f.header_ok ? f.valid : std::vector<uint8_t>{};
-    if (!f.header_ok) {
-      if (f.exists) REXLOG_WARN("prepare shaders: {} is from another version and is replaced", path.string());
+    std::vector<uint8_t> out = im.shaders.header_ok ? im.shaders.valid : std::vector<uint8_t>{};
+    if (!im.shaders.header_ok) {
       PutLe32(out, 0x48534558);
       PutLe32(out, ByteSwap32(ss::kShaderStorageVersion));
     }
-    available = f.shader_hashes;
     for (const Rebuilt& r : rebuilt) {
       if (!available.insert(r.hash).second) continue;
       PutLe64(out, r.hash);
@@ -1182,81 +1457,362 @@ void Prepare(rex::Runtime* runtime) {
       out.insert(out.end(), r.ucode.begin(), r.ucode.end());
       ++shaders_added;
     }
-    if (shaders_added || !f.header_ok || f.valid.size() != std::filesystem::file_size(path, error))
-      WriteAtomically(path, out);
+    if (shaders_added) {
+      if (im.shaders.present && !im.shaders.header_ok)
+        REXLOG_WARN("shader pack: the shader storage is from another version and is replaced");
+      outs.push_back({"xsh", std::move(out), im.shaders.header_ok ? im.shaders.valid.size() : 0});
+    }
   }
-  for (const PackList& list : pack.lists) {
-    const auto path = folder / (title + "." + list.name);
-    StorageFile f = ReadPipelineStorage(path, list.header.data(), list.record_size);
-    std::vector<uint8_t> out = f.header_ok ? f.valid : std::vector<uint8_t>(list.header.begin(), list.header.end());
-    if (!f.header_ok && f.exists)
-      REXLOG_WARN("prepare shaders: {} is from another version and is replaced", path.string());
+  for (const PackList& l : im.pack.lists) {
+    const ListSpec& spec = kLists[l.spec];
+    const StoredFile& f = im.lists[l.spec];
+    std::vector<uint8_t> out = f.header_ok ? f.valid : std::vector<uint8_t>{};
+    if (!f.header_ok) {
+      const auto header = ListHeader(spec);
+      out.assign(header.begin(), header.end());
+    }
+    std::unordered_set<uint64_t> keys = f.header_ok ? f.keys : std::unordered_set<uint64_t>{};
     size_t added = 0;
-    for (const auto& record : list.records) {
-      // Only pipelines whose shaders are in the storage.
-      const uint64_t vs = Le64(record.data() + 8), ps = Le64(record.data() + 24);
+    for (const auto& r : l.records) {
+      // Only descriptions whose shaders are in the storage.
+      const uint64_t vs = Le64(r.data() + 8), ps = Le64(r.data() + 24);
       if (!available.count(vs) || (ps && !available.count(ps))) continue;
-      if (f.records.count(record)) continue;
-      out.insert(out.end(), record.begin(), record.end());
+      if (!keys.insert(Le64(r.data())).second) continue;
+      out.insert(out.end(), r.begin(), r.end());
       ++added;
     }
-    pipelines_added += added;
-    if (added || !f.header_ok || f.valid.size() != std::filesystem::file_size(path, error))
-      WriteAtomically(path, out);
+    if (added) {
+      if (f.present && !f.header_ok)
+        REXLOG_WARN("shader pack: {} is from another version and is replaced", spec.name);
+      outs.push_back({spec.name, std::move(out), f.header_ok ? f.valid.size() : 0});
+      pipelines_added += added;
+    }
   }
-  Line("merge " + std::to_string(shaders_added) + " " + std::to_string(pipelines_added));
-  REXLOG_INFO("prepare shaders: {} shaders and {} pipelines added to {}", shaders_added,
-              pipelines_added, folder.string());
+  if (!outs.empty()) {
+    Journal& j = g_state.journal;
+    j.phase = "merged";
+    j.files.clear();
+    for (const Out& o : outs) j.files.push_back({o.name, o.before, o.data.size()});
+    WriteJournal(g_state.folders.Local("import"), j);
+    size_t replaced = 0;
+    try {
+      for (const Out& o : outs) {
+        mcla::shader_storage::WriteFileAtomically(g_state.folders.File(o.name), o.data);
+        ++replaced;
+      }
+    } catch (const Failure&) {
+      // Back to the lengths before, now, rather than at the next start.
+      try {
+        for (size_t i = 0; i < replaced; ++i) {
+          const auto path = g_state.folders.File(outs[i].name);
+          if (outs[i].before) {
+            mcla::shader_storage::TruncateFile(path, outs[i].before);
+          } else {
+            mcla::shader_storage::RemoveFile(path);
+          }
+        }
+        j.phase = "rolled-back";
+        j.files.clear();
+        WriteJournal(g_state.folders.Local("import"), j);
+      } catch (const Failure& undo) {
+        REXLOG_ERROR("shader pack: couldn't undo the import at once ({}); the next start will",
+                     undo.message);
+      }
+      throw;
+    }
+    g_state.merged = true;
+    if (REXCVAR_GET(mcla_shader_pack_test_crash) == 1) {
+      REXLOG_WARN("shader pack: test crash after the import");
+      Quit(99);
+    }
+  }
+  if (g_state.mode == Mode::kPrepare)
+    Line("merge " + std::to_string(shaders_added) + " " + std::to_string(pipelines_added));
+  REXLOG_INFO("shader pack: {} shaders and {} pipelines added to {}", shaders_added,
+              pipelines_added, g_state.folders.shareable.string());
+}
+
+// The import at a start or in a preparation run. Throws Failure.
+void RunImport(rex::Runtime* runtime) {
+  const auto start = Clock::now();
+  const bool check_only = !rex::cvar::GetFlagByName("mcla_prepare_shaders_check").empty();
+  Import im = PlanImport(runtime, check_only);
+  Journal& j = g_state.journal;
+  if (j.pack != im.pack.hash) {
+    // Another pack: its own attempts.
+    j = Journal{};
+    j.pack = im.pack.hash;
+  }
+  if (j.disabled && !check_only) {
+    g_state.import_state = "disabled";
+    REXLOG_WARN(
+        "shader pack: importing pack {:016X} is disabled after {} failed starts; the storage is "
+        "used as it is. More > Prepare shaders in the launcher (or deleting "
+        "shaders/local/545407F8.import) tries again.",
+        im.pack.hash, j.failures);
+    if (g_state.mode == Mode::kPrepare)
+      Line(fmt::format("import-disabled {:016X} {}", im.pack.hash, j.failures));
+    return;
+  }
+  g_state.import_state = "on";
+  if (g_state.mode == Mode::kPrepare) Line("start " + std::to_string(im.missing_shaders.size()));
+  if (im.missing_shaders.empty() && !im.missing_records) {
+    g_state.rebuild_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+    if (g_state.mode == Mode::kPrepare) {
+      Line("rebuild-done 0 0 " + std::to_string(g_state.rebuild_ms));
+      Line("merge 0 0");
+    }
+    REXLOG_INFO("shader pack: nothing missing from the storage ({} ms)", g_state.rebuild_ms);
+    return;
+  }
+
+  // Recorded before anything is rebuilt: a crash in the game's code (a damaged effect) then
+  // counts as a failed start too.
+  std::vector<std::pair<uint64_t, bool>> results;
+  std::vector<Rebuilt> rebuilt;
+  if (!im.missing_shaders.empty()) {
+    if (!check_only) {
+      j.phase = "rebuild";
+      WriteJournal(g_state.folders.Local("import"), j);
+    }
+    if (REXCVAR_GET(mcla_shader_pack_test_crash) == 2 && !check_only) {
+      REXLOG_WARN("shader pack: test crash while rebuilding");
+      Quit(98);
+    }
+    try {
+      rebuilt = RebuildShaders(runtime, im.missing_shaders, results);
+    } catch (const Failure&) {
+      // Not a crash: nothing to count against the pack, nothing written.
+      if (!check_only) {
+        j.phase = "idle";
+        WriteJournal(g_state.folders.Local("import"), j);
+      }
+      throw;
+    }
+  }
+  size_t failed = 0;
+  for (auto [hash, ok] : results) {
+    if (!ok) {
+      ++failed;
+      j.unbuildable.insert(hash);
+    }
+  }
+  g_state.rebuild_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+  if (g_state.mode == Mode::kPrepare) {
+    Line("rebuild-done " + std::to_string(results.size() - failed) + " " + std::to_string(failed) +
+         " " + std::to_string(g_state.rebuild_ms));
+  }
+  REXLOG_INFO("shader pack: {} of {} shaders rebuilt in {} ms", results.size() - failed,
+              results.size(), g_state.rebuild_ms);
+
+  // Development: the reachability check of a new pack (launcher/dev/shaderpack).
+  if (check_only) {
+    std::ofstream out(rex::cvar::GetFlagByName("mcla_prepare_shaders_check"), std::ios::trunc);
+    for (auto [hash, ok] : results) out << fmt::format("{:016X} {}\n", hash, ok ? "ok" : "failed");
+    out.close();
+    Quit(out ? 0 : kIoError);
+  }
+
+  MergeImport(im, rebuilt);
+  if (!g_state.merged) {
+    // Nothing written (all missing shaders unbuildable): no import in progress.
+    j.phase = "idle";
+    WriteJournal(g_state.folders.Local("import"), j);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The stamp, after the stored pipelines were created: what the launcher compares before Play.
+
+void WriteStamp(rex::Runtime* runtime, const std::string& report) {
+  std::string files;
+  {
+    const auto names = StorageFileNames();
+    for (const std::string& name : names) {
+      int64_t size = -1;
+      try {
+        size = mcla::shader_storage::FileSizeOrAbsent(g_state.folders.File(name));
+      } catch (const Failure&) {
+      }
+      if (size < 0) continue;
+      std::string entry = fmt::format("{}:{{\"size\":{}", mcla::shader_storage::JsonString(name), size);
+      for (const ListSpec& spec : kLists)
+        if (name == spec.name && size >= 12)
+          entry += fmt::format(",\"count\":{}", (uint64_t(size) - 12) / spec.record_size);
+      files += (files.empty() ? "" : ",") + entry + "}";
+    }
+  }
+  char when[32] = {};
+  const std::time_t now = std::time(nullptr);
+  std::tm local{};
+#ifdef _WIN32
+  const bool have_time = localtime_s(&local, &now) == 0;
+#else
+  const bool have_time = localtime_r(&now, &local) != nullptr;
+#endif
+  if (have_time) std::strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &local);
+  auto setting = [](const char* name) {
+    return mcla::shader_storage::JsonString(rex::cvar::GetFlagByName(name));
+  };
+  const std::string json = fmt::format(
+      "{{\n"
+      "  \"format\": 1,\n"
+      "  \"written\": \"{}\",\n"
+      "  \"by\": \"{}\",\n"
+      "  \"title\": \"{}\",\n"
+      "  \"pack\": {},\n"
+      "  \"pack_import\": \"{}\",\n"
+      "  \"storage_versions\": [\"{:08X}\", \"{:08X}\", \"{:08X}\"],\n"
+      "  \"storage\": {},\n"
+      "  \"settings\": {{\"mcla_gpu_backend\": {}, \"resolution_scale\": {}, \"mcla_anti_aliasing\": {}}},\n"
+      "  \"files\": {{{}}},\n"
+      "  \"display_drivers\": {}\n"
+      "}}\n",
+      when, g_state.mode == Mode::kPrepare ? "prepare" : "start", kTitle,
+      g_state.pack_hash ? fmt::format("\"{:016X}\"", g_state.pack_hash) : "null",
+      g_state.import_state, ss::kShaderStorageVersion, ss::kD3D12PipelineStorageVersion,
+      ss::kVulkanPipelineStorageVersion, report.empty() ? "null" : report,
+      setting("mcla_gpu_backend"), setting("resolution_scale"), setting("mcla_anti_aliasing"),
+      files, mcla::shader_storage::DisplayDriversJson());
+  (void)runtime;
+  mcla::shader_storage::WriteFileAtomically(g_state.folders.Local("stamp.json"),
+                                            std::vector<uint8_t>(json.begin(), json.end()));
+}
+
+bool KeepWaitingForPreparation(const std::string& holder) {
+  // A preparation run ends by itself within a minute or so; another game doesn't.
+  return holder.rfind("prepare", 0) == 0;
 }
 
 }  // namespace
 
-bool MclaPrepareShadersIsRequested() { return REXCVAR_GET(mcla_prepare_shaders); }
+// ---------------------------------------------------------------------------------------------
 
-// Called before the module starts, before the SDK loads the storage (MclaApp::OnPreLaunchModule;
-// on the PS5, main_ps5.cpp): prepares the storage, which the SDK then loads, creating every
-// pipeline (its progress on standard output). With then_play (the PS5), a failure is reported and
-// the game starts as it would have; otherwise the process ends with the failure's code.
-bool MclaPrepareShadersBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* window, bool then_play) {
-  if (!REXCVAR_GET(mcla_prepare_shaders)) return false;
-  g_state.active = true;
-  g_state.then_play = then_play;
+bool MclaPrepareShadersIsRequested() {
+  // Only from the command line: a line in mcla.toml would make every start quit.
+  return rex::cvar::GetFlagByName("mcla_prepare_shaders") == "true" &&
+         rex::cvar::GetFlagSource("mcla_prepare_shaders") == rex::cvar::Source::kCommandLine;
+}
+
+// Called before the module starts and before the SDK loads the storage (MclaApp::OnPreLaunchModule;
+// on the PS5, main_ps5.cpp, with then_play): takes the session lock, recovers an interrupted
+// import, and imports what the storage lacks of the pack. In a preparation run (not then_play),
+// a failure ends the process with its code; otherwise it is logged and the game starts as it
+// would have.
+void MclaShaderStorageBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* window,
+                                   bool then_play) {
+  const bool prepare = !then_play && MclaPrepareShadersIsRequested();
+  if (!then_play && rex::cvar::GetFlagByName("mcla_prepare_shaders") == "true" && !prepare) {
+    REXLOG_WARN("mcla_prepare_shaders is only taken from the command line (the launcher passes it); "
+                "the game starts as usual");
+  }
+  g_state.mode = prepare ? Mode::kPrepare
+                         : (rex::cvar::GetFlagByName("mcla_shader_pack_auto") == "true" ? Mode::kAuto
+                                                                                         : Mode::kOff);
 #ifdef _WIN32
-  if (window && !then_play) {
-    if (HWND hwnd = static_cast<HWND>(window->GetNativeWindowHandle())) ShowWindow(hwnd, SW_HIDE);
+  if (prepare) {
+    // A crash ends the hidden process at once, without an error dialog nobody sees.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    if (window) {
+      if (HWND hwnd = static_cast<HWND>(window->GetNativeWindowHandle())) ShowWindow(hwnd, SW_HIDE);
+    }
   }
 #else
   (void)window;
 #endif
-  Failure failure{0, {}};
+  if (prepare && rex::cvar::GetFlagSource("shader_storage_progress") == rex::cvar::Source::kDefault) {
+    // A command-line value: never saved to mcla.toml.
+    rex::cvar::SetFlagFromCommandLine("shader_storage_progress", "50");
+  }
+  auto fail = [&](const Failure& failure) {
+    if (prepare) Fail(failure);
+    REXLOG_WARN("shader pack: {}; the game starts with the storage as it is", failure.message);
+    g_state.import_state = "unavailable";
+  };
+
+  // The storage the SDK will load.
+  if (runtime->cache_root().empty() || rex::cvar::GetFlagByName("store_shaders") != "true") {
+    if (prepare) Fail({kIoError, "the shader storage is off (no cache folder, or store_shaders false)"});
+    return;
+  }
+  g_state.folders.shareable = runtime->cache_root() / "shaders" / "shareable";
+  g_state.folders.local = runtime->cache_root() / "shaders" / "local";
+  std::error_code error;
+  std::filesystem::create_directories(g_state.folders.shareable, error);
+  std::filesystem::create_directories(g_state.folders.local, error);
+#ifdef _WIN32
+  const int pid = int(GetCurrentProcessId());
+#else
+  const int pid = int(getpid());
+#endif
+  std::string holder;
+  const bool locked = mcla::shader_storage::AcquireSessionLock(
+      g_state.folders.Local("lock"), fmt::format("{} {}", prepare ? "prepare" : "game", pid),
+      prepare ? 2000 : 120000, prepare ? nullptr : &KeepWaitingForPreparation, &holder);
+  if (!locked) {
+    if (prepare) Fail({kInUse, "the shader storage is in use by a running game"});
+    REXLOG_WARN("shader pack: the storage is in use by another process ({}); no import", holder);
+    g_state.import_state = "unavailable";
+    return;
+  }
+  g_state.storage = true;
   try {
-    Prepare(runtime);
-  } catch (const Failure& f) {
-    failure = f;
-  } catch (const std::exception& error) {
-    failure = {6, std::string("unexpected error: ") + error.what()};
-  }
-  if (failure.code) {
-    if (!then_play) Fail(failure);
-    REXLOG_ERROR("prepare shaders: {}", failure.message);
-    Line("error " + std::to_string(failure.code) + " " + failure.message);
-    g_state.active = false;
-    return false;
-  }
-  if (rex::cvar::GetFlagSource("shader_storage_progress") == rex::cvar::Source::kDefault) {
-    rex::cvar::SetFlagByName("shader_storage_progress", "50");
+    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.shareable, StorageFileNames());
+    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.local, {"import", "stamp.json"});
+    ReadJournal(g_state.folders.Local("import"), g_state.journal);
+    RecoverInterruptedImport();
+    if (prepare && rex::cvar::GetFlagByName("mcla_prepare_shaders_retry") == "true" &&
+        g_state.journal.disabled) {
+      REXLOG_INFO("shader pack: importing pack {:016X} is tried again", g_state.journal.pack);
+      g_state.journal.disabled = false;
+      g_state.journal.failures = 0;
+      g_state.journal.unbuildable.clear();
+      WriteJournal(g_state.folders.Local("import"), g_state.journal);
+    }
+    if (g_state.mode != Mode::kOff) RunImport(runtime);
+  } catch (const Failure& failure) {
+    fail(failure);
+  } catch (const std::exception& e) {
+    fail({kIoError, std::string("unexpected error: ") + e.what()});
   }
   g_state.preload_start = Clock::now();
-  return true;
 }
 
-// Called once the SDK created the stored pipelines (MclaApp::OnPostLaunchModule): reports and
-// quits before the game starts.
-void MclaPrepareShadersAfterPreload() {
-  if (!g_state.active) return;
+// Called once the SDK created the stored pipelines (MclaApp::OnPostLaunchModule; on the PS5,
+// after InitializeShaderStorage): the import is done, the stamp is written, and a preparation run
+// reports and quits before the game starts.
+void MclaShaderStorageAfterPreload(rex::Runtime* runtime) {
+  if (!g_state.storage) return;
+  const bool prepare = g_state.mode == Mode::kPrepare;
   const auto preload_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - g_state.preload_start)
           .count();
+  try {
+    // The import, or an earlier one this start loaded, got through the creation of the stored
+    // pipelines: no failed starts in a row any more.
+    Journal& j = g_state.journal;
+    if (g_state.merged ||
+        (j.failures && !j.disabled && j.pack == g_state.pack_hash && g_state.import_state == "on")) {
+      j.phase = "done";
+      j.failures = 0;
+      j.files.clear();
+      WriteJournal(g_state.folders.Local("import"), j);
+    }
+  } catch (const Failure& failure) {
+    REXLOG_WARN("shader pack: can't record the finished import: {}", failure.message);
+  }
+  // In a preparation run the storage is closed first (a driver pipeline cache saved, the files
+  // flushed), as the process ends without the graphics shutdown.
+  std::string report;
+  if (auto* graphics = runtime->graphics_system()) report = graphics->ShaderStorageReport(prepare);
+  try {
+    WriteStamp(runtime, report);
+  } catch (const Failure& failure) {
+    REXLOG_WARN("shader pack: can't write the storage's stamp: {}", failure.message);
+  }
+  if (!prepare) return;
   double private_mb = 0, gpu_mb = 0;
 #ifdef _WIN32
   PROCESS_MEMORY_COUNTERS_EX counters{};
@@ -1280,10 +1836,12 @@ void MclaPrepareShadersAfterPreload() {
     factory->Release();
   }
 #endif
-  Line(fmt::format("done {} {} {:.0f} {:.0f}", g_state.rebuild_ms, preload_ms, private_mb, gpu_mb));
-  REXLOG_INFO("prepare shaders: done; rebuild {} ms, pipelines {} ms, {:.0f} MB private memory, "
-              "{:.0f} MB GPU memory",
-              g_state.rebuild_ms, preload_ms, private_mb, gpu_mb);
-  g_state.active = false;
-  if (!g_state.then_play) Quit(0);
+  const int64_t process_ms = mcla::shader_storage::ProcessUptimeMs();
+  Line(fmt::format("done {} {} {:.0f} {:.0f} {}", g_state.rebuild_ms, preload_ms, private_mb,
+                   gpu_mb, process_ms));
+  REXLOG_INFO(
+      "prepare shaders: done; rebuild {} ms, pipelines {} ms, {:.0f} MB private memory, {:.0f} MB "
+      "GPU memory, {} ms since the process started",
+      g_state.rebuild_ms, preload_ms, private_mb, gpu_mb, process_ms);
+  Quit(0);
 }

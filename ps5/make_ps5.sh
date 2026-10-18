@@ -380,7 +380,7 @@ echo "game data to /data/mcla/game (6 GB the first time)"
     put "$repo/game/$file" "/data/mcla/game/$file"
 done
 if [ -f "$repo/shaderpack/545407F8.shaderpack" ]; then
-    echo "shader pack to /data/mcla/shaderpack (for mcla_prepare_shaders = true in /data/mcla/mcla.toml)"
+    echo "shader pack to /data/mcla/shaderpack (imported at every start)"
     put "$repo/shaderpack/545407F8.shaderpack" "/data/mcla/shaderpack/545407F8.shaderpack" always
 fi
 echo "title to /data/homebrew/$title_id"
