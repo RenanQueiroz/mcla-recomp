@@ -1,5 +1,33 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index dd37511..22504b3 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -112,6 +112,11 @@ class CommandProcessor {
+   // May be called not only from the command processor thread when the command
+   // processor is paused, and the termination of this function may be explicitly
+   // awaited.
++  // GraphicsSystem::ShaderStorageReport, on the command processor's thread.
++  virtual std::string ShaderStorageReport(bool shutdown) {
++    (void)shutdown;
++    return {};
++  }
+   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                                        bool blocking);
+ 
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 7e2d0e6..0b43cce 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -58,6 +58,7 @@ class D3D12CommandProcessor : public CommandProcessor {
+ 
+   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                                bool blocking) override;
++  std::string ShaderStorageReport(bool shutdown) override;
+ 
+   ui::d3d12::D3D12Provider& GetD3D12Provider() const {
+     return *static_cast<ui::d3d12::D3D12Provider*>(graphics_system_->provider());
 diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
-index 37a8b15..0795b05 100644
+index 37a8b15..ad24e94 100644
 --- a/include/rex/graphics/d3d12/pipeline_cache.h
 +++ b/include/rex/graphics/d3d12/pipeline_cache.h
 @@ -40,6 +40,10 @@
@@ -13,7 +41,18 @@ index 37a8b15..0795b05 100644
  namespace rex::graphics::d3d12 {
  
  class D3D12CommandProcessor;
-@@ -433,6 +437,11 @@ class PipelineCache {
+@@ -62,6 +66,10 @@ class PipelineCache {
+   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                                bool blocking);
+   void ShutdownShaderStorage();
++  // The pipeline storage file in use, its descriptions and the pipelines created from them, as
++  // JSON members (IGraphicsSystem::ShaderStorageReport), the storage shut down first with
++  // shutdown. Empty without storage.
++  std::string ShaderStorageReport(bool shutdown);
+ 
+   void EndSubmission();
+   bool IsCreatingPipelines();
+@@ -433,6 +441,16 @@ class PipelineCache {
    // creation_request_cond_ when set.
    size_t creation_threads_shutdown_from_ = SIZE_MAX;
    std::vector<std::unique_ptr<rex::thread::Thread>> creation_threads_;
@@ -22,9 +61,26 @@ index 37a8b15..0795b05 100644
 +  // (shader_storage_progress). Null otherwise.
 +  std::atomic<ShaderStorageProgress*> preload_progress_{nullptr};
 +  void ReportPreloadCreation(const Pipeline* pipeline);
++
++  // For ShaderStorageReport, from the last InitializeShaderStorage.
++  std::string storage_report_file_;
++  size_t storage_report_descriptions_ = 0;
++  size_t storage_report_created_ = 0;
  };
  
  }  // namespace rex::graphics::d3d12
+diff --git a/include/rex/graphics/graphics_system.h b/include/rex/graphics/graphics_system.h
+index e9ba52d..9277cf3 100644
+--- a/include/rex/graphics/graphics_system.h
++++ b/include/rex/graphics/graphics_system.h
+@@ -90,6 +90,7 @@ class GraphicsSystem : public system::IGraphicsSystem {
+ 
+   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                                bool blocking) override;
++  std::string ShaderStorageReport(bool shutdown) override;
+ 
+   bool is_paused() const { return paused_; }
+   void Pause();
 diff --git a/include/rex/graphics/shader_storage.h b/include/rex/graphics/shader_storage.h
 new file mode 100644
 index 0000000..81a80ef
@@ -57,8 +113,75 @@ index 0000000..81a80ef
 +inline constexpr uint32_t kVulkanPipelineStorageVersion = 0x20260228;
 +
 +}  // namespace rex::graphics::shader_storage
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index e2f1cd9..ab4130d 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -142,6 +142,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+   void InvalidateGpuMemory() override;
+   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                                bool blocking) override;
++  std::string ShaderStorageReport(bool shutdown) override;
+ 
+   ui::vulkan::VulkanDevice* GetVulkanDevice() const {
+     // The provider lives as long as the graphics system, so its device is
+diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
+index 096b28b..49c1a07 100644
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -69,6 +69,8 @@ class VulkanPipelineCache {
+   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                                bool blocking);
+   void ShutdownShaderStorage();
++  // As PipelineCache::ShaderStorageReport (D3D12).
++  std::string ShaderStorageReport(bool shutdown);
+   void EndSubmission();
+ 
+   VulkanShader* LoadShader(xenos::ShaderType shader_type, const uint32_t* host_address,
+@@ -473,6 +475,11 @@ class VulkanPipelineCache {
+   // Size of the data in vk_pipeline_cache_path_ when it was loaded or last
+   // saved; the cache isn't written again while its size stays the same.
+   size_t vk_pipeline_cache_saved_size_ = 0;
++
++  // For ShaderStorageReport, from the last InitializeShaderStorage.
++  std::string storage_report_file_;
++  size_t storage_report_descriptions_ = 0;
++  size_t storage_report_created_ = 0;
+   // When the last save was requested, on the command processor thread.
+   std::chrono::steady_clock::time_point vk_pipeline_cache_save_requested_;
+   // Writes vk_pipeline_cache_ to vk_pipeline_cache_path_. Called by the storage
+diff --git a/include/rex/system/interfaces/graphics.h b/include/rex/system/interfaces/graphics.h
+index 197ec4c..7e52960 100644
+--- a/include/rex/system/interfaces/graphics.h
++++ b/include/rex/system/interfaces/graphics.h
+@@ -13,6 +13,7 @@
+ 
+ #include <cstdint>
+ #include <filesystem>
++#include <string>
+ 
+ #include <rex/system/xtypes.h>
+ 
+@@ -79,6 +80,17 @@ class IGraphicsSystem {
+     (void)blocking;
+   }
+ 
++  // The persistent shader storage as the last InitializeShaderStorage left it, as a JSON object:
++  // the API, the pipeline storage file in use, how many descriptions it held and how many
++  // pipelines were created from it, the adapter and its driver, the resolution scale. For a front
++  // end that records what was prepared (mcla's shader preparation). With shutdown, the storage is
++  // closed first: files flushed and closed, a driver pipeline cache saved (for a process that
++  // ends without the graphics shutdown). Empty without storage.
++  virtual std::string ShaderStorageReport(bool shutdown) {
++    (void)shutdown;
++    return {};
++  }
++
+   // One-shot convenience for callers that don't care about the split.
+   X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
+                  ui::WindowedAppContext* app_context, bool with_presentation) {
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index 16b00e3..69c71bc 100644
+index 0fe18c9..cbfa3c2 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -39,6 +39,10 @@
@@ -72,8 +195,74 @@ index 16b00e3..69c71bc 100644
  REXCVAR_DEFINE_BOOL(hdr_ui_layer, true, "GPU",
                      "HDR output: keep the game's HUD and menus as a separate SDR layer over the "
                      "HDR scene (rexglue-hdr-ui-layer.patch); off: the whole frame is SDR content");
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index e1630e0..ccb619c 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -32,6 +32,9 @@
+ #include <rex/memory/utils.h>
+ #include <rex/ui/d3d12/d3d12_presenter.h>
+ #include <rex/ui/d3d12/d3d12_util.h>
++#include <rex/string/utf8.h>
++
++#include "../shader_storage_progress.h"
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -169,6 +172,51 @@ void D3D12CommandProcessor::InitializeShaderStorage(const std::filesystem::path&
+   pipeline_cache_->InitializeShaderStorage(cache_root, title_id, blocking);
+ }
+ 
++std::string D3D12CommandProcessor::ShaderStorageReport(bool shutdown) {
++  std::string storage = pipeline_cache_ ? pipeline_cache_->ShaderStorageReport(shutdown) : "";
++  if (storage.empty()) {
++    return storage;
++  }
++  // The adapter the device is on, and its user-mode driver's version (what a driver update
++  // changes).
++  std::string adapter = "{}";
++  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
++  IDXGIFactory4* factory = nullptr;
++  if (provider.GetDevice() && provider.GetDXGIFactory() &&
++      SUCCEEDED(provider.GetDXGIFactory()->QueryInterface(IID_PPV_ARGS(&factory)))) {
++    IDXGIAdapter1* dxgi_adapter = nullptr;
++    if (SUCCEEDED(factory->EnumAdapterByLuid(provider.GetDevice()->GetAdapterLuid(),
++                                             IID_PPV_ARGS(&dxgi_adapter)))) {
++      DXGI_ADAPTER_DESC1 desc;
++      if (SUCCEEDED(dxgi_adapter->GetDesc1(&desc))) {
++        LARGE_INTEGER umd_version{};
++        std::string driver;
++        if (SUCCEEDED(dxgi_adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd_version))) {
++          driver = fmt::format(
++              "{}.{}.{}.{}", uint32_t(umd_version.HighPart) >> 16,
++              uint32_t(umd_version.HighPart) & 0xFFFF, uint32_t(umd_version.LowPart) >> 16,
++              uint32_t(umd_version.LowPart) & 0xFFFF);
++        }
++        adapter = fmt::format(
++            "{{\"name\":{},\"vendor\":{},\"device\":{},\"subsys\":{},\"revision\":{},"
++            "\"driver\":{}}}",
++            ShaderStorageJsonString(
++                rex::string::to_utf8(std::u16string_view(reinterpret_cast<const char16_t*>(desc.Description)))),
++            desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision,
++            ShaderStorageJsonString(driver));
++      }
++      dxgi_adapter->Release();
++    }
++    factory->Release();
++  }
++  return fmt::format(
++      "{{\"api\":\"d3d12\",{},\"adapter\":{},\"resolution_scale\":[{},{}],\"edram_tiles\":{}}}",
++      storage, adapter,
++      render_target_cache_ ? render_target_cache_->draw_resolution_scale_x() : 0,
++      render_target_cache_ ? render_target_cache_->draw_resolution_scale_y() : 0,
++      graphics_system_->edram_tile_count());
++}
++
+ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
+                                                                uint32_t packet, uint32_t count) {
+   if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
 diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
-index 4836bd8..8196583 100644
+index 4836bd8..1e6dde4 100644
 --- a/src/graphics/d3d12/pipeline_cache.cpp
 +++ b/src/graphics/d3d12/pipeline_cache.cpp
 @@ -33,6 +33,7 @@
@@ -93,7 +282,17 @@ index 4836bd8..8196583 100644
  REXCVAR_DEFINE_BOOL(d3d12_dxbc_disasm, false, "GPU/D3D12", "Dump DXBC disassembly");
  
  REXCVAR_DEFINE_BOOL(d3d12_dxbc_disasm_dxilconv, false, "GPU/D3D12",
-@@ -244,6 +247,11 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+@@ -225,6 +228,9 @@ void PipelineCache::Shutdown() {
+ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_root,
+                                             uint32_t title_id, bool blocking) {
+   ShutdownShaderStorage();
++  storage_report_file_.clear();
++  storage_report_descriptions_ = 0;
++  storage_report_created_ = 0;
+ 
+   auto shader_storage_root = cache_root / "shaders";
+   // For files that can be moved between different hosts.
+@@ -244,6 +250,11 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
      }
    }
  
@@ -105,13 +304,21 @@ index 4836bd8..8196583 100644
    bool edram_rov_used =
        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
  
-@@ -546,9 +554,26 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+@@ -263,6 +274,7 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+         rex::path_to_utf8(pipeline_storage_file_path));
+     return;
+   }
++  storage_report_file_ = rex::path_to_utf8(pipeline_storage_file_path.filename());
+   pipeline_storage_file_flush_needed_ = false;
+   // 'XEPS'.
+   const uint32_t pipeline_storage_magic = 0x53504558;
+@@ -546,9 +558,26 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
      }
  
      size_t pipelines_created = 0;
 +    // Progress lines for a front end (shader_storage_progress); every stored description counts,
 +    // as skipped, failed or created.
-+    ShaderStorageProgress progress(pipeline_stored_descriptions.size());
++    ShaderStorageProgress progress(pipeline_stored_descriptions.size(), blocking);
 +    if (blocking) {
 +      preload_progress_.store(&progress, std::memory_order_release);
 +    }
@@ -132,7 +339,7 @@ index 4836bd8..8196583 100644
        // TODO(Triang3l): On Vulkan, skip pipelines requiring unsupported device
        // features (to keep the cache files mostly shareable across devices).
        // Skip already known pipelines - those have already been enqueued.
-@@ -650,7 +675,9 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+@@ -650,7 +679,9 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
        } else {
          new_pipeline->state.store(CreateD3D12Pipeline(pipeline_runtime_description),
                                    std::memory_order_release);
@@ -142,7 +349,7 @@ index 4836bd8..8196583 100644
        ++pipelines_created;
      }
  
-@@ -691,6 +718,10 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+@@ -691,6 +722,10 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
          rex::thread::Wait(creation_completion_event_.get(), false);
        }
      }
@@ -153,7 +360,36 @@ index 4836bd8..8196583 100644
  
      REXGPU_INFO(
          "Created {} graphics pipelines (not including reading the "
-@@ -3251,6 +3282,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
+@@ -698,6 +733,8 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+         pipelines_created,
+         (rex::chrono::Clock::QueryHostTickCount() - pipeline_creation_start_) * 1000 /
+             rex::chrono::Clock::QueryHostTickFrequency());
++    storage_report_descriptions_ = pipeline_stored_descriptions.size();
++    storage_report_created_ = pipelines_created;
+     // If any pipeline descriptions were corrupted (or the whole file has excess
+     // bytes in the end), truncate to the last valid pipeline description.
+     rex::filesystem::TruncateStdioFile(
+@@ -725,6 +762,19 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+   storage_write_thread_->set_name("D3D12 Storage writer");
+ }
+ 
++std::string PipelineCache::ShaderStorageReport(bool shutdown) {
++  std::string report;
++  if (!storage_report_file_.empty()) {
++    report = fmt::format(
++        "\"pipeline_storage\":\"{}\",\"pipeline_descriptions\":{},\"pipelines_created\":{}",
++        storage_report_file_, storage_report_descriptions_, storage_report_created_);
++  }
++  if (shutdown) {
++    ShutdownShaderStorage();
++  }
++  return report;
++}
++
+ void PipelineCache::ShutdownShaderStorage() {
+   if (storage_write_thread_) {
+     {
+@@ -3251,6 +3301,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
        pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
                                        std::memory_order_release);
      }
@@ -161,7 +397,7 @@ index 4836bd8..8196583 100644
      bool was_async_pending =
          pipeline_to_create->async_creation_pending.exchange(false, std::memory_order_acq_rel);
  
-@@ -3278,6 +3310,12 @@ bool PipelineCache::AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us
+@@ -3278,6 +3329,12 @@ bool PipelineCache::AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us
        [pipeline]() { return !pipeline->async_creation_pending.load(std::memory_order_acquire); });
  }
  
@@ -174,7 +410,7 @@ index 4836bd8..8196583 100644
  void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
    assert_false(creation_threads_.empty());
    while (true) {
-@@ -3297,6 +3335,7 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3297,6 +3354,7 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
        pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
                                        std::memory_order_release);
      }
@@ -182,11 +418,42 @@ index 4836bd8..8196583 100644
      // The processor thread is the only one waiting for these, and it's here.
      pipeline_to_create->async_creation_pending.store(false, std::memory_order_release);
    }
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index a9ea8e2..e00560b 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -374,6 +374,25 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
+   }
+ }
+ 
++std::string GraphicsSystem::ShaderStorageReport(bool shutdown) {
++  if (!command_processor_) {
++    return {};
++  }
++  // On the command processor's thread, as InitializeShaderStorage.
++  std::string report;
++  if (command_processor_->is_paused()) {
++    report = command_processor_->ShaderStorageReport(shutdown);
++  } else {
++    rex::thread::Fence fence;
++    command_processor_->CallInThread([this, shutdown, &report, &fence]() {
++      report = command_processor_->ShaderStorageReport(shutdown);
++      fence.Signal();
++    });
++    fence.Wait();
++  }
++  return report;
++}
++
+ void GraphicsSystem::Pause() {
+   paused_ = true;
+   command_processor_->Pause();
 diff --git a/src/graphics/shader_storage_progress.h b/src/graphics/shader_storage_progress.h
 new file mode 100644
+index 0000000..fd702a2
 --- /dev/null
 +++ b/src/graphics/shader_storage_progress.h
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,97 @@
 +/**
 + * @file        graphics/shader_storage_progress.h
 + * @brief       Progress of the start-up creation of stored pipelines, on standard output
@@ -206,6 +473,8 @@ new file mode 100644
 +#include <cstdint>
 +#include <cstdio>
 +#include <mutex>
++#include <string>
++#include <string_view>
 +
 +#include <rex/cvar.h>
 +
@@ -215,9 +484,10 @@ new file mode 100644
 +
 +class ShaderStorageProgress {
 + public:
-+  explicit ShaderStorageProgress(size_t total)
++  // print: false for a preload nobody waits for, which reports nothing.
++  explicit ShaderStorageProgress(size_t total, bool print = true)
 +      : total_(total),
-+        interval_(REXCVAR_GET(shader_storage_progress) > 0
++        interval_(print && REXCVAR_GET(shader_storage_progress) > 0
 +                      ? size_t(REXCVAR_GET(shader_storage_progress))
 +                      : 0),
 +        start_(std::chrono::steady_clock::now()) {
@@ -261,9 +531,78 @@ new file mode 100644
 +  std::mutex print_lock_;
 +};
 +
++// A JSON string literal of text (ShaderStorageReport).
++inline std::string ShaderStorageJsonString(std::string_view text) {
++  std::string out = "\"";
++  for (char c : text) {
++    if (c == '"' || c == '\\') {
++      out += '\\';
++      out += c;
++    } else if (static_cast<unsigned char>(c) < 0x20) {
++      char escaped[8];
++      std::snprintf(escaped, sizeof(escaped), "\\u%04x", unsigned(static_cast<unsigned char>(c)));
++      out += escaped;
++    } else {
++      out += c;
++    }
++  }
++  out += '"';
++  return out;
++}
++
 +}  // namespace rex::graphics
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index edecf56..0531582 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -49,6 +49,8 @@
+ #include <rex/ui/vulkan/presenter.h>
+ #include <rex/ui/vulkan/util.h>
+ 
++#include "../shader_storage_progress.h"
++
+ // Legacy backend compatibility aliases for shared readback controls.
+ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
+                     "Read render-to-texture results on the CPU")
+@@ -708,6 +710,36 @@ void VulkanCommandProcessor::InitializeShaderStorage(const std::filesystem::path
+   pipeline_cache_->InitializeShaderStorage(cache_root, title_id, blocking);
+ }
+ 
++std::string VulkanCommandProcessor::ShaderStorageReport(bool shutdown) {
++  std::string storage = pipeline_cache_ ? pipeline_cache_->ShaderStorageReport(shutdown) : "";
++  if (storage.empty()) {
++    return storage;
++  }
++  // The device and its driver: the driver's version and the pipeline cache UUID (what a driver
++  // update changes).
++  std::string adapter = "{}";
++  if (const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice()) {
++    VkPhysicalDeviceProperties properties = {};
++    vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(
++        vulkan_device->physical_device(), &properties);
++    std::string uuid;
++    for (uint8_t byte : properties.pipelineCacheUUID) {
++      uuid += fmt::format("{:02x}", byte);
++    }
++    adapter = fmt::format(
++        "{{\"name\":{},\"vendor\":{},\"device\":{},\"driver_version\":{},"
++        "\"pipeline_cache_uuid\":\"{}\"}}",
++        ShaderStorageJsonString(properties.deviceName), properties.vendorID, properties.deviceID,
++        properties.driverVersion, uuid);
++  }
++  return fmt::format(
++      "{{\"api\":\"vulkan\",{},\"adapter\":{},\"resolution_scale\":[{},{}],\"edram_tiles\":{}}}",
++      storage, adapter,
++      render_target_cache_ ? render_target_cache_->draw_resolution_scale_x() : 0,
++      render_target_cache_ ? render_target_cache_->draw_resolution_scale_y() : 0,
++      graphics_system_->edram_tile_count());
++}
++
+ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
+                                                                 uint32_t packet, uint32_t count) {
+   if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 95bcc39..0bfb8f5 100644
+index 95bcc39..5c4deaf 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -55,6 +55,9 @@
@@ -276,7 +615,22 @@ index 95bcc39..0bfb8f5 100644
  
  REXCVAR_DEFINE_INT32(
      vulkan_pipeline_creation_threads, -1, "GPU/Vulkan",
-@@ -542,6 +545,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -421,6 +424,9 @@ bool VulkanPipelineCache::Initialize() {
+ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_root,
+                                                   uint32_t title_id, bool blocking) {
+   ShutdownShaderStorage();
++  storage_report_file_.clear();
++  storage_report_descriptions_ = 0;
++  storage_report_created_ = 0;
+   {
+     std::lock_guard<std::mutex> lock(creation_request_lock_);
+     startup_loading_ = false;
+@@ -538,10 +544,15 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+         rex::path_to_utf8(pipeline_storage_file_path));
+     return;
+   }
++  storage_report_file_ = rex::path_to_utf8(pipeline_storage_file_path.filename());
+   pipeline_storage_file_flush_needed_ = false;
    // 'XEPS'.
    const uint32_t pipeline_storage_magic = 0x53504558;
    const uint32_t pipeline_storage_magic_api = edram_fragment_shader_interlock ? 1u : 0u;
@@ -287,7 +641,15 @@ index 95bcc39..0bfb8f5 100644
    const uint32_t pipeline_storage_version_swapped = rex::byte_swap(
        std::max(PipelineDescription::kVersion, SpirvShaderTranslator::Modification::kVersion));
    struct {
-@@ -849,16 +856,20 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -601,6 +612,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+       }
+       pipeline_stored_descriptions.resize(pipeline_storage_kept_count);
+       pipeline_storage_valid_count = pipeline_storage_read_count;
++      storage_report_descriptions_ = pipeline_storage_valid_count;
+       if (pipeline_storage_skipped_unsupported_count || pipeline_storage_skipped_corrupted_count) {
+         REXGPU_INFO(
+             "VulkanPipelineCache: Pipeline storage filtering kept {} descriptions (skipped {} "
+@@ -849,16 +861,20 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
  
      std::atomic<size_t> next_creation_index(0);
      std::atomic<size_t> created_pipeline_count(0);
@@ -310,11 +672,34 @@ index 95bcc39..0bfb8f5 100644
        }
      };
  
-@@ -879,6 +890,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -879,8 +895,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
        }
      }
  
 +    progress.Finish();
      REXGPU_INFO("Created {} graphics pipelines from Vulkan storage ({} requested)",
                  created_pipeline_count.load(), pipeline_creations.size());
++    storage_report_created_ = created_pipeline_count.load();
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       startup_loading_ = false;
+@@ -928,6 +946,19 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+   storage_write_thread_->set_name("Vulkan Storage writer");
+ }
+ 
++std::string VulkanPipelineCache::ShaderStorageReport(bool shutdown) {
++  std::string report;
++  if (!storage_report_file_.empty()) {
++    report = fmt::format(
++        "\"pipeline_storage\":\"{}\",\"pipeline_descriptions\":{},\"pipelines_created\":{}",
++        storage_report_file_, storage_report_descriptions_, storage_report_created_);
++  }
++  if (shutdown) {
++    ShutdownShaderStorage();
++  }
++  return report;
++}
++
+ void VulkanPipelineCache::ShutdownShaderStorage() {
+   if (storage_write_thread_) {
      {

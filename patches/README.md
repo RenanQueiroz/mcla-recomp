@@ -1171,13 +1171,16 @@ Windows only until frame generation is checked elsewhere (phase 5). There is no 
 
 ## rexglue-shader-storage-prepare.patch
 
-**Why.** The fork's shader preparation (`mcla.exe --mcla_prepare_shaders`, `src/shader_prepare.cpp`) adds shaders and pipeline descriptions to the player's shader storage, then lets the SDK create every stored pipeline, and needs two things from the SDK:
+**Why.** The fork's shader pack import and preparation (`src/shader_prepare.cpp`) add shaders and pipeline descriptions to the player's shader storage, then let the SDK create every stored pipeline, and need from the SDK:
 - the versions the storage files must carry: a file whose header holds another one is emptied at start, so the game checks its shader pack against them before it writes anything;
-- how far the start-up creation of the stored pipelines got, for the launcher's progress line.
+- how far the start-up creation of the stored pipelines got, for the launcher's progress line;
+- what the storage was loaded with, for the record the launcher compares before Play (the stamp): the API, the pipeline storage file in use (which says the EDRAM path the GPU code chose: render targets or rasterizer-ordered views on D3D12, framebuffer or fragment shader interlock on Vulkan), the adapter and its driver, the resolution scale;
+- in a preparation run, which ends without the graphics shutdown, the storage closed first, so that a driver pipeline cache (`vulkan_pipeline_cache_file`) is saved.
 
 **What it changes.**
 - `include/rex/graphics/shader_storage.h`: the shader storage's and both pipeline storages' versions, as public constants. The D3D12 and Vulkan pipeline caches `static_assert` that they equal their own.
-- `shader_storage_progress` (0, off, by default): while the stored pipelines are created at start, `SHADERPREP preload <done> <total>` on standard output every that many pipelines, and `SHADERPREP preload-done <created> <total> <ms>` at the end. D3D12 counts every stored description (created, failed, or skipped because its shaders aren't there) during a blocking preload; Vulkan counts the pipelines it creates. Nothing else changes with it off.
+- `shader_storage_progress` (0, off, by default): while the stored pipelines are created at start, `SHADERPREP preload <done> <total>` on standard output every that many pipelines, and `SHADERPREP preload-done <created> <total> <ms>` at the end. D3D12 counts every stored description (created, failed, or skipped because its shaders aren't there) during a blocking preload, and prints nothing for one that doesn't block; Vulkan counts the pipelines it creates. Nothing else changes with it off.
+- `IGraphicsSystem::ShaderStorageReport(bool shutdown)` (a default that returns nothing, so other graphics systems need nothing): a JSON object with the API, the pipeline storage file, how many descriptions it held and how many pipelines were created from it, the adapter (D3D12: its description, vendor, device, subsystem and revision, and the user-mode driver's version from `CheckInterfaceSupport`; Vulkan: the device's name, vendor and device, `driverVersion` and `pipelineCacheUUID`), the resolution scale and the EDRAM size. It runs on the command processor's thread, as `InitializeShaderStorage`. With `shutdown`, the pipeline cache's `ShutdownShaderStorage` runs first (the storage writer joined, the files closed, a dirty `VkPipelineCache` saved).
 
 **Upstream:** fork-only for now (it serves the fork's shader pack).
 
@@ -1185,3 +1188,4 @@ Windows only until frame generation is checked elsewhere (phase 5). There is no 
 |---|---|---|
 | The storage versions, public | `include/rex/graphics/shader_storage.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | all platforms |
 | Progress of the stored pipelines' creation | `src/graphics/shader_storage_progress.h`, `src/graphics/command_processor.cpp`, `include/rex/graphics/d3d12/pipeline_cache.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | D3D12, Vulkan (all platforms) |
+| The storage report, and closing the storage on request | `include/rex/system/interfaces/graphics.h`, `include/rex/graphics/graphics_system.h`, `src/graphics/graphics_system.cpp`, `include/rex/graphics/command_processor.h`, the D3D12 and Vulkan `command_processor.h/.cpp` and `pipeline_cache.h/.cpp` | D3D12, Vulkan (all platforms) |
