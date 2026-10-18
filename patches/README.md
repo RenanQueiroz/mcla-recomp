@@ -966,7 +966,7 @@ The script stops without writing on a FidelityFX checkout that isn't the pinned 
 - **Phase 0:** the build of FidelityFX's frame generation and the way frames are presented for it.
 - **Phase 1:** generation on Direct3D 12 with HDR output and FSR anti-aliasing.
 - **Phase 2 (this):** generation on Direct3D 12 in SDR too, and with MSAA or anti-aliasing off.
-- **Still to come:** Vulkan (3), the settings (4), Linux and the PS5 (5), low latency (6).
+- **Still to come:** Vulkan (3), the settings (4: with the default cap below), Linux and the PS5 (5), low latency (6).
 
 Windows only until frame generation is checked elsewhere (phase 5). There is no menu row yet: `frame_generation` is a development option.
 
@@ -994,8 +994,8 @@ Windows only until frame generation is checked elsewhere (phase 5). There is no 
     - frames without motion vectors (no anti-aliasing draw that frame);
     - in SDR, with FXAA or the game's piecewise linear ramp (the generated frame's compose has neither);
     - the UI thread's paints (while the guest output thread is silent, generation is off on AMD's swap chain, and its presents copy the back buffer).
-  - **Presents:** with vertical sync by default. AMD's swap chain presents with SyncInterval 1 and no flags then (logged once); `frame_generation_present=tearing` (read at connection) gives SyncInterval 0 and `DXGI_PRESENT_ALLOW_TEARING`.
-    - **Not yet confirmed on screen:** PresentMon reported SyncInterval 0 for these presents and, at 3x, frames displayed for less than a refresh. The NVIDIA driver profile (read without changing anything) has no vertical sync override. To be measured again, with variable refresh rate and fullscreen.
+  - **Presents:** tear-free by default. AMD's swap chain presents with SyncInterval 1 and no flags then (logged once); `frame_generation_present=tearing` (read at connection) gives SyncInterval 0 and `DXGI_PRESENT_ALLOW_TEARING`.
+    - **Tear-free, verified with G-SYNC** (a 240 Hz display) in a window and in borderless fullscreen, both independent flip: at the display's rate every present is shown for exactly one refresh (4.17 ms), and below it for a time that varies with the frames (variable refresh rate). PresentMon reports these presents as SyncInterval 0 with tearing allowed, and it reports a plain DXGI `Present(1, 0)` (frame generation off) the same way on this display: that's how it shows vertical sync under G-SYNC in independent flip, not a driver override (the NVIDIA profile, read without changing anything, has none). A display with a fixed refresh rate is untested.
   - **After 1200 frames in a row with nothing to generate from,** the frame generation context (hundreds of MB at 4K) is released until there is.
   - **Memory with frame generation on:** AMD's swap chain keeps 3 replacement and 2 interpolation buffers at the swap chain's size (about 165 MB at 4K HDR10), used only while generation is off.
   - **AMD's `Present` waits without a time limit** (for the previous frame's composition, its interpolation and a free buffer) while the guest output thread holds the paint lock. A hang in AMD's presenter thread or in DXGI would stop the UI thread with it. That's AMD's code; it isn't bounded here.
@@ -1048,7 +1048,26 @@ Windows only until frame generation is checked elsewhere (phase 5). There is no 
   - **SDR with FSR, HDR with MSAA, SDR with anti-aliasing off:** generated, presents per swap 2.0000 while driving, turning and standing (`fgdump-d3d12.pad`), fgcheck as above.
   - **The pause menu** (the world drawn again behind it, the camera turning around the car): its anti-aliasing draw is there, so it's generated, and 100% of still pixels are kept.
   - **`fg-mode.pad`,** HDR with FSR and SDR with MSAA: every real frame presented once with a generated frame (120 rendered, 240 shown), through the overlay, the suspension, fullscreen switches and HDR off and on; Vulkan's frame-generation mode and Direct3D 12 without generation unchanged.
-  - **Still to measure** once PresentMon works again: the display times with vertical sync (above), pacing with variable refresh rate and fullscreen at 3x, the latency of frame generation off and on, and a cap of half the display's rate (120 rendered, 240 shown).
+  - The presentation measurements PresentMon couldn't take then are below.
+- **Checked, presentation and latency** (Direct3D 12, HDR, FSR anti-aliasing, 240 Hz G-SYNC display, PresentMon and the present log, `pmgate.pad`'s 40 s of driving, 2026-10-17). Every run was presented in independent flip (a run composed by DWM, "Composed: Flip", doesn't count: PresentMon's display times are only the display's in independent flip). Swap to screen is each real frame's time from its swap to its first scan-out (PresentMon's display latency).
+
+  | | Rendered / shown a second | Swap to screen ms (median, p99) | Displayed ms (median, p1 to p99) |
+  |---|---|---|---|
+  | Native, off, uncapped | 145.8 / 145.8 | 2.06, 3.32 | 6.84 (5.5 to 8.4) |
+  | Native, off, capped at 116 | 116.0 / 116.0 | 1.08, 1.88 | 8.62 (7.4 to 9.9) |
+  | Native, on, uncapped | 120.0 / 240.0 | 22.57, 24.67 | 4.17 (4.12 to 4.21) |
+  | Native, on, capped at 116 | 116.0 / 232.0 | 6.30, 8.53 | 4.25 (2.8 to 5.7) |
+  | Native, on, `frame_generation_present=tearing` | 120.0 / 240.0 | 17.98, 19.04 | 4.17 (3.3 to 5.1) |
+  | 3x window, off, uncapped | 114.2 / 114.2 | 22.53, 24.98 | 8.74 (6.3 to 11.5) |
+  | 3x window, on, uncapped | 91.3 / 182.6 | 23.90, 26.80 | 5.71 (3.3 to 8.2) |
+  | 3x window, on, capped at 80 | 80.0 / 160.0 | 15.02, 16.26 | 6.17 (4.2 to 8.8) |
+  | 3x borderless fullscreen (3840x2160), on, uncapped | 83.4 / 166.8 | 26.49, 29.78 | 6.07 (3.9 to 8.5) |
+  | 3x borderless fullscreen, off, uncapped | 117.6 / 117.6 | 21.78, 23.48 | 8.70 (8.1 to 9.7) |
+
+  - **Uncapped, frame generation fills the display:** native reaches the 240 presents a second this display shows, and frames then queue behind the presents: 22.6 ms from swap to screen against 2.1 ms without generation, at about the same rendered rate as a cap of 116 that takes it down to 6.3 ms. With `frame_generation_present=tearing` it still stops at 120 rendered (18 ms). This machine's global NVIDIA profile has a frame rate limiter of 240, which caps the presents too and so meets frame generation the same way; it is the user's setting, read without changing anything.
+  - **GPU-bound at 3x,** the game's own queue is already about 22.5 ms without generation (the GPU command thread runs ahead of the GPU); generation adds about 1.4 ms to it, and a cap below the GPU's rate (80) takes it to 15 ms. That queue is low latency's to remove (phase 6), not a cap's: phase 6 measures it with Reflex, generation off and on.
+  - **Pacing:** with the cap at native, each present is shown for about one refresh (4.25 ms, against 4.31 ideal). GPU-bound at 3x uncapped, the generated and real frames alternate about 3.5 and 7.7 ms instead of 5.5 each; capped at 80 they spread around the ideal 6.25 ms instead. Borderless fullscreen has variable refresh rate as the window does.
+  - **The cap with frame generation:** half the display's refresh rate less about 3% (116 at 240 Hz, 58 at 120 Hz) becomes the default cap whenever frame generation is on, on every display, with the settings (phase 4); a higher cap stays possible, its label saying it adds latency. Until then, set `mcla_fps` to it (`--mcla_fps=116`, or in `mcla.toml`: the pause menu's FPS TARGET has no such value). Fixed-refresh displays are untested.
 - **Checked, phase 0** (Windows, RTX 5080, 1920x1080 window, uncapped, PresentMon and the present log, `launcher/dev/fg/fg-mode.pad`). On both APIs, with frame generation on (D3D12's then without generation):
   - **Every guest frame presented exactly once:** in steady driving, with the F4 overlay open and after a stall (146 a second with the overlay, against 77 on the default path).
   - **The suspension** (after 1 s with frame generation): during a forced 3 s stall the UI thread painted the overlay about 540 times. The mode resumed 250 ms after guest frames came again, the frame at the switch going through the pacer, with no paint without UI around either switch.
