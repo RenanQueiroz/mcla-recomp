@@ -164,9 +164,18 @@ try {
                 "downloading Clang $llvmVersion (about 900 MB) into tools\"
                 New-Item -ItemType Directory -Force "$root\tools" | Out-Null
                 $archive = "$root\tools\$llvmName.tar.xz"
+                # Python, installed just before if it was missing, unpacks it
+                # when tar.exe cannot: the one in Windows 10 has no .xz support
+                # ("unable to run program xz", issue #10).
+                RefreshPath
                 Logged "install-clang" {
                     curl.exe -L --fail -o $archive "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmName.tar.xz"
-                    if ($LASTEXITCODE -eq 0) { tar.exe -xf $archive -C "$root\tools" }
+                    if ($LASTEXITCODE -ne 0) { return }
+                    tar.exe -xf $archive -C "$root\tools"
+                    if ($LASTEXITCODE -ne 0) {
+                        "tar.exe could not unpack the archive; unpacking it with Python instead (about a minute)"
+                        python -c "import sys, tarfile; kw = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}; tarfile.open(sys.argv[1], 'r:xz').extractall(sys.argv[2], **kw)" $archive "$root\tools"
+                    }
                 }
                 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
             } elseif ($name -eq "Vulkan SDK") {
