@@ -113,6 +113,7 @@ By hand: `git pull`, then `.\scripts\make_pc.ps1` again. It adds new SDK patches
 | PowerShell says `running scripts is disabled on this system` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script again. |
 | The SDK build fails with `'crtversion.h' file not found` | Another Clang on your path was used. Update and run `make_pc.ps1` again: it now uses only its own. |
 | Step 1 fails after downloading Clang, with `unable to run program "xz -d -qq"` | Windows 10's `tar.exe` cannot unpack `.tar.xz`. Update and run `make_pc.ps1` again: it now unpacks the archive with Python when `tar.exe` cannot. |
+| The SDK step fails with `Filename too long` or `'$GIT_DIR' too big`, or the build says FSR was left out | The folder's path is too long: git stops at 148 characters, and FidelityFX's shader compiler (FSR) at about 75, whatever Windows' long-path setting. Move the whole folder to a shorter path, for example `C:\Games\mcla-recomp`, and run the script again. |
 | `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
 | After an update, the build says a patch has changed since it was applied, is in the SDK without a record, or does not apply | `.\launcher\build-game.ps1 -ResetSdk`, or the launcher's **More** → *Re-patch and rebuild the SDK*. |
 | `no .NET 10 SDK found` | `winget install Microsoft.DotNet.SDK.10`, then `.\launcher\build-launcher.ps1` again. |

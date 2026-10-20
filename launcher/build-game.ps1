@@ -14,6 +14,9 @@
 param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "")
 
 $ErrorActionPreference = "Stop"
+# Git needs core.longpaths for the SDK's deep submodule files (resetting the
+# SDK cleans them); set for every git started from here, as make_pc.ps1 does.
+$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
 $repo = Split-Path $PSScriptRoot -Parent
 $sdk = Join-Path $repo "third_party\rexglue-sdk"
 $builtCommitFile = Join-Path $PSScriptRoot "built-commit.txt"

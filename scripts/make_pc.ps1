@@ -20,6 +20,10 @@
 param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset = "win-amd64-release")
 
 $ErrorActionPreference = "Stop"
+# The SDK has files deep in its submodules: git on Windows needs core.longpaths
+# for them. Set for every git this script starts, and the ones those start,
+# without touching anyone's git configuration.
+$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
 $root = Split-Path $PSScriptRoot -Parent
 $sdk = "$root\third_party\rexglue-sdk"
 $sdkTag = "v0.10.0"
@@ -81,6 +85,13 @@ function CheckPatch([string]$patch) {
     if ($record.Split(" ")[0] -ne (PatchHash $patch)) {
         Fail "patches\$leaf has changed since it was applied to the SDK. $again"
     }
+}
+
+# Git refuses a repository folder whose path is over 220 characters, with
+# core.longpaths or without; the longest below this folder is 72 (the
+# submodule vulkan-memory-allocator's), so this folder's path may have 148.
+if ($root.Length -gt 148) {
+    Fail "this folder's path is $($root.Length) characters long, and git cannot clone the SDK into one over 148. Move the whole folder somewhere with a shorter path (for example C:\Games\mcla-recomp) and run this again."
 }
 
 Push-Location $root
@@ -326,6 +337,11 @@ try {
     # FSR is optional: say plainly when it was left out, and what brings it back.
     if (-not (Test-Path "$install\bin\amd_fidelityfx_dx12.dll")) {
         "note: the FSR anti-aliasing option was not built this time: fetching the FidelityFX SDK needs the internet, or its build failed (out\logs\sdk-configure.log, sdk-build.log). The game offers MSAA and off; the next build (or Update) tries again."
+        # FidelityFX's shader compiler stops at 260 characters, whatever Windows
+        # is set to; its longest source file path is 181 below this folder.
+        if ($root.Length -gt 75) {
+            "      This folder's path is $($root.Length) characters long, and that may be the reason: FidelityFX's shader compiler cannot open paths over 260 characters. With the folder at a path of 75 characters or fewer (for example C:\Games\mcla-recomp), the next build includes FSR."
+        }
     } elseif (-not (Test-Path "$install\bin\amd_fidelityfx_vk.dll")) {
         if (HasVulkanSdk) {
             "note: FSR was built for Direct3D 12 only: its Vulkan runtime failed to build (out\logs\sdk-build.log). With Vulkan the game offers MSAA and off."
