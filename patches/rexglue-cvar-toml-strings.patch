@@ -1,5 +1,5 @@
 diff --git a/include/rex/cvar.h b/include/rex/cvar.h
-index fe94186..73bd347 100644
+index fe94186..0f53ff5 100644
 --- a/include/rex/cvar.h
 +++ b/include/rex/cvar.h
 @@ -124,7 +124,18 @@ void LoadConfig(const std::filesystem::path& config_path);
@@ -9,10 +9,10 @@ index fe94186..73bd347 100644
 +// Merges what was changed while running (source kRuntime) into the TOML file:
 +// each flag's line replaced where it is or added before the first [table],
 +// every other line kept. Command-line and environment values, and defaults
-+// set with SetDefaultValue, are not written.
++// set with SetDefaultValue, are not written, and neither are transient flags.
  void SaveConfig(const std::filesystem::path& config_path);
-+// The same for these flags only, whatever set them. False, with the file as it
-+// was, when it can't be read or written.
++// The same for these flags only, whatever set them (but not transient ones).
++// False, with the file as it was, when it can't be read or written.
 +bool SaveConfigValues(const std::filesystem::path& config_path,
 +                      const std::vector<std::string>& names);
 +// An app's own default for a flag: its value while nothing else sets it, and
@@ -21,8 +21,33 @@ index fe94186..73bd347 100644
  
  //=============================================================================
  // Flag Registry
+@@ -172,6 +183,11 @@ struct FlagEntry {
+   Constraints constraints;
+   std::string default_value;
+   bool is_debug_only = false;
++  // A value the program works out and sets while running (a status, or a mirror
++  // of another setting), not a setting: never written to the config file, a
++  // line for it in the file is ignored (the command line and the environment
++  // still set it), and the settings overlay doesn't list it.
++  bool transient = false;
+   Source source = Source::kDefault;
+ };
+ 
+@@ -302,6 +318,12 @@ struct FlagRegistrar {
+     return std::move(*this);
+   }
+ 
++  // See FlagEntry::transient.
++  FlagRegistrar&& transient() && {
++    apply_([](FlagEntry& entry) { entry.transient = true; });
++    return std::move(*this);
++  }
++
+   FlagRegistrar&& validator(std::function<bool(std::string_view)> fn) && {
+     apply_([fn = std::move(fn)](FlagEntry& entry) mutable {
+       entry.constraints.custom_validator = std::move(fn);
 diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
-index 228728d..074885e 100644
+index 228728d..18585be 100644
 --- a/src/core/cvar.cpp
 +++ b/src/core/cvar.cpp
 @@ -10,12 +10,24 @@
@@ -50,7 +75,34 @@ index 228728d..074885e 100644
  
  #include <CLI/CLI.hpp>
  
-@@ -137,6 +149,506 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
+@@ -81,6 +93,10 @@ enum class ApplyResult { kApplied, kSkipped, kRejected };
+ ApplyResult SetFlagFromSource(std::string_view name, std::string_view value, Source source);
+ 
+ bool Outranks(Source source, const FlagEntry& entry) {
++  // A transient flag isn't a setting: a config file doesn't set it.
++  if (entry.transient && source == Source::kConfig) {
++    return false;
++  }
+   return source >= entry.source;
+ }
+ 
+@@ -115,11 +131,14 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
+         continue;
+       }
+ 
+-      if (GetFlagInfo(full_key) == nullptr) {
++      if (const FlagEntry* info = GetFlagInfo(full_key); info == nullptr) {
+         std::lock_guard lock(GetRegistryMutex());
+         GetPendingValuesStorage()[full_key].config = value_str;
+         REXLOG_DEBUG("Config: '{}' deferred (cvar not yet registered)", full_key);
+         continue;
++      } else if (info->transient) {
++        REXLOG_DEBUG("Config: {} ignored, it is not a setting (transient)", full_key);
++        continue;
+       }
+ 
+       switch (SetFlagFromSource(full_key, value_str, Source::kConfig)) {
+@@ -137,6 +156,506 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
    }
  }
  
@@ -557,7 +609,7 @@ index 228728d..074885e 100644
  // todo(tomc): move restart manager to Runtime
  std::vector<std::string>& GetPendingRestartStorage() {
    static std::vector<std::string> pending;
-@@ -541,7 +1053,7 @@ std::string SerializeToTOML() {
+@@ -541,7 +1060,7 @@ std::string SerializeToTOML() {
    for (const auto& entry : GetRegistryStorage()) {
      if (entry.getter() != entry.default_value) {
        if (entry.type == FlagType::String) {
@@ -566,7 +618,7 @@ index 228728d..074885e 100644
        } else {
          result += entry.name + " = " + entry.getter() + "\n";
        }
-@@ -556,7 +1068,7 @@ std::string SerializeToTOML(std::string_view category) {
+@@ -556,7 +1075,7 @@ std::string SerializeToTOML(std::string_view category) {
    for (const auto& entry : GetRegistryStorage()) {
      if (entry.category == category && entry.getter() != entry.default_value) {
        if (entry.type == FlagType::String) {
@@ -575,7 +627,7 @@ index 228728d..074885e 100644
        } else {
          result += entry.name + " = " + entry.getter() + "\n";
        }
-@@ -648,6 +1160,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
+@@ -648,6 +1167,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
      REXLOG_DEBUG("Loaded config from {}", config_path.string());
    } catch (const toml::parse_error& err) {
      REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
@@ -583,7 +635,7 @@ index 228728d..074885e 100644
    }
  }
  
-@@ -690,25 +1203,69 @@ bool IsFinalized() {
+@@ -690,25 +1210,69 @@ bool IsFinalized() {
    return g_finalized;
  }
  
@@ -598,7 +650,7 @@ index 228728d..074885e 100644
 +        continue;
 +      }
 +      const FlagEntry& entry = GetRegistryStorage()[it->second];
-+      if (entry.type == FlagType::Command) {
++      if (entry.type == FlagType::Command || entry.transient) {
 +        continue;
 +      }
 +      values.emplace_back(entry.name, entry.type == FlagType::String ? TomlString(entry.getter())
@@ -620,7 +672,7 @@ index 228728d..074885e 100644
 +  {
 +    std::lock_guard lock(GetRegistryMutex());
 +    for (const FlagEntry& entry : GetRegistryStorage()) {
-+      if (entry.source == Source::kRuntime && entry.type != FlagType::Command) {
++      if (entry.source == Source::kRuntime && entry.type != FlagType::Command && !entry.transient) {
 +        names.push_back(entry.name);
 +      }
 +    }
@@ -666,3 +718,29 @@ index 228728d..074885e 100644
  }
  
  namespace testing {
+diff --git a/src/ui/overlay/settings_overlay.cpp b/src/ui/overlay/settings_overlay.cpp
+index 4ede107..0ef1c2b 100644
+--- a/src/ui/overlay/settings_overlay.cpp
++++ b/src/ui/overlay/settings_overlay.cpp
+@@ -162,7 +162,9 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+   // Collect sorted unique category paths.
+   std::set<std::string> category_set;
+   for (auto& entry : registry) {
+-    category_set.insert(entry.category);
++    if (!entry.transient) {
++      category_set.insert(entry.category);
++    }
+   }
+ 
+   // Build tree: for each category path like "Input/Keybinds/Controller",
+@@ -291,6 +293,10 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+ 
+   ImGui::BeginChild("##cvars", ImVec2(0, -30.0f), false);
+   for (auto& entry : registry) {
++    // Not settings: values the program works out (nothing here is saved for them).
++    if (entry.transient) {
++      continue;
++    }
+     // Filter by category (unless searching).
+     if (!searching) {
+       if (!category_matches(entry.category)) {

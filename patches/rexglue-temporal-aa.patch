@@ -3137,10 +3137,10 @@ index 0000000..3e1a722
 +};
 diff --git a/src/graphics/temporal_aa.cpp b/src/graphics/temporal_aa.cpp
 new file mode 100644
-index 0000000..1c3015e
+index 0000000..1538b1f
 --- /dev/null
 +++ b/src/graphics/temporal_aa.cpp
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,537 @@
 +/**
 + * Temporal anti-aliasing (rexglue-temporal-aa.patch): the backend-independent
 + * part, see CommandProcessor::TaaFrame in command_processor.h.
@@ -3179,14 +3179,18 @@ index 0000000..1c3015e
 +                      " off: none (the default)\n"
 +                      " fsr: AMD FSR 3.1 at native resolution (Native AA)")
 +    .allowed({"off", "fsr"})
-+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++    .lifecycle(rex::cvar::Lifecycle::kHotReload)
++    // The game sets it from its own setting (mcla_anti_aliasing) while running: not saved, and
++    // a line for it in a config file is ignored.
++    .transient();
 +REXCVAR_DEFINE_STRING(temporal_aa_available, "unknown", "GPU",
 +                      "Temporal anti-aliasing, set by the GPU plugin when the first frame ends: "
 +                      "whether FSR can run with this graphics API and device (yes: its runtime "
 +                      "is there and it hasn't failed; next_start: after a restart, the device "
 +                      "having been created without the features it uses; no; unknown before)")
 +    .allowed({"unknown", "yes", "next_start", "no"})
-+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++    .lifecycle(rex::cvar::Lifecycle::kHotReload)
++    .transient();
 +REXCVAR_DEFINE_DOUBLE(temporal_aa_sharpness, 0.2, "GPU",
 +                      "Temporal anti-aliasing: sharpening after FSR (RCAS), 0 (off) to 1")
 +    .range(0.0, 1.0)
@@ -3726,10 +3730,10 @@ index 0000000..c495d85
 +
 +#endif  // REX_HAS_FSR
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index c56cd13..1195069 100644
+index b4d627c..0628940 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
-@@ -2185,6 +2185,9 @@ void VulkanCommandProcessor::ShutdownSubmissionThread() {
+@@ -2212,6 +2212,9 @@ void VulkanCommandProcessor::ShutdownSubmissionThread() {
  
  void VulkanCommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
@@ -3739,7 +3743,7 @@ index c56cd13..1195069 100644
    ShutdownSubmissionThread();
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
-@@ -4572,6 +4575,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4627,6 +4630,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
    texture_cache_->RequestTextures(used_texture_mask);
  
@@ -3752,7 +3756,7 @@ index c56cd13..1195069 100644
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
-@@ -4681,6 +4690,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4736,6 +4745,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        normalized_depth_control,
        host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader(),
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);

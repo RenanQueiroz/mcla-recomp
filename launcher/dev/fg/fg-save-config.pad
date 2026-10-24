@@ -1,6 +1,6 @@
-# Phase 4 fix: what the F4 overlay's Save (save_config here) writes into mcla.toml after frame
-# generation was turned on: only real settings (frame_generation), none of the presenter's status.
-# Run with --toml <a file with one line> and compare it with mcla.toml.after in the run folder.
+# What the F4 overlay's Save (save_config) writes on a file with stale temporal_aa lines, after
+# frame generation was turned on: only frame_generation; the stale lines stay as they were.
+# Run with --toml <a file with mcla_fps and those lines> and compare it with mcla.toml.after.
 wait 8s
 mark title
 press_until start left_title every=2s timeout=90s
@@ -8,12 +8,12 @@ mark map_zoom
 wait_until roam 180s
 mark settle
 wait 3s
-get frame_generation fg_status
+get mcla_anti_aliasing temporal_aa temporal_aa_available
 set frame_generation fsr
-wait 3s
-get frame_generation fg_status
+wait 2s
 save_config
 wait 1s
+get mcla_anti_aliasing temporal_aa temporal_aa_available
 set frame_generation off
 wait 1s
 mark end
