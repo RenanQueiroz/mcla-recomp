@@ -86,6 +86,35 @@ index 500ee36..7c63956 100644
  // Apple libc++ does not expose clock_time_conversion or clock_cast, and
  // neither does the libc++ shipped with the PS5 payload SDK.
  template <class, class>
+diff --git a/include/rex/ui/d3d12/amd_antilag2_dx12.h b/include/rex/ui/d3d12/amd_antilag2_dx12.h
+--- a/include/rex/ui/d3d12/amd_antilag2_dx12.h
++++ b/include/rex/ui/d3d12/amd_antilag2_dx12.h
+@@ -68,6 +68,16 @@
+     public:
+         virtual HRESULT UpdateAntiLagState(VOID* pData) = 0;
+     };
++#if defined(__MINGW32__) && defined(__CRT_UUID_DECL)
++} // namespace AntiLag2DX12
++} // namespace AMD
++// mingw-w64's __uuidof needs a declaration per interface, at global scope and before its first use;
++// MIDL_INTERFACE's uuid is MSVC's.
++__CRT_UUID_DECL(AMD::AntiLag2DX12::IAmdExtAntiLagApi, 0x44085fbe, 0xe839, 0x40c5, 0xbf, 0x38,
++                0x0e, 0xbc, 0x5a, 0xb4, 0xd0, 0xa6)
++namespace AMD {
++namespace AntiLag2DX12 {
++#endif
+ 
+     // Context structure for the SDK. Declare a persistent object of this type *once* in your game code.
+     // Ensure the contents are initialized to zero before calling Initialize() but do not modify these members directly after that.
+@@ -122,7 +132,7 @@
+             if ( hModule )
+             {
+                 typedef HRESULT(__cdecl* PFNAmdExtD3DCreateInterface)( IUnknown* pOuter, REFIID riid, void** ppvObject );
+-                PFNAmdExtD3DCreateInterface AmdExtD3DCreateInterface = static_cast<PFNAmdExtD3DCreateInterface>( (VOID*)GetProcAddress(hModule, "AmdExtD3DCreateInterface") );
++                PFNAmdExtD3DCreateInterface AmdExtD3DCreateInterface = reinterpret_cast<PFNAmdExtD3DCreateInterface>( GetProcAddress(hModule, "AmdExtD3DCreateInterface") );
+                 if ( AmdExtD3DCreateInterface )
+                 {
+                     hr = AmdExtD3DCreateInterface( device, __uuidof(IAmdExtAntiLagApi), (void**)&context->m_pAntiLagAPI );
 diff --git a/include/rex/ui/d3d12/d3d12_api.h b/include/rex/ui/d3d12/d3d12_api.h
 index d0e7252..a42d602 100644
 --- a/include/rex/ui/d3d12/d3d12_api.h
