@@ -212,9 +212,11 @@ byte for byte as it was.
 
 *NVIDIA Reflex* / *AMD Anti-Lag 2* (`low_latency`: Default, Off, On, and On +
 Boost on a GeForce) is the GPU maker's latency reducer, named by the GPU the game
-will most likely use (the first adapter Windows lists, `GpuVendor.First` in
-`src\DisplayHdr.cs`; the game picks its own, so on a laptop with two GPUs the name
-can be the other one's; "Low latency" for any other GPU, where it does nothing).
+will most likely use (the adapter the game used at its last start, from its shader
+record, `ShaderStamp.LastAdapterVendor`; before the first start the first adapter
+Windows lists, `GpuVendor.First` in `src\DisplayHdr.cs`, and on a laptop with two
+GPUs the game may pick the other; "Low latency" for any other GPU, where it does
+nothing).
 Default is on for NVIDIA Reflex and off for AMD Anti-Lag 2 (untested), and says
 so in the list ("Default (on)"). The tip states the price next to the gain: about
 4% of the frame rate at 3x on Direct3D 12 (none on Vulkan or at native

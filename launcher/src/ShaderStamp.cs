@@ -109,6 +109,28 @@ static class ShaderStamp
         return new(reason, watch.ElapsedMilliseconds);
     }
 
+    /// The vendor of the adapter the game used at its last start, from its shader record (0: no
+    /// record, or none with an adapter in it).
+    public static uint LastAdapterVendor(string arguments, string workingDirectory)
+    {
+        try
+        {
+            var stampFile = Path.Combine(CacheRoot(arguments, workingDirectory), "shaders", "local", Title + ".stamp.json");
+            if (!File.Exists(stampFile)) return 0;
+            using var stamp = JsonDocument.Parse(ReadShared(stampFile));
+            if (stamp.RootElement.TryGetProperty("storage", out var storage) && storage.ValueKind == JsonValueKind.Object &&
+                storage.TryGetProperty("adapter", out var adapter) && adapter.ValueKind == JsonValueKind.Object &&
+                adapter.TryGetProperty("vendor", out var vendor) && vendor.ValueKind == JsonValueKind.Number)
+                return vendor.GetUInt32();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException
+                                       or NotSupportedException or InvalidOperationException or FormatException)
+        {
+            // No record is as good as one without an adapter.
+        }
+        return 0;
+    }
+
     static string? JsonText(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 

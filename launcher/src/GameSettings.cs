@@ -348,8 +348,8 @@ static class GameSettings
 
     // low_latency (the SDK's, rexglue-low-latency.patch): the GPU vendor's latency reducer, NVIDIA
     // Reflex or AMD Anti-Lag 2, named in plain text by the GPU the game will most likely use (the
-    // first adapter Windows lists; the game picks its own, so on a laptop with two GPUs the name
-    // can be the other one's). Default is on for NVIDIA Reflex and off for the rest (Anti-Lag 2 is
+    // one it used at its last start, from its shader record; before that the first adapter
+    // Windows lists, and on a laptop with two GPUs the game may pick the other). Default is on for NVIDIA Reflex and off for the rest (Anti-Lag 2 is
     // untested). Frame generation turns it on whatever this says (the game's
     // low_latency_frame_generation, which only mcla.toml sets); it changes during play too.
     public static GameSetting LowLatencyFor(uint gpuVendor)

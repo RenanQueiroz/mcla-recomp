@@ -154,11 +154,15 @@ sealed record DisplayHdr(bool HdrOn, float PeakNits, float SdrWhiteNits)
     }
 }
 
-/// The GPU vendor the game will use: the first hardware adapter's, as DXGI lists them (0 if none
-/// can be read), for the settings that are a vendor's feature (the low latency setting's name).
+/// The GPU vendor the game will use, for the settings that are a vendor's feature (the low latency
+/// setting's name): the adapter the game used at its last start (its shader record has it: the
+/// game picks its own, which on a laptop with two GPUs can be the other one), else the first
+/// hardware adapter's, as DXGI lists them (0 if none can be read).
 static class GpuVendor
 {
     public static readonly Lazy<uint> First = new(() => DisplayDrivers.List() is { Count: > 0 } list ? list[0].Vendor : 0u);
+
+    public static uint For(uint lastUsed) => lastUsed != 0 ? lastUsed : First.Value;
 }
 
 /// The main display's refresh rate as Windows reports it (a variable-refresh display: its
