@@ -70,6 +70,10 @@ static class Program
     static int Settings(string[] args)
     {
         var refresh = double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
+        // The GPU vendor for the low latency setting: LAUNCHER_CHECK_VENDOR (hex, 10DE NVIDIA, 1002 AMD),
+        // else the first adapter's.
+        var vendor = Environment.GetEnvironmentVariable("LAUNCHER_CHECK_VENDOR") is { Length: > 0 } text
+            ? Convert.ToUInt32(text, 16) : GpuVendor.First.Value;
         var set = new Dictionary<string, object>();
         foreach (var pair in args.Skip(3))
         {
@@ -80,7 +84,7 @@ static class Program
         foreach (var (key, value) in set) GameSettingsFile.Set(args[1], new Dictionary<string, object> { [key] = value });
         var file = GameSettingsFile.Read(args[1]);
         Console.WriteLine($"half display cap at {refresh} Hz: {GameSettings.HalfDisplayCap(refresh)}");
-        foreach (var setting in GameSettings.GraphicsFor(file, refresh))
+        foreach (var setting in GameSettings.GraphicsFor(file, refresh, vendor))
         {
             var (choices, index) = setting.Show(file);
             Console.WriteLine($"{setting.Header} [{setting.Key}]: {choices[index].Label} <- {string.Join(" | ", choices.Select(c => c.Label))}");

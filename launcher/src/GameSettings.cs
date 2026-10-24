@@ -346,9 +346,39 @@ static class GameSettings
             ? FrameRateWithFrameGeneration(HalfDisplayCap(refreshHz))
             : FrameRate;
 
-    public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz) =>
+    // low_latency (the SDK's, rexglue-low-latency.patch): the GPU vendor's latency reducer, NVIDIA
+    // Reflex or AMD Anti-Lag 2, named in plain text by the GPU the game will use (the first
+    // adapter, as the game takes it). Frame generation turns it on whatever this says (the game's
+    // low_latency_frame_generation, which only mcla.toml sets); it changes during play too.
+    public static GameSetting LowLatencyFor(uint gpuVendor)
+    {
+        const uint Nvidia = 0x10DE, Amd = 0x1002;
+        var name = gpuVendor switch { Nvidia => "NVIDIA Reflex", Amd => "AMD Anti-Lag 2", _ => "Low latency" };
+        var choices = new List<SettingChoice> { new("Default", "auto"), new("Off", "off"), new("On", "on") };
+        if (gpuVendor == Nvidia) choices.Add(new("On + Boost (the GPU clocks stay high)", "boost"));
+        var info = gpuVendor switch
+        {
+            Nvidia => "NVIDIA's latency reducer. The game waits at the start of each frame, at the moment the "
+                    + "driver picks, so that the frame meets the GPU just as it is free and the queue of frames "
+                    + "waiting for it (and the input lag that adds) goes away. It matters where the GPU is the "
+                    + "limit, as at 3x resolution; where the GPU has room it changes nothing. On + Boost also "
+                    + "keeps the GPU's clocks high (more power). Frame generation turns it on whatever this "
+                    + "says. Needs a GeForce driver with Reflex.",
+            Amd => "AMD's latency reducer (Radeon RX 5000 series and later, a recent Adrenalin driver). The game "
+                 + "waits at the start of each frame, at the moment the driver picks, so that the queue of "
+                 + "frames waiting for the GPU (and the input lag that adds) goes away. Frame generation turns "
+                 + "it on whatever this says. Untested: written from AMD's documentation, never run on a "
+                 + "Radeon.",
+            _ => "The GPU's latency reducer (NVIDIA Reflex, AMD Anti-Lag 2). The game found none for this GPU "
+               + "(Intel has no equivalent the game can use), so this changes nothing.",
+        };
+        return new("low_latency", name, [.. choices], "auto") { Info = info };
+    }
+
+    public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
+                                            uint gpuVendor = 0) =>
         [Resolution, FrameRateFor(file, refreshHz), Display, DisplayGamma, AntiAliasing, FrameGeneration,
-         FsrSharpness, SingleTile, HudRate, GraphicsApi];
+         LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApi];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Intro, Prompts];

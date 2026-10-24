@@ -154,6 +154,13 @@ sealed record DisplayHdr(bool HdrOn, float PeakNits, float SdrWhiteNits)
     }
 }
 
+/// The GPU vendor the game will use: the first hardware adapter's, as DXGI lists them (0 if none
+/// can be read), for the settings that are a vendor's feature (the low latency setting's name).
+static class GpuVendor
+{
+    public static readonly Lazy<uint> First = new(() => DisplayDrivers.List() is { Count: > 0 } list ? list[0].Vendor : 0u);
+}
+
 /// The main display's refresh rate as Windows reports it (a variable-refresh display: its
 /// highest), for the frame rate settings with frame generation (Half display); 0 if it can't be
 /// read. Read once, when the launcher opens; the game reads the display its window is on.
