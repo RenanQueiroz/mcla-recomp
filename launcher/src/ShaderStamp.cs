@@ -1,10 +1,17 @@
 // Whether shaders should be prepared before Play. After every start and every preparation the
 // game records what its storage was loaded with (the stamp, <cache>\shaders\local\545407F8.stamp.json,
-// src/shader_prepare.cpp): the shader pack, the API, the resolution scale, the adapter and its
-// driver, the files' sizes. This compares it with what the next start will use: the pack in the
-// checkout, mcla.toml and the options the launcher passes, the display drivers installed now and
-// the files as they are. It reads a few small files and lists the display adapters (DXGI); it
-// never starts mcla.exe. Kept free of the launcher's UI, for the setup wizard too.
+// src/shader_prepare.cpp): the shader pack, the API and resolution scale it was asked for (and
+// the ones it ended up with), the adapter and its driver, the files' sizes. This compares it with
+// what the next start will use: the pack, mcla.toml and the options the launcher passes, the
+// display drivers installed now and the files as they are. It reads a few small files and lists
+// the display adapters (DXGI); it never starts mcla.exe. Kept free of the launcher's UI, for the
+// setup wizard too.
+//
+// What it doesn't notice, because the launcher can't tell from here (the player runs More >
+// Prepare shaders): a graphics API left on "any" that the game resolves differently than before
+// (the plugin failing to load); a switch between two adapters that both stay installed (Windows'
+// graphics preference); a storage format change without a new pack (the game then refuses the
+// pack, which no preparation fixes).
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -49,24 +56,49 @@ static class ShaderStamp
         return null;
     }
 
-    /// The cache folder the game will use, as the SDK picks it: cache_root, else user_data_root's
-    /// cache folder, else Documents\mcla\cache.
-    public static string CacheRoot(string arguments, IReadOnlyDictionary<string, string> toml)
+    /// A folder option the way the game takes it. The SDK reads cache_root and user_data_root
+    /// before mcla.toml is loaded (ReXApp::SetupEnvironment), so only the command line and the
+    /// REX_ variables set them; the toml does not. A relative path is the game's working folder's,
+    /// which the launcher sets to mcla.exe's folder.
+    static string? PathSetting(string name, string arguments, string workingDirectory)
     {
-        if (Setting("cache_root", arguments, toml) is { Length: > 0 } cache) return cache;
-        var user = Setting("user_data_root", arguments, toml) is { Length: > 0 } root
-            ? root
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "mcla");
+        var value = GameOptions.Value(arguments, name);
+        if (string.IsNullOrEmpty(value)) value = Environment.GetEnvironmentVariable("REX_" + name.ToUpperInvariant());
+        return string.IsNullOrEmpty(value) ? null : Path.GetFullPath(value, workingDirectory);
+    }
+
+    /// The cache folder the game will use, as the SDK picks it: cache_root, else user_data_root's
+    /// cache folder, else Documents\mcla\cache. Throws ArgumentException or NotSupportedException
+    /// for a path that is malformed.
+    public static string CacheRoot(string arguments, string workingDirectory)
+    {
+        if (PathSetting("cache_root", arguments, workingDirectory) is { } cache) return cache;
+        var user = PathSetting("user_data_root", arguments, workingDirectory)
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "mcla");
         return Path.Combine(user, "cache");
     }
 
-    public static PrepareCheck Check(string repo, string arguments, IReadOnlyDictionary<string, string> toml, string? skipPack)
+    /// The shader pack the game will use: mcla_shader_pack where something sets it, else the one
+    /// the fork ships. Throws as CacheRoot.
+    public static string PackFile(string repo, string arguments, IReadOnlyDictionary<string, string> toml, string workingDirectory) =>
+        Setting("mcla_shader_pack", arguments, toml) is { Length: > 0 } custom
+            ? Path.GetFullPath(custom, workingDirectory)
+            : ShaderPrepRun.PackFile(repo);
+
+    public static PrepareCheck Check(string repo, string workingDirectory, string arguments, IReadOnlyDictionary<string, string> toml, string? skipPack)
     {
         var watch = Stopwatch.StartNew();
         string? reason;
         try
         {
-            reason = Reason(repo, arguments, toml, skipPack);
+            reason = Reason(repo, workingDirectory, arguments, toml, skipPack);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+        {
+            // A path option the game can't use either (a bad character): a preparation couldn't
+            // do anything about it, so Play goes on.
+            Debug.WriteLine($"shader check: {ex.Message}");
+            reason = null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
                                        or InvalidOperationException or FormatException or KeyNotFoundException)
@@ -77,16 +109,19 @@ static class ShaderStamp
         return new(reason, watch.ElapsedMilliseconds);
     }
 
-    static string? Reason(string repo, string arguments, IReadOnlyDictionary<string, string> toml, string? skipPack)
+    static string? JsonText(JsonElement parent, string name) =>
+        parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    static string? Reason(string repo, string workingDirectory, string arguments, IReadOnlyDictionary<string, string> toml, string? skipPack)
     {
-        var packFile = ShaderPrepRun.PackFile(repo);
+        var packFile = PackFile(repo, arguments, toml, workingDirectory);
         if (!File.Exists(packFile)) return null;
         var pack = PackHash(packFile);
         // The last automatic preparation failed for this pack: not again at every Play
         // (More > Prepare shaders tries again).
         if (pack != null && pack == skipPack) return null;
 
-        var cache = CacheRoot(arguments, toml);
+        var cache = CacheRoot(arguments, workingDirectory);
         var local = Path.Combine(cache, "shaders", "local");
         var shareable = Path.Combine(cache, "shaders", "shareable");
 
@@ -100,8 +135,13 @@ static class ShaderStamp
         using var stamp = JsonDocument.Parse(ReadShared(stampFile));
         var root = stamp.RootElement;
 
-        var stampPack = root.TryGetProperty("pack", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
-        if (pack != null && stampPack != pack) return "the shader pack changed";
+        // The pack the game added at its last start. With the automatic import off (mcla_shader_pack_auto
+        // false) a normal start adds nothing and records no pack: it only says something about the
+        // pack when the last run was a preparation, which imports whatever that option says.
+        var stampPack = JsonText(root, "pack");
+        var auto = !bool.TryParse(Setting("mcla_shader_pack_auto", arguments, toml), out var autoValue) || autoValue;
+        if (pack != null && stampPack != pack && (auto || JsonText(root, "pack_import") == "on"))
+            return "the shader pack changed";
 
         // The files: one that vanished or shrank was deleted, reset or cut.
         if (root.TryGetProperty("files", out var files) && files.ValueKind == JsonValueKind.Object)
@@ -118,15 +158,26 @@ static class ShaderStamp
 
         if (!root.TryGetProperty("storage", out var storage) || storage.ValueKind != JsonValueKind.Object) return null;
 
-        // The API and the resolution scale the next start will use, against what was loaded.
-        var api = (Setting("mcla_gpu_backend", arguments, toml) ?? "any").Trim().ToLowerInvariant();
-        var stampApi = storage.GetProperty("api").GetString();
-        if (api is "d3d12" or "vulkan" && api != stampApi) return "the graphics API changed";
-        var scaleText = Setting("resolution_scale", arguments, toml) ?? "1";
-        if (int.TryParse(scaleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var scale) &&
-            storage.TryGetProperty("resolution_scale", out var stampScale) && stampScale.ValueKind == JsonValueKind.Array &&
-            stampScale.GetArrayLength() > 0 && stampScale[0].GetInt32() != scale)
-            return "the resolution changed";
+        // The API and the resolution scale the next start will ask for, against what the last one
+        // was asked for ("settings"): not against what it ended up with ("storage"), which the game
+        // changes by itself on a weaker GPU (a scale it can't do) or when a plugin fails to load,
+        // and which would then never match.
+        if (root.TryGetProperty("settings", out var asked) && asked.ValueKind == JsonValueKind.Object)
+        {
+            var api = (Setting("mcla_gpu_backend", arguments, toml) ?? "any").Trim().ToLowerInvariant();
+            var askedApi = (JsonText(asked, "mcla_gpu_backend") ?? "any").Trim().ToLowerInvariant();
+            // "any" then, an explicit API now: the same API as the one it came to, is no change.
+            var sameAsResolved = askedApi == "any" && api == JsonText(storage, "api")?.ToLowerInvariant();
+            if (api != askedApi && !sameAsResolved) return "the graphics API changed";
+
+            var scaleText = (Setting("resolution_scale", arguments, toml) ?? "1").Trim();
+            var askedScaleText = (JsonText(asked, "resolution_scale") ?? "1").Trim();
+            var scaleChanged = int.TryParse(scaleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var scale) &&
+                               int.TryParse(askedScaleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var askedScale)
+                ? scale != askedScale
+                : scaleText != askedScaleText;
+            if (scaleChanged) return "the resolution changed";
+        }
 
         // The adapter and its driver: a driver update empties the driver's own cache.
         if (storage.TryGetProperty("adapter", out var adapter) && adapter.TryGetProperty("vendor", out var vendorElement) &&

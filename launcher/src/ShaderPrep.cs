@@ -36,7 +36,9 @@ sealed class ShaderPrepRun
     const int KeepLogs = 10;
     static readonly TimeSpan Timeout = TimeSpan.FromMinutes(15);
 
-    /// Exit codes (src/shader_prepare.cpp). In use is the only one worth trying again soon.
+    /// Exit codes (src/shader_prepare.cpp). In use is the only one worth trying again soon: the
+    /// game gives it only for a sharing or lock violation or a storage lock held by a running mcla,
+    /// never for a read-only file, a permission or a lock file it can't open (those are 6).
     public const int InUse = 7;
 
     readonly Process process;
@@ -51,6 +53,9 @@ sealed class ShaderPrepRun
     /// The "done" report: rebuild ms, pipelines ms, private MB, GPU MB, process ms.
     public string? Summary { get; private set; }
     public string? ErrorMessage { get; private set; }
+    /// Ended by Stop(), by the player or the launcher closing: not a failure of the pack.
+    public bool StopRequested => Volatile.Read(ref stopRequested);
+    bool stopRequested;
     public int PipelinesCreated { get; private set; }
     /// The pack's import was disabled after failed starts (More > Prepare shaders tries again).
     public bool ImportDisabled { get; private set; }
@@ -117,8 +122,9 @@ sealed class ShaderPrepRun
                 // is only ever replaced whole, and the game's next start undoes an unfinished import.
                 if (!process.WaitForExit(Timeout))
                 {
+                    // A failure of the run, not a stop asked for.
                     Write($"no exit after {Timeout.TotalMinutes:0} minutes; ending it");
-                    Stop();
+                    Kill();
                 }
                 process.WaitForExit();
                 Write($"exit code {process.ExitCode}");
@@ -174,7 +180,15 @@ sealed class ShaderPrepRun
         }
     }
 
+    /// Ends the run (the player's Stop or Play now, the launcher closing). The storage is only ever
+    /// replaced whole, and the game's next start undoes an import that was not finished.
     public void Stop()
+    {
+        Volatile.Write(ref stopRequested, true);
+        Kill();
+    }
+
+    void Kill()
     {
         try { process.Kill(entireProcessTree: true); }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception) { }
@@ -191,7 +205,7 @@ sealed class ShaderPrepRun
         3 => Sentence(message) ?? "The shader pack is damaged",
         4 => Sentence(message) ?? "Your game files don't match the shader pack",
         5 => "The shader pack is for another version of the game's graphics code",
-        6 => Sentence(message) ?? "Couldn't read or write the shader storage",
+        6 => Sentence(message) ?? "Couldn't read or write the shader storage (a read-only file, or no permission)",
         InUse => "The shader storage is in use by a running game; it's prepared at the next Play",
         _ => $"The game stopped while preparing shaders (exit code {exitCode})",
     };

@@ -61,8 +61,12 @@ sealed class LauncherApp : Component
         var (prepProgress, setPrepProgress) = UseState<ShaderPrepProgress?>(null, threadSafe: true);
         var (prepResult, setPrepResult) = UseState<int?>(null, threadSafe: true);
         var prepRef = UseRef<ShaderPrepRun?>(null);
-        // The game starts once the preparation that runs before it ends (PrepareKind.BeforePlay).
+        // The game starts once the preparation that runs before it ends (PrepareKind.BeforePlay,
+        // or the player's Play now).
         var playAfterPrepRef = UseRef(false);
+        // The player ended a preparation with Stop: Play doesn't ask for another until the
+        // launcher is opened again or a preparation is asked for.
+        var prepDeclinedRef = UseRef(false);
         var initialRunning = UseMemo(GameIsRunning, Array.Empty<object>());
         var (gameRunning, setGameRunning) = UseState(initialRunning, threadSafe: true);
         var runningRef = UseRef(initialRunning);
@@ -110,7 +114,12 @@ sealed class LauncherApp : Component
         {
             if (prepRef.Current is { Completion.IsCompleted: false }) return false;
             var manual = kind == PrepareKind.Manual;
-            if (!File.Exists(ShaderPrepRun.PackFile(Paths.Repo)) || !File.Exists(Paths.GameExe))
+            // The pack the game will use: a custom one given with --mcla_shader_pack, or the
+            // fork's. A path the game can't use either (a bad character) is none.
+            string? packFile = null;
+            try { packFile = ShaderStamp.PackFile(Paths.Repo, GameOptions.Arguments(settingsRef.Current), ReadGameSettings(), Paths.BuildDir); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { }
+            if (packFile == null || !File.Exists(packFile) || !File.Exists(Paths.GameExe))
             {
                 if (manual) setNotice("This version has no shader pack, so there are no shaders to prepare.");
                 return false;
@@ -124,23 +133,29 @@ sealed class LauncherApp : Component
             setCountdown(null);
             setPrepResult(null);
             setPrepProgress(null);
+            prepDeclinedRef.Current = false;
             try
             {
                 var run = new ShaderPrepRun(Paths.GameExe, GameOptions.Arguments(settingsRef.Current), setPrepProgress, Paths.LogsDir,
                                             reason, retry: manual);
-                var pack = ShaderStamp.PackHash(ShaderPrepRun.PackFile(Paths.Repo));
+                var pack = ShaderStamp.PackHash(packFile);
                 prepRef.Current = run;
                 playAfterPrepRef.Current = kind == PrepareKind.BeforePlay;
                 setPrep(run);
                 _ = run.Completion.ContinueWith(task =>
                 {
                     var exit = task.IsFaulted ? -1 : task.Result;
-                    // A failure other than "in use" isn't tried again before every Play for the
-                    // same pack; a success clears that, and so does asking for it.
-                    if (exit == 0 || manual)
+                    // A run the player (or the launcher closing) ended says nothing about the
+                    // pack. A failure for good (not "in use") isn't tried again before every Play
+                    // for the same pack, whoever asked for the run; only a success clears that.
+                    if (!run.StopRequested && exit == 0)
+                    {
                         updateSettings(s => s.ShaderPrepSkipPack == null ? s : s with { ShaderPrepSkipPack = null });
-                    else if (!ShaderPrepRun.IsTransient(exit) && pack != null)
+                    }
+                    else if (!run.StopRequested && !ShaderPrepRun.IsTransient(exit) && pack != null)
+                    {
                         updateSettings(s => s with { ShaderPrepSkipPack = pack });
+                    }
                     setPrepResult(exit);
                 }, TaskScheduler.Default);
                 return true;
@@ -197,15 +212,38 @@ sealed class LauncherApp : Component
             setCountdown(null);
             // Never beside a preparation (the countdown included).
             if (prepRef.Current is { Completion.IsCompleted: false }) return;
-            var check = ShaderStamp.Check(Paths.Repo, GameOptions.Arguments(settings), ReadGameSettings(), settings.ShaderPrepSkipPack);
-            Debug.WriteLine($"shader check: {check.Reason ?? "nothing to prepare"} ({check.Milliseconds} ms)");
-            if (check.Reason != null && StartPrepare(PrepareKind.BeforePlay, check.Reason)) return;
+            if (!prepDeclinedRef.Current)
+            {
+                var check = ShaderStamp.Check(Paths.Repo, Paths.BuildDir, GameOptions.Arguments(settings), ReadGameSettings(), settings.ShaderPrepSkipPack);
+                Debug.WriteLine($"shader check: {check.Reason ?? "nothing to prepare"} ({check.Milliseconds} ms)");
+                if (check.Reason != null && StartPrepare(PrepareKind.BeforePlay, check.Reason)) return;
+            }
             StartGame();
+        }
+
+        // A preparation that runs (before Play, after a build, or asked for) can be ended: Stop
+        // ends it and starts nothing, Play now ends it and starts the game. Both are safe: the
+        // storage is only ever replaced whole, and the game adds the shader pack and creates the
+        // stored pipelines by itself at its start (what it hadn't got to compiles as it meets it).
+        void StopPrepare()
+        {
+            playAfterPrepRef.Current = false;
+            prepDeclinedRef.Current = true;
+            prepRef.Current?.Stop();
+        }
+
+        void PlayNow()
+        {
+            playAfterPrepRef.Current = true;
+            prepRef.Current?.Stop();
         }
 
         void StartGame()
         {
             setCountdown(null);
+            // Not while the launcher is closing (a preparation ending because of it must not
+            // start the game).
+            if (exitingRef.Current) return;
             try
             {
                 var game = Process.Start(new ProcessStartInfo(Paths.GameExe, GameOptions.Arguments(settings))
@@ -298,6 +336,7 @@ sealed class LauncherApp : Component
                     psi.ArgumentList.Add(arg);
                 Process.Start(psi);
                 exitingRef.Current = true;
+                playAfterPrepRef.Current = false;
                 prepRef.Current?.Stop();
                 ReactorApp.Exit();
             }
@@ -336,7 +375,10 @@ sealed class LauncherApp : Component
                 if (exitingRef.Current || buildRef.Current is not { Completion.IsCompleted: false })
                 {
                     // Closing: preparing shaders just stops. The storage is only ever replaced
-                    // whole, and the game's next start undoes an unfinished import.
+                    // whole, and the game's next start undoes an unfinished import. The game
+                    // doesn't start because of it.
+                    exitingRef.Current = true;
+                    playAfterPrepRef.Current = false;
                     prepRef.Current?.Stop();
                     return;
                 }
@@ -550,6 +592,9 @@ sealed class LauncherApp : Component
                             InfoBarSeverity.Warning);
             if (!status.BuildCurrent)
                 return Info("The last build didn't finish", "Rebuild to finish it. Play starts the last version that built.", InfoBarSeverity.Warning);
+            if (prep is { StopRequested: true } && prepResult != null)
+                return Info("Shader preparation stopped", "The game still plays: it adds the shader pack by itself and compiles shaders as it meets them. "
+                            + "More > Prepare shaders runs it again.", InfoBarSeverity.Informational);
             if (prep != null && prepResult is int prepExit)
                 return prepExit == 0
                     ? Info(ShaderPrepRun.Describe(0, null), (prep.PipelinesCreated > 0
@@ -831,10 +876,23 @@ sealed class LauncherApp : Component
                     buttons.Add(Button("Rebuild", () => StartBuild(BuildKind.Build)).AccentButton());
             }
 
-            var play = Button(HStack(8, Icon(Symbol.Play), TextBlock(gameRunning && !preparing ? "Running" : "Play")), Play)
+            if (preparing)
+            {
+                buttons.Add(Button("Stop", StopPrepare)
+                    .AutomationName("Stop preparing shaders")
+                    .ToolTip("End the shader preparation and don't start the game"));
+                buttons.Add(Button(HStack(8, Icon(Symbol.Play), TextBlock("Play now")), PlayNow)
+                    .AccentButton()
+                    .AutomationName("Play now")
+                    .ToolTip("End the shader preparation and start the game now. The game adds the shader pack by itself when it starts.")
+                    .MinWidth(120));
+                return HStack(8, buttons.ToArray()).HAlign(HorizontalAlignment.Right).Margin(0, 16, 0, 0);
+            }
+
+            var play = Button(HStack(8, Icon(Symbol.Play), TextBlock(gameRunning ? "Running" : "Play")), Play)
                 .AutomationName("Play");
             if (buttons.Count == 0 && !busy) play = play.AccentButton();
-            buttons.Add(play.IsEnabled(gameBuilt && !busy && !preparing && !gameRunning)
+            buttons.Add(play.IsEnabled(gameBuilt && !busy && !gameRunning)
                             .ToolTip(status?.UpdateAvailable == true ? "Play the installed version without updating" : "Start the game")
                             .MinWidth(120));
             return HStack(8, buttons.ToArray()).HAlign(HorizontalAlignment.Right).Margin(0, 16, 0, 0);

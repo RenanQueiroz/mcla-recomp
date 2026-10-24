@@ -253,8 +253,18 @@ as when playing):
   preparation) says the shaders aren't compiled for the next start: the
   graphics driver was updated or the card changed (the display adapters'
   drivers, as DXGI reports them), the API or the resolution scale the game will
-  start with differs, the shader pack changed, the storage files shrank or
-  vanished, or the last start ended while it was adding the pack's shaders.
+  start with differs from what the last start was asked for (not from what
+  the game ended up with: it clamps a scale a weaker GPU can't do, and falls
+  back to another API when a plugin doesn't load), the shader pack changed
+  (the one `--mcla_shader_pack` names, if you pass one; with
+  `mcla_shader_pack_auto = false` only after a preparation), the storage files
+  shrank or vanished, or the last start ended while it was adding the pack's
+  shaders. Relative paths in the options are the game's folder's, as for the
+  game, and `cache_root` and `user_data_root` are read from the options and the
+  `REX_` variables only: the game reads them before `mcla.toml` is loaded.
+  It doesn't notice a graphics API left on "any" that the game resolves
+  differently, a switch between two adapters that both stay installed, or a
+  storage format change without a new pack (that one no preparation fixes).
   The check (`ShaderStamp.cs`) reads a few small files and lists the display
   adapters, in a few milliseconds, and never starts `mcla.exe`; when it finds
   nothing, the game starts at once. The status line says why it prepares, and
@@ -282,16 +292,27 @@ The run:
 The status line shows its progress, read from the lines it prints
 (`SHADERPREP <step> ...`, `ShaderPrep.cs`). Its log is
 `logs\prepare-shaders-*.log` (the last ten), and the game's own log of the run
-`logs\prepare-shaders-game.log` (a `--log_file` of yours isn't touched). Play,
-the countdown of *start the game right away* and the settings wait meanwhile;
-the restart prompt after a launcher update shows once it's done. Closing the
-launcher stops it, and a launcher that dies takes it along (a job object); a
-run that hangs is ended after 15 minutes. If the pack or the game's files
+`logs\prepare-shaders-game.log` (a `--log_file` of yours isn't touched). The
+countdown of *start the game right away* and the settings wait meanwhile, and
+the buttons are **Stop** (ends the run, starts nothing; Play doesn't prepare
+again until the launcher is opened again or *Prepare shaders* is used) and
+**Play now** (ends the run and starts the game, which adds the pack and
+creates the stored pipelines by itself as it starts); the restart prompt after
+a launcher update shows once it's done. Both are safe: the storage is only ever
+replaced whole, and the game's next start undoes an import that didn't finish
+(the interrupted run counts as a failed start in its journal, and two in a row
+turn the import off until *Prepare shaders*). Closing the launcher stops it
+too, and doesn't start the game; a launcher that dies takes it along (a job
+object); a run that hangs is ended after 15 minutes. If the pack or the game's files
 don't match, it says so and nothing is written; the game then plays as before,
-compiling shaders as it meets them. An automatic preparation that failed for
-another reason than *in use* isn't run again before every Play for the same
-pack (`settings.json`, `ShaderPrepSkipPack`) until *Prepare shaders* succeeds
-or the pack changes. Without the launcher the game adds what its storage lacks
+compiling shaders as it meets them. A preparation, automatic or by hand, that
+failed for good (not *in use*, and not ended by you or by closing the launcher)
+isn't run again before every Play for the same pack (`settings.json`,
+`ShaderPrepSkipPack`, which also silences the other reasons for that pack)
+until *Prepare shaders* succeeds or the pack changes. Exit code 7 (*in use*) is
+only a sharing or lock violation or a storage lock held by a running game; a
+read-only file, no permission or a lock file the game can't open is a failure
+for good. Without the launcher the game adds what its storage lacks
 of the pack at every start anyway (`KNOWN-ISSUES.md`, "Shaders prepared before
 the first start, and kept prepared").
 
