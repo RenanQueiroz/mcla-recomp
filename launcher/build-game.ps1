@@ -8,10 +8,21 @@
 #   .\build-game.ps1 -InstallTools  let make_pc.ps1 install missing tools without asking
 #   .\build-game.ps1 -Iso PATH      disc image, only needed until game\ is extracted;
 #                                   by default the first *.iso next to the repository
+#   .\build-game.ps1 -Toolchain mingw   build with llvm-mingw instead of Visual Studio
+#                                   Build Tools' headers and libraries (msvc, the default)
+#   -ToolsDir DIR, -SdkBundle PATH|URL, -SdkBundleSha256 HASH   as in make_pc.ps1
+#                                   (portable tools; a prebuilt SDK instead of building it)
+# These four are kept (launcher\build-options.json, by make_pc.ps1, whichever
+# way it was run) when a build finishes, and given none of them, a build, an
+# update and the launcher's Update and rebuild build the way the last one did:
+# a checkout built with mingw, or from a prebuilt SDK, does not fall back to msvc
+# or to building the SDK. Given any of them, only what is given is used.
 #
 # The real work is done by scripts\make_pc.ps1; this wrapper only covers what
 # that script leaves to the user.
-param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "")
+param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "",
+      [ValidateSet("", "msvc", "mingw")][string]$Toolchain = "", [string]$ToolsDir = "",
+      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "")
 
 $ErrorActionPreference = "Stop"
 # Git needs core.longpaths for the SDK's deep submodule files (resetting the
@@ -47,6 +58,26 @@ function Show-UpstreamLag {
 try {
     if (-not (Test-Path "$repo\.git")) { throw "no mcla-recomp checkout at $repo" }
 
+    # What the last build was asked for, when this one is asked for nothing of it:
+    # an update builds the way the checkout was built, and the launcher, which asks
+    # for none, too (msvc when there is no record: every install made before there
+    # was a choice).
+    . "$repo\scripts\mcla-lib.ps1"
+    $asked = $PSBoundParameters.ContainsKey("Toolchain") -or $PSBoundParameters.ContainsKey("ToolsDir") -or
+             $PSBoundParameters.ContainsKey("SdkBundle") -or $PSBoundParameters.ContainsKey("SdkBundleSha256")
+    if (-not $asked) {
+        $last = Get-BuildOptions $repo
+        if ($last) {
+            $Toolchain = $last.Toolchain; $ToolsDir = $last.ToolsDir
+            $SdkBundle = $last.SdkBundle; $SdkBundleSha256 = $last.SdkBundleSha256
+            if ($last.Toolchain -ne "msvc" -or $last.ToolsDir -or $last.SdkBundle) {
+                "build options of the last build: -Toolchain $Toolchain$(if ($ToolsDir) { ' -ToolsDir ' + $ToolsDir })$(if ($SdkBundle) { ' -SdkBundle ' + $SdkBundle })"
+            }
+        }
+    }
+    if (-not $Toolchain) { $Toolchain = "msvc" }
+    if ($Toolchain -ne "msvc") { "toolchain: $Toolchain" }
+
     # -----------------------------------------------------------------------
     if ($Update) {
         Step "update from the fork"
@@ -74,7 +105,9 @@ try {
 
     # make_pc.ps1 stops at an SDK patched before it recorded each patch's hash
     # (.mcla-patches), which may hold older versions of them: patch it afresh.
-    if (-not $ResetSdk -and (Test-Path "$sdk\.mcla-patched") -and -not (Test-Path "$sdk\.mcla-patches")) {
+    # (Not with a prebuilt SDK: there is no patched checkout of it to reset.)
+    if ($SdkBundle) { $ResetSdk = $false }
+    if (-not $ResetSdk -and -not $SdkBundle -and (Test-Path "$sdk\.mcla-patched") -and -not (Test-Path "$sdk\.mcla-patches")) {
         "the SDK was patched before patches were recorded"
         $ResetSdk = $true
     }
@@ -120,6 +153,10 @@ try {
 
     $params = @{}
     if ($InstallTools) { $params.InstallTools = $true }
+    $params.Toolchain = $Toolchain
+    if ($ToolsDir) { $params.ToolsDir = $ToolsDir }
+    if ($SdkBundle) { $params.SdkBundle = $SdkBundle }
+    if ($SdkBundleSha256) { $params.SdkBundleSha256 = $SdkBundleSha256 }
     if (-not (Test-Path "$repo\game\default.xex")) {
         if (-not $Iso) {
             $Iso = Get-ChildItem -LiteralPath (Split-Path $repo -Parent) -Filter *.iso -File | Select-Object -First 1 -ExpandProperty FullName

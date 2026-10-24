@@ -25,7 +25,8 @@ rebuild.
       ├─ app\                        the built launcher                      (not tracked)
       ├─ logs\                       one log per build the launcher ran      (not tracked)
       ├─ settings.json               launcher options                        (not tracked)
-      └─ built-commit.txt            commit of the last successful build     (not tracked)
+      ├─ built-commit.txt            commit of the last successful build     (not tracked)
+      └─ build-options.json          what the last build was asked for       (not tracked)
 ```
 
 ## From a terminal
@@ -34,6 +35,7 @@ rebuild.
 .\build-game.ps1             # build (or finish building) what is checked out
 .\build-game.ps1 -Update     # fast-forward to the fork's latest commit, then build
 .\build-game.ps1 -ResetSdk   # re-apply the SDK patches and rebuild the SDK
+.\build-game.ps1 -Toolchain mingw   # build with llvm-mingw instead of the Visual Studio Build Tools
 ```
 
 `build-game.ps1` wraps `scripts\make_pc.ps1` and adds what it leaves out:
@@ -46,6 +48,20 @@ rebuild.
 - **Local edits.** Updates use `git merge --ff-only --autostash`. Codegen rewrites
   `mcla_manifest.toml` and `generated\rexglue.cmake` with LF line endings, so they
   always look modified; autostash carries them across updates safely.
+- **The toolchain and the other options.** `-Toolchain msvc|mingw`, `-ToolsDir`,
+  `-SdkBundle` and `-SdkBundleSha256` go to `make_pc.ps1` (README.md, "Without
+  Microsoft's compiler"), which keeps them in `launcher\build-options.json` when a
+  build finishes, however it was run, if they are more than the defaults. Given
+  none of them, a build, an update and the launcher's **Update and rebuild** build
+  the way the last build did (the same toolchain, portable tools and prebuilt SDK,
+  and not msvc or an SDK built from source behind your back); `msvc` where there
+  is no record (every install made before there was a choice). Given any of them,
+  only what is given is used. Changing the toolchain reconfigures and rebuilds the
+  game; each toolchain has an SDK build of its own, the first one built the first
+  time. A prebuilt SDK has no patched checkout, so `-ResetSdk` and the patch check
+  do nothing with it; an update that changes the patches makes it stale
+  (`mcla-sdk-bundle.json` says what it was built from), and it is refused until a
+  matching one is given.
 - **Python.** `make_pc.ps1` rejects any `python.exe` under `WindowsApps`, which is
   where the Python install manager puts its working one; the wrapper hands that one over.
 
