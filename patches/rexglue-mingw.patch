@@ -1,0 +1,226 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 64a86fd..887eaf5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,19 @@ project(ReXGlue
+     LANGUAGES ${REXGLUE_LANGUAGES}
+     DESCRIPTION "Xbox 360 Recompilation SDK"
+ )
++if(MINGW)
++    # Windows file names, as with MSVC: the GPU plugin is loaded at run time as
++    # rexgpu-<name>.dll (gpu_plugin_loader.cpp), not CMake's MinGW libfoo.dll.
++    set(CMAKE_SHARED_LIBRARY_PREFIX "")
++    set(CMAKE_IMPORT_LIBRARY_PREFIX "")
++    # mingw-w64 assumes Windows 7 (_WIN32_WINNT=0x601) where the Windows SDK
++    # assumes the current Windows; the SDK calls newer APIs (SetProcessInformation
++    # in frame_timing.cpp). In the flags rather than add_compile_definitions, so
++    # that the configure checks of the libraries below see them too.
++    # -fms-extensions: __try/__except, as with MSVC.
++    string(APPEND CMAKE_C_FLAGS " -D_WIN32_WINNT=0x0A00")
++    string(APPEND CMAKE_CXX_FLAGS " -D_WIN32_WINNT=0x0A00 -fms-extensions")
++endif()
+ # Floor only: bump MAJOR.MINOR for API changes. Patch is derived from git tags
+ # in cmake/rex_version.cmake. See docs/RELEASING.md.
+ 
+diff --git a/cmake/mingw_imp_exports.cmake b/cmake/mingw_imp_exports.cmake
+new file mode 100644
+index 0000000..6734035
+--- /dev/null
++++ b/cmake/mingw_imp_exports.cmake
+@@ -0,0 +1,25 @@
++# Writes a .def that exports every __imp_* symbol the given objects define.
++# MinGW only: lld's auto-export (MinGW's WINDOWS_EXPORT_ALL_SYMBOLS) leaves
++# these out, but the recompiler names a title's kernel imports __imp__<name>.
++#   cmake -DNM=<llvm-nm> -DRSP=<file listing the objects> -DOUT=<def> -P mingw_imp_exports.cmake
++# $<TARGET_OBJECTS> also lists the precompiled header (.pch): keep the objects.
++file(STRINGS "${RSP}" _lines)
++list(FILTER _lines INCLUDE REGEX "\\.(obj|o)\"?$")
++list(JOIN _lines "\n" _objects)
++file(WRITE "${OUT}.rsp" "${_objects}\n")
++execute_process(
++    COMMAND "${NM}" --extern-only --defined-only --just-symbol-name "@${OUT}.rsp"
++    OUTPUT_VARIABLE _symbols
++    RESULT_VARIABLE _result)
++if(NOT _result EQUAL 0)
++    message(FATAL_ERROR "llvm-nm failed (${_result})")
++endif()
++string(REGEX MATCHALL "(^|\n)__imp_[A-Za-z0-9_@$?]+" _imports "${_symbols}")
++list(TRANSFORM _imports STRIP)
++list(REMOVE_DUPLICATES _imports)
++list(SORT _imports)
++list(JOIN _imports "\n    " _body)
++file(WRITE "${OUT}.tmp" "EXPORTS\n    ${_body}\n")
++file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)
++list(LENGTH _imports _count)
++message(STATUS "rexruntime: ${_count} __imp_ exports for MinGW")
+diff --git a/cmake/rexglue_helpers.cmake b/cmake/rexglue_helpers.cmake
+index 41e6dce..f455b00 100644
+--- a/cmake/rexglue_helpers.cmake
++++ b/cmake/rexglue_helpers.cmake
+@@ -101,6 +101,12 @@ function(rexglue_configure_target target_name)
+ 
+     rexglue_apply_target_settings(${target_name})
+ 
++    if(MINGW)
++        # The Windows entry point is wWinMain (windowed_app_main_sdl.cpp):
++        # MinGW's CRT calls it only with -municode.
++        target_link_options(${target_name} PRIVATE -municode)
++    endif()
++
+     if(WIN32)
+         # Stage runtime DLLs (rexruntime, TracyClient, etc.) next to the host
+         # binary on every link. copy_if_different is a no-op when up to date.
+diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
+index 500ee36..7c63956 100644
+--- a/include/rex/chrono/chrono.h
++++ b/include/rex/chrono/chrono.h
+@@ -116,7 +116,10 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
+ 
+ namespace std::chrono {
+ 
+-#if defined(__APPLE__) || defined(__PROSPERO__) || defined(__FreeBSD__)
++// LLVM's libc++ (llvm-mingw on Windows) has none either, until it reports the
++// complete C++20 <chrono> (__cpp_lib_chrono 201907L, which 20.1 does not: 201611L).
++#if defined(__APPLE__) || defined(__PROSPERO__) || defined(__FreeBSD__) || \
++    (defined(_LIBCPP_VERSION) && (!defined(__cpp_lib_chrono) || __cpp_lib_chrono < 201907L))
+ // Apple libc++ does not expose clock_time_conversion or clock_cast, and
+ // neither does the libc++ shipped with the PS5 payload SDK.
+ template <class, class>
+diff --git a/include/rex/ui/d3d12/d3d12_api.h b/include/rex/ui/d3d12/d3d12_api.h
+index d0e7252..a42d602 100644
+--- a/include/rex/ui/d3d12/d3d12_api.h
++++ b/include/rex/ui/d3d12/d3d12_api.h
+@@ -21,7 +21,23 @@
+ #include <windows.h>
+ #include <ObjBase.h>
+ 
++#if __has_include(<DXProgrammableCapture.h>)
+ #include <DXProgrammableCapture.h>
++#else
++// mingw-w64 has no DXProgrammableCapture.h (Windows SDK): declare the one
++// interface used, PIX's programmatic capture.
++#include <unknwn.h>
++MIDL_INTERFACE("9f251514-9d4d-4902-9d60-18988ab7d4b5")
++IDXGraphicsAnalysis : public IUnknown {
++ public:
++  virtual void STDMETHODCALLTYPE BeginCapture() = 0;
++  virtual void STDMETHODCALLTYPE EndCapture() = 0;
++};
++#ifdef __CRT_UUID_DECL
++__CRT_UUID_DECL(IDXGraphicsAnalysis, 0x9f251514, 0x9d4d, 0x4902, 0x9d, 0x60, 0x18, 0x98, 0x8a,
++                0xb7, 0xd4, 0xb5)
++#endif
++#endif
+ #include <d3d12.h>
+ #include <d3d12sdklayers.h>
+ #include <d3dcompiler.h>
+@@ -31,5 +47,15 @@
+ #include <wrl/client.h>
+ #include <dxcapi.h>
+ #include "DxbcConverter.h"
++#if defined(__MINGW32__) && defined(__CRT_UUID_DECL)
++// mingw-w64's __uuidof needs a declaration per interface; the DXC headers
++// only carry MSVC's __declspec(uuid).
++__CRT_UUID_DECL(IDxbcConverter, 0x5f956ed5, 0x78d1, 0x4b15, 0x82, 0x47, 0xf7, 0x18, 0x76, 0x14,
++                0xa0, 0x41)
++__CRT_UUID_DECL(IDxcUtils, 0x4605c4cb, 0x2019, 0x492a, 0xad, 0xa4, 0x65, 0xf2, 0x0b, 0xb7, 0xd6,
++                0x7f)
++__CRT_UUID_DECL(IDxcCompiler, 0x8c210bf3, 0x011f, 0x4422, 0x8d, 0x70, 0x6f, 0x9a, 0xcb, 0x8d,
++                0xb6, 0x17)
++#endif
+ 
+ // clang-format on
+diff --git a/src/graphics/shader_storage_progress.h b/src/graphics/shader_storage_progress.h
+index fd702a2..f570dce 100644
+--- a/src/graphics/shader_storage_progress.h
++++ b/src/graphics/shader_storage_progress.h
+@@ -20,6 +20,12 @@
+ #include <string>
+ #include <string_view>
+ 
++#ifdef snprintf
++// With MinGW's secure API (MINGW_HAS_SECURE_API) glslang's Common.h, included before this
++// header in the Vulkan sources, defines snprintf as sprintf_s: std::snprintf can't be spelt.
++#undef snprintf
++#endif
++
+ #include <rex/cvar.h>
+ 
+ REXCVAR_DECLARE(int32_t, shader_storage_progress);
+diff --git a/src/input/xinput/xinput_input_driver.cpp b/src/input/xinput/xinput_input_driver.cpp
+index a6a1da9..45c242a 100644
+--- a/src/input/xinput/xinput_input_driver.cpp
++++ b/src/input/xinput/xinput_input_driver.cpp
+@@ -115,12 +115,12 @@ X_STATUS XinputInputDriver::Setup() {
+   }
+ 
+   module_ = module;
+-  XInputGetCapabilities_ = xigc;
+-  XInputGetState_ = xigs;
+-  XInputGetStateEx_ = xigsEx;
+-  XInputGetKeystroke_ = xigk;
+-  XInputSetState_ = xiss;
+-  XInputEnable_ = xie;
++  XInputGetCapabilities_ = reinterpret_cast<void*>(xigc);
++  XInputGetState_ = reinterpret_cast<void*>(xigs);
++  XInputGetStateEx_ = reinterpret_cast<void*>(xigsEx);
++  XInputGetKeystroke_ = reinterpret_cast<void*>(xigk);
++  XInputSetState_ = reinterpret_cast<void*>(xiss);
++  XInputEnable_ = reinterpret_cast<void*>(xie);
+ 
+   return X_STATUS_SUCCESS;
+ }
+diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
+index 5f57565..6231b65 100644
+--- a/src/system/CMakeLists.txt
++++ b/src/system/CMakeLists.txt
+@@ -61,6 +61,22 @@ add_library(rex::kernel ALIAS rexruntime)
+ 
+ set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+ 
++if(MINGW AND NOT PS5)
++    # CMake implements WINDOWS_EXPORT_ALL_SYMBOLS only for MSVC-style tools; with
++    # MinGW, lld exports everything by itself but leaves out symbols named
++    # __imp_*, which is how the recompiler names a title's kernel imports. List
++    # those in a .def of their own; --export-all-symbols keeps the rest exported.
++    set(_rex_imp_rsp "${CMAKE_CURRENT_BINARY_DIR}/rexruntime-objects-$<CONFIG>.rsp")
++    set(_rex_imp_def "${CMAKE_CURRENT_BINARY_DIR}/rexruntime-imports-$<CONFIG>.def")
++    file(GENERATE OUTPUT "${_rex_imp_rsp}"
++         CONTENT "\"$<JOIN:$<TARGET_OBJECTS:rexruntime>,\"\n\">\"\n")
++    add_custom_command(TARGET rexruntime PRE_LINK
++        COMMAND ${CMAKE_COMMAND} "-DNM=${CMAKE_NM}" "-DRSP=${_rex_imp_rsp}"
++                "-DOUT=${_rex_imp_def}" -P "${REXGLUE_ROOT}/cmake/mingw_imp_exports.cmake"
++        VERBATIM)
++    target_link_options(rexruntime PRIVATE "LINKER:--export-all-symbols" "${_rex_imp_def}")
++endif()
++
+ rex_target_pch(rexruntime
+     <mutex>
+     <unordered_map>
+diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
+index bf8252b..5684023 100644
+--- a/src/ui/d3d12/d3d12_provider.cpp
++++ b/src/ui/d3d12/d3d12_provider.cpp
+@@ -256,7 +256,7 @@ bool D3D12Provider::Initialize() {
+   while (dxgi_factory->EnumAdapters1(adapter_index, &adapter) == S_OK) {
+     DXGI_ADAPTER_DESC1 adapter_desc;
+     if (SUCCEEDED(adapter->GetDesc1(&adapter_desc))) {
+-      if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device),
++      if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+                                              nullptr))) {
+         if (REXCVAR_GET(d3d12_adapter) >= 0) {
+           if (adapter_index == REXCVAR_GET(d3d12_adapter)) {
+diff --git a/thirdparty/crypto/sha256.cpp b/thirdparty/crypto/sha256.cpp
+index e96b4da..b8fa5ab 100644
+--- a/thirdparty/crypto/sha256.cpp
++++ b/thirdparty/crypto/sha256.cpp
+@@ -14,7 +14,8 @@
+ #define __BYTE_ORDER __BYTE_ORDER__
+ #define __BIG_ENDIAN __ORDER_BIG_ENDIAN__
+ #endif
+-#else
++// Windows is little-endian, and older mingw-w64 (llvm-mingw 20250709) has no endian.h.
++#elif !defined(_WIN32)
+ #include <endian.h>
+ #endif
+ #endif

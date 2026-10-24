@@ -44,9 +44,13 @@ git apply ../../patches/rexglue-vulkan-present-semaphore-per-image.patch
 git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
 git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 git apply ../../patches/rexglue-shader-storage-prepare.patch
+git apply ../../patches/rexglue-mingw.patch
+git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply them themselves, each once, telling one that is in by a name it adds, and they record each patch's SHA-256 in the SDK checkout's `.mcla-patches`. When a patch that is in has changed since it was applied, or has no record (an SDK patched by hand or by an older script), they stop rather than build with an older version of it: patch the SDK afresh (`launcher\build-game.ps1 -ResetSdk`, which the launcher does by itself after an update that changes a patch, or delete the SDK checkout and run the script again).
+
+The last two are for building with llvm-mingw (`scripts\make_pc.ps1 -Toolchain mingw`, Windows only). `make_pc.ps1` applies them with either toolchain: every change in them is guarded by the compiler (`#if`, `if(MINGW)`), or is the same code for every compiler (three small source fixes, below), so one patched SDK serves both and switching toolchains needs no patching again; nothing of the Visual Studio toolchain's output changes. `ps5/make_ps5.sh` and the Linux build don't need them.
 
 On Linux, two more go on top, from the same folder:
 
@@ -1279,3 +1283,32 @@ Windows is the only platform it has run on. Linux and the PS5 offer it, untested
 | The storage versions, public | `include/rex/graphics/shader_storage.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | all platforms |
 | Progress of the stored pipelines' creation | `src/graphics/shader_storage_progress.h`, `src/graphics/command_processor.cpp`, `include/rex/graphics/d3d12/pipeline_cache.h`, `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | D3D12, Vulkan (all platforms) |
 | The storage report, and closing the storage on request | `include/rex/system/interfaces/graphics.h`, `include/rex/graphics/graphics_system.h`, `src/graphics/graphics_system.cpp`, `include/rex/graphics/command_processor.h`, the D3D12 and Vulkan `command_processor.h/.cpp` and `pipeline_cache.h/.cpp` | D3D12, Vulkan (all platforms) |
+
+## rexglue-mingw.patch
+
+**Why.** Builds the SDK, `rexglue.exe` and the game with llvm-mingw 20250709 (Clang 20.1.8, lld, libc++ and mingw-w64 on Windows' UCRT), so that a PC needs no Microsoft compiler (`scripts\make_pc.ps1 -Toolchain mingw`). Found by building the SDK that way: every change is small, and guarded or without effect for the Microsoft toolchain (checked: the msvc build's `mcla.exe`, `rexruntime.dll`, `rexgpu-xenos.dll` and the code `rexglue codegen` writes are unchanged). A game built this way was compared with the msvc build's (the same Clang version, 62 scripted runs on both APIs, 2026-10-24): the same pictures, saves and behaviour, and frame times within the benchmarks' own spread.
+
+**What it changes.**
+- MinGW's DLLs get Windows names, `rexruntime.dll` and `rexgpu-xenos.dll`, not `librexruntime.dll`: the GPU plugin is loaded by the name `rexgpu-<name>.dll`, and a prefix would have failed at the first start, not at build time.
+- `rexruntime.dll` exports the symbols named `__imp_*`: the recompiler names a title's kernel imports `__imp__<name>`, which lld's automatic export always leaves out for MinGW (the Microsoft toolchain exports them through CMake's generated `.def`). `cmake/mingw_imp_exports.cmake` lists them from the objects before the link (2,866 for this game), and `--export-all-symbols` keeps the rest.
+- The host links with `-municode` (the SDK's entry point is `wWinMain`), and the SDK and the game compile with `-D_WIN32_WINNT=0x0A00` (mingw-w64 assumes Windows 7; the Windows SDK assumes the current Windows, and `frame_timing.cpp` calls newer APIs) and `-fms-extensions` (`__try`/`__except`).
+- `std::chrono::clock_cast` and `clock_time_conversion` stand-ins for LLVM's libc++ (`_LIBCPP_VERSION`) while it does not report the complete C++20 `<chrono>` (`__cpp_lib_chrono` 201907L; 20.1 says 201611L), as already for Apple's and the PS5's, which don't have them; a libc++ that has them is left alone.
+- `IDXGraphicsAnalysis` (PIX's programmatic capture) declared where the Windows SDK's `DXProgrammableCapture.h` is missing; `__CRT_UUID_DECL` for the three DXC interfaces the SDK asks `__uuidof` of, which DXC's headers only describe for MSVC; `__uuidof` where the code had `_uuidof` (a typo MSVC's mode accepts); `reinterpret_cast` where a `FARPROC` was assigned to a `void*`; no `endian.h` on Windows in `sha256.cpp`; and `shader_storage_progress.h` drops the macro glslang's `Common.h` defines under MinGW's secure API (`snprintf` as `sprintf_s`), which `std::snprintf` can't be spelt with.
+- Not in the SDK: the game's own flags for MinGW (`-fms-extensions`, `_WIN32_WINNT`, and no `-fasync-exceptions`, with the reason) are in the fork's `CMakeLists.txt`, after it includes `generated/rexglue.cmake`, and not in the template of that file: `rexglue codegen` writes the file at every build, and with a case in the template a Linux or PS5 build (which does not apply this patch) would leave the tracked file modified. The Clang driver drops `-fasync-exceptions` for a MinGW target (a warning on every file), and passed on to the compiler itself it crashed Clang 23.1.3 in SimplifyCFG on most of the game's host files, so a fault inside a guest `__try` scope is not caught with this toolchain; this game has no such scope (0 of 29,848 functions), and a title that has one needs the msvc toolchain.
+
+**Upstream:** not offered for now (all upstream work is parked); the changes are small and portable, and meant to be.
+
+| Change | Files | Affects |
+|---|---|---|
+| DLL and import library names without MinGW's `lib` prefix; `_WIN32_WINNT` and `-fms-extensions` | `CMakeLists.txt` | MinGW |
+| `__imp_*` exports of `rexruntime.dll` | `cmake/mingw_imp_exports.cmake` (new), `src/system/CMakeLists.txt` | MinGW |
+| `-municode` for the host | `cmake/rexglue_helpers.cmake` | MinGW |
+| `clock_cast` stand-ins for LLVM's libc++ without the full C++20 `<chrono>` | `include/rex/chrono/chrono.h` | LLVM's libc++ (llvm-mingw; elsewhere the condition is as it was) |
+| PIX capture interface, DXC interface GUIDs | `include/rex/ui/d3d12/d3d12_api.h` | MinGW (the declarations are used where the header is missing) |
+| `__uuidof`; `reinterpret_cast` of `FARPROC`; no `endian.h` on Windows | `src/ui/d3d12/d3d12_provider.cpp`, `src/input/xinput/xinput_input_driver.cpp`, `thirdparty/crypto/sha256.cpp` | Windows, all toolchains (the same code) |
+| glslang's `snprintf` macro undone | `src/graphics/shader_storage_progress.h` | MinGW (the macro is not defined elsewhere) |
+
+## rexglue-ffmpeg-mingw-config.patch
+
+FFmpeg's Windows configuration is the Microsoft toolchain's (`--toolchain=msvc`): it asks for `crtversion.h`, which mingw-w64 with the UCRT doesn't have (151 files failed). Under `__MINGW32__`, `config.h` sets `HAVE_LIBC_MSVCRT` to 0, which also gives the C99 `printf` specifiers. Applied in the `thirdparty/FFmpeg` submodule, like `rexglue-ffmpeg-ps5-config.patch`; nothing changes for any other compiler.
+

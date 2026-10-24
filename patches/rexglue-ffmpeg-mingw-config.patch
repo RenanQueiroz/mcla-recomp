@@ -1,0 +1,17 @@
+diff --git a/config.h b/config.h
+index b6a504a..32cdad7 100644
+--- a/config.h
++++ b/config.h
+@@ -4,6 +4,12 @@
+ #else
+ #include "config_windows_x86_64.h"
+ #endif
++#if defined(__MINGW32__)
++/* The Windows configuration is MSVC's (--toolchain=msvc). mingw-w64 with the
++   UCRT has no crtversion.h and takes the C99 printf specifiers. */
++#undef HAVE_LIBC_MSVCRT
++#define HAVE_LIBC_MSVCRT 0
++#endif
+ #elif defined(__APPLE__) && defined(__MACH__)
+ #if defined(__aarch64__) || defined(__arm64__)
+ #include "config_macos_aarch64.h"
