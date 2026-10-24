@@ -45,6 +45,12 @@
 #                which this script writes into the SDK it builds) have to be
 #                this checkout's.
 #
+#   -Until       stop after a step, for CI, which has no game: tools (the tools
+#                found or installed), sdk-source (and the SDK cloned and
+#                patched) or sdk (and built and installed, or the prebuilt one
+#                unpacked and checked). The game's steps (extracting the disc
+#                image, codegen, the build) are not run.
+#
 # What a finished build was asked for (-Toolchain, -ToolsDir, -SdkBundle, its
 # SHA-256) is kept in launcher\build-options.json when it is not just the
 # defaults, and launcher\build-game.ps1 (so an update, also the launcher's)
@@ -55,7 +61,8 @@
 # choose it yourself.
 param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset = "win-amd64-release",
       [ValidateSet("msvc", "mingw")][string]$Toolchain = "msvc", [string]$ToolsDir = "",
-      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "")
+      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "",
+      [ValidateSet("", "tools", "sdk-source", "sdk")][string]$Until = "")
 
 $ErrorActionPreference = "Stop"
 # The SDK has files deep in its submodules: git on Windows needs core.longpaths
@@ -226,9 +233,17 @@ function WriteBundleManifest([string]$dir) {
     foreach ($line in (Get-Content -LiteralPath "$sdk\.mcla-patches")) {
         if ($line -match '^([0-9a-f]{64}) (\S+)$') { $patches += [ordered]@{ name = $Matches[2]; sha256 = $Matches[1] } }
     }
+    # Sorted by name, ordinally (Sort-Object follows the culture, which ignores hyphens): a
+    # consumer that derives a hash of the patches from this list (scripts\ci\make-sdk-bundle.py
+    # does, the same way) gets the same order on any PC.
+    $names = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($p in $patches) { $names.Add([string]$p["name"]) }
+    $names.Sort([System.StringComparer]::Ordinal)
+    $byName = @{}
+    foreach ($p in $patches) { $byName[[string]$p["name"]] = $p }
     $manifest = [ordered]@{
         format = 1; sdkCommit = $sdkCommit; toolchain = $Toolchain
-        patches = @($patches | Sort-Object -Property @{ Expression = { $_["name"] } })
+        patches = @($names | ForEach-Object { $byName[$_] })
     }
     Set-Content -LiteralPath "$dir\$bundleManifestName" -Encoding Ascii (($manifest | ConvertTo-Json -Depth 4) + "`r`n")
 }
@@ -422,6 +437,8 @@ try {
     # portable build from the LLVM project, unpacked into tools\.
     $llvmVersion = "20.1.8"
     $llvmName = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc"
+    # The SHA-256 of the release's .tar.xz (the digest GitHub shows for the asset).
+    $llvmSha256 = "f229769f11d6a6edc8ada599c0cda964b7dee6ab1a08c6cf9dd7f513e85b107f"
     # -Toolchain mingw: llvm-mingw, Clang $llvmVersion again with lld, libc++ and
     # mingw-w64, in one zip from its release page. Pinned, with the SHA-256 of
     # the zip (the one GitHub shows for the release asset); a download that does
@@ -491,7 +508,11 @@ try {
         if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $list += "Ninja" }
         # The Microsoft Store's placeholder python.exe is not Python.
         $python = Get-Command python -ErrorAction SilentlyContinue
-        if ((-not $SdkBundle -or -not (Test-Path -LiteralPath "$root\game\default.xex")) -and
+        # (Python builds the SDK, where glslang's build_info.py runs, and extracts the
+        # game; -Until stops before the game and, at sdk-source, before the build.)
+        $buildsSdk = -not $SdkBundle -and $Until -ne "tools" -and $Until -ne "sdk-source"
+        $extractsGame = -not $Until -and -not (Test-Path -LiteralPath "$root\game\default.xex")
+        if (($buildsSdk -or $extractsGame) -and
             (-not $python -or $python.Source -like "*WindowsApps*")) { $list += "Python" }
         if ($mingw) {
             # In -ToolsDir, or unpacked into tools\ (env.ps1 found it).
@@ -505,7 +526,7 @@ try {
         }
         # Optional: FSR 3.1's Vulkan runtime is built only with it (and only
         # when the SDK is built here with msvc: llvm-mingw cannot build FSR).
-        if (-not $SdkBundle -and -not $mingw -and -not (HasVulkanSdk)) { $list += "Vulkan SDK" }
+        if (-not $SdkBundle -and -not $mingw -and $Until -ne "tools" -and $Until -ne "sdk-source" -and -not (HasVulkanSdk)) { $list += "Vulkan SDK" }
         $list
     }
     # The Vulkan SDK (its headers and loader library): VULKAN_SDK, as its
@@ -564,13 +585,35 @@ try {
                 # ("unable to run program xz", issue #10).
                 RefreshPath
                 Logged "install-clang" {
-                    curl.exe -L --fail -o $archive "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmName.tar.xz"
+                    curl.exe -L --fail --proto "=https" --proto-redir "=https" -o $archive "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmName.tar.xz"
                     if ($LASTEXITCODE -ne 0) { return }
-                    tar.exe -xf $archive -C "$root\tools"
+                    # Checked before it is unpacked; one that does not match is deleted.
+                    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+                    if ($actualHash -ne $llvmSha256) {
+                        "the download's SHA-256 is $actualHash, not the pinned ${llvmSha256}: deleted, nothing unpacked"
+                        Remove-Item -LiteralPath $archive -Force
+                        $global:LASTEXITCODE = 1
+                        return
+                    }
+                    # Unpacked next to its final place and moved there only when complete, as
+                    # llvm-mingw is: an interrupted run leaves no half-unpacked Clang that
+                    # looks installed.
+                    RemoveFolder "$root\tools\.u"
+                    New-Item -ItemType Directory -Force "$root\tools\.u" | Out-Null
+                    tar.exe -xf $archive -C "$root\tools\.u"
                     if ($LASTEXITCODE -ne 0) {
                         "tar.exe could not unpack the archive; unpacking it with Python instead (about a minute)"
-                        python -c "import sys, tarfile; kw = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}; tarfile.open(sys.argv[1], 'r:xz').extractall(sys.argv[2], **kw)" $archive "$root\tools"
+                        python -c "import sys, tarfile; kw = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}; tarfile.open(sys.argv[1], 'r:xz').extractall(sys.argv[2], **kw)" $archive "$root\tools\.u"
                     }
+                    if ($LASTEXITCODE -ne 0) { return }
+                    if (-not (Test-Path -LiteralPath "$root\tools\.u\$llvmName\bin\clang.exe")) {
+                        "the archive does not hold $llvmName\bin\clang.exe"
+                        $global:LASTEXITCODE = 1
+                        return
+                    }
+                    RemoveFolder "$root\tools\$llvmName"
+                    Move-Item -LiteralPath "$root\tools\.u\$llvmName" -Destination "$root\tools\$llvmName"
+                    RemoveFolder "$root\tools\.u"
                 }
                 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
             } elseif ($name -eq "llvm-mingw") {
@@ -617,6 +660,11 @@ try {
             $env:CMAKE_BUILD_PARALLEL_LEVEL = "$jobLimit"
             "memory: $([Math]::Round($availableMb / 1024, 1)) GB available; building with $jobLimit compiler jobs instead of $([Environment]::ProcessorCount + 2)"
         }
+    }
+
+    if ($Until -eq "tools") {
+        "stopping after the tools (-Until tools)"
+        exit 0
     }
 
     # -----------------------------------------------------------------------
@@ -675,6 +723,11 @@ try {
             } else {
                 CheckPatch "$root\patches\$($later.Patch)"
             }
+        }
+
+        if ($Until -eq "sdk-source") {
+            "stopping after the SDK's sources, patched (-Until sdk-source)"
+            exit 0
         }
 
         # -----------------------------------------------------------------------
@@ -744,6 +797,11 @@ try {
                 "note: FSR was built for Direct3D 12 only: its Vulkan runtime needs the Vulkan SDK (run with -InstallTools, or install it from vulkan.lunarg.com, then build again)."
             }
         }
+    }
+
+    if ($Until) {
+        "stopping after the SDK (-Until $Until): $install"
+        exit 0
     }
 
     # -----------------------------------------------------------------------

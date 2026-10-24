@@ -154,6 +154,21 @@ building one. `make_pc.ps1` keeps what it was asked for in
 builds the way the last build did, so that an update (also the launcher's)
 neither falls back to msvc nor to building the SDK from source.
 
+**CI** (`.github/workflows/`, `scripts/ci/README.md`): every push and pull
+request checks that the pinned tools and the patch list agree, builds the SDK
+as patched with the pinned llvm-mingw (`make_pc.ps1 -Until sdk`), compiles the
+host sources in `src/` against it (syntax and types; the recompiled game code,
+linking and running need a game), and publishes the launcher. The release
+workflow builds the launcher, the SDK bundle (with the FidelityFX DLLs, the C
+runtime linked in), the corresponding source of the bundle's GPL and LGPL parts
+and the files that describe them (with build-provenance attestations), and
+makes a **draft** GitHub release of them; it never publishes one. A patch
+added to `patches/` has to be added to `make_pc.ps1` and to the `git apply`
+lines below: CI fails if they differ. It also builds the SDK with llvm-mingw,
+so a patch that only builds with MSVC's Clang fails there (as
+`rexglue-low-latency.patch` did, until `rexglue-mingw.patch` got two lines for
+it).
+
 ## Building by hand, or on Linux
 
 `scripts\make_pc.ps1` and `ps5/make_ps5.sh` apply the fork's SDK patches
