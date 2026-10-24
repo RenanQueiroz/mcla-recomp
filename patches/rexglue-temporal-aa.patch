@@ -351,7 +351,7 @@ new file mode 100644
 index 0000000..a8ee628
 --- /dev/null
 +++ b/cmake/rexglue_fsr.cmake
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,341 @@
 +# rexglue_fsr.cmake - AMD FSR 3.1 for temporal anti-aliasing (rexglue-temporal-aa.patch)
 +#
 +# Builds ffx-api of the AMD FidelityFX SDK 1.1.4 (MIT) from source, as
@@ -622,6 +622,13 @@ index 0000000..a8ee628
 +    if(NOT WIN32)
 +        # The Linux library is a shared object; the PS5's title is position-independent.
 +        list(APPEND args -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
++    endif()
++    if(WIN32)
++        # The C runtime linked into the library, so that a player's PC needs no Visual C++
++        # Redistributable for it (the DLL imports kernel32 and the system's own DLLs only). The
++        # policy is given too: FidelityFX's projects set an older one for themselves. A MinGW
++        # target ignores both.
++        list(APPEND args -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_POLICY_DEFAULT_CMP0091=NEW)
 +    endif()
 +    if(REXGLUE_FSR_STATIC)
 +        # Linked into the title with the SDK's own code, with link-time

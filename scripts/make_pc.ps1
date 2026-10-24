@@ -27,9 +27,9 @@
 #                the other one builds a second SDK; after that, switching
 #                rebuilds only the game). A game built with mingw needs
 #                libc++.dll and libunwind.dll next to mcla.exe (copied), not the
-#                Visual C++ runtime, except for FSR's DLLs, which are built with
-#                MSVC and do need it (without it the game goes on with MSAA); its
-#                debug information is split into mcla.exe.debug.
+#                Visual C++ runtime (FSR's DLLs, built with MSVC, have the C
+#                runtime linked in and need none either); its debug
+#                information is split into mcla.exe.debug.
 #   -ToolsDir    a folder with portable tools to use instead of installing or
 #                downloading them: llvm-mingw-*\ (mingw) or clang+llvm-*\
 #                (msvc), cmake*\ and ninja*\ (or ninja.exe) in it; it has to
@@ -393,6 +393,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-vulkan-pipeline-storage-keep-unsupported.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "pipeline_storage_valid_count" }
     @{ Patch = "rexglue-shader-storage-prepare.patch"; File = "src\graphics\shader_storage_progress.h"; Adds = "ShaderStorageProgress" }
     @{ Patch = "rexglue-content-header-padding.patch"; File = "src\system\xam\content_manager.cpp"; Adds = "Written as zeros." }
+    @{ Patch = "rexglue-low-latency.patch"; File = "src\ui\low_latency.cpp"; Adds = "LowLatency::OnFrameStart" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.
@@ -594,7 +595,7 @@ try {
     }
     "clang: $env:MCLA_CC ($((& $env:MCLA_CC --version | Select-Object -First 1)))"
     if ($mingw) {
-        "toolchain: mingw (llvm-mingw, libc++ and Windows' UCRT; the game needs no Visual C++ runtime, FSR's DLLs do)"
+        "toolchain: mingw (llvm-mingw, libc++ and Windows' UCRT; the game needs no Visual C++ runtime, nor do FSR's DLLs)"
         if ($env:MCLA_MINGW_ROOT -notlike "*$mingwName") {
             "WARNING: the build is made and tested with llvm-mingw $mingwVersion (Clang $llvmVersion, libc++ 20); this one is $env:MCLA_MINGW_ROOT, and the SDK may not build with it (a newer libc++ can bring declarations the SDK makes itself, and the toolchain's own fixes)"
         }
@@ -778,9 +779,9 @@ try {
         # toolchain in CI) work with it. Without a bundle, the ones this
         # checkout's SDK build with the msvc toolchain made, if the patches have
         # not changed since (the marker is touched whenever one is applied).
-        # They are linked against the Visual C++ runtime, which the rest of a
-        # mingw game does not need: on a PC without it they do not load, and the
-        # game goes on with MSAA when FSR is chosen.
+        # They have the C runtime linked in (the SDK builds them with the static
+        # one), so they need no Visual C++ runtime on the PC either; a DLL that
+        # does not load is reported unavailable and the game goes on with MSAA.
         if (-not (Test-Path -LiteralPath "$build\amd_fidelityfx_dx12.dll")) {
             $msvcBin = "$sdk\out\install\win-amd64\bin"
             $theirs = @(Get-ChildItem -LiteralPath $msvcBin -Filter "amd_fidelityfx_*.dll" -ErrorAction SilentlyContinue)
@@ -791,7 +792,7 @@ try {
             }
             if ($theirs) {
                 $theirs | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $build -Force }
-                "FSR: the runtime ($($theirs.Name -join ', ')) comes from the msvc SDK build (it needs the Visual C++ runtime)"
+                "FSR: the runtime ($($theirs.Name -join ', ')) comes from the msvc SDK build"
             } else {
                 "note: the FSR anti-aliasing option and frame generation are not available: FidelityFX's runtime (amd_fidelityfx_dx12.dll) does not build with llvm-mingw. A prebuilt SDK bundle has it, and so does an SDK built once with -Toolchain msvc. The game offers MSAA and off."
             }
