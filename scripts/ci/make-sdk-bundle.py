@@ -158,9 +158,9 @@ src += [
     "",
     "FFmpeg (libavcodec, libavutil: the XMA decoders) is compiled under the LGPL version 2.1 or later",
     "(its config header says CONFIG_GPL 0, CONFIG_NONFREE 0), and libmspack under the LGPL 2.1; both",
-    "are linked into the SDK's libraries in lib\\ and into rexruntime.dll, and the game's build links",
-    "against them from source on the player's PC with the scripts of the fork, so they can be replaced",
-    "by building the SDK again with other sources.",
+    "are built from the sources above into the SDK's libraries (lib\\ and the DLLs in bin\\). The scripts of",
+    "the fork build the SDK, and the game against it, from these sources on any PC, so they can be",
+    "replaced by building the SDK again with other sources.",
     "",
     "FidelityFX (amd_fidelityfx_dx12.dll, amd_fidelityfx_vk.dll): AMD FidelityFX SDK, MIT",
 ]
