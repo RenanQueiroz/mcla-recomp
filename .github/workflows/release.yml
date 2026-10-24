@@ -1,0 +1,447 @@
+name: Release (draft only)
+
+# Builds every asset of a release and puts them in a DRAFT GitHub release for the maintainer to look
+# at. It never publishes: the last job creates the release with --draft, no tag is created or
+# pushed (a draft only names its tag), and a published release of the same tag makes it stop.
+# Publishing is done by a person, in the GitHub UI, after the checklist in scripts/ci/README.md.
+#
+#   Actions > Release (draft only) > Run workflow, from main, with the version tag (v0.1.0)
+#   or a push to a branch named draft-release/<anything>, which makes a test draft named
+#   draft-<commit> (a v* tag is refused there), which is how this workflow is tried.
+#
+# Nothing of the game is involved: the assets are the launcher, the SDK bundle (with FSR's two
+# DLLs), the corresponding source of the bundle and files made from them. See scripts/ci/README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag name, a version such as v0.1.0 (from main only). The draft names it; no tag is created."
+        required: true
+        type: string
+  push:
+    branches:
+      - "draft-release/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # A release from main is not cancelled by another run; a test on a branch is.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  plan:
+    name: Tag, version and checks
+    if: github.repository == 'RenanQueiroz/mcla-recomp'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A real version tag (v*) is made from main only; a draft-release/ branch makes test drafts
+      # named after the commit. The value is checked here once, and the other jobs use the output.
+      - id: plan
+        shell: powershell
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $short = $env:SHA.Substring(0, 8)
+          if ($env:REF -ceq "refs/heads/main") {
+              if ($env:INPUT_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?\z') {
+                  throw "from main the tag has to be a version such as v0.1.0 (or v0.1.0-rc.1)"
+              }
+              $tag = $env:INPUT_TAG
+          } elseif ($env:REF -clike "refs/heads/draft-release/*") {
+              $tag = "draft-$short"
+              if ($env:INPUT_TAG -and $env:INPUT_TAG -cne $tag) {
+                  throw "a draft-release/ branch only makes test drafts, named ${tag}: a version tag is made from main"
+              }
+          } else {
+              throw "run this from main (or from a draft-release/ branch, to try it), not from $env:REF"
+          }
+          if ($tag -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,62}\z') { throw "not a tag name: $tag" }
+          $version = if ($tag -cmatch '^v([0-9]+\.[0-9]+\.[0-9]+)') { $Matches[1] } else { "0.0.0" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag $tag, version $version, commit $env:SHA"
+
+      # The same check CI makes (pins, patch list, no game data, pinned actions), so that a release
+      # cannot be made from a commit that fails it.
+      - name: Pins, patches and game data
+        run: python -I scripts/ci/check_pins.py
+
+  tools:
+    name: Pinned tools are what the pins say
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The four tools release.json names for the wizard, downloaded again (265 MB) and compared with
+      # tools.json. Done in parallel with the builds, with retries.
+      - run: python -I scripts/ci/verify_tools.py
+
+  sdk:
+    name: SDK (patched, llvm-mingw)
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No cache here: a release is built from nothing.
+      - name: Build the SDK
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -Until sdk
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-install
+          path: third_party/rexglue-sdk/out/install/win-amd64-mingw
+          if-no-files-found: error
+          retention-days: 3
+
+  source:
+    name: Corresponding source of the SDK bundle
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The SDK cloned with its submodules at the pinned commits and patched, as the build sees it.
+      - name: SDK source, patched
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -Until sdk-source
+
+      - name: Archive it, with the fork
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $epoch = (git log -1 --format=%ct).Trim()
+          python -I scripts\ci\make-source-archive.py --sdk third_party\rexglue-sdk --repo . --out "$env:RUNNER_TEMP\source" --source-date-epoch $epoch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-source
+          path: ${{ runner.temp }}/source/*.tar.xz
+          if-no-files-found: error
+          retention-days: 3
+          # Already compressed
+          compression-level: 0
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-source-info
+          path: ${{ runner.temp }}/source/sdk-source-info.json
+          if-no-files-found: error
+          retention-days: 3
+
+  fidelityfx:
+    name: FidelityFX DLLs (static C runtime)
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The SDK's sources, patched (its FidelityFX wrapper is built apart below), and the project's
+      # Clang for Windows (hash-checked), which finds the Visual Studio on the runner.
+      - name: SDK source and the project's Clang
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain msvc -InstallTools -Until sdk-source
+
+      - name: Vulkan SDK (pinned, hash-checked)
+        shell: powershell
+        run: .\scripts\ci\install-vulkan-sdk.ps1
+
+      - name: Build the two DLLs
+        shell: powershell
+        run: .\scripts\ci\build-fidelityfx.ps1 -Out "$env:RUNNER_TEMP\ffx-dlls"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fidelityfx
+          path: ${{ runner.temp }}/ffx-dlls
+          if-no-files-found: error
+          retention-days: 3
+
+  launcher:
+    name: Launcher (self-contained)
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Its NuGet packages float, as in a build on any PC (Microsoft.UI.Reactor *-*, Windows App
+      # SDK 2.*): the versions this build resolves are recorded in release.json.
+      - name: Publish and zip the launcher
+        shell: powershell
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: .\scripts\ci\publish-launcher.ps1 -Out "$env:RUNNER_TEMP\launcher" -Zip "$env:RUNNER_TEMP\launcher-zip\MCLA-Launcher-$env:TAG-win-x64.zip" -Version $env:VERSION
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-zip
+          path: ${{ runner.temp }}/launcher-zip
+          if-no-files-found: error
+          retention-days: 3
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-notices
+          path: ${{ runner.temp }}/launcher/notices
+          if-no-files-found: error
+          retention-days: 3
+
+  bundle:
+    name: SDK bundle
+    needs: [plan, sdk, source, fidelityfx]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      name: ${{ steps.bundle.outputs.bundle_name }}
+      sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # llvm-mingw only (its libc++, its licence and its mingw-w64 notices go into the bundle).
+      - name: llvm-mingw
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -Until tools
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-install
+          path: third_party/rexglue-sdk/out/install/win-amd64-mingw
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fidelityfx
+          path: ${{ runner.temp }}/ffx-dlls
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-source
+          path: ${{ runner.temp }}/source
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-source-info
+          path: ${{ runner.temp }}/source
+
+      # The licences, the submodules and the FidelityFX pins of the bundle's notices come from the
+      # archived tree, the one the SDK was built from (the bundle script checks the patches agree).
+      - name: Assemble the bundle
+        id: bundle
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "$env:RUNNER_TEMP\s"
+          New-Item -ItemType Directory -Force $src | Out-Null
+          $archive = (Get-ChildItem "$env:RUNNER_TEMP\source" -Filter "rexglue-sdk-source-*.tar.xz").FullName
+          # Windows' own tar (bsdtar, with xz); another tar on the PATH (Git's) does not read C:\ paths.
+          & "$env:SystemRoot\System32\tar.exe" -xf $archive -C $src --strip-components=1
+          if ($LASTEXITCODE -ne 0) { throw "could not unpack the source archive" }
+          $mingw = (Get-ChildItem tools -Directory -Filter "llvm-mingw-*" | Select-Object -First 1).FullName
+          # The files of the zip get the script's fixed date (2026-01-01), not the commit's: a zip
+          # holds local times, and one stamped with "now" unpacks into the future on a PC west of
+          # UTC, where Ninja then finds its files forever newer than its outputs.
+          python -I scripts\ci\make-sdk-bundle.py `
+              --install third_party\rexglue-sdk\out\install\win-amd64-mingw --sdk "$src\sdk" --repo . `
+              --source-info "$env:RUNNER_TEMP\source\sdk-source-info.json" `
+              --mingw $mingw --ffx "$env:RUNNER_TEMP\ffx-dlls" `
+              --out "$env:RUNNER_TEMP\bundle" --stage "$env:RUNNER_TEMP\bundle-stage"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-bundle
+          path: ${{ runner.temp }}/bundle/rexglue-sdk-*.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  verify:
+    name: SDK bundle, used as a player's PC would
+    needs: bundle
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-bundle
+          path: ${{ runner.temp }}/bundle
+
+      # A fresh checkout and a fresh machine: the bundle is unpacked, checked against the patches,
+      # and used by make_pc.ps1 exactly as the wizard's install uses it.
+      - name: Use the bundle
+        shell: powershell
+        env:
+          BUNDLE_NAME: ${{ needs.bundle.outputs.name }}
+          BUNDLE_SHA256: ${{ needs.bundle.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path "$env:RUNNER_TEMP\bundle" $env:BUNDLE_NAME
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $env:BUNDLE_SHA256) { throw "the bundle's SHA-256 is $actual, not $env:BUNDLE_SHA256" }
+          .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -SdkBundle $zip -SdkBundleSha256 $actual -Until sdk
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # rexglue.exe runs, the FidelityFX DLLs import no C runtime and load, a program links against
+      # the bundle's import library with llvm-mingw and runs with its DLLs.
+      - name: Look at the bundle
+        shell: powershell
+        run: .\scripts\ci\verify-bundle.ps1 -SdkDir third_party\rexglue-sdk-bin
+
+      - name: Compile the host sources against the bundle
+        shell: powershell
+        run: .\scripts\ci\host-compile.ps1 -SdkDir third_party\rexglue-sdk-bin
+
+  assemble:
+    name: release.json, notices, sums
+    needs: [plan, tools, bundle, launcher, source, verify]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-bundle
+          path: ${{ runner.temp }}/files
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: launcher-zip
+          path: ${{ runner.temp }}/files
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-source
+          path: ${{ runner.temp }}/files
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: launcher-notices
+          path: ${{ runner.temp }}/launcher-notices
+
+      - name: release.json, NOTICES.txt, SHA256SUMS and the draft's text
+        shell: powershell
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUNDLE_NAME: ${{ needs.bundle.outputs.name }}
+          BUNDLE_SHA256: ${{ needs.bundle.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $files = "$env:RUNNER_TEMP\files"
+          $source = (Get-ChildItem $files -Filter "rexglue-sdk-source-*.tar.xz").Name
+          python -I scripts\ci\assemble-release.py --tag $env:TAG --commit $env:COMMIT --repository $env:REPOSITORY `
+              --assets $files --launcher-zip "MCLA-Launcher-$env:TAG-win-x64.zip" --sdk-bundle-zip $env:BUNDLE_NAME `
+              --sdk-source-archive $source --expect-bundle-sha256 $env:BUNDLE_SHA256 `
+              --launcher-notices "$env:RUNNER_TEMP\launcher-notices" --out $files --run-url $env:RUN_URL
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem $files | ForEach-Object { "{0,-64} {1,14:N0}" -f $_.Name, $_.Length }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/files
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  # Build-provenance attestations for every asset, so that `gh attestation verify` ties each file to
+  # this workflow, this commit and this run. The only job with the permissions for it, and no write
+  # access to the repository's contents.
+  attest:
+    name: Attestations
+    needs: assemble
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      # In the workspace, so that the globs below are relative paths (a Windows temp path has
+      # backslashes, which a glob reads as escapes).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release-files
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-files/*.zip
+            release-files/*.tar.xz
+            release-files/release.json
+            release-files/NOTICES.txt
+            release-files/SHA256SUMS
+
+  draft:
+    name: Draft release
+    needs: [plan, assemble, attest]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/files
+
+      # The only step that writes to the repository, and it can only create a draft.
+      - name: Create the draft release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+        run: .\scripts\ci\create-draft-release.ps1 -Tag $env:TAG -Commit $env:COMMIT -Folder "$env:RUNNER_TEMP\files"
