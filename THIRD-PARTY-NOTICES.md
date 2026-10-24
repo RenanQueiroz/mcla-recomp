@@ -142,6 +142,80 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+## NVIDIA NVAPI (Reflex)
+
+<https://github.com/NVIDIA/nvapi>, release of 2026-09 (commit `70d337d`).
+
+Used for NVIDIA Reflex on Direct3D 12 (`patches/rexglue-low-latency.patch`):
+`src/ui/d3d12/d3d12_low_latency.cpp` of the SDK has the structures and enums of
+NVAPI's `nvapi.h` that Reflex uses, with the same layouts, and the interface ids
+of `nvapi_interface.h`. NVAPI itself is not linked: `nvapi64.dll` comes with the
+NVIDIA driver and the functions are looked up with `nvapi_QueryInterface`.
+
+```
+SPDX-FileCopyrightText: Copyright (c) 2019-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: MIT
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+## AMD Anti-Lag 2
+
+<https://github.com/GPUOpen-LibrariesAndSDKs/AntiLag2-SDK>, the DirectX 12 header
+as carried by the FidelityFX SDK (`sdk/libs/antilag2/ffx_antilag2_dx12.h`).
+
+Used for AMD Anti-Lag 2 on Direct3D 12 (`patches/rexglue-low-latency.patch`): the
+header, unmodified, is `include/rex/ui/d3d12/amd_antilag2_dx12.h` of the SDK, with
+its notice in the file. It loads `amdxc64.dll` from the AMD driver; nothing of
+AMD's is shipped. The game's use of it has not been run on an AMD GPU.
+
+```
+This file is part of the Anti-Lag 2.0 SDK.
+
+Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+## Trademarks
+
+NVIDIA, NVIDIA Reflex, GeForce, AMD, Radeon, AMD Anti-Lag and AMD FidelityFX are
+trademarks of their owners (NVIDIA Corporation, Advanced Micro Devices, Inc.). This
+fork uses their names only, as plain text, to say which GPU feature a setting is
+(the pause menu's and the launcher's low latency setting, the frame generation
+and FSR settings): no logos, and no endorsement by either company is implied.
+
 ## puff (zlib)
 
 <https://github.com/madler/zlib/tree/develop/contrib/puff>

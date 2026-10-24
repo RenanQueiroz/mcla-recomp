@@ -210,6 +210,23 @@ rows for a file and a refresh rate after writing `key=value` pairs as the page
 does, to check the round trip and that a file from before this setting stays
 byte for byte as it was.
 
+*NVIDIA Reflex* / *AMD Anti-Lag 2* (`low_latency`: Default, Off, On, and On +
+Boost on a GeForce) is the GPU maker's latency reducer, named by the GPU the game
+will use (the first adapter, as the game takes it: `GpuVendor.First` in
+`src\DisplayHdr.cs`; "Low latency" for any other GPU, where it does nothing).
+Default is off: at 3x on Direct3D 12 Reflex costs 3.9% of the frame rate for 13
+ms less latency. Frame generation turns it on whatever the setting says (the
+pause menu's row reads ON (FRAME GEN), and the tip says so;
+`low_latency_frame_generation`, which only `mcla.toml` has, turns that off). The
+tip also says what it does and that AMD's is untested. A value the list doesn't
+have (`boost` in a file used on a Radeon) is shown as written. `launcher-check`'s
+`settings` mode takes `LAUNCHER_CHECK_VENDOR` (hex: 10DE NVIDIA, 1002 AMD, 8086
+Intel) for the vendor. `devrun.py --presentmon --pm-pcl` makes PresentMon track
+the PC latency (the markers' PCLStats events); `presents.py` reports each frame's
+time from the engine timer pass (where the game reads its input) to the screen
+next to the swap's, from the `f` lines the dev pad writes at the start of
+every frame (`frames.csv`).
+
 *Single tile rendering* (`mcla_single_tile`, on by default) draws the scene with
 anti-aliasing on once instead of in the Xbox 360's two tiles, in the larger
 EDRAM (4,096 tiles instead of the console's 2,048) the game asks the GPU plugin

@@ -116,9 +116,9 @@ KNOWN-ISSUES.md has the costs and limits. FidelityFX's runtime does not build
 with llvm-mingw (`make_pc.ps1 -Toolchain mingw`): that SDK has FSR support in
 its plugin but not the runtime, which comes from a prebuilt SDK or from an
 msvc build of the same checkout (the DLLs are plain C to the plugin, and work
-with either toolchain's game). They are built with MSVC and need the Visual C++
-runtime, which a mingw game otherwise does not: without it they do not load, and
-the game goes on with MSAA.
+with either toolchain's game). They are built with MSVC with the C runtime linked
+in, so a PC needs no Visual C++ runtime for them either; a DLL that is there and
+doesn't load is reported unavailable and the game goes on with MSAA.
 
 ## Testing so far
 
@@ -206,6 +206,7 @@ git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
 git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
+git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
