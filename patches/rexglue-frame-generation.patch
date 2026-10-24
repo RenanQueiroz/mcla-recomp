@@ -328,7 +328,7 @@ index e2f1cd9..5c86891 100644
    // Has no dependencies on specific pipeline stages on both ends to simplify
    // use in different scenarios with different pipelines - use explicit barriers
 diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
-index c355da2..9e8a68d 100644
+index c355da2..ba34aca 100644
 --- a/include/rex/ui/d3d12/d3d12_presenter.h
 +++ b/include/rex/ui/d3d12/d3d12_presenter.h
 @@ -57,20 +57,69 @@ class D3D12Presenter final : public Presenter {
@@ -403,16 +403,17 @@ index c355da2..9e8a68d 100644
    };
  
    static std::unique_ptr<D3D12Presenter> Create(HostGpuLossCallback host_gpu_loss_callback,
-@@ -109,6 +158,8 @@ class D3D12Presenter final : public Presenter {
+@@ -109,6 +158,9 @@ class D3D12Presenter final : public Presenter {
    PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
  
    bool SupportsUIOverlayPaintMode() const override { return true; }
 +  // Frame generation (rexglue-frame-generation.patch).
-+  bool SupportsFrameGeneration() const override { return true; }
++  bool SupportsFrameGeneration() const override;
++  const char* FrameGenerationUnsupportedReason() const override;
    bool RenderUIOverlayFromUIThread() override;
  
   private:
-@@ -302,8 +353,58 @@ class D3D12Presenter final : public Presenter {
+@@ -302,8 +354,58 @@ class D3D12Presenter final : public Presenter {
    void CompositeUIOverlay(ID3D12GraphicsCommandList* command_list,
                            D3D12_CPU_DESCRIPTOR_HANDLE back_buffer_rtv);
  
@@ -473,7 +474,7 @@ index c355da2..9e8a68d 100644
  
    bool dxgi_supports_tearing() const { return dxgi_supports_tearing_; }
  
-@@ -359,6 +460,10 @@ class D3D12Presenter final : public Presenter {
+@@ -359,6 +461,10 @@ class D3D12Presenter final : public Presenter {
    // drawers (accessible from the UI thread only, at any time).
    D3D12SubmissionTracker ui_submission_tracker_;
  
@@ -485,10 +486,30 @@ index c355da2..9e8a68d 100644
    UIOverlay ui_overlay_;
    // The layer the UI thread last finished drawing into (submitted on the direct
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index 2c37992..4f4429f 100644
+index 2c37992..b1d310e 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
-@@ -419,6 +419,10 @@ class Presenter {
+@@ -207,6 +207,9 @@ class Presenter {
+     float full_frame_nits = 0.0f;
+     float min_nits = 0.0f;
+     float sdr_white_nits = 0.0f;  // the system's level for SDR content, 0 = not reported
++    // The display's refresh rate in Hz as the system reports it (a variable-refresh
++    // display: its highest), 0 = not reported. Read with the rest.
++    float refresh_hz = 0.0f;
+   };
+   // What a guest output refresher needs to write HDR10.
+   struct HdrOutputState {
+@@ -407,6 +410,9 @@ class Presenter {
+   // What the display reported last, and whether the swap chain is HDR10, for
+   // settings screens (any thread).
+   static HdrDisplayInfo GetLastHdrDisplayInfo();
++  // The display's refresh rate in Hz (0 = not reported yet), as last read with
++  // the above.
++  static float GetDisplayRefreshHz();
+   // Asks for the display's state now, also while `hdr` is off (otherwise it's
+   // only read while it isn't), and waits up to `timeout_ms` for the answer, for
+   // a settings screen being opened (any thread).
+@@ -419,6 +425,10 @@ class Presenter {
    };
    static HdrAutoLevels GetHdrAutoLevels();
    static bool IsHdrOutputActive();
@@ -499,7 +520,7 @@ index 2c37992..4f4429f 100644
    // For the guest output refresher: whether it can write HDR10 now (for
    // instance not with a PWL gamma ramp); if not, the swap chain stays SDR.
    static void SetGuestOutputHdrAvailable(bool available);
-@@ -850,6 +854,38 @@ class Presenter {
+@@ -850,6 +860,44 @@ class Presenter {
    // implementation's, for the image of the given refresh.
    static void LogPresentFromPacer(uint64_t refresh_number, int result, uint64_t present_ns);
  
@@ -507,6 +528,8 @@ index 2c37992..4f4429f 100644
 +  // which also paints with the UI overlay: whether the implementation can, and
 +  // whether it was asked for (read at initialization).
 +  virtual bool SupportsFrameGeneration() const { return false; }
++  // Why not, for the settings (menu text: A to Z, 0 to 9, space, + . ( ) only).
++  virtual const char* FrameGenerationUnsupportedReason() const { return "NOT AVAILABLE HERE"; }
 +  // Whether this thread is in the guest output thread's paint (the one that
 +  // comes right after the guest frame's own work in the queue).
 +  static bool InGuestOutputThreadPaint();
@@ -519,12 +542,16 @@ index 2c37992..4f4429f 100644
 +  // callback makes next (thread c).
 +  static void LogPresentFromCallback(uint64_t refresh_number);
 +  static void SetFrameGenerationUiSeparation(bool wanted);
-+  // Whether frame generation is asked for and can still run. An implementation
-+  // that finds it can't (its context or runtime, a dispatch that failed) says
-+  // so with SetFrameGenerationUnavailable (any thread, once is logged): the
-+  // next connection is made without it, and the UI separation it needed goes.
++  // Whether frame generation is asked for (the cvar frame_generation, also as
++  // it changes while playing: the next connection follows it) and can run. An
++  // implementation that finds it can't (its context or runtime, a dispatch that
++  // failed) says so with SetFrameGenerationUnavailable (any thread, once is
++  // logged): the next connection is made without it, and the UI separation it
++  // needed goes. Its state is the cvars frame_generation_available (yes or no)
++  // and frame_generation_why, for the settings.
 +  bool frame_generation_wanted() const {
-+    return frame_generation_wanted_ &&
++    return frame_generation_supported_ &&
++           frame_generation_requested_.load(std::memory_order_acquire) &&
 +           !frame_generation_unavailable_.load(std::memory_order_acquire);
 +  }
 +  void SetFrameGenerationUnavailable(const char* reason);
@@ -538,17 +565,22 @@ index 2c37992..4f4429f 100644
   private:
    enum class PaintMode {
      // Don't paint at all.
-@@ -1135,6 +1171,8 @@ class Presenter {
+@@ -1135,6 +1183,13 @@ class Presenter {
    // Also with implicit vsync or presenting from the UI thread only (frame
    // generation, whose pacer presents).
    bool ui_overlay_paint_forced_ = false;
-+  bool frame_generation_wanted_ = false;
++  bool frame_generation_supported_ = false;
++  std::atomic<bool> frame_generation_requested_{false};
 +  std::atomic<bool> frame_generation_unavailable_{false};
++  void UpdateFrameGenerationStatus();
++  // present_ui_overlay: UI overlay painting is on for its own sake (otherwise
++  // it is available only for frame generation to switch on while playing).
++  bool ui_overlay_paint_user_ = false;
    // UI thread only.
    bool ui_overlay_paint_suspended_ = false;
    uint64_t ui_overlay_paint_suspended_ns_ = 0;
 diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
-index e1860c7..2355fa6 100644
+index e1860c7..9b6e23a 100644
 --- a/include/rex/ui/vulkan/device.h
 +++ b/include/rex/ui/vulkan/device.h
 @@ -178,6 +178,10 @@ class VulkanDevice {
@@ -572,17 +604,21 @@ index e1860c7..2355fa6 100644
      // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
  #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
  #undef XE_UI_VULKAN_FUNCTION_PROMOTED
-@@ -242,6 +249,9 @@ class VulkanDevice {
+@@ -242,6 +249,13 @@ class VulkanDevice {
    // Whether the device was created with the features temporal anti-aliasing
    // (FSR) uses, where the physical device has them (temporal_aa_device_features).
    bool temporal_aa_features() const { return temporal_aa_features_; }
 +  // Frame generation (rexglue-frame-generation.patch) can run on this device:
 +  // asked for, on Windows, with what FidelityFX and the pacer need.
 +  bool frame_generation_supported() const { return frame_generation_supported_; }
++  // Why not (the settings menu's letters), or null.
++  const char* frame_generation_unsupported_reason() const {
++    return frame_generation_unsupported_reason_;
++  }
  
    template <typename Object>
    void SetObjectName(const VkObjectType object_type, const Object object_handle,
-@@ -291,6 +301,13 @@ class VulkanDevice {
+@@ -291,6 +305,13 @@ class VulkanDevice {
    // May be the same as queue_family_graphics_compute().
    uint32_t queue_family_sparse_binding() const { return queue_family_sparse_binding_; }
  
@@ -596,11 +632,12 @@ index e1860c7..2355fa6 100644
    Queue::Acquisition AcquireQueue(const uint32_t queue_family_index,
                                    const uint32_t queue_index) const {
      return queue_families()[queue_family_index].queues[queue_index]->Acquire();
-@@ -318,10 +335,13 @@ class VulkanDevice {
+@@ -318,10 +339,14 @@ class VulkanDevice {
  
    Functions functions_;
    bool temporal_aa_features_ = false;
 +  bool frame_generation_supported_ = false;
++  const char* frame_generation_unsupported_reason_ = nullptr;
  
    std::vector<QueueFamily> queue_families_;
    uint32_t queue_family_graphics_compute_ = UINT32_MAX;
@@ -622,7 +659,7 @@ index 0000000..6919ef0
 +XE_UI_VULKAN_FUNCTION_PROMOTED(vkSignalSemaphoreKHR, vkSignalSemaphore)
 +XE_UI_VULKAN_FUNCTION_PROMOTED(vkWaitSemaphoresKHR, vkWaitSemaphores)
 diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
-index 5c087f3..d3010f9 100644
+index 5c087f3..c91befd 100644
 --- a/include/rex/ui/vulkan/presenter.h
 +++ b/include/rex/ui/vulkan/presenter.h
 @@ -13,9 +13,13 @@
@@ -703,18 +740,19 @@ index 5c087f3..d3010f9 100644
    };
  
    static std::unique_ptr<VulkanPresenter> Create(HostGpuLossCallback host_gpu_loss_callback,
-@@ -157,6 +198,10 @@ class VulkanPresenter final : public Presenter {
+@@ -157,6 +198,11 @@ class VulkanPresenter final : public Presenter {
    // vulkan_presenter_ui_overlay.cpp.
    bool SupportsUIOverlayPaintMode() const override;
    bool RenderUIOverlayFromUIThread() override;
 +  // Frame generation (rexglue-frame-generation.patch), in
 +  // vulkan_presenter_frame_generation.cpp.
 +  bool SupportsFrameGeneration() const override;
++  const char* FrameGenerationUnsupportedReason() const override;
 +  void PrepareGuestOutputThreadPaint() override;
  
   private:
    // Usable for both the guest output image itself and for intermediate images.
-@@ -334,7 +379,11 @@ class VulkanPresenter final : public Presenter {
+@@ -334,7 +380,11 @@ class VulkanPresenter final : public Presenter {
        kGuestOutputDescriptorSetUiOverlay0Sampled,
        kGuestOutputDescriptorSetUiOverlay1Sampled,
  
@@ -727,7 +765,7 @@ index 5c087f3..d3010f9 100644
      };
  
      struct UISetupCommandBuffer {
-@@ -370,7 +419,9 @@ class VulkanPresenter final : public Presenter {
+@@ -370,7 +420,9 @@ class VulkanPresenter final : public Presenter {
          const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
          VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out,
          VkFormat& image_format_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
@@ -738,7 +776,7 @@ index 5c087f3..d3010f9 100644
  
      // Destroys the swapchain and its derivatives, nulls `swapchain` and returns
      // the original swapchain object, if it existed, for use as oldSwapchain if
-@@ -456,6 +507,30 @@ class VulkanPresenter final : public Presenter {
+@@ -456,6 +508,30 @@ class VulkanPresenter final : public Presenter {
      std::array<VkDeviceMemory, 2> ui_overlay_memory = {};
      std::array<VkImageView, 2> ui_overlay_views = {};
      std::array<VkFramebuffer, 2> ui_overlay_framebuffers = {};
@@ -769,7 +807,7 @@ index 5c087f3..d3010f9 100644
    };
  
    explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
-@@ -521,7 +596,7 @@ class VulkanPresenter final : public Presenter {
+@@ -521,7 +597,7 @@ class VulkanPresenter final : public Presenter {
    void DestroyUIOverlayFromUIThread();
    // At destruction.
    void ShutdownUIOverlay();
@@ -778,7 +816,7 @@ index 5c087f3..d3010f9 100644
    void CompositeUIOverlay(VkCommandBuffer command_buffer);
    VkShaderModule ui_overlay_composite_fs_ = VK_NULL_HANDLE;
    VkPipeline ui_overlay_composite_pipeline_ = VK_NULL_HANDLE;
-@@ -536,6 +611,146 @@ class VulkanPresenter final : public Presenter {
+@@ -536,6 +612,146 @@ class VulkanPresenter final : public Presenter {
    // The newest finished overlay layer, UINT32_MAX if none.
    std::atomic<uint32_t> ui_overlay_published_{UINT32_MAX};
  
@@ -4444,7 +4482,7 @@ index 795337f..c4870dd 100644
  if(TARGET amd_fidelityfx_vk)
      target_link_libraries(rexui PRIVATE amd_fidelityfx_vk)
 diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
-index 0a47a27..4f5c9ca 100644
+index 0a47a27..16d9830 100644
 --- a/src/ui/d3d12/d3d12_presenter.cpp
 +++ b/src/ui/d3d12/d3d12_presenter.cpp
 @@ -53,7 +53,16 @@ namespace shaders {
@@ -4468,9 +4506,9 @@ index 0a47a27..4f5c9ca 100644
    // HDR output: HDR10 when wanted (the `hdr` setting and the display's state).
    uint32_t hdr_wanted = IsHdrOutputWanted();
  
-+  // Frame generation that can't run any more: AMD's swap chain goes, and a
-+  // DXGI one is made as without frame generation.
-+  if (paint_context_.swap_chain && FrameGenerationSwapChainActive() && !frame_generation_wanted()) {
++  // Frame generation switched on, or off (or it can't run any more): a swap
++  // chain of the other kind, AMD's or DXGI's, is made.
++  if (paint_context_.swap_chain && FrameGenerationSwapChainActive() != frame_generation_wanted()) {
 +    DestroySwapChain();
 +  }
 +
@@ -4561,9 +4599,9 @@ index 0a47a27..4f5c9ca 100644
    if (IsHdrOutputWanted() != paint_context_.swap_chain_hdr_wanted) {
      return PaintResult::kNotPresentedConnectionOutdated;
    }
-+  // Frame generation that can't run (reported by its context or a dispatch):
-+  // a connection without AMD's swap chain.
-+  if (!frame_generation_wanted() && FrameGenerationSwapChainActive()) {
++  // Frame generation switched on or off, or that can't run (reported by its
++  // context or a dispatch): a swap chain of the other kind.
++  if (FrameGenerationSwapChainActive() != frame_generation_wanted()) {
 +    return PaintResult::kNotPresentedConnectionOutdated;
 +  }
    // HDR10 metadata: the peak setting and the display (BT.2020, D65).
@@ -4598,10 +4636,10 @@ index 0a47a27..4f5c9ca 100644
               (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
 diff --git a/src/ui/d3d12/d3d12_presenter_frame_generation.cpp b/src/ui/d3d12/d3d12_presenter_frame_generation.cpp
 new file mode 100644
-index 0000000..8c17a4b
+index 0000000..d7ca5d1
 --- /dev/null
 +++ b/src/ui/d3d12/d3d12_presenter_frame_generation.cpp
-@@ -0,0 +1,1381 @@
+@@ -0,0 +1,1402 @@
 +/**
 + * Frame generation on Direct3D 12 (rexglue-frame-generation.patch).
 + *
@@ -4904,6 +4942,8 @@ index 0000000..8c17a4b
 +        FAILED(device->CreateDescriptorHeap(&rtv_heap_desc,
 +                                            IID_PPV_ARGS(&frame_generation->rtv_heap)))) {
 +      REXLOG_ERROR("D3D12Presenter: frame generation: couldn't create its descriptor heaps");
++      SetFrameGenerationUnavailable("its descriptor heaps couldn't be created");
++      SetFrameGenerationPresentingFromUIThread(false);
 +      return false;
 +    }
 +    frame_generation_ = std::move(frame_generation);
@@ -4959,6 +4999,8 @@ index 0000000..8c17a4b
 +  fg.reset_next = true;
 +  if (FAILED(fg.swap_chain.As(&swap_chain_out))) {
 +    DestroyFrameGenerationSwapChain();
++    SetFrameGenerationUnavailable("AMD's swap chain isn't usable");
++    SetFrameGenerationPresentingFromUIThread(false);
 +    return false;
 +  }
 +  // AMD's pacing: sleeping in its spin wait, and waiting on its fence with
@@ -4976,7 +5018,18 @@ index 0000000..8c17a4b
 +  fg.configure(&fg.swap_chain_context, &pacing_desc.header);
 +  REXLOG_INFO("D3D12Presenter: frame generation: presenting through AMD's frame interpolation "
 +              "swap chain");
++  SetFrameGenerationPresentingFromUIThread(true);
 +  return true;
++}
++
++bool D3D12Presenter::SupportsFrameGeneration() const {
++  std::error_code error;
++  return std::filesystem::exists(rex::filesystem::GetExecutableFolder() / "amd_fidelityfx_dx12.dll",
++                                 error);
++}
++
++const char* D3D12Presenter::FrameGenerationUnsupportedReason() const {
++  return "NO FIDELITYFX RUNTIME";
 +}
 +
 +void D3D12Presenter::AwaitFrameGenerationPresents() {
@@ -5966,6 +6019,12 @@ index 0000000..8c17a4b
 +                                                    Microsoft::WRL::ComPtr<IDXGISwapChain1>&) {
 +  return false;
 +}
++bool D3D12Presenter::SupportsFrameGeneration() const {
++  return false;
++}
++const char* D3D12Presenter::FrameGenerationUnsupportedReason() const {
++  return "NOT BUILT";
++}
 +void D3D12Presenter::AwaitFrameGenerationPresents() {}
 +bool D3D12Presenter::FrameGenerationSwapChainActive() const {
 +  return false;
@@ -5984,18 +6043,23 @@ index 0000000..8c17a4b
 +
 +}  // namespace rex::ui::d3d12
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 09669f1..838f3fe 100644
+index 09669f1..26a24d0 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -92,6 +92,33 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
+@@ -92,6 +92,38 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
                      "Enable output dithering in the final present pass")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
 +REXCVAR_DEFINE_STRING(frame_generation, "off", "GPU",
 +                      "Frame generation (AMD FSR 3.1): off or fsr, a frame generated between every "
-+                      "two. In development (rexglue-frame-generation.patch)")
-+    .allowed({"off", "fsr"})
-+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++                      "two (rexglue-frame-generation.patch). Changes while playing")
++    .allowed({"off", "fsr"});
++
++REXCVAR_DEFINE_STRING(frame_generation_available, "unknown", "GPU",
++                      "Read-only: whether frame generation can run here: unknown (before the "
++                      "presenter starts), yes or no (frame_generation_why says why)");
++REXCVAR_DEFINE_STRING(frame_generation_why, "", "GPU",
++                      "Read-only: why frame generation can't run, in the settings menu's letters");
 +
 +REXCVAR_DEFINE_STRING(frame_generation_present, "auto", "GPU",
 +                      "With frame generation: auto presents tear-free (vsync, with variable "
@@ -6021,7 +6085,38 @@ index 09669f1..838f3fe 100644
  REXCVAR_DEFINE_BOOL(present_ui_overlay, true, "UI/Presenter",
                      "The guest output thread presents every guest frame even while the "
                      "presenter's UI (overlays, dialogs, pop-ups) is shown: the UI thread draws "
-@@ -925,6 +952,38 @@ void Presenter::LogPresentFromPacer(uint64_t refresh_number, int result, uint64_
+@@ -489,6 +521,9 @@ Presenter::~Presenter() {
+   // it if needed.
+   assert_false(is_executing_ui_drawers_);
+ 
++  // (Registered for frame generation: it points at this.)
++  rex::cvar::UnregisterChangeCallbacks("frame_generation");
++
+ #if REX_PLATFORM_WIN32
+   if (dxgi_ui_tick_thread_.joinable()) {
+     {
+@@ -644,7 +679,7 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+   // connection has become outdated and has requested the UI thread to
+   // reconnect).
+   bool draw_ui = !ui_drawers_.empty();
+-  if (ui_overlay_paint_mode_) {
++  if (ui_overlay_paint_mode_ && (ui_overlay_paint_user_ || ui_overlay_paint_forced_)) {
+     // While suspended, the UI thread paints as without it.
+     const bool was_suspended = ui_overlay_paint_suspended_;
+     UpdateUIOverlayPaintSuspensionFromUIThread(draw_ui);
+@@ -874,8 +909,9 @@ bool Presenter::IsUIOverlayPaintModeActive() const {
+   // With implicit vsync the guest output thread's presents would wait for it,
+   // and without host_present_from_non_ui_thread it doesn't present at all:
+   // there the UI thread paints as before.
+-  return ui_overlay_paint_forced_ || (REXCVAR_GET(host_present_from_non_ui_thread) &&
+-                                      !surface_paint_connection_has_implicit_vsync_);
++  return ui_overlay_paint_forced_ ||
++         (ui_overlay_paint_user_ && REXCVAR_GET(host_present_from_non_ui_thread) &&
++          !surface_paint_connection_has_implicit_vsync_);
+ }
+ 
+ void Presenter::UpdateUIOverlayPaintSuspensionFromUIThread(bool draw_ui) {
+@@ -925,6 +961,53 @@ void Presenter::LogPresentFromPacer(uint64_t refresh_number, int result, uint64_
    }
  }
  
@@ -6046,6 +6141,20 @@ index 09669f1..838f3fe 100644
 +  frame_generation_ui_separation.store(wanted, std::memory_order_release);
 +}
 +
++void Presenter::UpdateFrameGenerationStatus() {
++  const char* available = "yes";
++  const char* why = "";
++  if (!frame_generation_supported_) {
++    available = "no";
++    why = FrameGenerationUnsupportedReason();
++  } else if (frame_generation_unavailable_.load(std::memory_order_acquire)) {
++    available = "no";
++    why = "FAILED";
++  }
++  rex::cvar::SetFlagByName("frame_generation_why", why);
++  rex::cvar::SetFlagByName("frame_generation_available", available);
++}
++
 +void Presenter::SetFrameGenerationUnavailable(const char* reason) {
 +  if (frame_generation_unavailable_.exchange(true, std::memory_order_acq_rel)) {
 +    return;
@@ -6055,36 +6164,102 @@ index 09669f1..838f3fe 100644
 +      "connection",
 +      reason);
 +  SetFrameGenerationUiSeparation(false);
++  UpdateFrameGenerationStatus();
 +}
 +
  bool Presenter::RefreshGuestOutput(
      uint32_t frontbuffer_width, uint32_t frontbuffer_height, uint32_t display_aspect_ratio_x,
      uint32_t display_aspect_ratio_y,
-@@ -1212,10 +1271,21 @@ void Presenter::RequestUIPaintFromUIThread() {
+@@ -1212,11 +1295,40 @@ void Presenter::RequestUIPaintFromUIThread() {
  
  bool Presenter::InitializeCommonSurfaceIndependent() {
    HdrRegisterSettingCallbacks();
-+  // Frame generation (rexglue-frame-generation.patch) paints this way too.
-+  if (REXCVAR_GET(frame_generation) != "off") {
-+    if (SupportsFrameGeneration()) {
-+      frame_generation_wanted_ = true;
++  // Frame generation (rexglue-frame-generation.patch) paints this way too, and
++  // switches on and off while playing: the cvar is followed from here on.
++  frame_generation_supported_ = SupportsFrameGeneration();
++  frame_generation_requested_.store(REXCVAR_GET(frame_generation) != "off",
++                                    std::memory_order_release);
++  if (frame_generation_supported_) {
++    rex::cvar::RegisterChangeCallback(
++        "frame_generation", [this](std::string_view, std::string_view value) {
++          const bool requested = value != "off";
++          if (frame_generation_requested_.exchange(requested) != requested) {
++            REXLOG_INFO("Presenter: frame generation {} (frame_generation = {})",
++                        requested ? "asked for" : "turned off", value);
++          }
++        });
++  }
++  UpdateFrameGenerationStatus();
++  if (frame_generation_requested_.load()) {
++    if (frame_generation_supported_) {
 +      REXLOG_INFO("Presenter: frame generation (frame_generation = {})",
 +                  REXCVAR_GET(frame_generation));
 +    } else {
-+      REXLOG_WARN("Presenter: frame generation isn't available with this graphics backend");
++      REXLOG_WARN("Presenter: frame generation isn't available here: {}",
++                  FrameGenerationUnsupportedReason());
 +    }
 +  }
    ui_overlay_paint_start_ns_ = PresentLog::Now();
 -  if (REXCVAR_GET(present_ui_overlay)) {
-+  if (REXCVAR_GET(present_ui_overlay) || frame_generation_wanted_) {
++  ui_overlay_paint_user_ = REXCVAR_GET(present_ui_overlay);
++  if (ui_overlay_paint_user_ || frame_generation_supported_) {
      if (SupportsUIOverlayPaintMode()) {
        ui_overlay_paint_mode_ = true;
-+      ui_overlay_paint_forced_ = frame_generation_wanted_;
-       REXLOG_INFO("Presenter: UI overlay painting");
+-      REXLOG_INFO("Presenter: UI overlay painting");
++      ui_overlay_paint_forced_ = frame_generation_wanted();
++      if (ui_overlay_paint_user_ || frame_generation_wanted()) {
++        REXLOG_INFO("Presenter: UI overlay painting");
++      }
      } else {
        REXLOG_WARN("Presenter: UI overlay painting isn't available with this graphics backend");
+     }
+@@ -2301,6 +2413,12 @@ void Presenter::HdrDisplayWorker::Query() {
+   DXGI_OUTPUT_DESC1 desc;
+   if (output6_ && SUCCEEDED(output6_->GetDesc1(&desc))) {
+     info.known = true;
++    DEVMODEW mode = {};
++    mode.dmSize = sizeof(mode);
++    if (EnumDisplaySettingsW(desc.DeviceName, ENUM_CURRENT_SETTINGS, &mode) &&
++        mode.dmDisplayFrequency > 1) {
++      info.refresh_hz = float(mode.dmDisplayFrequency);
++    }
+     info.hdr_enabled = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+     info.peak_nits = desc.MaxLuminance;
+     info.full_frame_nits = desc.MaxFullFrameLuminance;
+@@ -2342,22 +2460,27 @@ void Presenter::HdrDisplayWorker::Query() {
+     changed = info.known != hdr_display_info.known ||
+               info.hdr_enabled != hdr_display_info.hdr_enabled ||
+               info.peak_nits != hdr_display_info.peak_nits ||
+-              info.sdr_white_nits != hdr_display_info.sdr_white_nits;
++              info.sdr_white_nits != hdr_display_info.sdr_white_nits ||
++              info.refresh_hz != hdr_display_info.refresh_hz;
+     hdr_display_info = info;
+   }
+   if (changed) {
+     if (info.known) {
+       REXLOG_INFO(
+           "Presenter: display HDR {}, peak {} nits, full frame {} nits, black {} nits, SDR "
+-          "white {} nits",
+-          info.hdr_enabled ? "on" : "off", info.peak_nits, info.full_frame_nits,
+-          info.min_nits, info.sdr_white_nits);
++          "white {} nits, {} Hz",
++          info.hdr_enabled ? "on" : "off", info.peak_nits, info.full_frame_nits, info.min_nits,
++          info.sdr_white_nits, info.refresh_hz);
+     } else {
+       REXLOG_INFO("Presenter: the display's HDR state is unknown");
+     }
+   }
+ }
+ 
++float Presenter::GetDisplayRefreshHz() {
++  return GetLastHdrDisplayInfo().refresh_hz;
++}
++
+ void Presenter::RefreshHdrDisplayInfo(uint32_t timeout_ms) {
+   HdrDisplayWorker::Get().QueryAndWait(std::chrono::milliseconds(timeout_ms));
+ }
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index aa5f63c..e0a66e9 100644
+index aa5f63c..aa08879 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
 @@ -11,12 +11,14 @@
@@ -6129,7 +6304,7 @@ index aa5f63c..e0a66e9 100644
  
      if (!(queue_unsupported_flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
        first_queue_family_graphics_compute =
-@@ -503,6 +518,70 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -503,6 +518,82 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
          size_t(1), device->queue_families_[device->queue_family_sparse_binding_].queues.size()));
    }
  
@@ -6139,31 +6314,43 @@ index aa5f63c..e0a66e9 100644
 +  // queue in the graphics and compute family where it has one, otherwise one
 +  // of another family that may present (any family can copy). Without one,
 +  // frame generation can't present on the connection (the presenter says so).
-+  // Windows only until frame generation is checked elsewhere (phase 5), and
-+  // only where it can run: FidelityFX's Vulkan runtime is there, the device is
++  // Wherever it can run (so it can be switched on while playing, whether
++  // frame_generation asks for it now or not): FidelityFX's Vulkan runtime is
++  // there (on Windows; elsewhere the command processor finds out), the device is
 +  // Vulkan 1.3 with the features it uses (as FSR's), and has the timeline
-+  // semaphores the pacer needs.
-+  bool frame_generation_wanted = REX_PLATFORM_WIN32 && with_swapchain && with_gpu_emulation &&
-+                                 REXCVAR_GET(frame_generation) != "off";
++  // semaphores the pacer needs. The second queue is the only cost.
++  bool frame_generation_wanted = with_swapchain && with_gpu_emulation;
 +  if (frame_generation_wanted) {
-+    const char* unavailable_why = nullptr;
-+    std::error_code runtime_error;
++    const char* unavailable_why = nullptr;       // for the log
++    const char* unavailable_menu_why = nullptr;  // for the settings menu
 +    if (properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 0)) {
 +      unavailable_why = "FidelityFX needs a Vulkan 1.3 device";
++      unavailable_menu_why = "NEEDS VULKAN 1.3";
 +    } else if (!REXCVAR_GET(temporal_aa_device_features)) {
++      // (The PS5 enables them when frame generation or FSR is chosen at the start.)
 +      unavailable_why = "temporal_aa_device_features is off";
++      unavailable_menu_why = "NEXT START";
 +    } else if (!get_physical_device_properties2_supported ||
 +               !features_1_2.supported.timelineSemaphore) {
 +      unavailable_why = "the device has no timeline semaphores";
-+    } else if (!std::filesystem::exists(
-+                   rex::filesystem::GetExecutableFolder() / "amd_fidelityfx_vk.dll",
-+                   runtime_error)) {
++      unavailable_menu_why = "NO TIMELINE SEMAPHORES";
++    }
++#if REX_PLATFORM_WIN32
++    std::error_code runtime_error;
++    if (!unavailable_why &&
++        !std::filesystem::exists(rex::filesystem::GetExecutableFolder() / "amd_fidelityfx_vk.dll",
++                                 runtime_error)) {
 +      unavailable_why = "amd_fidelityfx_vk.dll isn't next to the executable";
++      unavailable_menu_why = "NO FIDELITYFX RUNTIME";
 +    }
++#endif
 +    if (unavailable_why) {
-+      REXLOG_WARN("Vulkan device: frame generation isn't available: {}", unavailable_why);
++      REXLOG_INFO("Vulkan device: frame generation isn't available: {}", unavailable_why);
 +      frame_generation_wanted = false;
++      device->frame_generation_unsupported_reason_ = unavailable_menu_why;
 +    }
++  } else {
++    device->frame_generation_unsupported_reason_ = "NOT AVAILABLE HERE";
 +  }
 +  device->frame_generation_supported_ = frame_generation_wanted;
 +  const std::string& pacer_queue_choice = REXCVAR_GET(frame_generation_debug_pacer_queue);
@@ -6200,7 +6387,7 @@ index aa5f63c..e0a66e9 100644
    size_t max_enabled_queues_per_family = 0;
    for (const QueueFamily& queue_family : device->queue_families_) {
      max_enabled_queues_per_family =
-@@ -693,6 +772,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -693,6 +784,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  
@@ -6213,7 +6400,7 @@ index aa5f63c..e0a66e9 100644
    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
      if (with_gpu_emulation) {
        XE_UI_VULKAN_FEATURE_2(features_1_3, shaderDemoteToHelperInvocation);
-@@ -812,6 +897,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -812,6 +909,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
  #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
  #include <rex/ui/vulkan/functions/device_1_3_khr_maintenance4.inc>
    }
@@ -6633,10 +6820,10 @@ index ebb0622..8123b04 100644
    present_info.pNext = nullptr;
 diff --git a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
 new file mode 100644
-index 0000000..c8a9c0f
+index 0000000..7d90794
 --- /dev/null
 +++ b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
-@@ -0,0 +1,1259 @@
+@@ -0,0 +1,1263 @@
 +/**
 + ******************************************************************************
 + * ReXGlue: frame generation (rexglue-frame-generation.patch), Vulkan side of  *
@@ -6696,11 +6883,15 @@ index 0000000..c8a9c0f
 +
 +bool VulkanPresenter::SupportsFrameGeneration() const {
 +  // Only where generation can run: the device checked FidelityFX's Vulkan
-+  // runtime, Vulkan 1.3 with the features it uses, and the timeline semaphores
-+  // the pacer needs, and asks for them with frame generation on Windows only,
-+  // until it is checked elsewhere (phase 5).
-+  return REX_PLATFORM_WIN32 && vulkan_device_->frame_generation_supported() &&
++  // runtime (Windows), Vulkan 1.3 with the features it uses, and the timeline
++  // semaphores the pacer needs. Linux and the PS5 offer it untested (phase 5).
++  return vulkan_device_->frame_generation_supported() &&
 +         vulkan_device_->properties().timelineSemaphore;
++}
++
++const char* VulkanPresenter::FrameGenerationUnsupportedReason() const {
++  const char* reason = vulkan_device_->frame_generation_unsupported_reason();
++  return reason ? reason : "NO TIMELINE SEMAPHORES";
 +}
 +
 +void VulkanPresenter::PrepareGuestOutputThreadPaint() {
