@@ -109,7 +109,13 @@ has been built or run there yet; on
 the PS5 FSR is a choice for the next start, marked UNTESTED, as the console's
 Vulkan device gets FSR's features only when the game starts with it chosen. A
 reactive mask for rain and smoke is in but experimental and off by default.
-KNOWN-ISSUES.md has the costs and limits.
+KNOWN-ISSUES.md has the costs and limits. FidelityFX's runtime does not build
+with llvm-mingw (`make_pc.ps1 -Toolchain mingw`): that SDK has FSR support in
+its plugin but not the runtime, which comes from a prebuilt SDK or from an
+msvc build of the same checkout (the DLLs are plain C to the plugin, and work
+with either toolchain's game). They are built with MSVC and need the Visual C++
+runtime, which a mingw game otherwise does not: without it they do not load, and
+the game goes on with MSAA.
 
 ## Testing so far
 
@@ -126,6 +132,24 @@ Los Angeles Complete Edition, USA/Europe) next to the repository folder, and run
 README.md, "Windows", for the tools). Then `launcher\build-launcher.ps1`
 builds the launcher and puts a shortcut to it on the desktop, which updates,
 builds and plays from then on.
+
+Two toolchains build it (`-Toolchain`, README.md, "Windows"): `msvc`, the
+default, is the project's Clang 20.1.8 with Visual Studio Build Tools' headers
+and libraries; `mingw` is llvm-mingw 20250709 (the same Clang version, with lld,
+libc++ and the mingw-w64 headers, on Windows' own UCRT), downloaded into
+`tools\` from its release page and checked against a pinned SHA-256, with no
+Microsoft compiler and no administrator rights. Each keeps its own SDK build
+(`third_party\rexglue-sdk\out\build` and `out\install`, `win-amd64` and
+`win-amd64-mingw`) and both share the patched SDK sources: the first build
+with the other toolchain builds a second SDK, and after that switching
+rebuilds the game only. `-ToolsDir` takes portable llvm-mingw, CMake and Ninja
+instead of installing them, and `-SdkBundle` a prebuilt SDK (unpacked into
+`third_party\rexglue-sdk-bin`, and checked against this checkout's SDK commit
+and patches through its `mcla-sdk-bundle.json`) instead of cloning, patching and
+building one. `make_pc.ps1` keeps what it was asked for in
+`launcher\build-options.json`, and `launcher\build-game.ps1`, given no options,
+builds the way the last build did, so that an update (also the launcher's)
+neither falls back to msvc nor to building the SDK from source.
 
 ## Building by hand, or on Linux
 
@@ -178,7 +202,15 @@ git apply ../../patches/rexglue-vulkan-present-semaphore-per-image.patch
 git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
 git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 git apply ../../patches/rexglue-shader-storage-prepare.patch
+git apply ../../patches/rexglue-mingw.patch
+git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
+
+The last two are for building on Windows with llvm-mingw (`scripts\make_pc.ps1
+-Toolchain mingw`, below); `make_pc.ps1` applies them with either toolchain,
+since each change in them is guarded by the compiler or has no effect for any
+other. On Linux and the PS5 they are not needed (they apply, and change nothing
+there).
 
 The fork's SDK patches are built and tested on Windows only. On Linux they
 apply in this order on top of the two Linux patches, but have not been built

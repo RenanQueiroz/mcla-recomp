@@ -5,7 +5,9 @@
 # Needs Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++
 # workload) and Clang 20. Whatever is missing, the script offers to install
 # (winget, and Clang from the LLVM project's releases); README.md
-# lists them for doing it by hand.
+# lists them for doing it by hand. With -Toolchain mingw it needs no Microsoft
+# compiler: Clang, lld, libc++ and the mingw-w64 headers come in one download
+# (llvm-mingw), which needs no administrator rights.
 # Everything is built on your machine from your own copy of the game: nothing
 # of the game is in this repository, and what this builds is not for sharing.
 #
@@ -17,7 +19,43 @@
 #   -Play        start the game when the build is done
 #   -InstallTools  install missing tools without asking first
 #   -Preset      CMake preset of the game build (default win-amd64-release)
-param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset = "win-amd64-release")
+#   -Toolchain   msvc (default): the project's Clang 20.1.8 with Visual Studio
+#                Build Tools' headers and libraries. mingw: llvm-mingw 20250709
+#                (Clang 20.1.8, lld, libc++, mingw-w64 and Windows' own UCRT),
+#                downloaded into tools\ and checked against a pinned SHA-256.
+#                Each toolchain keeps its own SDK build (the first build with
+#                the other one builds a second SDK; after that, switching
+#                rebuilds only the game). A game built with mingw needs
+#                libc++.dll and libunwind.dll next to mcla.exe (copied), not the
+#                Visual C++ runtime, except for FSR's DLLs, which are built with
+#                MSVC and do need it (without it the game goes on with MSAA); its
+#                debug information is split into mcla.exe.debug.
+#   -ToolsDir    a folder with portable tools to use instead of installing or
+#                downloading them: llvm-mingw-*\ (mingw) or clang+llvm-*\
+#                (msvc), cmake*\ and ninja*\ (or ninja.exe) in it; it has to
+#                exist. A tool not found there is looked for as usual. Nothing
+#                is added to the PATH outside this process.
+#   -SdkBundle   a prebuilt ReXGlue SDK instead of cloning, patching and building
+#                the SDK: a folder (used where it is, and trusted as it is), or a
+#                .zip, a path or an https URL; a URL needs -SdkBundleSha256, and
+#                http is refused. A .zip is checked against the SHA-256 when one
+#                is given and unpacked into third_party\rexglue-sdk-bin. Either
+#                way its layout, the toolchain it was built with, and the SDK
+#                commit and patches it was built from (mcla-sdk-bundle.json,
+#                which this script writes into the SDK it builds) have to be
+#                this checkout's.
+#
+# What a finished build was asked for (-Toolchain, -ToolsDir, -SdkBundle, its
+# SHA-256) is kept in launcher\build-options.json when it is not just the
+# defaults, and launcher\build-game.ps1 (so an update, also the launcher's)
+# builds with the same options when it is given none.
+#
+# On a PC with little free memory the number of compiler jobs is capped (about
+# one per 0.5 GB), so that it does not page; set CMAKE_BUILD_PARALLEL_LEVEL to
+# choose it yourself.
+param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset = "win-amd64-release",
+      [ValidateSet("msvc", "mingw")][string]$Toolchain = "msvc", [string]$ToolsDir = "",
+      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "")
 
 $ErrorActionPreference = "Stop"
 # The SDK has files deep in its submodules: git on Windows needs core.longpaths
@@ -25,15 +63,38 @@ $ErrorActionPreference = "Stop"
 # without touching anyone's git configuration.
 $env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
 $root = Split-Path $PSScriptRoot -Parent
+. "$PSScriptRoot\mcla-lib.ps1"
 $sdk = "$root\third_party\rexglue-sdk"
 $sdkTag = "v0.10.0"
 $sdkCommit = "f5337cdc947ff6d4c4196737e2c807a48f2a1fc2"
-$install = "$sdk\out\install\win-amd64"
+$mingw = $Toolchain -eq "mingw"
+# Each toolchain has its own SDK build and install, so that the other one's
+# stay as they are (msvc: the folders earlier versions of this script used).
+$sdkBuildName = if ($mingw) { "win-amd64-mingw" } else { "win-amd64" }
+$install = "$sdk\out\install\$sdkBuildName"
+$bundleDir = "$root\third_party\rexglue-sdk-bin"
 $logs = "$root\out\logs"
 New-Item -ItemType Directory -Force $logs | Out-Null
 
 function Step([string]$text) { Write-Host ""; Write-Host "==> $text" }
 function Fail([string]$text) { Write-Host ""; Write-Host "FAILED: $text" -ForegroundColor Red; exit 1 }
+
+# Paths given on the command line are taken from where the command was run, as
+# absolute paths (the script works in the repository's folder), and have to be
+# there: a -ToolsDir that is not there is not "no tools found". A path with [ ]
+# in it is a path: -LiteralPath for every one.
+if ($ToolsDir) {
+    if (-not (Test-Path -LiteralPath $ToolsDir -PathType Container)) { Fail "-ToolsDir: no such folder: $ToolsDir" }
+    $ToolsDir = (Resolve-Path -LiteralPath $ToolsDir).ProviderPath
+}
+$sdkBundleIsUrl = $SdkBundle -match '^[A-Za-z][A-Za-z0-9+.-]*://'
+if ($SdkBundle -and -not $sdkBundleIsUrl) {
+    if (-not (Test-Path -LiteralPath $SdkBundle)) { Fail "no such SDK bundle: $SdkBundle (a folder, a .zip, or an https URL of one)" }
+    $SdkBundle = (Resolve-Path -LiteralPath $SdkBundle).ProviderPath
+}
+if ($Iso -and (Test-Path -LiteralPath $Iso)) { $Iso = (Resolve-Path -LiteralPath $Iso).ProviderPath }
+if ($SdkBundleSha256 -and -not $SdkBundle) { Fail "-SdkBundleSha256 is for -SdkBundle" }
+if ($SdkBundleSha256 -and $SdkBundleSha256.Trim() -notmatch '^[0-9a-fA-F]{64}$') { Fail "-SdkBundleSha256 is not a SHA-256 (64 hexadecimal digits)" }
 # Run a command with its output in a log; on failure show the end of the log.
 function Logged([string]$name, [scriptblock]$command) {
     $log = "$logs\$name.log"
@@ -42,7 +103,7 @@ function Logged([string]$name, [scriptblock]$command) {
     $ErrorActionPreference = "Continue"
     & $command 2>&1 | ForEach-Object { "$_" } > $log
     if ($LASTEXITCODE -ne 0) {
-        Get-Content $log -Tail 25 | ForEach-Object { Write-Host $_ }
+        Get-Content -LiteralPath $log -Tail 25 | ForEach-Object { Write-Host $_ }
         Fail "$name (full log: $log)"
     }
 }
@@ -62,12 +123,12 @@ function Patch([string]$name, [string]$repo, [string]$patch) {
 # that is in without its current hash there stops the build: the SDK has to
 # be patched afresh, as reverting an older version can fail where later
 # patches change the same lines.
-function PatchHash([string]$patch) { (Get-FileHash -Algorithm SHA256 $patch).Hash.ToLowerInvariant() }
+function PatchHash([string]$patch) { (Get-FileHash -Algorithm SHA256 -LiteralPath $patch).Hash.ToLowerInvariant() }
 function RecordPatch([string]$patch) {
     $leaf = Split-Path $patch -Leaf
     $lines = @()
-    if (Test-Path "$sdk\.mcla-patches") {
-        $lines = @(Get-Content "$sdk\.mcla-patches" | Where-Object { -not $_.EndsWith(" $leaf") })
+    if (Test-Path -LiteralPath "$sdk\.mcla-patches") {
+        $lines = @(Get-Content -LiteralPath "$sdk\.mcla-patches" | Where-Object { -not $_.EndsWith(" $leaf") })
     }
     $lines += "$(PatchHash $patch) $leaf"
     Set-Content -Force -Encoding Ascii "$sdk\.mcla-patches" $lines
@@ -75,8 +136,8 @@ function RecordPatch([string]$patch) {
 function CheckPatch([string]$patch) {
     $leaf = Split-Path $patch -Leaf
     $record = $null
-    if (Test-Path "$sdk\.mcla-patches") {
-        $record = Get-Content "$sdk\.mcla-patches" | Where-Object { $_.EndsWith(" $leaf") } | Select-Object -First 1
+    if (Test-Path -LiteralPath "$sdk\.mcla-patches") {
+        $record = Get-Content -LiteralPath "$sdk\.mcla-patches" | Where-Object { $_.EndsWith(" $leaf") } | Select-Object -First 1
     }
     $again = "Patch the SDK afresh: launcher\build-game.ps1 -ResetSdk, or delete third_party\rexglue-sdk, and run this again."
     if (-not $record) {
@@ -87,6 +148,257 @@ function CheckPatch([string]$patch) {
     }
 }
 
+# Remove a folder and stop if it is still there (a program has a file in it
+# open, or a path in it is too long for PowerShell 5.1): a new folder moved over
+# a leftover one would end up inside it, and the script would go on with the old.
+function RemoveFolder([string]$path) {
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $path) {
+            Fail "could not remove $path (a program may have a file in it open, or a path in it is too long for PowerShell): close it, delete the folder by hand, and run this again. Nothing else was changed."
+        }
+    }
+}
+
+# Unpack a .zip into a new, empty folder (an old one is removed). tar.exe
+# (Windows 10 and later) is quick; .NET if it cannot. The folders it is given are
+# short ones, as the archives hold paths of over 100 characters.
+function UnzipTo([string]$name, [string]$archive, [string]$dest) {
+    RemoveFolder $dest
+    New-Item -ItemType Directory -Force $dest | Out-Null
+    Logged $name {
+        tar.exe -xf $archive -C $dest
+        if ($LASTEXITCODE -ne 0) {
+            "tar.exe could not unpack the archive; unpacking it with .NET instead"
+            Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                [IO.Compression.ZipFile]::ExtractToDirectory($archive, $dest)
+                $global:LASTEXITCODE = 0
+            } catch { "$_"; $global:LASTEXITCODE = 1 }
+        }
+    }
+}
+
+# The runtime a program built with llvm-mingw loads: libc++ and libunwind, in
+# place of the Visual C++ runtime (Apache-2.0 with the LLVM exception; no
+# notice is needed with a binary), from the toolchain or from $from. Beside
+# rexglue.exe and the SDK's DLLs, and beside mcla.exe. -OnlyIfMissing leaves one
+# that is there (a bundle's own: they belong to the SDK it was built with).
+function CopyMingwRuntime([string]$dest, [string]$from = "", [switch]$OnlyIfMissing) {
+    if (-not $from) { $from = "$env:MCLA_MINGW_ROOT\x86_64-w64-mingw32\bin" }
+    foreach ($dll in "libc++.dll", "libunwind.dll") {
+        if (-not (Test-Path -LiteralPath "$from\$dll")) { Fail "$from\$dll is missing: there is no x86_64 UCRT runtime there" }
+        $target = Get-Item -LiteralPath "$dest\$dll" -ErrorAction SilentlyContinue
+        $same = $target -and $target.Length -eq (Get-Item -LiteralPath "$from\$dll").Length
+        if (-not $target -or (-not $OnlyIfMissing -and -not $same)) { Copy-Item -LiteralPath "$from\$dll" -Destination $dest -Force }
+    }
+}
+
+# What is wrong with a prebuilt SDK folder (empty when nothing): the files the
+# game's build and the launcher need, and that it was built with the toolchain
+# asked for (libraries of the one cannot be linked by the other: libc++ against
+# the Microsoft STL).
+function SdkLayoutProblem([string]$dir) {
+    $need = "bin\rexglue.exe", "bin\rexruntime.dll", "bin\rexgpu-xenos.dll", "lib\cmake\rexglue\rexglueConfig.cmake", "include\rex"
+    $missing = @($need | Where-Object { -not (Test-Path -LiteralPath "$dir\$_") })
+    if ($missing) { return "it lacks $($missing -join ', ')" }
+    $bundleMingw = Test-Path -LiteralPath "$dir\lib\rexruntime.dll.a"
+    $bundleMsvc = Test-Path -LiteralPath "$dir\lib\rexruntime.lib"
+    if (-not $bundleMingw -and -not $bundleMsvc) { return "it has no import library for rexruntime.dll (lib\rexruntime.dll.a or lib\rexruntime.lib)" }
+    if ($mingw -and -not $bundleMingw) { return "it was built with the msvc toolchain, and this is -Toolchain mingw" }
+    if (-not $mingw -and $bundleMingw) { return "it was built with the mingw toolchain: use -Toolchain mingw" }
+    ""
+}
+
+# What an SDK was built from, written into its install folder (and so into a
+# bundle made from it): the SDK commit, the toolchain, and the SHA-256 of every
+# patch applied (as .mcla-patches records them). A prebuilt SDK is used only when
+# it says the same as this checkout, so that a bundle made before a pull is not
+# built against.
+$bundleManifestName = "mcla-sdk-bundle.json"
+function ExpectedPatchNames {
+    @("rexglue-v0.10.0-mcla.patch", "rexglue-ffmpeg-ps5-config.patch", "rexglue-minmax-blend-factor.patch") +
+        @($laterPatches | ForEach-Object { $_.Patch })
+}
+function WriteBundleManifest([string]$dir) {
+    $patches = @()
+    foreach ($line in (Get-Content -LiteralPath "$sdk\.mcla-patches")) {
+        if ($line -match '^([0-9a-f]{64}) (\S+)$') { $patches += [ordered]@{ name = $Matches[2]; sha256 = $Matches[1] } }
+    }
+    $manifest = [ordered]@{
+        format = 1; sdkCommit = $sdkCommit; toolchain = $Toolchain
+        patches = @($patches | Sort-Object -Property @{ Expression = { $_["name"] } })
+    }
+    Set-Content -LiteralPath "$dir\$bundleManifestName" -Encoding Ascii (($manifest | ConvertTo-Json -Depth 4) + "`r`n")
+}
+function BundleManifestProblem([string]$dir) {
+    $file = "$dir\$bundleManifestName"
+    if (-not (Test-Path -LiteralPath $file)) {
+        return "it has no $bundleManifestName (the SDK that make_pc.ps1 builds has one, and so has a release's bundle)"
+    }
+    try { $m = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { return "its $bundleManifestName cannot be read" }
+    if ($m.format -ne 1) { return "its $bundleManifestName is of another format ($($m.format))" }
+    if ($m.sdkCommit -ne $sdkCommit) { return "it was built from SDK commit $($m.sdkCommit), and this checkout's is $sdkCommit" }
+    if ($m.toolchain -ne $Toolchain) { return "its manifest says the $($m.toolchain) toolchain, and this is -Toolchain $Toolchain" }
+    $theirs = @{}
+    foreach ($p in @($m.patches)) { $theirs[[string]$p.name] = [string]$p.sha256 }
+    $expectedNames = @(ExpectedPatchNames)
+    $differ = @()
+    foreach ($name in $expectedNames) {
+        $patchFile = "$root\patches\$name"
+        if (-not $theirs.ContainsKey($name)) { $differ += "$name (not in it)" }
+        elseif (-not (Test-Path -LiteralPath $patchFile) -or $theirs[$name] -ne (PatchHash $patchFile)) { $differ += "$name (another version)" }
+    }
+    foreach ($name in $theirs.Keys) { if ($expectedNames -notcontains $name) { $differ += "$name (this checkout does not apply it)" } }
+    if ($differ) {
+        $more = if ($differ.Count -gt 4) { ", and $($differ.Count - 4) more" } else { "" }
+        return "it was built from other patches than this checkout's: $((@($differ) | Select-Object -First 4) -join ', ')$more"
+    }
+    ""
+}
+
+# -SdkBundle: a prebuilt SDK instead of cloning, patching and building one. A
+# folder is used where it is (nothing is written into it). A .zip (a path, or an
+# https URL, which needs its SHA-256 and is downloaded into out\downloads and
+# removed after) is unpacked into third_party\rexglue-sdk-bin, and again only when
+# it is another one: the SHA-256 of what is unpacked is kept in .mcla-bundle, so a
+# run with -SdkBundleSha256 does not even download it twice. The zip holds the
+# install tree (bin, lib, include, share), directly or in a single folder. What is
+# in place is looked at at every run (layout, manifest) against this checkout, so
+# that "unpacked already" never means "still the right one". Sets $install.
+function UseSdkBundle {
+    $expected = $SdkBundleSha256.Trim().ToLowerInvariant()
+    $record = "$bundleDir\.mcla-bundle"
+    $unpacked = ""
+    if (Test-Path -LiteralPath $record) {
+        $first = Get-Content -LiteralPath $record -TotalCount 1
+        if ($first) { $unpacked = $first.Trim() }
+    }
+    if (-not $sdkBundleIsUrl -and (Test-Path -LiteralPath $SdkBundle -PathType Container)) {
+        $dir = $SdkBundle
+        "SDK bundle: the folder $dir, used where it is (nothing is written into it; -SdkBundleSha256 is for a .zip)"
+    } else {
+        if ($sdkBundleIsUrl) {
+            if ($SdkBundle -notmatch '^https://') { Fail "-SdkBundle takes https URLs only, not $SdkBundle" }
+            if (-not $expected) {
+                Fail "a -SdkBundle URL needs -SdkBundleSha256: what is downloaded is run (rexglue.exe) and put beside the game, so it is checked against the hash the release names."
+            }
+        }
+        $zip = $SdkBundle
+        $downloaded = $false
+        if ($sdkBundleIsUrl -and $unpacked -eq $expected -and (Test-Path -LiteralPath "$bundleDir\bin\rexglue.exe")) {
+            "SDK bundle $expected is unpacked already"
+        } else {
+            if ($sdkBundleIsUrl) {
+                New-Item -ItemType Directory -Force "$root\out\downloads" | Out-Null
+                # A file name made of the URL's last part, with nothing in it that is a path.
+                $leaf = (($SdkBundle -split '[?#]')[0].Split('/')[-1]) -replace '[^A-Za-z0-9._-]', '_'
+                if (-not $leaf -or $leaf -match '^\.+$') { $leaf = "sdk-bundle.zip" }
+                $zip = "$root\out\downloads\$leaf"
+                $downloaded = $true
+                "downloading the SDK bundle"
+                Logged "sdk-bundle-download" { curl.exe -L --fail --proto "=https" --proto-redir "=https" -o $zip $SdkBundle }
+            }
+            $dropZip = { if ($downloaded) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue } }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+            if ($expected -and $actual -ne $expected) {
+                & $dropZip
+                Fail "the SDK bundle's SHA-256 is $actual, not the $expected given with -SdkBundleSha256; nothing was unpacked."
+            }
+            if ($actual -eq $unpacked -and (Test-Path -LiteralPath "$bundleDir\bin\rexglue.exe")) {
+                "SDK bundle $actual is unpacked already"
+            } else {
+                "unpacking the SDK bundle into $bundleDir"
+                $tmp = "$root\third_party\.u"
+                New-Item -ItemType Directory -Force "$root\third_party" | Out-Null
+                UnzipTo "sdk-bundle-unpack" $zip $tmp
+                $top = if (Test-Path -LiteralPath "$tmp\bin\rexglue.exe") { $tmp } else {
+                    $inner = @(Get-ChildItem -LiteralPath $tmp -Directory | Where-Object { Test-Path -LiteralPath "$($_.FullName)\bin\rexglue.exe" })
+                    if ($inner.Count -eq 1) { $inner[0].FullName } else { $null }
+                }
+                if (-not $top) {
+                    & $dropZip; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+                    Fail "the SDK bundle holds no bin\rexglue.exe (the zip is the install tree: bin, lib, include, share)"
+                }
+                # Looked at before it replaces the one in place.
+                $problem = SdkLayoutProblem $top
+                if (-not $problem) { $problem = BundleManifestProblem $top }
+                if ($problem) {
+                    & $dropZip; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+                    Fail "the SDK bundle cannot be used: $problem (nothing was changed)."
+                }
+                RemoveFolder $bundleDir
+                Move-Item -LiteralPath $top -Destination $bundleDir
+                Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+                Set-Content -LiteralPath $record -Encoding Ascii $actual
+            }
+            & $dropZip
+        }
+        $dir = $bundleDir
+    }
+    # Whatever is in place, now: the layout, and that it is this checkout's SDK.
+    $problem = SdkLayoutProblem $dir
+    if ($problem) { Fail "the SDK bundle at $dir cannot be used: $problem." }
+    $problem = BundleManifestProblem $dir
+    if ($problem) {
+        Fail "the SDK bundle at $dir is not this checkout's SDK: $problem. Use the bundle of the release this checkout is at, or build the SDK here (run without -SdkBundle)."
+    }
+    # The unpacked one is ours; a folder given is not written into.
+    if ($mingw -and $dir -eq $bundleDir) { CopyMingwRuntime "$dir\bin" -OnlyIfMissing }
+    $script:install = $dir
+}
+
+# Later patches to the SDK (patches\README.md), applied in the order they were
+# made, as several change neighbouring lines: each goes onto an SDK patched before
+# it existed, found by a name it adds. Above the steps, as a prebuilt SDK is
+# checked against the same list.
+$laterPatches = @(
+    @{ Patch = "rexglue-gpu-regwrite-bulk.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_regwrite_bulk" }
+    @{ Patch = "rexglue-imgui-dialog-repaint-on-demand.patch"; File = "include\rex\ui\imgui_dialog.h"; Adds = "RepaintsContinuously" }
+    @{ Patch = "rexglue-inline-bit-helpers.patch"; File = "include\rex\math.h"; Adds = "Out of line in rexruntime" }
+    @{ Patch = "rexglue-perf-counters-batched.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_batch_perf_counters" }
+    @{ Patch = "rexglue-shared-memory-request-fast-path.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "shared_memory_request_fast_path" }
+    @{ Patch = "rexglue-threaded-submission-d3d12.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_threaded_submission" }
+    @{ Patch = "rexglue-timer-queue-blocking-wait.patch"; File = "src\core\timer_queue.cpp"; Adds = "timer_queue_blocking_wait" }
+    @{ Patch = "rexglue-shared-memory-fast-path-hot-pages.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "shared_memory_request_fast_path_with_hot_pages" }
+    @{ Patch = "rexglue-hot-pages-watched-ranges.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "Watching wins" }
+    @{ Patch = "rexglue-cursor-auto-hide.patch"; File = "src\ui\window.cpp"; Adds = "RequestAutoHiddenCursorHide" }
+    @{ Patch = "rexglue-vulkan-memexport-check-order.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "most draws export nothing" }
+    @{ Patch = "rexglue-vulkan-hoist-shared-memory-uploads.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_hoist_shared_memory_uploads" }
+    @{ Patch = "rexglue-threaded-submission-vulkan.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_threaded_submission" }
+    @{ Patch = "rexglue-d3d12-placed-texture-heaps.patch"; File = "src\graphics\d3d12\texture_cache.cpp"; Adds = "d3d12_texture_heaps" }
+    @{ Patch = "rexglue-vulkan-texture-load-storage-copy.patch"; File = "src\graphics\vulkan\texture_cache.cpp"; Adds = "vulkan_texture_load_storage_copy" }
+    @{ Patch = "rexglue-clear-rectangle-draws.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "clear_rectangle_draws" }
+    @{ Patch = "rexglue-texture-load-direct.patch"; File = "src\graphics\pipeline\texture\cache.cpp"; Adds = "texture_load_direct" }
+    @{ Patch = "rexglue-async-pipelines-no-frame-wait.patch"; File = "src\graphics\command_processor.cpp"; Adds = "async_pipeline_wait_budget_ms" }
+    @{ Patch = "rexglue-vulkan-pipeline-storage-parallel-translation.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "vulkan_pipeline_storage_translation_threads" }
+    @{ Patch = "rexglue-vulkan-pipeline-cache-file.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "vulkan_pipeline_cache_file" }
+    @{ Patch = "rexglue-resolve-4xmsaa-depth-samples.patch"; File = "src\graphics\shaders\bytecode\d3d12_5_1\resolve_fast_32bpp_4xmsaa_cs.h"; Adds = "Approximately 200 instruction slots used" }
+    @{ Patch = "rexglue-direct-resolve.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "GetDirectResolveSource" }
+    @{ Patch = "rexglue-cvar-toml-strings.patch"; File = "src\core\cvar.cpp"; Adds = "LoadConfigByLine" }
+    @{ Patch = "rexglue-edram-size.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "edram_tiles" }
+    @{ Patch = "rexglue-guest-markers.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "OnGuestMarker" }
+    @{ Patch = "rexglue-hdr-output.patch"; File = "src\ui\presenter.cpp"; Adds = "IsHdrOutputWanted" }
+    @{ Patch = "rexglue-hdr-ui-layer.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrBeforeResolve" }
+    @{ Patch = "rexglue-hdr-scene-mcla.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrPrepareScene" }
+    @{ Patch = "rexglue-temporal-aa.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaJitterNdcOffset" }
+    @{ Patch = "rexglue-temporal-aa-shaders-vk.patch"; File = "thirdparty\fidelityfx-shaders-vk\rexglue_fsr_shaders_vk.h"; Adds = "REXGLUE_FSR_SHADERS_VK_FLAGS" }
+    @{ Patch = "rexglue-fullscreen-setting-ui-thread.patch"; File = "src\ui\rex_app.cpp"; Adds = "after the lock is released" }
+    @{ Patch = "rexglue-presenter-ui-overlay.patch"; File = "src\ui\vulkan\vulkan_presenter_ui_overlay.cpp"; Adds = "CreateUIOverlayFromUIThread" }
+    @{ Patch = "rexglue-frame-generation.patch"; File = "src\ui\vulkan\vulkan_presenter_frame_generation.cpp"; Adds = "FramePacerThread" }
+    @{ Patch = "rexglue-vulkan-paint-pipeline-format.patch"; File = "src\ui\vulkan\vulkan_presenter.cpp"; Adds = "swapchain_effect_pipeline.swapchain_format =" }
+    @{ Patch = "rexglue-vulkan-present-semaphore-per-image.patch"; File = "src\ui\vulkan\vulkan_presenter.cpp"; Adds = "swapchain_present_semaphores.push_back" }
+    @{ Patch = "rexglue-d3d12-storage-preload-threads.patch"; File = "src\graphics\d3d12\pipeline_cache.cpp"; Adds = "creation_threads_.size() < creation_thread_needed_count" }
+    @{ Patch = "rexglue-vulkan-pipeline-storage-keep-unsupported.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "pipeline_storage_valid_count" }
+    @{ Patch = "rexglue-shader-storage-prepare.patch"; File = "src\graphics\shader_storage_progress.h"; Adds = "ShaderStorageProgress" }
+    # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
+    # by the compiler or a no-op for the other, so that one patched SDK
+    # serves both, and switching toolchains needs no new patching.
+    @{ Patch = "rexglue-mingw.patch"; File = "cmake\mingw_imp_exports.cmake"; Adds = "__imp_" }
+    @{ Patch = "rexglue-ffmpeg-mingw-config.patch"; Repo = "thirdparty\FFmpeg"; File = "config.h"; Adds = "HAVE_LIBC_MSVCRT 0" }
+)
+
 # Git refuses a repository folder whose path is over 220 characters, with
 # core.longpaths or without; the longest below this folder is 72 (the
 # submodule vulkan-memory-allocator's), so this folder's path may have 148.
@@ -96,6 +408,11 @@ if ($root.Length -gt 148) {
 
 Push-Location $root
 try {
+    $lastOptions = Get-BuildOptions $root
+    if ($lastOptions -and ($lastOptions.Toolchain -ne $Toolchain -or $lastOptions.ToolsDir -ne $ToolsDir -or
+                           $lastOptions.SdkBundle -ne $SdkBundle -or $lastOptions.SdkBundleSha256 -ne $SdkBundleSha256.Trim())) {
+        "note: the last build used -Toolchain $($lastOptions.Toolchain)$(if ($lastOptions.ToolsDir) { ' -ToolsDir ' + $lastOptions.ToolsDir })$(if ($lastOptions.SdkBundle) { ' -SdkBundle ' + $lastOptions.SdkBundle }); this one is $Toolchain, and launcher\build-options.json will say so (launcher\build-game.ps1 without options builds as the last build did)"
+    }
     # -----------------------------------------------------------------------
     Step "1/6 tools"
     # What the build needs, how to tell that it is there, and how to get it.
@@ -103,31 +420,90 @@ try {
     # portable build from the LLVM project, unpacked into tools\.
     $llvmVersion = "20.1.8"
     $llvmName = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc"
+    # -Toolchain mingw: llvm-mingw, Clang $llvmVersion again with lld, libc++ and
+    # mingw-w64, in one zip from its release page. Pinned, with the SHA-256 of
+    # the zip (the one GitHub shows for the release asset); a download that does
+    # not match is deleted. Programs it builds use Windows' own UCRT.
+    $mingwVersion = "20250709"
+    $mingwName = "llvm-mingw-$mingwVersion-ucrt-x86_64"
+    $mingwUrl = "https://github.com/mstorsjo/llvm-mingw/releases/download/$mingwVersion/$mingwName.zip"
+    $mingwSha256 = "82babcd6aae4dc3606e8e0471d816989c384b4bf86a139f184a8b4a1b2c2758d"
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     function HasBuildTools {
-        if (-not (Test-Path $vswhere)) { return $false }
+        if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
         [bool](& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     }
     function RefreshPath {
         $env:PATH = [Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
                     [Environment]::GetEnvironmentVariable("PATH", "User")
-        . "$PSScriptRoot\env.ps1"
+        . "$PSScriptRoot\env.ps1" -Toolchain $Toolchain -ToolsDir $ToolsDir
+    }
+    # llvm-mingw into tools\: downloaded, checked against the pinned SHA-256
+    # (a download that does not match is deleted and nothing is unpacked),
+    # unpacked next to its final place and moved there only when complete, so
+    # that an interrupted run leaves no half-unpacked compiler that looks
+    # installed. No administrator rights, no registry, no PATH.
+    function FetchMingw {
+        New-Item -ItemType Directory -Force "$root\tools" | Out-Null
+        $archive = "$root\tools\$mingwName.zip"
+        $partial = "$archive.part"
+        function Sha256Of([string]$path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() }
+        # Its longest path is 117 characters (a Python extension): from a folder of
+        # more than 133 it passes 260, which tar.exe copes with and PowerShell 5.1
+        # does not (nor the .NET fallback).
+        if ($root.Length -gt 133) {
+            "note: this folder's path is $($root.Length) characters long, and llvm-mingw has files whose paths pass 260 characters from here: if unpacking or removing it fails, move the folder to a shorter path"
+        }
+        # A zip that is there already and right (an earlier run's, or one put there)
+        # is used, and is not removed after.
+        $downloaded = $false
+        if (-not ((Test-Path -LiteralPath $archive) -and (Sha256Of $archive) -eq $mingwSha256)) {
+            "downloading llvm-mingw $mingwVersion (about 170 MB) into tools\"
+            # Named install-clang for the launcher, which shows "Downloading Clang" for that log.
+            Logged "install-clang" { curl.exe -L --fail --proto "=https" --proto-redir "=https" -o $partial $mingwUrl }
+            $actual = Sha256Of $partial
+            if ($actual -ne $mingwSha256) {
+                Remove-Item -LiteralPath $partial -Force
+                Fail "the llvm-mingw download does not match its pinned SHA-256 ($mingwSha256; got $actual), so it was deleted and nothing was unpacked. Try again, or download $mingwUrl yourself, unpack it and give the folder with -ToolsDir."
+            }
+            Move-Item -LiteralPath $partial -Destination $archive -Force
+            $downloaded = $true
+        }
+        "unpacking llvm-mingw (700 MB; about a minute)"
+        # A short folder of its own: the archive's paths are long.
+        $unpack = "$root\tools\.u"
+        UnzipTo "unpack-llvm-mingw" $archive $unpack
+        if (-not (Test-Path -LiteralPath "$unpack\$mingwName\bin\clang.exe")) { Fail "the llvm-mingw archive does not hold $mingwName\bin\clang.exe" }
+        RemoveFolder "$root\tools\$mingwName"
+        Move-Item -LiteralPath "$unpack\$mingwName" -Destination "$root\tools\$mingwName"
+        Remove-Item -LiteralPath $unpack -Recurse -Force -ErrorAction SilentlyContinue
+        if ($downloaded) { Remove-Item -LiteralPath $archive -Force }
     }
     function MissingTools {
         RefreshPath
         $list = @()
-        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $list += "Git" }
+        # A prebuilt SDK needs no Git (it is for cloning the SDK), and no Python
+        # (for building it) once the game is extracted.
+        if (-not $SdkBundle -and -not (Get-Command git -ErrorAction SilentlyContinue)) { $list += "Git" }
         if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { $list += "CMake" }
         if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $list += "Ninja" }
         # The Microsoft Store's placeholder python.exe is not Python.
         $python = Get-Command python -ErrorAction SilentlyContinue
-        if (-not $python -or $python.Source -like "*WindowsApps*") { $list += "Python" }
-        if (-not (HasBuildTools)) { $list += "Visual Studio Build Tools" }
-        # Only the project's own Clang counts: another one on the path may not
-        # find the Microsoft headers (issue #9).
-        if (-not (Test-Path "$root\tools\$llvmName\bin\clang.exe")) { $list += "Clang" }
-        # Optional: FSR 3.1's Vulkan runtime is built only with it.
-        if (-not (HasVulkanSdk)) { $list += "Vulkan SDK" }
+        if ((-not $SdkBundle -or -not (Test-Path -LiteralPath "$root\game\default.xex")) -and
+            (-not $python -or $python.Source -like "*WindowsApps*")) { $list += "Python" }
+        if ($mingw) {
+            # In -ToolsDir, or unpacked into tools\ (env.ps1 found it).
+            if (-not $env:MCLA_CC -or -not (Test-Path -LiteralPath $env:MCLA_CC)) { $list += "llvm-mingw" }
+        } else {
+            if (-not (HasBuildTools)) { $list += "Visual Studio Build Tools" }
+            # Only the project's own Clang counts: another one on the path may not
+            # find the Microsoft headers (issue #9). One in -ToolsDir is the user's choice.
+            if (-not (Test-Path -LiteralPath "$root\tools\$llvmName\bin\clang.exe") -and
+                -not ($ToolsDir -and $env:MCLA_CC -and (Test-Path -LiteralPath $env:MCLA_CC))) { $list += "Clang" }
+        }
+        # Optional: FSR 3.1's Vulkan runtime is built only with it (and only
+        # when the SDK is built here with msvc: llvm-mingw cannot build FSR).
+        if (-not $SdkBundle -and -not $mingw -and -not (HasVulkanSdk)) { $list += "Vulkan SDK" }
         $list
     }
     # The Vulkan SDK (its headers and loader library): VULKAN_SDK, as its
@@ -135,7 +511,7 @@ try {
     function HasVulkanSdk {
         $machine = [Environment]::GetEnvironmentVariable("VULKAN_SDK", "Machine")
         if (-not $env:VULKAN_SDK -and $machine) { $env:VULKAN_SDK = $machine }
-        if ($env:VULKAN_SDK -and (Test-Path "$env:VULKAN_SDK\Include\vulkan\vulkan.h")) { return $true }
+        if ($env:VULKAN_SDK -and (Test-Path -LiteralPath "$env:VULKAN_SDK\Include\vulkan\vulkan.h")) { return $true }
         [bool](Get-ChildItem "C:\VulkanSDK\*\Include\vulkan\vulkan.h" -ErrorAction SilentlyContinue)
     }
     $missing = @(MissingTools)
@@ -156,11 +532,17 @@ try {
     if ($missing) {
         "missing: $($missing -join ', ')"
         if ($required -and -not $InstallTools) {
-            $answer = Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights, and so does the Vulkan SDK. [y/N]"
+            $answer = if ($mingw) {
+                Read-Host "Install them now? Programs come from winget (CMake's installer may ask for administrator rights), the compiler (llvm-mingw, about 170 MB, no administrator rights) from its release page, checked against a pinned SHA-256; the Vulkan SDK asks for administrator rights. [y/N]"
+            } else {
+                Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights, and so does the Vulkan SDK. [y/N]"
+            }
             if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in README.md) and run this again, or run with -InstallTools" }
         }
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install the tools by hand (README.md, 'Windows')" }
         $ids = @{ "Git" = "Git.Git"; "CMake" = "Kitware.CMake"; "Ninja" = "Ninja-build.Ninja"; "Python" = "Python.Python.3.12" }
+        # winget is for what comes from winget: not for llvm-mingw (a download) or Clang.
+        $fromWinget = @($missing | Where-Object { $ids.ContainsKey($_) -or $_ -eq "Visual Studio Build Tools" -or $_ -eq "Vulkan SDK" })
+        if ($fromWinget -and -not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install $($fromWinget -join ', ') by hand (README.md, 'Windows')" }
         foreach ($name in $missing) {
             if ($ids.ContainsKey($name)) {
                 "installing $name"
@@ -189,6 +571,8 @@ try {
                     }
                 }
                 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
+            } elseif ($name -eq "llvm-mingw") {
+                FetchMingw
             } elseif ($name -eq "Vulkan SDK") {
                 # Not through Logged: the build goes on without it.
                 "installing the Vulkan SDK (for FSR on Vulkan; it asks for administrator rights)"
@@ -208,168 +592,213 @@ try {
         if ($missing) { Fail "still missing after installing: $($missing -join ', '). A new PowerShell window may be needed; then run this again" }
     }
     "clang: $env:MCLA_CC ($((& $env:MCLA_CC --version | Select-Object -First 1)))"
+    if ($mingw) {
+        "toolchain: mingw (llvm-mingw, libc++ and Windows' UCRT; the game needs no Visual C++ runtime, FSR's DLLs do)"
+        if ($env:MCLA_MINGW_ROOT -notlike "*$mingwName") {
+            "WARNING: the build is made and tested with llvm-mingw $mingwVersion (Clang $llvmVersion, libc++ 20); this one is $env:MCLA_MINGW_ROOT, and the SDK may not build with it (a newer libc++ can bring declarations the SDK makes itself, and the toolchain's own fixes)"
+        }
+    }
 
-    # -----------------------------------------------------------------------
-    Step "2/6 ReXGlue SDK $sdkTag with this project's patches"
-    if (-not (Test-Path "$sdk\.mcla-patched")) {
-        if (-not (Test-Path "$sdk\.git")) {
-            Logged "sdk-clone" { git clone --recursive --branch $sdkTag https://github.com/rexglue/rexglue-sdk.git $sdk }
-        }
-        if ((git -C $sdk rev-parse HEAD) -ne $sdkCommit) { Fail "the SDK checkout is not $sdkTag ($sdkCommit)" }
-        Patch "sdk-patch" $sdk "$root\patches\rexglue-v0.10.0-mcla.patch"
-        Patch "sdk-patch-ffmpeg" "$sdk\thirdparty\FFmpeg" "$root\patches\rexglue-ffmpeg-ps5-config.patch"
-        # Git on Windows checks out symbolic links as small text files holding
-        # the link's target; one of the SDK's libraries has some. Replace them
-        # with copies of what they point to. With Developer Mode on (or as an
-        # administrator) Git makes real links instead, which need nothing:
-        # they are skipped, as reading one gives the target's contents.
-        $links = "$sdk\thirdparty\libmspack\cabextract\mspack"
-        Get-ChildItem $links -File | Where-Object { $_.Length -lt 200 -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object {
-            $target = Join-Path $links (Get-Content $_.FullName -Raw).Trim()
-            if (Test-Path $target) { Copy-Item $target $_.FullName -Force }
-        }
-        New-Item -ItemType File "$sdk\.mcla-patched" | Out-Null
+    # Compiler jobs: Ninja starts one per CPU thread (and two more), and a
+    # compiler takes up to 0.4 GB (the codegen 0.7 GB), so a PC with 8 GB
+    # would page. Capped at one job per 0.5 GB of memory available (free and
+    # reclaimable), only when that is fewer than Ninja's own number, so that a
+    # PC with enough memory builds exactly as before. Every cmake --build
+    # below (the SDK's, FidelityFX's, the game's) takes it from the environment.
+    # (The figure is one look at the memory available now, in 17 ms; see mcla-lib.ps1.)
+    if ($env:CMAKE_BUILD_PARALLEL_LEVEL) {
+        "compiler jobs: $env:CMAKE_BUILD_PARALLEL_LEVEL (CMAKE_BUILD_PARALLEL_LEVEL)"
     } else {
-        "already patched: $sdk"
-        CheckPatch "$root\patches\rexglue-v0.10.0-mcla.patch"
-        CheckPatch "$root\patches\rexglue-ffmpeg-ps5-config.patch"
-    }
-    # The car reflection fix came later than the patches
-    # above: an SDK patched before it gets it here, and the marker's new time
-    # has step 3 build the SDK again.
-    if (-not (Select-String -Quiet -SimpleMatch "kSysFlag_MinMaxColor0TimesSrcAlpha" "$sdk\include\rex\graphics\pipeline\shader\spirv_translator.h")) {
-        Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
-        (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
-    } else {
-        CheckPatch "$root\patches\rexglue-minmax-blend-factor.patch"
-    }
-    # Later patches to the SDK (patches\README.md), applied in the order they
-    # were made, as several change neighbouring lines. Each goes onto an SDK
-    # patched before it existed, found by a name it adds, and the marker's new
-    # time has step 3 build the SDK again. One that is in already must be the
-    # version recorded (CheckPatch).
-    $laterPatches = @(
-        @{ Patch = "rexglue-gpu-regwrite-bulk.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_regwrite_bulk" }
-        @{ Patch = "rexglue-imgui-dialog-repaint-on-demand.patch"; File = "include\rex\ui\imgui_dialog.h"; Adds = "RepaintsContinuously" }
-        @{ Patch = "rexglue-inline-bit-helpers.patch"; File = "include\rex\math.h"; Adds = "Out of line in rexruntime" }
-        @{ Patch = "rexglue-perf-counters-batched.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_batch_perf_counters" }
-        @{ Patch = "rexglue-shared-memory-request-fast-path.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "shared_memory_request_fast_path" }
-        @{ Patch = "rexglue-threaded-submission-d3d12.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_threaded_submission" }
-        @{ Patch = "rexglue-timer-queue-blocking-wait.patch"; File = "src\core\timer_queue.cpp"; Adds = "timer_queue_blocking_wait" }
-        @{ Patch = "rexglue-shared-memory-fast-path-hot-pages.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "shared_memory_request_fast_path_with_hot_pages" }
-        @{ Patch = "rexglue-hot-pages-watched-ranges.patch"; File = "src\graphics\shared_memory.cpp"; Adds = "Watching wins" }
-        @{ Patch = "rexglue-cursor-auto-hide.patch"; File = "src\ui\window.cpp"; Adds = "RequestAutoHiddenCursorHide" }
-        @{ Patch = "rexglue-vulkan-memexport-check-order.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "most draws export nothing" }
-        @{ Patch = "rexglue-vulkan-hoist-shared-memory-uploads.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_hoist_shared_memory_uploads" }
-        @{ Patch = "rexglue-threaded-submission-vulkan.patch"; File = "src\graphics\vulkan\command_processor.cpp"; Adds = "vulkan_threaded_submission" }
-        @{ Patch = "rexglue-d3d12-placed-texture-heaps.patch"; File = "src\graphics\d3d12\texture_cache.cpp"; Adds = "d3d12_texture_heaps" }
-        @{ Patch = "rexglue-vulkan-texture-load-storage-copy.patch"; File = "src\graphics\vulkan\texture_cache.cpp"; Adds = "vulkan_texture_load_storage_copy" }
-        @{ Patch = "rexglue-clear-rectangle-draws.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "clear_rectangle_draws" }
-        @{ Patch = "rexglue-texture-load-direct.patch"; File = "src\graphics\pipeline\texture\cache.cpp"; Adds = "texture_load_direct" }
-        @{ Patch = "rexglue-async-pipelines-no-frame-wait.patch"; File = "src\graphics\command_processor.cpp"; Adds = "async_pipeline_wait_budget_ms" }
-        @{ Patch = "rexglue-vulkan-pipeline-storage-parallel-translation.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "vulkan_pipeline_storage_translation_threads" }
-        @{ Patch = "rexglue-vulkan-pipeline-cache-file.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "vulkan_pipeline_cache_file" }
-        @{ Patch = "rexglue-resolve-4xmsaa-depth-samples.patch"; File = "src\graphics\shaders\bytecode\d3d12_5_1\resolve_fast_32bpp_4xmsaa_cs.h"; Adds = "Approximately 200 instruction slots used" }
-        @{ Patch = "rexglue-direct-resolve.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "GetDirectResolveSource" }
-        @{ Patch = "rexglue-cvar-toml-strings.patch"; File = "src\core\cvar.cpp"; Adds = "LoadConfigByLine" }
-        @{ Patch = "rexglue-edram-size.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "edram_tiles" }
-        @{ Patch = "rexglue-guest-markers.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "OnGuestMarker" }
-        @{ Patch = "rexglue-hdr-output.patch"; File = "src\ui\presenter.cpp"; Adds = "IsHdrOutputWanted" }
-        @{ Patch = "rexglue-hdr-ui-layer.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrBeforeResolve" }
-        @{ Patch = "rexglue-hdr-scene-mcla.patch"; File = "src\graphics\command_processor.cpp"; Adds = "HdrPrepareScene" }
-        @{ Patch = "rexglue-temporal-aa.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaJitterNdcOffset" }
-        @{ Patch = "rexglue-temporal-aa-shaders-vk.patch"; File = "thirdparty\fidelityfx-shaders-vk\rexglue_fsr_shaders_vk.h"; Adds = "REXGLUE_FSR_SHADERS_VK_FLAGS" }
-        @{ Patch = "rexglue-fullscreen-setting-ui-thread.patch"; File = "src\ui\rex_app.cpp"; Adds = "after the lock is released" }
-        @{ Patch = "rexglue-presenter-ui-overlay.patch"; File = "src\ui\vulkan\vulkan_presenter_ui_overlay.cpp"; Adds = "CreateUIOverlayFromUIThread" }
-        @{ Patch = "rexglue-frame-generation.patch"; File = "src\ui\vulkan\vulkan_presenter_frame_generation.cpp"; Adds = "FramePacerThread" }
-        @{ Patch = "rexglue-vulkan-paint-pipeline-format.patch"; File = "src\ui\vulkan\vulkan_presenter.cpp"; Adds = "swapchain_effect_pipeline.swapchain_format =" }
-        @{ Patch = "rexglue-vulkan-present-semaphore-per-image.patch"; File = "src\ui\vulkan\vulkan_presenter.cpp"; Adds = "swapchain_present_semaphores.push_back" }
-        @{ Patch = "rexglue-d3d12-storage-preload-threads.patch"; File = "src\graphics\d3d12\pipeline_cache.cpp"; Adds = "creation_threads_.size() < creation_thread_needed_count" }
-        @{ Patch = "rexglue-vulkan-pipeline-storage-keep-unsupported.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "pipeline_storage_valid_count" }
-        @{ Patch = "rexglue-shader-storage-prepare.patch"; File = "src\graphics\shader_storage_progress.h"; Adds = "ShaderStorageProgress" }
-    )
-    foreach ($later in $laterPatches) {
-        # A patch that adds its file is not in while the file isn't there.
-        if (-not (Test-Path "$sdk\$($later.File)") -or
-            -not (Select-String -Quiet -SimpleMatch $later.Adds "$sdk\$($later.File)")) {
-            Patch "sdk-patch-$($later.Patch -replace '^rexglue-|\.patch$')" $sdk "$root\patches\$($later.Patch)"
-            (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
-        } else {
-            CheckPatch "$root\patches\$($later.Patch)"
+        $availableMb = Get-AvailableMemoryMb
+        $jobLimit = Get-JobLimit $availableMb ([Environment]::ProcessorCount)
+        if ($jobLimit) {
+            $env:CMAKE_BUILD_PARALLEL_LEVEL = "$jobLimit"
+            "memory: $([Math]::Round($availableMb / 1024, 1)) GB available; building with $jobLimit compiler jobs instead of $([Environment]::ProcessorCount + 2)"
         }
     }
 
     # -----------------------------------------------------------------------
-    Step "3/6 build and install the SDK (the long step, once)"
-    # -Force on both: a hidden file (the marker often is one) is invisible to
-    # Get-Item otherwise, which would end the script under "Stop".
-    $marker = Get-Item "$sdk\.mcla-patched" -Force
-    $recompiler = Get-Item "$install\bin\rexglue.exe" -Force -ErrorAction SilentlyContinue
-    # FSR's runtime missing (an earlier build without the network, or the
-    # Vulkan SDK installed since): configured and built again, which fetches
-    # and builds it if it can (the rest of the SDK is up to date).
-    $fsrMissing = -not (Test-Path "$install\bin\amd_fidelityfx_dx12.dll") -or
-        ((HasVulkanSdk) -and -not (Test-Path "$install\bin\amd_fidelityfx_vk.dll"))
-    if ($fsrMissing -and $recompiler) { "FSR's runtime is missing from the SDK's build: building it again" }
-    if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime -or $fsrMissing) {
-        # FSR 3.1 (temporal anti-aliasing) is built from the FidelityFX SDK's
-        # source, fetched at a pinned commit (cmake\rexglue_fsr.cmake); its
-        # Vulkan library needs the Vulkan SDK, found through VULKAN_SDK
-        # (without it, FSR is built for Direct3D 12 only).
-        if (-not $env:VULKAN_SDK) {
-            $vulkanSdk = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
-                Sort-Object { [version]$_.Name } | Select-Object -Last 1
-            if ($vulkanSdk) { $env:VULKAN_SDK = $vulkanSdk.FullName }
-        }
-        Push-Location $sdk
-        try {
-            # The compilers by full path; a build folder configured earlier
-            # with another Clang is then configured again from scratch.
-            Logged "sdk-configure" { cmake --preset win-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON "-DCMAKE_C_COMPILER=$env:MCLA_CC" "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX" }
-            Logged "sdk-build" { cmake --build out\build\win-amd64 --config Release }
-            Logged "sdk-install" { cmake --install out\build\win-amd64 --config Release }
-        } finally { Pop-Location }
+    if ($SdkBundle) {
+        Step "2/6 ReXGlue SDK: the prebuilt bundle"
+        UseSdkBundle
+        Step "3/6 build and install the SDK"
+        "not needed: the bundle is prebuilt ($install)"
     } else {
-        "already installed: $install"
-    }
-    if (-not (Test-Path "$install\bin\rexglue.exe")) { Fail "the SDK was not installed" }
-    # FSR is optional: say plainly when it was left out, and what brings it back.
-    if (-not (Test-Path "$install\bin\amd_fidelityfx_dx12.dll")) {
-        "note: the FSR anti-aliasing option was not built this time: fetching the FidelityFX SDK needs the internet, or its build failed (out\logs\sdk-configure.log, sdk-build.log). The game offers MSAA and off; the next build (or Update) tries again."
-        # FidelityFX's shader compiler stops at 260 characters, whatever Windows
-        # is set to; its longest source file path is 181 below this folder.
-        if ($root.Length -gt 75) {
-            "      This folder's path is $($root.Length) characters long, and that may be the reason: FidelityFX's shader compiler cannot open paths over 260 characters. With the folder at a path of 75 characters or fewer (for example C:\Games\mcla-recomp), the next build includes FSR."
-        }
-    } elseif (-not (Test-Path "$install\bin\amd_fidelityfx_vk.dll")) {
-        if (HasVulkanSdk) {
-            "note: FSR was built for Direct3D 12 only: its Vulkan runtime failed to build (out\logs\sdk-build.log). With Vulkan the game offers MSAA and off."
+        Step "2/6 ReXGlue SDK $sdkTag with this project's patches"
+        if (-not (Test-Path -LiteralPath "$sdk\.mcla-patched")) {
+            if (-not (Test-Path -LiteralPath "$sdk\.git")) {
+                Logged "sdk-clone" { git clone --recursive --branch $sdkTag https://github.com/rexglue/rexglue-sdk.git $sdk }
+            }
+            if ((git -C $sdk rev-parse HEAD) -ne $sdkCommit) { Fail "the SDK checkout is not $sdkTag ($sdkCommit)" }
+            Patch "sdk-patch" $sdk "$root\patches\rexglue-v0.10.0-mcla.patch"
+            Patch "sdk-patch-ffmpeg" "$sdk\thirdparty\FFmpeg" "$root\patches\rexglue-ffmpeg-ps5-config.patch"
+            # Git on Windows checks out symbolic links as small text files holding
+            # the link's target; one of the SDK's libraries has some. Replace them
+            # with copies of what they point to. With Developer Mode on (or as an
+            # administrator) Git makes real links instead, which need nothing:
+            # they are skipped, as reading one gives the target's contents.
+            $links = "$sdk\thirdparty\libmspack\cabextract\mspack"
+            Get-ChildItem -LiteralPath $links -File | Where-Object { $_.Length -lt 200 -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object {
+                $target = Join-Path $links (Get-Content -LiteralPath $_.FullName -Raw).Trim()
+                if (Test-Path -LiteralPath $target) { Copy-Item $target $_.FullName -Force }
+            }
+            New-Item -ItemType File "$sdk\.mcla-patched" | Out-Null
         } else {
-            "note: FSR was built for Direct3D 12 only: its Vulkan runtime needs the Vulkan SDK (run with -InstallTools, or install it from vulkan.lunarg.com, then build again)."
+            "already patched: $sdk"
+            CheckPatch "$root\patches\rexglue-v0.10.0-mcla.patch"
+            CheckPatch "$root\patches\rexglue-ffmpeg-ps5-config.patch"
+        }
+        # The car reflection fix came later than the patches
+        # above: an SDK patched before it gets it here, and the marker's new time
+        # has step 3 build the SDK again.
+        if (-not (Select-String -Quiet -SimpleMatch "kSysFlag_MinMaxColor0TimesSrcAlpha" -LiteralPath "$sdk\include\rex\graphics\pipeline\shader\spirv_translator.h")) {
+            Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
+            (Get-Item -LiteralPath "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+        } else {
+            CheckPatch "$root\patches\rexglue-minmax-blend-factor.patch"
+        }
+        # Later patches to the SDK (patches\README.md), applied in the order they
+        # were made, as several change neighbouring lines. Each goes onto an SDK
+        # patched before it existed, found by a name it adds, and the marker's new
+        # time has step 3 build the SDK again. One that is in already must be the
+        # version recorded (CheckPatch).
+        foreach ($later in $laterPatches) {
+            # A patch to a submodule (FFmpeg) is applied from its folder.
+            $laterRepo = if ($later.Repo) { "$sdk\$($later.Repo)" } else { $sdk }
+            # A patch that adds its file is not in while the file isn't there.
+            if (-not (Test-Path -LiteralPath "$laterRepo\$($later.File)") -or
+                -not (Select-String -Quiet -SimpleMatch $later.Adds -LiteralPath "$laterRepo\$($later.File)")) {
+                Patch "sdk-patch-$($later.Patch -replace '^rexglue-|\.patch$')" $laterRepo "$root\patches\$($later.Patch)"
+                (Get-Item -LiteralPath "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+            } else {
+                CheckPatch "$root\patches\$($later.Patch)"
+            }
+        }
+
+        # -----------------------------------------------------------------------
+        Step "3/6 build and install the SDK (the long step, once)"
+        # -Force on both: a hidden file (the marker often is one) is invisible to
+        # Get-Item otherwise, which would end the script under "Stop".
+        $marker = Get-Item -LiteralPath "$sdk\.mcla-patched" -Force
+        $recompiler = Get-Item -LiteralPath "$install\bin\rexglue.exe" -Force -ErrorAction SilentlyContinue
+        # FSR's runtime missing (an earlier build without the network, or the
+        # Vulkan SDK installed since): configured and built again, which fetches
+        # and builds it if it can (the rest of the SDK is up to date).
+        # Not with mingw: FidelityFX's source needs MSVC's headers (comdef.h, strsafe.h),
+        # so that SDK is built without its runtime (step 5 takes the DLLs from elsewhere).
+        $fsrMissing = (-not $mingw) -and (-not (Test-Path -LiteralPath "$install\bin\amd_fidelityfx_dx12.dll") -or
+            ((HasVulkanSdk) -and -not (Test-Path -LiteralPath "$install\bin\amd_fidelityfx_vk.dll")))
+        if ($fsrMissing -and $recompiler) { "FSR's runtime is missing from the SDK's build: building it again" }
+        if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime -or $fsrMissing) {
+            # FSR 3.1 (temporal anti-aliasing) is built from the FidelityFX SDK's
+            # source, fetched at a pinned commit (cmake\rexglue_fsr.cmake); its
+            # Vulkan library needs the Vulkan SDK, found through VULKAN_SDK
+            # (without it, FSR is built for Direct3D 12 only).
+            if (-not $env:VULKAN_SDK) {
+                $vulkanSdk = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
+                    Sort-Object { [version]$_.Name } | Select-Object -Last 1
+                if ($vulkanSdk) { $env:VULKAN_SDK = $vulkanSdk.FullName }
+            }
+            Push-Location $sdk
+            try {
+                # The compilers by full path; a build folder configured earlier
+                # with another Clang is then configured again from scratch.
+                # mingw: a build folder and an install folder of their own, beside the msvc ones.
+                $sdkConfigure = if ($mingw) { @("-B", "out\build\$sdkBuildName", "-DCMAKE_INSTALL_PREFIX=$($install.Replace('\', '/'))") } else { @() }
+                # mingw: FSR stays ON, as it is what compiles FSR support into the GPU
+                # plugin, but FidelityFX's runtime is not built (its source needs
+                # MSVC's headers): a source folder that is not there makes the SDK's
+                # CMake skip it with a warning, and not fetch it. The plugin loads the
+                # DLLs at run time (step 5 says where they come from).
+                if ($mingw) { $sdkConfigure += "-DREXGLUE_FSR_SOURCE_DIR=$($root.Replace('\', '/'))/third_party/fidelityfx-not-built-with-mingw" }
+                Logged "sdk-configure" { cmake --preset win-amd64 @sdkConfigure -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON "-DCMAKE_C_COMPILER=$env:MCLA_CC" "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX" }
+                Logged "sdk-build" { cmake --build out\build\$sdkBuildName --config Release }
+                Logged "sdk-install" { cmake --install out\build\$sdkBuildName --config Release }
+            } finally { Pop-Location }
+        } else {
+            "already installed: $install"
+        }
+        if (-not (Test-Path -LiteralPath "$install\bin\rexglue.exe")) { Fail "the SDK was not installed" }
+        # What it was built from (a bundle made of this install says so).
+        WriteBundleManifest $install
+        # The target's runtime DLLs (libc++, libunwind) beside rexglue.exe and the
+        # SDK's DLLs, which need them to run.
+        if ($mingw) { CopyMingwRuntime "$install\bin" }
+        # FSR is optional: say plainly when it was left out, and what brings it back.
+        if ($mingw) {
+            # (nothing built here: step 5 says where the DLLs come from)
+        } elseif (-not (Test-Path -LiteralPath "$install\bin\amd_fidelityfx_dx12.dll")) {
+            "note: the FSR anti-aliasing option was not built this time: fetching the FidelityFX SDK needs the internet, or its build failed (out\logs\sdk-configure.log, sdk-build.log). The game offers MSAA and off; the next build (or Update) tries again."
+            # FidelityFX's shader compiler stops at 260 characters, whatever Windows
+            # is set to; its longest source file path is 181 below this folder.
+            if ($root.Length -gt 75) {
+                "      This folder's path is $($root.Length) characters long, and that may be the reason: FidelityFX's shader compiler cannot open paths over 260 characters. With the folder at a path of 75 characters or fewer (for example C:\Games\mcla-recomp), the next build includes FSR."
+            }
+        } elseif (-not (Test-Path -LiteralPath "$install\bin\amd_fidelityfx_vk.dll")) {
+            if (HasVulkanSdk) {
+                "note: FSR was built for Direct3D 12 only: its Vulkan runtime failed to build (out\logs\sdk-build.log). With Vulkan the game offers MSAA and off."
+            } else {
+                "note: FSR was built for Direct3D 12 only: its Vulkan runtime needs the Vulkan SDK (run with -InstallTools, or install it from vulkan.lunarg.com, then build again)."
+            }
         }
     }
 
     # -----------------------------------------------------------------------
     Step "4/6 your game: extract from the disc image"
-    if (-not (Test-Path "$root\game\default.xex")) {
+    if (-not (Test-Path -LiteralPath "$root\game\default.xex")) {
         if (-not $Iso) { Fail "game\ is empty: give your disc image with -Iso" }
         if (-not (Test-Path -LiteralPath $Iso)) { Fail "no such file: $Iso" }
         Logged "extract" { python "$PSScriptRoot\extract_game.py" $Iso "$root\game" }
     } else {
         "already extracted: $root\game"
     }
-    if (-not (Test-Path "$root\game\default.xex")) { Fail "game\default.xex is missing after extraction" }
+    if (-not (Test-Path -LiteralPath "$root\game\default.xex")) { Fail "game\default.xex is missing after extraction" }
 
     # -----------------------------------------------------------------------
     Step "5/6 recompile the game's code and build it (several minutes the first time)"
-    & "$PSScriptRoot\build.ps1" -Preset $Preset
+    & "$PSScriptRoot\build.ps1" -Preset $Preset -Toolchain $Toolchain -ToolsDir $ToolsDir -Sdk $install
     $build = "$root\out\build\$Preset"
-    if (-not (Test-Path "$build\mcla.exe")) { Fail "mcla.exe was not built (log: $root\out\build.log)" }
-    Copy-Item "$install\bin\rexgpu-xenos.dll" $build -Force
+    if (-not (Test-Path -LiteralPath "$build\mcla.exe")) { Fail "mcla.exe was not built (log: $root\out\build.log)" }
+    Copy-Item -LiteralPath "$install\bin\rexgpu-xenos.dll" -Destination $build -Force
     # FSR 3.1's runtime (MIT, THIRD-PARTY-NOTICES.md), which the plugin loads.
-    Get-ChildItem "$install\bin" -Filter "amd_fidelityfx_*.dll" -ErrorAction SilentlyContinue |
-        ForEach-Object { Copy-Item $_.FullName $build -Force }
+    Get-ChildItem -LiteralPath "$install\bin" -Filter "amd_fidelityfx_*.dll" -ErrorAction SilentlyContinue |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $build -Force }
+    if ($mingw) {
+        # The SDK's own libc++ and libunwind when it brings them (a bundle's: the
+        # ones its DLLs were built with), else the toolchain's.
+        if ($SdkBundle -and (Test-Path -LiteralPath "$install\bin\libc++.dll") -and (Test-Path -LiteralPath "$install\bin\libunwind.dll")) {
+            CopyMingwRuntime $build "$install\bin"
+        } else {
+            CopyMingwRuntime $build
+        }
+        # FidelityFX's runtime does not build with llvm-mingw, but it is plain C
+        # to the plugin, so the ones a prebuilt bundle holds (built with MSVC's
+        # toolchain in CI) work with it. Without a bundle, the ones this
+        # checkout's SDK build with the msvc toolchain made, if the patches have
+        # not changed since (the marker is touched whenever one is applied).
+        # They are linked against the Visual C++ runtime, which the rest of a
+        # mingw game does not need: on a PC without it they do not load, and the
+        # game goes on with MSAA when FSR is chosen.
+        if (-not (Test-Path -LiteralPath "$build\amd_fidelityfx_dx12.dll")) {
+            $msvcBin = "$sdk\out\install\win-amd64\bin"
+            $theirs = @(Get-ChildItem -LiteralPath $msvcBin -Filter "amd_fidelityfx_*.dll" -ErrorAction SilentlyContinue)
+            $patched = Get-Item -LiteralPath "$sdk\.mcla-patched" -Force -ErrorAction SilentlyContinue
+            if ($theirs -and $patched -and ($theirs | Where-Object { $_.LastWriteTime -lt $patched.LastWriteTime })) {
+                "note: the FSR runtime in the msvc SDK build ($msvcBin) is older than the SDK's patches, so it was not used; run make_pc.ps1 -Toolchain msvc once to refresh it"
+                $theirs = @()
+            }
+            if ($theirs) {
+                $theirs | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $build -Force }
+                "FSR: the runtime ($($theirs.Name -join ', ')) comes from the msvc SDK build (it needs the Visual C++ runtime)"
+            } else {
+                "note: the FSR anti-aliasing option and frame generation are not available: FidelityFX's runtime (amd_fidelityfx_dx12.dll) does not build with llvm-mingw. A prebuilt SDK bundle has it, and so does an SDK built once with -Toolchain msvc. The game offers MSAA and off."
+            }
+        }
+    }
+
+    # What this build was asked for, for an update to ask for the same.
+    Save-BuildOptions $root $Toolchain $ToolsDir $SdkBundle $SdkBundleSha256 $install
 
     # -----------------------------------------------------------------------
     Step "6/6 done"
