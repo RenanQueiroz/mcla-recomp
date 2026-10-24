@@ -181,9 +181,12 @@ DEALINGS IN THE SOFTWARE.
 as carried by the FidelityFX SDK (`sdk/libs/antilag2/ffx_antilag2_dx12.h`).
 
 Used for AMD Anti-Lag 2 on Direct3D 12 (`patches/rexglue-low-latency.patch`): the
-header, unmodified, is `include/rex/ui/d3d12/amd_antilag2_dx12.h` of the SDK, with
-its notice in the file. It loads `amdxc64.dll` from the AMD driver; nothing of
-AMD's is shipped. The game's use of it has not been run on an AMD GPU.
+header is `include/rex/ui/d3d12/amd_antilag2_dx12.h` of the SDK, with its notice in
+the file and two small changes for llvm-mingw, marked MCLA there (a `reinterpret_cast`
+of `GetProcAddress`'s result where AMD's has an MSVC-only `static_cast` from `void*`,
+and the interface's `__CRT_UUID_DECL` for mingw-w64's `__uuidof`); it is otherwise
+byte for byte AMD's. It loads `amdxc64.dll` from the AMD driver; nothing of AMD's is
+shipped. The game's use of it has not been run on an AMD GPU.
 
 ```
 This file is part of the Anti-Lag 2.0 SDK.
@@ -210,11 +213,14 @@ THE SOFTWARE.
 
 ## Trademarks
 
-NVIDIA, NVIDIA Reflex, GeForce, AMD, Radeon, AMD Anti-Lag and AMD FidelityFX are
-trademarks of their owners (NVIDIA Corporation, Advanced Micro Devices, Inc.). This
-fork uses their names only, as plain text, to say which GPU feature a setting is
-(the pause menu's and the launcher's low latency setting, the frame generation
-and FSR settings): no logos, and no endorsement by either company is implied.
+NVIDIA, NVIDIA Reflex, GeForce, G-SYNC, AMD, Radeon, AMD Anti-Lag, AMD FreeSync and AMD
+FidelityFX are trademarks of their owners (NVIDIA Corporation, Advanced Micro Devices,
+Inc.); Windows and Direct3D are Microsoft's, Vulkan is the Khronos Group's, PresentMon
+is Intel's, and the other product names in this repository's documents belong to their
+owners. This fork uses the names only, as plain text, to say which GPU feature or tool
+is meant (the pause menu's and the launcher's low latency setting, the frame generation
+and FSR settings, the measurements): no logos, and no endorsement by any of them is
+implied.
 
 ## puff (zlib)
 

@@ -166,8 +166,8 @@ makes a **draft** GitHub release of them; it never publishes one. A patch
 added to `patches/` has to be added to `make_pc.ps1` and to the `git apply`
 lines below: CI fails if they differ. It also builds the SDK with llvm-mingw,
 so a patch that only builds with MSVC's Clang fails there (as
-`rexglue-low-latency.patch` did, until `rexglue-mingw.patch` got two lines for
-it).
+`rexglue-low-latency.patch` did, until its AMD header was changed to build with
+both).
 
 ## Building by hand, or on Linux
 
