@@ -310,9 +310,12 @@ failed for good (not *in use*, and not ended by you or by closing the launcher)
 isn't run again before every Play for the same pack (`settings.json`,
 `ShaderPrepSkipPack`, which also silences the other reasons for that pack)
 until *Prepare shaders* succeeds or the pack changes. Exit code 7 (*in use*) is
-only a sharing or lock violation or a storage lock held by a running game; a
-read-only file, no permission or a lock file the game can't open is a failure
-for good. Without the launcher the game adds what its storage lacks
+a sharing or lock violation, a storage file another program has open without
+delete sharing or mapped (an antivirus scan, a backup, OneDrive: Windows calls
+that access denied too, and the game asks for DELETE access to tell it from a
+permission), or a storage lock held by a running game; a read-only file, a
+permission that denies the replacement or a lock file the game can't open is a
+failure for good. Without the launcher the game adds what its storage lacks
 of the pack at every start anyway (`KNOWN-ISSUES.md`, "Shaders prepared before
 the first start, and kept prepared").
 

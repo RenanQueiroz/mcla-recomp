@@ -22,9 +22,11 @@ constexpr int kBadPack = 3;        // a damaged pack, or one this game can't rea
 constexpr int kOtherGame = 4;      // the game's files aren't the ones the pack was made for
 constexpr int kOtherVersions = 5;  // the pack is for other storage versions
 constexpr int kIoError = 6;        // the storage can't be read or written (or another error): a
-                                   // read-only file, no permission, a lock file that can't be opened
+                                   // read-only file, a permission that denies the replacement, a
+                                   // lock file that can't be opened
 constexpr int kInUse = 7;          // the storage is in use by another process (a sharing or lock
-                                   // violation, the session lock held): try again later
+                                   // violation, a file open elsewhere without delete sharing or
+                                   // mapped, the session lock held): try again later
 
 // Reads a whole file. False when it doesn't exist. A file that exists but can't be read throws:
 // kInUse while another process holds it (a sharing or lock violation), kIoError otherwise.
@@ -34,9 +36,10 @@ int64_t FileSizeOrAbsent(const std::filesystem::path& path);
 
 // Writes data beside path (<path>.<process id>.tmp), flushes it to the disk and renames it over
 // path, retrying for a moment while another process has the file open. On a failure the
-// temporary file is removed and path left as it was; kInUse is thrown only for a sharing or lock
-// violation (the file is open elsewhere), kIoError for anything else, a read-only file and a
-// refused permission included: those don't pass by waiting.
+// temporary file is removed and path left as it was; kInUse is thrown for a sharing or lock
+// violation, and for access denied when it is the file being open elsewhere without delete
+// sharing (or mapped) that causes it; kIoError for anything else, a read-only file and a refused
+// permission included: those don't pass by waiting.
 void WriteFileAtomically(const std::filesystem::path& path, const std::vector<uint8_t>& data);
 // Cuts a file to size, flushed (the rollback of an import); throws kInUse or kIoError.
 void TruncateFile(const std::filesystem::path& path, uint64_t size);

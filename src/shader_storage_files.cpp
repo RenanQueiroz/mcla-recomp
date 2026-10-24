@@ -48,7 +48,8 @@ bool IsInUseError(DWORD error) {
 
 // Only a sharing or lock violation is "in use" (another program has the file open, which passes);
 // everything else, a read-only file and a refused permission included, is an error that waiting
-// doesn't fix.
+// doesn't fix. (A replacement that is refused with access denied is told apart first:
+// ClassifyDeniedReplace.)
 Failure ErrorFailure(const char* what, const std::filesystem::path& path, DWORD error) {
   if (IsInUseError(error)) {
     return {kInUse, fmt::format("{} is in use by another program", Name(path))};
@@ -67,6 +68,23 @@ struct Handle {
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
   }
 };
+
+// MoveFileExW answers ERROR_ACCESS_DENIED for two different things: a permission (or a read-only
+// file) that stops the replacement for good, and a target another program has open without delete
+// sharing, or mapped (an antivirus scan, OneDrive, a backup tool), which passes. Asking for DELETE
+// access with every sharing allowed tells them apart:
+// - a sharing violation is the other program;
+// - access denied is the permission;
+// - a success means the other handle went away meanwhile, or the file is mapped: the other
+//   program again;
+// - anything else keeps the error as it was.
+// Returns the error to report: ERROR_SHARING_VIOLATION for "in use", ERROR_ACCESS_DENIED otherwise.
+DWORD ClassifyDeniedReplace(const std::filesystem::path& path) {
+  Handle probe{CreateFileW(path.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, 0, nullptr)};
+  if (probe.h != INVALID_HANDLE_VALUE) return ERROR_SHARING_VIOLATION;
+  return GetLastError() == ERROR_SHARING_VIOLATION ? ERROR_SHARING_VIOLATION : ERROR_ACCESS_DENIED;
+}
 #else
 Failure ErrorFailure(const char* what, const std::filesystem::path& path, int error) {
   if (error == EWOULDBLOCK || error == EBUSY || error == ETXTBSY) {
@@ -185,9 +203,10 @@ void WriteFileAtomically(const std::filesystem::path& path, const std::vector<ui
     }
   }
   // Another process (an antivirus, a backup, a game of an older version) may have the file open
-  // for a moment: a sharing violation, or access denied while it is mapped. Those are tried again
-  // for two seconds, and a sharing violation that lasts is "in use". Access denied that lasts is
-  // an error (a read-only file, a permission), and a read-only file isn't waited for at all.
+  // for a moment: a sharing violation, or access denied while it has it open without delete
+  // sharing or mapped. Those are tried again for two seconds. What lasts is "in use" if it is
+  // another program (a sharing violation, or access denied that ClassifyDeniedReplace finds to be
+  // one), and an error if it is a permission or a read-only file, which isn't waited for at all.
   DWORD error = 0;
   for (int attempt = 0; attempt < 20; ++attempt) {
     if (MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -200,6 +219,13 @@ void WriteFileAtomically(const std::filesystem::path& path, const std::vector<ui
       if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY)) break;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  // A read-only file keeps its access denied (the probe would say so too); any other lasting
+  // access denied is told apart from the other program having the file.
+  if (error == ERROR_ACCESS_DENIED) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    const bool read_only = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY);
+    if (!read_only) error = ClassifyDeniedReplace(path);
   }
   DeleteFileW(temp.c_str());
   throw ErrorFailure("replace", path, error);

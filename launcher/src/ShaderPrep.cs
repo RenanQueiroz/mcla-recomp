@@ -37,8 +37,10 @@ sealed class ShaderPrepRun
     static readonly TimeSpan Timeout = TimeSpan.FromMinutes(15);
 
     /// Exit codes (src/shader_prepare.cpp). In use is the only one worth trying again soon: the
-    /// game gives it only for a sharing or lock violation or a storage lock held by a running mcla,
-    /// never for a read-only file, a permission or a lock file it can't open (those are 6).
+    /// game gives it for a sharing or lock violation, a storage file another program has open
+    /// (without delete sharing) or mapped, or a storage lock held by a running mcla; never for a
+    /// read-only file, a permission that denies the replacement or a lock file it can't open
+    /// (those are 6).
     public const int InUse = 7;
 
     readonly Process process;
@@ -206,7 +208,7 @@ sealed class ShaderPrepRun
         4 => Sentence(message) ?? "Your game files don't match the shader pack",
         5 => "The shader pack is for another version of the game's graphics code",
         6 => Sentence(message) ?? "Couldn't read or write the shader storage (a read-only file, or no permission)",
-        InUse => "The shader storage is in use by a running game; it's prepared at the next Play",
+        InUse => "The shader storage is in use (by a running game, or another program that has a storage file open); it's prepared at the next Play",
         _ => $"The game stopped while preparing shaders (exit code {exitCode})",
     };
 

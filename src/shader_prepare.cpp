@@ -63,10 +63,12 @@
 //   done <rebuild ms> <preload ms> <private MB> <GPU MB> <process ms>
 //   error <code> <message>                   (then the process ends with that code)
 // Exit codes: 0 done; permanent: 2 no pack, 3 damaged pack, 4 game files don't match, 5 pack for
-// another version of the graphics code, 6 storage can't be read or written (a read-only file, no
-// permission, a lock file that can't be opened or locked); transient: 7 storage in use by another
-// program (a sharing or lock violation, or the session lock held by a running mcla): try again
-// later. The launcher tries 7 again at the next Play and nothing else.
+// another version of the graphics code, 6 storage can't be read or written (a read-only file, a
+// permission that denies the replacement, a lock file that can't be opened or locked); transient:
+// 7 storage in use by another program (a sharing or lock violation, a file another program has
+// open without delete sharing or mapped, which Windows reports as access denied too, or the
+// session lock held by a running mcla): try again later. The launcher tries 7 again at the next
+// Play and nothing else.
 //
 // Nothing else is written: not mcla.toml (the overrides here are command-line values, which the
 // settings file never saves), not the save.
