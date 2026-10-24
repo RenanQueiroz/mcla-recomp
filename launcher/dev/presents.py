@@ -66,21 +66,24 @@ def load_frames(folder):
     return t0, swaps, marks
 
 
-def load_starts(folder, t0):
+def load_starts(folder, t0, with_steps=False):
     """The frames' starts (ns on the steady clock): "f" lines of frames.csv, written by the dev
-    pad's timer hook right after the low-latency wait; [] without them."""
+    pad's timer hook right after the low-latency wait; [] without them. With with_steps, the
+    simulation step the engine took in each frame (the line's third field, microseconds; 0 in
+    files from before it was logged) is returned too, as a second list."""
     path = folder / "frames.csv"
-    starts = []
+    starts, steps = [], []
     if t0 is None or not path.exists():
-        return starts
+        return (starts, steps) if with_steps else starts
     for line in path.read_text(encoding="utf-8").splitlines()[1:]:
         kind, *rest = line.split(",")
         if kind == "f" and rest:
             try:
                 starts.append(t0 + int(rest[0]) * 1000)
+                steps.append(int(rest[1]) if len(rest) > 1 else 0)
             except ValueError:
                 pass
-    return starts
+    return (starts, steps) if with_steps else starts
 
 
 def load_present_log(folder):
@@ -103,7 +106,7 @@ def load_present_log(folder):
     return refreshes, paints, switches
 
 
-def latencies(log, pm, begin, end, starts=None, swaps=None):
+def latencies(log, pm, begin, end, starts=None, swaps=None, steps=None):
     """Each real frame's time from its swap (the refresh's log line) to the screen (PresentMon's
     present of it: its CPU start plus DisplayLatency). The frame's present is found from its paint
     line: thread c (D3D12's frame generation callback, logged before the present) takes the first
@@ -115,12 +118,15 @@ def latencies(log, pm, begin, end, starts=None, swaps=None):
     # refresh at the same position in the log is that swap's (a refresh made by the GPU thread
     # can come after the next frame's start when it lags).
     start_of_refresh = {}
+    step_of_refresh = {}
     if starts and swaps:
         order = [n for _, n in refreshes]
-        for start in starts:
+        for j, start in enumerate(starts):
             k = bisect.bisect_right(swaps, start)
             if k < len(swaps) and k < len(order) and order[k]:
                 start_of_refresh[order[k]] = start
+                if steps and steps[j]:
+                    step_of_refresh[order[k]] = steps[j] / 1000.0
     calls = []
     for ns, row in pm:
         busy = number(row, "CPUBusy")
@@ -152,6 +158,7 @@ def latencies(log, pm, begin, end, starts=None, swaps=None):
     present_after_log = after > before
     result = []
     from_start = []
+    shown_at = {}
     seen = set()
     for t, n, thread, status, _, _ in paints:
         if not (begin < t <= end) or not n or n in seen or n not in refresh_time or status < 0:
@@ -170,9 +177,22 @@ def latencies(log, pm, begin, end, starts=None, swaps=None):
             continue
         seen.add(n)
         result.append((calls[i][1] - refresh_time[n]) / 1e6)
+        shown_at[n] = calls[i][1]
         # From the frame's start (the last engine timer pass before its swap) to the screen.
         if n in start_of_refresh and refresh_time[n] - start_of_refresh[n] < 200_000_000:
             from_start.append((calls[i][1] - start_of_refresh[n]) / 1e6)
+    if steps is not None:
+        # The motion the engine's step promised against the one on the screen: for each frame
+        # shown right after the one before it, the time between their display times minus the
+        # step the engine took for it (ms). Zero everywhere is perfectly even motion; the
+        # spread is the judder.
+        errors = []
+        step_values = []
+        for n, shown in shown_at.items():
+            if n - 1 in shown_at and n in step_of_refresh:
+                errors.append((shown - shown_at[n - 1]) / 1e6 - step_of_refresh[n])
+                step_values.append(step_of_refresh[n])
+        return result, from_start, errors, step_values
     return (result, from_start) if starts is not None else result
 
 
@@ -260,7 +280,7 @@ def report(folder):
     t0, swaps, marks = load_frames(folder)
     log = load_present_log(folder)
     pm = load_presentmon(folder)
-    starts = load_starts(folder, t0)
+    starts, steps = load_starts(folder, t0, with_steps=True)
     print(f"{folder.name}: {len(swaps)} swaps" + (", present log" if log else "") +
           (f", PresentMon {len(pm)} presents" if pm is not None else ""))
     if t0 is None:
@@ -324,12 +344,21 @@ def report(folder):
                            + "; "
                            f"paint us {percentiles(paint_us)}")
         if pm and log:
-            lat, from_start = latencies(log, pm, begin, end, starts, swaps)
+            lat, from_start, step_errors, step_values = latencies(log, pm, begin, end, starts,
+                                                                 swaps, steps)
             if lat:
                 details.append(f"real frames' swap to screen ms {percentiles(lat)} ({len(lat)})")
             if from_start:
                 details.append(f"real frames' start (engine timer) to screen ms {percentiles(from_start)} "
                                f"({len(from_start)})")
+            if len(step_errors) > 20:
+                ordered = sorted(abs(e) for e in step_errors)
+                details.append(
+                    f"engine step vs display interval ms: step median "
+                    f"{statistics.median(step_values):.2f} sigma {statistics.pstdev(step_values):.3f}; "
+                    f"error mean {statistics.mean(step_errors):+.3f} sigma "
+                    f"{statistics.pstdev(step_errors):.3f} p99 abs {ordered[int(len(ordered) * 0.99)]:.2f} "
+                    f"({len(step_errors)})")
         if pm:
             seg = [row for ns, row in pm if ns is not None and begin < ns <= end]
             if seg:
