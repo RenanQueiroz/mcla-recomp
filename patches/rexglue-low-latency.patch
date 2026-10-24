@@ -1,3 +1,40 @@
+diff --git a/cmake/rexglue_fsr.cmake b/cmake/rexglue_fsr.cmake
+index 93eead8..e3c8932 100644
+--- a/cmake/rexglue_fsr.cmake
++++ b/cmake/rexglue_fsr.cmake
+@@ -334,6 +334,13 @@ foreach(api IN LISTS _rexglue_fsr_apis)
+         INSTALL_COMMAND ""
+         BUILD_BYPRODUCTS "${library}"
+         BUILD_ALWAYS OFF)
++    if(WIN32 AND NOT MINGW AND NOT REXGLUE_FSR_STATIC)
++        # The library links the C runtime in (above): one that doesn't any more is a warning.
++        ExternalProject_Add_Step(rexglue_fsr_${api} check_crt
++            COMMAND "${CMAKE_COMMAND}" "-DDLL=${library}"
++                -P "${REXGLUE_ROOT}/cmake/rexglue_fsr_check_crt.cmake"
++            DEPENDEES build DEPENDERS install)
++    endif()
+     add_dependencies(rexglue_fsr_runtime rexglue_fsr_${api})
+     if(_rexglue_fsr_install_dir)
+         install(FILES "${library}" DESTINATION "${_rexglue_fsr_install_dir}" OPTIONAL)
+diff --git a/cmake/rexglue_fsr_check_crt.cmake b/cmake/rexglue_fsr_check_crt.cmake
+new file mode 100644
+index 0000000..aecea59
+--- /dev/null
++++ b/cmake/rexglue_fsr_check_crt.cmake
+@@ -0,0 +1,13 @@
++# Warns when a FidelityFX runtime that cmake/rexglue_fsr.cmake built imports the Visual C++
++# runtime or the universal C runtime: the runtimes are built with the C runtime linked in
++# (CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded, so that a PC needs no Redistributable for them), and
++# a later FidelityFX pin that brings the dynamic one back should not do it silently.
++#   cmake -DDLL=<the built library> -P rexglue_fsr_check_crt.cmake
++# (The import table holds the DLLs' names as plain text.)
++if(NOT DLL OR NOT EXISTS "${DLL}")
++    return()
++endif()
++file(STRINGS "${DLL}" _imports REGEX "(VCRUNTIME[0-9]+|MSVCP[0-9]+|ucrtbase|api-ms-win-crt-[a-z0-9-]+)\\.dll" LIMIT_COUNT 1)
++if(_imports)
++    message(WARNING "FSR: ${DLL} imports the C runtime (${_imports}): a PC needs the Visual C++ Redistributable for it; the runtimes are meant to link it in (CMAKE_MSVC_RUNTIME_LIBRARY in cmake/rexglue_fsr.cmake)")
++endif()
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
 index 500b03e..6b712d0 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
@@ -39,13 +76,19 @@ index 1168402..66fe249 100644
  #if REX_PLATFORM_WIN32
 diff --git a/include/rex/ui/d3d12/amd_antilag2_dx12.h b/include/rex/ui/d3d12/amd_antilag2_dx12.h
 new file mode 100644
-index 0000000..446b5fc
+index 0000000..9ed72b5
 --- /dev/null
 +++ b/include/rex/ui/d3d12/amd_antilag2_dx12.h
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,265 @@
 +// This file is part of the Anti-Lag 2.0 SDK.
 +//
 +// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
++//
++// AMD's sdk/libs/antilag2/ffx_antilag2_dx12.h of the FidelityFX SDK pinned in cmake/rexglue_fsr.cmake,
++// with two changes for llvm-mingw (marked MCLA; neither changes anything for the other
++// toolchains): the cast of GetProcAddress's result is a reinterpret_cast (a static_cast from
++// void* to a function pointer is an MSVC extension), and mingw-w64's __uuidof gets the
++// interface's declaration (__CRT_UUID_DECL) before its first use.
 +//
 +// Permission is hereby granted, free of charge, to any person obtaining a copy
 +// of this software and associated documentation files (the "Software"), to deal
@@ -113,6 +156,16 @@ index 0000000..446b5fc
 +    public:
 +        virtual HRESULT UpdateAntiLagState(VOID* pData) = 0;
 +    };
++#if defined(__MINGW32__) && defined(__CRT_UUID_DECL)
++} // namespace AntiLag2DX12
++} // namespace AMD
++// MCLA: mingw-w64's __uuidof needs a declaration per interface, at global scope and before its
++// first use; MIDL_INTERFACE's uuid is MSVC's.
++__CRT_UUID_DECL(AMD::AntiLag2DX12::IAmdExtAntiLagApi, 0x44085fbe, 0xe839, 0x40c5, 0xbf, 0x38,
++                0x0e, 0xbc, 0x5a, 0xb4, 0xd0, 0xa6)
++namespace AMD {
++namespace AntiLag2DX12 {
++#endif
 +
 +    // Context structure for the SDK. Declare a persistent object of this type *once* in your game code.
 +    // Ensure the contents are initialized to zero before calling Initialize() but do not modify these members directly after that.
@@ -167,7 +220,7 @@ index 0000000..446b5fc
 +            if ( hModule )
 +            {
 +                typedef HRESULT(__cdecl* PFNAmdExtD3DCreateInterface)( IUnknown* pOuter, REFIID riid, void** ppvObject );
-+                PFNAmdExtD3DCreateInterface AmdExtD3DCreateInterface = static_cast<PFNAmdExtD3DCreateInterface>( (VOID*)GetProcAddress(hModule, "AmdExtD3DCreateInterface") );
++                PFNAmdExtD3DCreateInterface AmdExtD3DCreateInterface = reinterpret_cast<PFNAmdExtD3DCreateInterface>( GetProcAddress(hModule, "AmdExtD3DCreateInterface") ); // MCLA: was a static_cast from VOID*
 +                if ( AmdExtD3DCreateInterface )
 +                {
 +                    hr = AmdExtD3DCreateInterface( device, __uuidof(IAmdExtAntiLagApi), (void**)&context->m_pAntiLagAPI );
@@ -356,10 +409,10 @@ index ba34aca..190e30a 100644
    // UI overlay painting.
 diff --git a/include/rex/ui/low_latency.h b/include/rex/ui/low_latency.h
 new file mode 100644
-index 0000000..08cf0e4
+index 0000000..89179ad
 --- /dev/null
 +++ b/include/rex/ui/low_latency.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,148 @@
 +#pragma once
 +/**
 + * Low latency (rexglue-low-latency.patch): the GPU vendor's latency reducer for
@@ -368,10 +421,15 @@ index 0000000..08cf0e4
 + * VK_AMD_anti_lag). The names are used as plain text, to say which one it is.
 + *
 + * A frame is the guest's: one pass through the engine timer (the update
-+ * thread, OnFrameStart) to one VdSwap (the render thread, OnGuestSwap). Its id
-+ * is the ordinal of the swap that ends it, which the GPU command thread counts
-+ * too (its swap packets come in the same order), so every marker of a frame
-+ * carries the same id without any queue between the threads. A swap with no
++ * thread, OnFrameStart) to one swap packet (written by VdSwap on the render
++ * thread, OnGuestSwap, and executed by the GPU command thread). Its id is the
++ * ordinal of the swap packet that ends it: the update thread knows it before
++ * the swap is written (the swaps written so far plus the frames it started
++ * that are not swapped yet, plus one), the render thread counts the packets
++ * where it writes them and the GPU command thread where it executes them, in
++ * the same order, so every marker of a frame carries the same id without any
++ * queue between the threads, and a frame whose swap is late (the update ran
++ * twice before the render thread swapped) keeps its own id. A swap with no
 + * engine timer pass before it (the logos, loading screens) is not marked.
 + *
 + * The functions can be called from any thread, the game's, the GPU command
@@ -400,6 +458,10 @@ index 0000000..08cf0e4
 +  kOutOfBandRenderSubmitEnd,
 +  kOutOfBandPresentStart,
 +  kOutOfBandPresentEnd,
++  // The generated frames of frame generation are out of band too, but the vendors that count
++  // the presents of a frame (Anti-Lag 2) take the real frame's only.
++  kGeneratedPresentStart,
++  kGeneratedPresentEnd,
 +};
 +
 +// What a graphics API's presenter provides: one vendor's reducer on its device.
@@ -412,15 +474,23 @@ index 0000000..08cf0e4
 +  virtual bool SupportsBoost() const { return false; }
 +  // Never run: written from the vendor's documentation and headers.
 +  virtual bool Untested() const { return false; }
-+  // Whether low_latency = auto means on for this one.
++  // Whether low_latency = auto means on for this one (a tested one).
 +  virtual bool OnByDefault() const { return false; }
++  // Whether the guest frame's present markers go out when the frame is handed to frame
++  // generation's pacer (Reflex), or only with the pacer's own presents (Anti-Lag 2).
++  virtual bool PresentMarkersAtHandOff() const { return true; }
 +  // Whether its driver call takes the frame-rate limit (minimum interval).
 +  virtual bool SupportsLimit() const { return true; }
-+  // The mode: on or off, boost, and the minimum frame interval (0: none).
-+  virtual void SetMode(bool on, bool boost, uint32_t minimum_interval_us) = 0;
++  // The mode: on or off, boost, and the minimum frame interval (0: none). Whether the driver
++  // took it (not while there is no swapchain to take it: the mode is told again when there is).
++  virtual bool SetMode(bool on, bool boost, uint32_t minimum_interval_us) = 0;
++  // Why SetMode failed (the settings' letters).
++  virtual const char* FailureReason() const { return "NOT SUPPORTED"; }
 +  // Called once per frame, before the frame's input is read: the driver waits
-+  // here for the best moment to start (it is the latency reduction).
-+  virtual void Sleep(uint64_t frame_id) = 0;
++  // here for the best moment to start (it is the latency reduction). Whether it did (and holds
++  // the frame rate to the minimum interval): false where it could not (no swapchain yet, a call
++  // that failed), when the game's own limiter has to hold the frame rate.
++  virtual bool Sleep(uint64_t frame_id) = 0;
 +  virtual void Marker(LatencyMarker marker, uint64_t frame_id) = 0;
 +  // For the debug log: the driver's own report of the latest frames, or empty.
 +  virtual std::string TimingReport() { return std::string(); }
@@ -448,17 +518,23 @@ index 0000000..08cf0e4
 +  static Status GetStatus();
 +
 +  // The game's threads.
-+  // The update thread, once per frame, first thing in the engine timer: the
-+  // driver's wait, then the frame's SIMULATION_START and INPUT_SAMPLE.
++  // The update thread, once per frame, first thing in the engine timer (before it reads the
++  // time): the driver's wait, then the frame's SIMULATION_START and INPUT_SAMPLE.
 +  static void OnFrameStart();
-+  // The render thread, at VdSwap: SIMULATION_END, and the next frame's id.
++  // The render thread, in VdSwap once the swap packet is written: SIMULATION_END, and the
++  // packet's count.
 +  static void OnGuestSwap();
 +  // The game's frame-rate limit, 0 for none; handed to the driver only while
 +  // low_latency_limiter is driver (DriverLimits).
 +  static void SetFrameLimit(uint32_t fps);
-+  // The driver holds the frame rate to the limit now: the game's own limiter
-+  // waits for nothing.
++  // The driver holds the frame rate to the limit now (the mode was taken and this frame's wait
++  // was made): the game's own limiter waits for nothing. Never true on a hope: where the driver
++  // could not, the game's limiter holds the frame rate.
 +  static bool DriverLimits();
++  // Whether device creation should ask for the vendor's extensions (Vulkan): the GPU's vendor
++  // has a reducer, low_latency_debug_backend allows it, and the device is one that takes them
++  // (low_latency_device_extensions).
++  static bool WantsVulkanExtensions(uint32_t vendor_id, bool* nvidia, bool* amd);
 +
 +  // The GPU command thread.
 +  // A draw is about to be executed: the first of a frame starts RENDERSUBMIT.
@@ -561,7 +637,7 @@ index 0000000..c91cfad
 +XE_UI_VULKAN_FUNCTION(vkGetLatencyTimingsNV)
 +XE_UI_VULKAN_FUNCTION(vkQueueNotifyOutOfBandNV)
 diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
-index 704d4da..f83096a 100644
+index 704d4da..f23aa86 100644
 --- a/include/rex/ui/vulkan/presenter.h
 +++ b/include/rex/ui/vulkan/presenter.h
 @@ -29,6 +29,7 @@
@@ -572,6 +648,19 @@ index 704d4da..f83096a 100644
  #include <rex/ui/vulkan/ui_samplers.h>
  
  namespace rex {
+@@ -420,9 +421,9 @@ class VulkanPresenter final : public Presenter {
+         const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+         VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out,
+         VkFormat& image_format_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
+-        bool& ui_surface_unusable_out, bool hdr_wanted, bool& hdr_out,
+-        bool frame_generation, uint32_t& pacer_queue_family_out,
+-        uint32_t& pacer_queue_index_out, bool& transfer_dst_out);
++        bool& ui_surface_unusable_out, bool hdr_wanted, bool& hdr_out, bool frame_generation,
++        uint32_t& pacer_queue_family_out, uint32_t& pacer_queue_index_out, bool& transfer_dst_out,
++        bool& latency_mode_out);
+ 
+     // Destroys the swapchain and its derivatives, nulls `swapchain` and returns
+     // the original swapchain object, if it existed, for use as oldSwapchain if
 @@ -436,6 +437,8 @@ class VulkanPresenter final : public Presenter {
      // Connection-indepedent.
  
@@ -612,16 +701,17 @@ index 704d4da..f83096a 100644
    // One present image into a swapchain image and presented; `last`: the
 diff --git a/include/rex/ui/vulkan/vulkan_low_latency.h b/include/rex/ui/vulkan/vulkan_low_latency.h
 new file mode 100644
-index 0000000..580de73
+index 0000000..21dbfbe
 --- /dev/null
 +++ b/include/rex/ui/vulkan/vulkan_low_latency.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,85 @@
 +#pragma once
 +/**
 + * Vulkan low latency (rexglue-low-latency.patch): NVIDIA Reflex through VK_NV_low_latency2 and AMD
 + * Anti-Lag 2 through VK_AMD_anti_lag. See include/rex/ui/low_latency.h.
 + */
 +
++#include <atomic>
 +#include <cstdint>
 +#include <memory>
 +#include <shared_mutex>
@@ -644,15 +734,22 @@ index 0000000..580de73
 +  bool SupportsBoost() const override { return nvidia_; }
 +  bool Untested() const override { return untested_; }
 +  bool OnByDefault() const override { return nvidia_ && !untested_ && kOnByDefault; }
-+  void SetMode(bool on, bool boost, uint32_t minimum_interval_us) override;
-+  void Sleep(uint64_t frame_id) override;
++  // (Anti-Lag 2 is presented at the pacer's real presents.)
++  bool PresentMarkersAtHandOff() const override { return nvidia_; }
++  bool SetMode(bool on, bool boost, uint32_t minimum_interval_us) override;
++  const char* FailureReason() const override { return failure_reason_; }
++  bool Sleep(uint64_t frame_id) override;
 +  void Marker(LatencyMarker marker, uint64_t frame_id) override;
 +  std::string TimingReport() override;
 +
 +  // The presenter's swapchain (UI thread), which the driver calls are made on; null before it is
-+  // made and from when it is retired (waits for the calls in progress). The mode is told to a new
-+  // one.
-+  void SetSwapchain(VkSwapchainKHR swapchain);
++  // made and from when it is retired (waits for the calls in progress). `latency_mode`: it was
++  // made with the latency mode (a driver that refused that gives one without, on which the
++  // reducer can't work). The mode is told to a new one, if it has been told one before.
++  void SetSwapchain(VkSwapchainKHR swapchain, bool latency_mode);
++  // The presenter is going: no more driver calls, the semaphore destroyed (after the calls in
++  // progress and the wait for the driver's signal).
++  void Shutdown();
 +  // The frame generation pacer's queue presents out of the guest frame's cadence: its
 +  // submissions don't count (Reflex).
 +  void NotifyOutOfBandPresentQueue(VkQueue queue);
@@ -662,23 +759,31 @@ index 0000000..580de73
 + private:
 +  explicit VulkanLowLatency(const VulkanDevice* device) : device_(device) {}
 +
-+  // low_latency = auto: set after the measurements (patches/README.md).
-+  static constexpr bool kOnByDefault = false;
++  // low_latency = auto: on for NVIDIA Reflex (patches/README.md has what it costs and gains).
++  static constexpr bool kOnByDefault = true;
 +
 +  const VulkanDevice* device_;
 +  bool nvidia_ = false;  // VK_NV_low_latency2 (else VK_AMD_anti_lag)
 +  bool untested_ = false;
 +  const char* name_ = "LOW LATENCY";
++  const char* failure_reason_ = "NOT SUPPORTED";
++  // The sleep's semaphore: used by the update thread (waited for outside the swapchain's lock),
++  // destroyed by Shutdown once the wait is over.
++  std::shared_mutex semaphore_mutex_;
 +  VkSemaphore sleep_semaphore_ = VK_NULL_HANDLE;
-+  uint64_t sleep_value_ = 0;
-+  uint32_t anti_lag_max_fps_ = 0;
-+  bool anti_lag_on_ = false;
++  std::atomic<uint64_t> sleep_value_{0};
 +  // Readers: the calls; the writer: the swapchain changing.
 +  std::shared_mutex swapchain_mutex_;
 +  VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
++  bool swapchain_latency_mode_ = false;
++  bool shut_down_ = false;
++  // The mode, once the policy has told one (until then the driver is told nothing).
++  bool mode_set_ = false;
 +  bool mode_on_ = false;
 +  bool mode_boost_ = false;
 +  uint32_t mode_interval_us_ = 0;
++  uint32_t anti_lag_max_fps_ = 0;
++  bool anti_lag_on_ = false;
 +  bool sleep_wait_failure_logged_ = false;
 +};
 +
@@ -735,7 +840,7 @@ index 7ac7790..b44459b 100644
    if (handle_) {
      dlclose(handle_);
 diff --git a/src/core/dynlib_win.cpp b/src/core/dynlib_win.cpp
-index a402c75..a97f0d2 100644
+index a402c75..1929a64 100644
 --- a/src/core/dynlib_win.cpp
 +++ b/src/core/dynlib_win.cpp
 @@ -5,6 +5,9 @@ static_assert(REX_PLATFORM_WIN32, "This file is Windows-only");
@@ -748,32 +853,38 @@ index a402c75..a97f0d2 100644
  namespace rex::platform {
  
  DynamicLibrary::~DynamicLibrary() {
-@@ -31,6 +34,41 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution /*
+@@ -31,6 +34,47 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution /*
    return handle_ != nullptr;
  }
  
 +LibraryCheck CheckLoadable(const std::filesystem::path& path, std::string* error) {
 +  static std::mutex mutex;
-+  static std::map<std::filesystem::path, DynamicLibrary*>* loaded =
-+      new std::map<std::filesystem::path, DynamicLibrary*>();  // kept
++  static std::map<std::filesystem::path, HMODULE>* loaded =
++      new std::map<std::filesystem::path, HMODULE>();  // kept for the process's lifetime
 +  if (error) {
 +    error->clear();
 +  }
-+  std::error_code exists_error;
-+  if (!std::filesystem::exists(path, exists_error)) {
++  std::error_code file_error;
++  if (!std::filesystem::exists(path, file_error)) {
 +    return LibraryCheck::kMissing;
 +  }
++  // By its full path, with its own folder and the system folder as the only places its imports
++  // are looked for (not the application's folder or the current directory).
++  std::filesystem::path full = std::filesystem::absolute(path, file_error);
++  if (file_error) {
++    full = path;
++  }
 +  std::lock_guard lock(mutex);
-+  if (loaded->count(path)) {
++  if (loaded->count(full)) {
 +    return LibraryCheck::kLoads;
 +  }
-+  auto* library = new DynamicLibrary();
-+  if (library->Load(path)) {
-+    (*loaded)[path] = library;
++  HMODULE module = LoadLibraryExW(full.c_str(), nullptr,
++                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
++  if (module) {
++    (*loaded)[full] = module;
 +    return LibraryCheck::kLoads;
 +  }
 +  const DWORD code = GetLastError();
-+  delete library;
 +  if (error) {
 +    char text[256] = {};
 +    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code, 0,
@@ -956,6 +1067,29 @@ index b7988c2..4bc7805 100644
  #endif
  }
  
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_video.cpp b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+index 1254710..69ff5b1 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+@@ -32,6 +32,7 @@
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xtypes.h>
+ #include <rex/ui/flags.h>
++#include <rex/ui/low_latency.h>
+ 
+ namespace {
+ // Display gamma type: 0 - linear, 1 - sRGB (CRT), 2 - BT.709 (HDTV), 3 - power
+@@ -518,6 +519,10 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
+   for (uint32_t i = offset; i < 64; i++) {
+     dwords[i] = xenos::MakePacketType2();
+   }
++
++  // Low latency (rexglue-low-latency.patch): one more swap packet written; the GPU command
++  // thread counts the ones it executes, so the two agree on every frame's id.
++  rex::ui::LowLatency::OnGuestSwap();
+ }
+ 
+ void RegisterVideoExports(rex::runtime::ExportResolver* export_resolver,
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index c4870dd..6652376 100644
 --- a/src/ui/CMakeLists.txt
@@ -986,10 +1120,10 @@ index c4870dd..6652376 100644
          d3d12/d3d12_provider.cpp
 diff --git a/src/ui/d3d12/d3d12_low_latency.cpp b/src/ui/d3d12/d3d12_low_latency.cpp
 new file mode 100644
-index 0000000..5c4db13
+index 0000000..f8a8103
 --- /dev/null
 +++ b/src/ui/d3d12/d3d12_low_latency.cpp
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,516 @@
 +/**
 + * Direct3D 12 low latency (rexglue-low-latency.patch): NVIDIA Reflex through NVAPI and AMD
 + * Anti-Lag 2 through the driver extension. See include/rex/ui/low_latency.h.
@@ -1140,12 +1274,14 @@ index 0000000..5c4db13
 +static_assert(sizeof(NvSetSleepModeParams) == 44, "NV_SET_SLEEP_MODE_PARAMS_V1");
 +static_assert(sizeof(NvLatencyMarkerParams) == 88, "NV_LATENCY_MARKER_PARAMS_V1");
 +static_assert(sizeof(NvLatencyFrameReport) == 240, "NV_LATENCY_RESULT_PARAMS_V1::FrameReport");
++static_assert(sizeof(NvLatencyResultParams) == 15400, "NV_LATENCY_RESULT_PARAMS_V1");
 +static_assert(sizeof(NvGetSleepStatusParams) == 136, "NV_GET_SLEEP_STATUS_PARAMS_V1");
 +
 +class NvapiReflex final : public LowLatencyBackend {
 + public:
 +  static std::shared_ptr<NvapiReflex> Create(ID3D12Device* device, const char** why) {
-+    HMODULE module = LoadLibraryW(L"nvapi64.dll");
++    // The driver's own NVAPI, from the system folder only (not one beside the executable).
++    HMODULE module = LoadLibraryExW(L"nvapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 +    if (!module) {
 +      *why = "NO NVAPI";
 +      return nullptr;
@@ -1158,7 +1294,7 @@ index 0000000..5c4db13
 +    }
 +    auto initialize = reinterpret_cast<PfnInitialize>(query(kIdInitialize));
 +    if (!initialize || initialize() != kNvApiOk) {
-+      *why = "NO NVIDIA GPU";
++      *why = "NVAPI FAILED";
 +      return nullptr;
 +    }
 +    std::shared_ptr<NvapiReflex> reflex(new NvapiReflex(device));
@@ -1171,25 +1307,16 @@ index 0000000..5c4db13
 +      *why = "NEEDS A NEWER DRIVER";
 +      return nullptr;
 +    }
-+    // The driver says whether it takes Reflex's calls: setting the mode off is accepted by one
-+    // that does.
-+    NvSetSleepModeParams params = {};
-+    params.version = NvVersion1<NvSetSleepModeParams>();
-+    const NvAPI_Status status = reflex->set_sleep_mode_(device, &params);
-+    if (status != kNvApiOk) {
-+      REXLOG_WARN("Low latency: NvAPI_D3D_SetSleepMode failed ({}): Reflex isn't available",
-+                  status);
-+      *why = "NEEDS A NEWER DRIVER";
-+      return nullptr;
-+    }
++    // (Whether the driver takes the calls for this GPU is found out when the mode is first set.)
 +    return reflex;
 +  }
 +
 +  const char* Name() const override { return "NVIDIA REFLEX"; }
 +  bool SupportsBoost() const override { return true; }
 +  bool OnByDefault() const override { return kOnByDefault; }
++  const char* FailureReason() const override { return "NOT SUPPORTED"; }
 +
-+  void SetMode(bool on, bool boost, uint32_t minimum_interval_us) override {
++  bool SetMode(bool on, bool boost, uint32_t minimum_interval_us) override {
 +    NvSetSleepModeParams params = {};
 +    params.version = NvVersion1<NvSetSleepModeParams>();
 +    params.bLowLatencyMode = on ? 1 : 0;
@@ -1199,6 +1326,7 @@ index 0000000..5c4db13
 +    const NvAPI_Status status = set_sleep_mode_(device_.Get(), &params);
 +    if (status != kNvApiOk) {
 +      REXLOG_WARN("Low latency: NvAPI_D3D_SetSleepMode failed ({})", status);
++      return false;
 +    }
 +    if (get_sleep_status_) {
 +      NvGetSleepStatusParams sleep_status = {};
@@ -1211,9 +1339,10 @@ index 0000000..5c4db13
 +            sleep_status.bUseGameSleep ? "used" : "not used");
 +      }
 +    }
++    return true;
 +  }
 +
-+  void Sleep(uint64_t) override { sleep_(device_.Get()); }
++  bool Sleep(uint64_t) override { return sleep_(device_.Get()) == kNvApiOk; }
 +
 +  void Marker(LatencyMarker marker, uint64_t frame_id) override {
 +    NvLatencyMarkerType type;
@@ -1346,8 +1475,8 @@ index 0000000..5c4db13
 + private:
 +  explicit NvapiReflex(ID3D12Device* device) : device_(device) {}
 +
-+  // low_latency = auto: set after the measurements (patches/README.md).
-+  static constexpr bool kOnByDefault = false;
++  // low_latency = auto: on for NVIDIA Reflex (patches/README.md has what it costs and gains).
++  static constexpr bool kOnByDefault = true;
 +
 +  Microsoft::WRL::ComPtr<ID3D12Device> device_;
 +  PfnSetSleepMode set_sleep_mode_ = nullptr;
@@ -1359,18 +1488,22 @@ index 0000000..5c4db13
 +
 +// --- AMD Anti-Lag 2 --------------------------------------------------------------------------
 +
++// AMD's SDK is built for its calls to run on different threads without a lock of the game's:
++// Update (the update thread, which sleeps in it), MarkEndOfFrameRendering (the render thread),
++// SetFrameGenFrameType (FidelityFX's presenter thread). The context's pointer is set once, by
++// Initialize, which is made when the reducer is first wanted: Initialize turns the driver's
++// Anti-Lag off, which is not for a user who never chose it here (their Adrenalin setting stays).
 +class AmdAntiLag2 final : public LowLatencyBackend {
 + public:
 +  static std::shared_ptr<AmdAntiLag2> Create(ID3D12Device* device, const char** why) {
-+    std::shared_ptr<AmdAntiLag2> anti_lag(new AmdAntiLag2());
-+    const HRESULT result = AMD::AntiLag2DX12::Initialize(&anti_lag->context_, device);
-+    if (result != S_OK) {
-+      REXLOG_INFO("Low latency: Anti-Lag 2 isn't available on this device (0x{:08X})",
-+                  uint32_t(result));
-+      *why = result == E_HANDLE ? "NO AMD DRIVER" : "NOT SUPPORTED BY THE DRIVER";
++    // The driver's extension library, loaded by the Direct3D 12 driver of an AMD GPU; nothing is
++    // called yet.
++    HMODULE module = GetModuleHandleA("amdxc64.dll");
++    if (!module || !GetProcAddress(module, "AmdExtD3DCreateInterface")) {
++      *why = "NO AMD DRIVER";
 +      return nullptr;
 +    }
-+    anti_lag->initialized_ = true;
++    std::shared_ptr<AmdAntiLag2> anti_lag(new AmdAntiLag2(device));
 +    return anti_lag;
 +  }
 +
@@ -1382,41 +1515,73 @@ index 0000000..5c4db13
 +
 +  const char* Name() const override { return "AMD ANTI LAG 2"; }
 +  bool Untested() const override { return true; }
++  const char* FailureReason() const override { return failure_reason_; }
 +
-+  void SetMode(bool on, bool, uint32_t minimum_interval_us) override {
-+    std::lock_guard lock(mutex_);
-+    enabled_ = on;
++  bool SetMode(bool on, bool, uint32_t minimum_interval_us) override {
++    if (!on) {
++      if (initialized_) {
++        // Told off once (a disabled Update has no wait).
++        enabled_ = false;
++        max_fps_ = 0;
++        AMD::AntiLag2DX12::Update(&context_, false, 0);
++      }
++      return true;
++    }
++    if (!EnsureInitialized()) {
++      return false;
++    }
++    // The state goes to the driver with the frame's Update (Sleep, just after this).
++    enabled_ = true;
 +    max_fps_ = minimum_interval_us ? uint32_t(1000000u / minimum_interval_us) : 0;
-+    // The state is set by Update; the wait it makes in the same call is harmless.
-+    AMD::AntiLag2DX12::Update(&context_, enabled_, max_fps_);
++    return true;
 +  }
 +
 +  // The per-frame call goes just before the input is polled: it waits where the driver wants.
-+  void Sleep(uint64_t) override {
-+    std::lock_guard lock(mutex_);
-+    AMD::AntiLag2DX12::Update(&context_, enabled_, max_fps_);
++  bool Sleep(uint64_t) override {
++    return initialized_ && SUCCEEDED(AMD::AntiLag2DX12::Update(&context_, enabled_, max_fps_));
 +  }
 +
 +  void Marker(LatencyMarker marker, uint64_t) override {
-+    // Once the frame's main rendering has been submitted, before the present (needed with frame
-+    // generation, harmless otherwise).
-+    if (marker == LatencyMarker::kRenderSubmitEnd) {
-+      std::lock_guard lock(mutex_);
++    // Once the frame's main rendering has been submitted, before the FSR 3 Present (needed with
++    // frame generation, harmless otherwise): the submission is made before the present is
++    // called, so this is where it is sent from. (Untested.)
++    if (marker == LatencyMarker::kPresentStart && initialized_) {
 +      AMD::AntiLag2DX12::MarkEndOfFrameRendering(&context_);
 +    }
 +  }
 +
 +  // For the frame generation swap chain's private data: AMD's proxy calls SetFrameGenFrameType
-+  // through it.
++  // through it (which does nothing before Initialize).
 +  AMD::AntiLag2DX12::Context* context() { return &context_; }
-+  bool enabled() const { return enabled_; }
 +
 + private:
-+  AmdAntiLag2() = default;
++  explicit AmdAntiLag2(ID3D12Device* device) : device_(device) {}
 +
-+  std::mutex mutex_;
++  bool EnsureInitialized() {
++    if (initialized_) {
++      return true;
++    }
++    if (initialize_failed_) {
++      return false;
++    }
++    const HRESULT result = AMD::AntiLag2DX12::Initialize(&context_, device_.Get());
++    if (result != S_OK) {
++      REXLOG_INFO("Low latency: Anti-Lag 2 isn't available on this device (0x{:08X})",
++                  uint32_t(result));
++      initialize_failed_ = true;
++      failure_reason_ = result == E_HANDLE ? "NO AMD DRIVER" : "NOT SUPPORTED";
++      return false;
++    }
++    initialized_ = true;
++    return true;
++  }
++
++  Microsoft::WRL::ComPtr<ID3D12Device> device_;
 +  AMD::AntiLag2DX12::Context context_;
++  // (The update thread's.)
 +  bool initialized_ = false;
++  bool initialize_failed_ = false;
++  const char* failure_reason_ = "NOT SUPPORTED";
 +  bool enabled_ = false;
 +  uint32_t max_fps_ = 0;
 +};
@@ -1454,7 +1619,7 @@ index 0000000..5c4db13
 +  } else if (forced == "amd") {
 +    vendor = GraphicsProvider::GpuVendorID::kAMD;
 +  }
-+  const char* reason = "NOT AVAILABLE ON THIS GPU";
++  const char* reason = "NOT ON THIS GPU";
 +  std::shared_ptr<LowLatencyBackend> backend;
 +  switch (vendor) {
 +    case GraphicsProvider::GpuVendorID::kNvidia:
@@ -1602,10 +1767,10 @@ index d7ca5d1..fba5a54 100644
    if (generate) {
 diff --git a/src/ui/low_latency.cpp b/src/ui/low_latency.cpp
 new file mode 100644
-index 0000000..d6d5ff9
+index 0000000..291e70e
 --- /dev/null
 +++ b/src/ui/low_latency.cpp
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,442 @@
 +/**
 + * Low latency: the frame bookkeeping, the policy and the cvars; the vendors' calls are the
 + * backends' (d3d12/d3d12_low_latency.cpp, vulkan/vulkan_low_latency.cpp).
@@ -1615,8 +1780,10 @@ index 0000000..d6d5ff9
 +#include <array>
 +#include <atomic>
 +#include <chrono>
++#include <functional>
 +#include <mutex>
 +#include <string>
++#include <thread>
 +#include <utility>
 +
 +#include <rex/cvar.h>
@@ -1628,9 +1795,9 @@ index 0000000..d6d5ff9
 +REXCVAR_DEFINE_STRING(low_latency, "auto", "UI/Presenter",
 +                      "The GPU vendor's latency reducer (NVIDIA Reflex, AMD Anti-Lag 2) while the "
 +                      "game runs: off, on, or boost (Reflex's On + Boost: the GPU clocks stay "
-+                      "high); auto is the default of the vendor's feature "
-+                      "(rexglue-low-latency.patch). Frame generation turns it on whatever this "
-+                      "says (low_latency_frame_generation)")
++                      "high); auto is on for NVIDIA Reflex and off for AMD Anti-Lag 2 "
++                      "(untested; rexglue-low-latency.patch). Frame generation turns it on "
++                      "whatever this says (low_latency_frame_generation)")
 +    .allowed({"auto", "off", "on", "boost"})
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
@@ -1651,6 +1818,15 @@ index 0000000..d6d5ff9
 +                      "the game's own")
 +    .allowed({"auto", "fork", "driver"})
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(low_latency_device_extensions, !REX_PLATFORM_PS5, "UI/Presenter",
++                    "Vulkan: ask for the vendor's low latency extensions (VK_NV_low_latency2 and "
++                    "its dependency VK_KHR_present_id on an NVIDIA GPU, VK_AMD_anti_lag on an AMD "
++                    "one) when the device is created, if the device has them. Off by default on "
++                    "the PS5, whose host turns it on when the game starts with low_latency on or "
++                    "boost, or with frame generation chosen, so that the console's device stays as "
++                    "it was otherwise")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 +
 +REXCVAR_DEFINE_STRING(low_latency_debug_backend, "auto", "UI/Presenter",
 +                      "Development: auto chooses the reducer from the GPU's vendor and what its "
@@ -1680,23 +1856,40 @@ index 0000000..d6d5ff9
 +constexpr size_t kMarkedFrames = 256;
 +std::array<std::atomic<uint64_t>, kMarkedFrames> g_marked_frames;
 +
-+std::atomic<uint64_t> g_swaps_issued{0};    // the render thread's VdSwaps
++// The swap packets written so far (VdSwap, the render thread; the high 32 bits) and the frames
++// the update thread started that have no swap yet (the low 32), in one word: a frame's id is
++// both plus one, read at once.
++constexpr uint64_t kSwapUnit = uint64_t(1) << 32;
++constexpr uint64_t kPendingMask = kSwapUnit - 1;
++std::atomic<uint64_t> g_frame_counts{0};
++// A frame that has no swap for this long was lost (the render thread stalled, or the update ran
++// without a frame): the count of such frames is written off, so ids don't stay shifted.
++constexpr int64_t kStaleFrameNs = 250'000'000;
++std::atomic<int64_t> g_last_swap_ns{0};
 +std::atomic<uint64_t> g_swaps_executed{0};  // the GPU command thread's swap packets
 +std::atomic<uint32_t> g_frame_limit{0};
++
++int64_t SteadyNs() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
 +
 +std::mutex g_mutex;
 +std::shared_ptr<LowLatencyBackend> g_backend;
 +std::string g_unavailable_why;
 +std::atomic<bool> g_have_backend{false};
 +
-+// What the driver has been told, and what the policy asks now.
++// What the driver has been told, and what the policy asks now. The driver is told nothing until
++// the policy has turned the reducer on (a user's own driver-level setting stays as it is).
 +struct Applied {
-+  bool valid = false;
 +  bool on = false;
 +  bool boost = false;
 +  uint32_t interval_us = 0;
++  bool failed = false;  // the driver refused the mode: no calls, the game's own limiter
 +};
 +Applied g_applied;                         // the update thread's
++std::string g_failed_why;                  // (g_mutex)
 +std::atomic<uint32_t> g_backend_epoch{0};  // changes with the backend: the mode is told again
 +std::atomic<bool> g_active{false};         // on, with the driver told
 +std::atomic<bool> g_driver_limits{false};
@@ -1733,23 +1926,27 @@ index 0000000..d6d5ff9
 +  bool forced = false;
 +};
 +
++// (The settings are read with GetFlagByName, which holds the cvar lock: the menu thread writes
++// them.)
 +Policy Evaluate(const LowLatencyBackend& backend) {
 +  Policy policy;
-+  const std::string setting = REXCVAR_GET(low_latency);
++  const std::string setting = rex::cvar::GetFlagByName("low_latency");
 +  bool setting_on = setting == "on" || setting == "boost";
 +  if (setting == "auto") {
 +    setting_on = backend.OnByDefault();
 +  }
 +  policy.on = setting_on;
 +  policy.boost = setting == "boost" && backend.SupportsBoost();
-+  if (!policy.on && REXCVAR_GET(low_latency_frame_generation) == "auto" && FrameGenerationOn()) {
++  const bool frame_generation_on = FrameGenerationOn();
++  if (!policy.on && frame_generation_on &&
++      rex::cvar::GetFlagByName("low_latency_frame_generation") == "auto") {
 +    policy.on = true;
 +    policy.forced = true;
 +  }
 +  const uint32_t limit = g_frame_limit.load(std::memory_order_relaxed);
 +  if (policy.on && limit && backend.SupportsLimit()) {
-+    const std::string limiter = REXCVAR_GET(low_latency_limiter);
-+    if (limiter == "driver" || (limiter == "auto" && !backend.Untested() && !FrameGenerationOn())) {
++    const std::string limiter = rex::cvar::GetFlagByName("low_latency_limiter");
++    if (limiter == "driver" || (limiter == "auto" && !backend.Untested() && !frame_generation_on)) {
 +      policy.interval_us = uint32_t(1000000u / limit);
 +    }
 +  }
@@ -1769,6 +1966,17 @@ index 0000000..d6d5ff9
 +    }
 +    return status;
 +  }
++  {
++    // The driver refused the mode: unavailable, as if there were no backend.
++    std::lock_guard lock(g_mutex);
++    if (!g_failed_why.empty()) {
++      status.state = State::kUnavailable;
++      status.name = backend->Name();
++      status.why = g_failed_why;
++      status.untested = backend->Untested();
++      return status;
++    }
++  }
 +  status.state = State::kAvailable;
 +  status.name = backend->Name();
 +  status.active = g_active.load(std::memory_order_relaxed);
@@ -1784,6 +1992,7 @@ index 0000000..d6d5ff9
 +    std::lock_guard lock(g_mutex);
 +    g_backend = std::move(backend);
 +    g_unavailable_why.clear();
++    g_failed_why.clear();
 +    g_have_backend.store(g_backend != nullptr, std::memory_order_release);
 +  }
 +  // The next frame tells the new driver objects the mode.
@@ -1817,8 +2026,44 @@ index 0000000..d6d5ff9
 +  return g_driver_limits.load(std::memory_order_relaxed);
 +}
 +
++bool LowLatency::WantsVulkanExtensions(uint32_t vendor_id, bool* nvidia, bool* amd) {
++  bool want_nvidia = false, want_amd = false;
++  if (REXCVAR_GET(low_latency_device_extensions)) {
++    const std::string choice = rex::cvar::GetFlagByName("low_latency_debug_backend");
++    if (choice != "none") {
++      want_nvidia = choice == "nvidia" || (choice == "auto" && vendor_id == 0x10DE);
++      want_amd = choice == "amd" || (choice == "auto" && vendor_id == 0x1002);
++    }
++  }
++  if (nvidia) {
++    *nvidia = want_nvidia;
++  }
++  if (amd) {
++    *amd = want_amd;
++  }
++  return want_nvidia || want_amd;
++}
++
 +void LowLatency::OnFrameStart() {
-+  const uint64_t id = g_swaps_issued.load(std::memory_order_acquire) + 1;
++  static std::thread::id frame_thread;
++  if (frame_thread == std::thread::id()) {
++    frame_thread = std::this_thread::get_id();
++    REXLOG_INFO("Low latency: the frames start on thread {}",
++                std::hash<std::thread::id>()(frame_thread));
++  }
++  // The frame's id: the swap packets written so far, the frames started that have no swap yet,
++  // and this one. Frames that have had none for a quarter of a second were lost.
++  uint64_t counts = g_frame_counts.load(std::memory_order_relaxed);
++  uint64_t base;
++  do {
++    base = counts;
++    if ((base & kPendingMask) &&
++        SteadyNs() - g_last_swap_ns.load(std::memory_order_relaxed) > kStaleFrameNs) {
++      base &= ~kPendingMask;
++    }
++  } while (!g_frame_counts.compare_exchange_weak(counts, base + 1, std::memory_order_acq_rel,
++                                                 std::memory_order_relaxed));
++  const uint64_t id = (base >> 32) + (base & kPendingMask) + 1;
 +  g_marked_frames[id % kMarkedFrames].store(id, std::memory_order_release);
 +  std::shared_ptr<LowLatencyBackend> backend = Backend();
 +  if (!backend) {
@@ -1831,35 +2076,52 @@ index 0000000..d6d5ff9
 +    g_applied = Applied();
 +  }
 +  const Policy policy = Evaluate(*backend);
-+  if (!g_applied.valid || g_applied.on != policy.on || g_applied.boost != policy.boost ||
-+      g_applied.interval_us != policy.interval_us) {
-+    if (policy.on != g_applied.on || !g_applied.valid) {
++  // The driver hears of the mode only once the policy has turned the reducer on (and of every
++  // change after that).
++  if (!g_applied.failed &&
++      (g_applied.on != policy.on || (policy.on && (g_applied.boost != policy.boost ||
++                                                   g_applied.interval_us != policy.interval_us)))) {
++    if (policy.on != g_applied.on) {
 +      REXLOG_INFO("Low latency: {} {}{}{}", backend->Name(), policy.on ? "on" : "off",
 +                  policy.boost ? ", boost" : "", policy.forced ? " (frame generation)" : "");
 +    }
-+    backend->SetMode(policy.on, policy.boost, policy.interval_us);
-+    g_applied.valid = true;
-+    g_applied.on = policy.on;
-+    g_applied.boost = policy.boost;
-+    g_applied.interval_us = policy.interval_us;
++    if (backend->SetMode(policy.on, policy.boost, policy.interval_us)) {
++      g_applied.on = policy.on;
++      g_applied.boost = policy.boost;
++      g_applied.interval_us = policy.interval_us;
++    } else {
++      // Refused: the reducer is unavailable (the menu says why) and the game's own limiter
++      // holds the frame rate.
++      g_applied.failed = true;
++      {
++        std::lock_guard lock(g_mutex);
++        g_failed_why = backend->FailureReason();
++      }
++      REXLOG_WARN("Low latency: {} refused the mode ({})", backend->Name(),
++                  backend->FailureReason());
++    }
 +  }
-+  g_active.store(policy.on, std::memory_order_relaxed);
-+  g_forced.store(policy.forced, std::memory_order_relaxed);
-+  g_driver_limits.store(policy.on && policy.interval_us != 0, std::memory_order_relaxed);
++  const bool working = policy.on && !g_applied.failed;
++  g_active.store(working, std::memory_order_relaxed);
++  g_forced.store(working && policy.forced, std::memory_order_relaxed);
 +  const int32_t debug = REXCVAR_GET(low_latency_debug);
 +  g_explicit_attribution.store(!(debug & 4), std::memory_order_relaxed);
-+  const bool markers = policy.on || (debug & 3) != 0;
++  const bool markers = working || (debug & 3) != 0;
 +  g_markers.store(markers, std::memory_order_relaxed);
 +  static uint64_t sleep_us_total = 0;  // the update thread's: the debug log's average
 +  static uint32_t sleep_count = 0;
-+  if (policy.on) {
++  bool held = false;
++  if (working) {
 +    const auto sleep_start = std::chrono::steady_clock::now();
-+    backend->Sleep(id);
++    held = backend->Sleep(id);
 +    sleep_us_total += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
 +                                   std::chrono::steady_clock::now() - sleep_start)
 +                                   .count());
 +    ++sleep_count;
 +  }
++  // The driver holds the frame rate only if it was told the interval and slept this frame; else
++  // the game's own limiter does.
++  g_driver_limits.store(held && g_applied.interval_us != 0, std::memory_order_relaxed);
 +  if (markers) {
 +    backend->Marker(LatencyMarker::kSimulationStart, id);
 +    backend->Marker(LatencyMarker::kInputSample, id);
@@ -1877,8 +2139,17 @@ index 0000000..d6d5ff9
 +}
 +
 +void LowLatency::OnGuestSwap() {
-+  const uint64_t id = g_swaps_issued.fetch_add(1, std::memory_order_acq_rel) + 1;
-+  if (IsMarked(id) && g_markers.load(std::memory_order_relaxed)) {
++  // One more swap packet, and the oldest frame the update thread started that has none is
++  // this one's (none: an untimed swap, a logo or a loading screen).
++  uint64_t counts = g_frame_counts.load(std::memory_order_relaxed);
++  uint64_t desired;
++  do {
++    desired = counts + kSwapUnit - ((counts & kPendingMask) ? 1 : 0);
++  } while (!g_frame_counts.compare_exchange_weak(counts, desired, std::memory_order_acq_rel,
++                                                 std::memory_order_relaxed));
++  g_last_swap_ns.store(SteadyNs(), std::memory_order_relaxed);
++  const uint64_t id = (counts >> 32) + 1;
++  if ((counts & kPendingMask) && g_markers.load(std::memory_order_relaxed)) {
 +    Marker(LatencyMarker::kSimulationEnd, id);
 +  }
 +}
@@ -1897,8 +2168,15 @@ index 0000000..d6d5ff9
 +
 +void LowLatency::OnRenderSwap() {
 +  OnRenderDraw();
-+  t_swap_frame = t_render_frame;
-+  if (t_swap_frame && g_markers.load(std::memory_order_relaxed)) {
++  if (!t_render_frame) {
++    // (The frame's mark can come after its first draw, if the update thread is late.)
++    const uint64_t id = g_swaps_executed.load(std::memory_order_relaxed) + 1;
++    t_render_frame = IsMarked(id) ? id : 0;
++  }
++  // The present code's frame: none while no markers go out, so a default-off game's submissions
++  // and presents are as they were.
++  t_swap_frame = g_markers.load(std::memory_order_relaxed) ? t_render_frame : 0;
++  if (t_swap_frame) {
 +    Marker(LatencyMarker::kRenderSubmitEnd, t_swap_frame);
 +  }
 +}
@@ -1936,32 +2214,42 @@ index 0000000..d6d5ff9
 +}  // namespace ui
 +}  // namespace rex
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index aa08879..7f9605a 100644
+index aa08879..ffc7d03 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
-@@ -21,6 +21,7 @@
+@@ -21,7 +21,9 @@
  #include <rex/filesystem.h>
  #include <rex/logging.h>
  #include <rex/platform.h>
 +#include <rex/platform/dynlib.h>
  #include <rex/string.h>
++#include <rex/ui/low_latency.h>
  #include <rex/ui/vulkan/device.h>
  
-@@ -224,6 +225,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+ REXCVAR_DEFINE_BOOL(temporal_aa_device_features, !REX_PLATFORM_PS5, "GPU",
+@@ -224,6 +226,21 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      XE_UI_VULKAN_STRUCT_EXTENSION(KHR_swapchain)
      // #106 (HDR output).
      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_hdr_metadata)
 +    if (get_physical_device_properties2_supported) {
-+      // Low latency (rexglue-low-latency.patch). #295, a dependency of #506 (which also needs
-+      // timeline semaphores: Vulkan 1.2, below), and #477.
-+      XE_UI_VULKAN_STRUCT_EXTENSION(KHR_present_id)
-+      XE_UI_VULKAN_STRUCT_EXTENSION(NV_low_latency2)
-+      XE_UI_VULKAN_STRUCT_EXTENSION(AMD_anti_lag)
++      // Low latency (rexglue-low-latency.patch), only for the vendor whose reducer it is and where
++      // low_latency_device_extensions and low_latency_debug_backend allow it (so that any other
++      // device, and the PS5's until its host asks, is made as it was). #295, a dependency of
++      // #506 (which also needs timeline semaphores: Vulkan 1.2, below), and #477.
++      bool want_nvidia = false, want_amd = false;
++      LowLatency::WantsVulkanExtensions(properties.vendorID, &want_nvidia, &want_amd);
++      if (want_nvidia) {
++        XE_UI_VULKAN_STRUCT_EXTENSION(KHR_present_id)
++        XE_UI_VULKAN_STRUCT_EXTENSION(NV_low_latency2)
++      }
++      if (want_amd) {
++        XE_UI_VULKAN_STRUCT_EXTENSION(AMD_anti_lag)
++      }
 +    }
    }
  
    bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;
-@@ -291,6 +299,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -291,6 +308,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
        }
        assert_true(supported_extension_count == supported_extensions.size());
        for (const VkExtensionProperties& supported_extension : supported_extensions) {
@@ -1971,27 +2259,42 @@ index aa08879..7f9605a 100644
          const auto requested_extension_it =
              requested_extensions.find(supported_extension.extensionName);
          if (requested_extension_it == requested_extensions.cend()) {
-@@ -310,6 +321,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -310,6 +330,34 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      return nullptr;
    }
  
-+  // Low latency 2 needs present ids and timeline semaphores (Vulkan 1.2): not enabled without
-+  // them (the extension's dependencies).
-+  if (device->extensions_.ext_NV_low_latency2 &&
-+      (!device->extensions_.ext_KHR_present_id ||
-+       properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 2, 0))) {
-+    enabled_extensions.erase(
-+        std::remove_if(enabled_extensions.begin(), enabled_extensions.end(),
-+                       [](const char* name) { return !std::strcmp(name, "VK_NV_low_latency2"); }),
-+        enabled_extensions.end());
-+    device->extensions_.ext_NV_low_latency2 = false;
++  // Low latency 2 needs present ids (the feature, not only the extension) and timeline
++  // semaphores (Vulkan 1.2): not enabled without them (the extension's dependencies).
++  if (device->extensions_.ext_NV_low_latency2 || device->extensions_.ext_KHR_present_id) {
++    bool present_id_feature = false;
++    if (device->extensions_.ext_KHR_present_id && get_physical_device_properties2_supported) {
++      VkPhysicalDevicePresentIdFeaturesKHR present_id_features = {
++          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
++      VkPhysicalDeviceFeatures2 present_id_query = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
++                                                    &present_id_features};
++      ifn.vkGetPhysicalDeviceFeatures2(physical_device, &present_id_query);
++      present_id_feature = present_id_features.presentId == VK_TRUE;
++    }
++    if (!present_id_feature || properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 2, 0)) {
++      enabled_extensions.erase(std::remove_if(enabled_extensions.begin(), enabled_extensions.end(),
++                                              [](const char* name) {
++                                                return !std::strcmp(name, "VK_NV_low_latency2") ||
++                                                       !std::strcmp(name, "VK_KHR_present_id");
++                                              }),
++                               enabled_extensions.end());
++      device->extensions_.ext_NV_low_latency2 = false;
++      device->extensions_.ext_KHR_present_id = false;
++      device->low_latency2_spec_version_ = 0;
++    }
++  }
++  if (!device->extensions_.ext_NV_low_latency2) {
 +    device->low_latency2_spec_version_ = 0;
 +  }
 +
    VkDeviceCreateInfo device_create_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
  
    device_create_info.enabledExtensionCount = uint32_t(enabled_extensions.size());
-@@ -363,6 +387,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -363,6 +411,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
    VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
                   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT>
        features_EXT_robustness2;
@@ -2004,7 +2307,7 @@ index aa08879..7f9605a 100644
  
    if (get_physical_device_properties2_supported) {
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
-@@ -408,6 +438,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -408,6 +462,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      if (device->extensions_.ext_EXT_robustness2) {
        features_EXT_robustness2.Link(supported_features_2, device_create_info);
      }
@@ -2017,7 +2320,7 @@ index aa08879..7f9605a 100644
      ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
      ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
    }
-@@ -546,12 +582,26 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -546,12 +606,26 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
        unavailable_menu_why = "NO TIMELINE SEMAPHORES";
      }
  #if REX_PLATFORM_WIN32
@@ -2050,7 +2353,7 @@ index aa08879..7f9605a 100644
      }
  #endif
      if (unavailable_why) {
-@@ -786,10 +836,21 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -786,10 +860,21 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
  
    // Frame generation (rexglue-frame-generation.patch): the pacer's timeline
    // semaphores (Vulkan 1.2; without them, frame generation stays off).
@@ -2073,7 +2376,7 @@ index aa08879..7f9605a 100644
    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
      if (with_gpu_emulation) {
        XE_UI_VULKAN_FEATURE_2(features_1_3, shaderDemoteToHelperInvocation);
-@@ -941,6 +1002,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -941,6 +1026,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
    if (device->extensions_.ext_EXT_hdr_metadata) {
  #include <rex/ui/vulkan/functions/device_ext_hdr_metadata.inc>
    }
@@ -2088,10 +2391,10 @@ index aa08879..7f9605a 100644
  #undef XE_UI_VULKAN_FUNCTION
 diff --git a/src/ui/vulkan/vulkan_low_latency.cpp b/src/ui/vulkan/vulkan_low_latency.cpp
 new file mode 100644
-index 0000000..b8d2267
+index 0000000..c41b323
 --- /dev/null
 +++ b/src/ui/vulkan/vulkan_low_latency.cpp
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,390 @@
 +/**
 + * Vulkan low latency (rexglue-low-latency.patch). See include/rex/ui/low_latency.h and
 + * include/rex/ui/vulkan/vulkan_low_latency.h.
@@ -2117,6 +2420,7 @@ index 0000000..b8d2267
 +#include <rex/ui/vulkan/vulkan_low_latency.h>
 +
 +REXCVAR_DECLARE(std::string, low_latency_debug_backend);
++REXCVAR_DECLARE(bool, low_latency_device_extensions);
 +REXCVAR_DECLARE(int32_t, low_latency_debug);
 +
 +namespace rex {
@@ -2135,7 +2439,7 @@ index 0000000..b8d2267
 +  }
 +  std::shared_ptr<VulkanLowLatency> backend(new VulkanLowLatency(device));
 +  if (forced != "amd" && extensions.ext_NV_low_latency2 && extensions.ext_KHR_present_id &&
-+      device->properties().timelineSemaphore) {
++      device->properties().presentId && device->properties().timelineSemaphore) {
 +    backend->nvidia_ = true;
 +    // Reflex on an NVIDIA GPU; another GPU with the extension (a layer) is untested, and so is
 +    // everything but Windows.
@@ -2157,36 +2461,57 @@ index 0000000..b8d2267
 +    }
 +    return backend;
 +  }
-+  if (forced != "nvidia" && extensions.ext_AMD_anti_lag) {
++  if (forced != "nvidia" && extensions.ext_AMD_anti_lag && device->properties().antiLag) {
 +    // Untested: no AMD GPU where this was written.
 +    backend->name_ = "AMD ANTI LAG 2";
 +    backend->untested_ = true;
 +    return backend;
 +  }
-+  if (vendor == 0x10DE) {
++  if ((vendor == 0x10DE || vendor == 0x1002) && !REXCVAR_GET(low_latency_device_extensions)) {
++    // The device was made without the extensions (the PS5's, until the game starts with the
++    // reducer asked for).
++    *why = "NEXT START";
++  } else if (vendor == 0x10DE) {
 +    *why = "NEEDS A NEWER DRIVER";
 +  } else if (vendor == 0x1002) {
-+    *why = "NOT SUPPORTED BY THE DRIVER";
++    *why = "NOT SUPPORTED";
 +  } else {
-+    *why = "NOT AVAILABLE ON THIS GPU";
++    *why = "NOT ON THIS GPU";
 +  }
 +  return nullptr;
 +}
 +
 +VulkanLowLatency::~VulkanLowLatency() {
++  Shutdown();
++}
++
++void VulkanLowLatency::Shutdown() {
++  // After the calls in progress (the wait for the driver's signal is bounded) and for good.
++  std::unique_lock semaphore_lock(semaphore_mutex_);
++  std::unique_lock swapchain_lock(swapchain_mutex_);
++  shut_down_ = true;
++  swapchain_ = VK_NULL_HANDLE;
 +  if (sleep_semaphore_ != VK_NULL_HANDLE) {
 +    device_->functions().vkDestroySemaphore(device_->device(), sleep_semaphore_, nullptr);
++    sleep_semaphore_ = VK_NULL_HANDLE;
 +  }
 +}
 +
 +bool VulkanLowLatency::ExplicitSubmissionAttribution() const {
++  // Revision 3 of the extension is what the RTX 5080's driver advertises (Vulkan header 357 still
++  // describes revision 2, which has the structure but whose submission-time attribution is not
++  // documented): with an older driver the submissions are left to the driver's own rules.
 +  return nvidia_ && device_->low_latency2_spec_version() >= 3;
 +}
 +
-+void VulkanLowLatency::SetSwapchain(VkSwapchainKHR swapchain) {
++void VulkanLowLatency::SetSwapchain(VkSwapchainKHR swapchain, bool latency_mode) {
 +  std::unique_lock lock(swapchain_mutex_);
++  if (shut_down_) {
++    return;
++  }
 +  swapchain_ = swapchain;
-+  if (swapchain_ == VK_NULL_HANDLE || !nvidia_) {
++  swapchain_latency_mode_ = swapchain != VK_NULL_HANDLE && latency_mode;
++  if (swapchain_ == VK_NULL_HANDLE || !nvidia_ || !swapchain_latency_mode_ || !mode_set_) {
 +    return;
 +  }
 +  // The mode belongs to the swapchain.
@@ -2202,7 +2527,7 @@ index 0000000..b8d2267
 +}
 +
 +void VulkanLowLatency::NotifyOutOfBandPresentQueue(VkQueue queue) {
-+  if (!nvidia_) {
++  if (!nvidia_ || !queue) {
 +    return;
 +  }
 +  VkOutOfBandQueueTypeInfoNV info = {VK_STRUCTURE_TYPE_OUT_OF_BAND_QUEUE_TYPE_INFO_NV};
@@ -2210,14 +2535,25 @@ index 0000000..b8d2267
 +  device_->functions().vkQueueNotifyOutOfBandNV(queue, &info);
 +}
 +
-+void VulkanLowLatency::SetMode(bool on, bool boost, uint32_t minimum_interval_us) {
++bool VulkanLowLatency::SetMode(bool on, bool boost, uint32_t minimum_interval_us) {
 +  std::unique_lock lock(swapchain_mutex_);
++  if (shut_down_) {
++    return true;
++  }
++  mode_set_ = true;
 +  mode_on_ = on;
 +  mode_boost_ = boost;
 +  mode_interval_us_ = minimum_interval_us;
 +  if (nvidia_) {
 +    if (swapchain_ == VK_NULL_HANDLE) {
-+      return;
++      // Told to the swapchain when there is one (SetSwapchain).
++      return true;
++    }
++    if (!swapchain_latency_mode_) {
++      // The driver made the swapchain without the latency mode (the presenter retried without
++      // it): the reducer can't work on it.
++      failure_reason_ = "SWAPCHAIN REFUSED IT";
++      return false;
 +    }
 +    VkLatencySleepModeInfoNV mode = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV};
 +    mode.lowLatencyMode = on ? VK_TRUE : VK_FALSE;
@@ -2227,30 +2563,42 @@ index 0000000..b8d2267
 +        device_->functions().vkSetLatencySleepModeNV(device_->device(), swapchain_, &mode);
 +    if (result != VK_SUCCESS) {
 +      REXLOG_WARN("Low latency: vkSetLatencySleepModeNV failed ({})", int32_t(result));
++      failure_reason_ = "NOT SUPPORTED";
++      return false;
 +    }
-+  } else {
-+    anti_lag_on_ = on;
-+    anti_lag_max_fps_ = minimum_interval_us ? uint32_t(1000000u / minimum_interval_us) : 0;
-+    VkAntiLagDataAMD data = {VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD};
-+    data.mode = on ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_OFF_AMD;
-+    data.maxFPS = anti_lag_max_fps_;
-+    device_->functions().vkAntiLagUpdateAMD(device_->device(), &data);
++    return true;
 +  }
++  anti_lag_on_ = on;
++  anti_lag_max_fps_ = minimum_interval_us ? uint32_t(1000000u / minimum_interval_us) : 0;
++  VkAntiLagDataAMD data = {VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD};
++  // Not on: left to the driver's own setting (the user's Adrenalin choice), not forced off.
++  data.mode = on ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_DRIVER_CONTROL_AMD;
++  data.maxFPS = anti_lag_max_fps_;
++  device_->functions().vkAntiLagUpdateAMD(device_->device(), &data);
++  return true;
 +}
 +
-+void VulkanLowLatency::Sleep(uint64_t frame_id) {
++bool VulkanLowLatency::Sleep(uint64_t frame_id) {
 +  const VulkanDevice::Functions& dfn = device_->functions();
-+  std::shared_lock lock(swapchain_mutex_);
 +  if (nvidia_) {
-+    if (swapchain_ == VK_NULL_HANDLE) {
-+      return;
-+    }
-+    const uint64_t value = ++sleep_value_;
-+    VkLatencySleepInfoNV info = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV};
-+    info.signalSemaphore = sleep_semaphore_;
-+    info.value = value;
-+    if (dfn.vkLatencySleepNV(device_->device(), swapchain_, &info) != VK_SUCCESS) {
-+      return;
++    uint64_t value;
++    // The driver call is made under the swapchain's lock (the UI thread retires it under the
++    // exclusive one); the wait for its signal is not, so a swapchain change never queues the
++    // markers of other threads behind a sleep.
++    std::shared_lock semaphore_lock(semaphore_mutex_);
++    {
++      std::shared_lock lock(swapchain_mutex_);
++      if (shut_down_ || swapchain_ == VK_NULL_HANDLE || !swapchain_latency_mode_ ||
++          sleep_semaphore_ == VK_NULL_HANDLE) {
++        return false;
++      }
++      value = sleep_value_.fetch_add(1, std::memory_order_relaxed) + 1;
++      VkLatencySleepInfoNV info = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV};
++      info.signalSemaphore = sleep_semaphore_;
++      info.value = value;
++      if (dfn.vkLatencySleepNV(device_->device(), swapchain_, &info) != VK_SUCCESS) {
++        return false;
++      }
 +    }
 +    // Bounded: a driver that never signals it must not hold the game.
 +    VkSemaphoreWaitInfo wait_info = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
@@ -2258,28 +2606,39 @@ index 0000000..b8d2267
 +    wait_info.pSemaphores = &sleep_semaphore_;
 +    wait_info.pValues = &value;
 +    const VkResult result = dfn.vkWaitSemaphores(device_->device(), &wait_info, 200'000'000);
-+    if (result != VK_SUCCESS && !sleep_wait_failure_logged_) {
-+      sleep_wait_failure_logged_ = true;
-+      REXLOG_WARN("Low latency: the driver's sleep wasn't signalled in 200 ms ({})",
-+                  int32_t(result));
++    if (result != VK_SUCCESS) {
++      if (!sleep_wait_failure_logged_) {
++        sleep_wait_failure_logged_ = true;
++        REXLOG_WARN("Low latency: the driver's sleep wasn't signalled in 200 ms ({})",
++                    int32_t(result));
++      }
++      return false;
 +    }
-+  } else {
-+    VkAntiLagPresentationInfoAMD presentation = {VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD};
-+    presentation.stage = VK_ANTI_LAG_STAGE_INPUT_AMD;
-+    presentation.frameIndex = frame_id;
-+    VkAntiLagDataAMD data = {VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD};
-+    data.mode = anti_lag_on_ ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_OFF_AMD;
-+    data.maxFPS = anti_lag_max_fps_;
-+    data.pPresentationInfo = &presentation;
-+    dfn.vkAntiLagUpdateAMD(device_->device(), &data);
++    return true;
 +  }
++  std::shared_lock lock(swapchain_mutex_);
++  if (shut_down_) {
++    return false;
++  }
++  VkAntiLagPresentationInfoAMD presentation = {VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD};
++  presentation.stage = VK_ANTI_LAG_STAGE_INPUT_AMD;
++  presentation.frameIndex = frame_id;
++  VkAntiLagDataAMD data = {VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD};
++  data.mode = anti_lag_on_ ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_DRIVER_CONTROL_AMD;
++  data.maxFPS = anti_lag_max_fps_;
++  data.pPresentationInfo = &presentation;
++  dfn.vkAntiLagUpdateAMD(device_->device(), &data);
++  return true;
 +}
 +
 +void VulkanLowLatency::Marker(LatencyMarker marker, uint64_t frame_id) {
 +  const VulkanDevice::Functions& dfn = device_->functions();
 +  std::shared_lock lock(swapchain_mutex_);
++  if (shut_down_) {
++    return;
++  }
 +  if (nvidia_) {
-+    if (swapchain_ == VK_NULL_HANDLE) {
++    if (swapchain_ == VK_NULL_HANDLE || !swapchain_latency_mode_) {
 +      return;
 +    }
 +    VkLatencyMarkerNV type;
@@ -2312,9 +2671,11 @@ index 0000000..b8d2267
 +        type = VK_LATENCY_MARKER_OUT_OF_BAND_RENDERSUBMIT_END_NV;
 +        break;
 +      case LatencyMarker::kOutOfBandPresentStart:
++      case LatencyMarker::kGeneratedPresentStart:
 +        type = VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_START_NV;
 +        break;
 +      case LatencyMarker::kOutOfBandPresentEnd:
++      case LatencyMarker::kGeneratedPresentEnd:
 +        type = VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_END_NV;
 +        break;
 +      default:
@@ -2324,13 +2685,15 @@ index 0000000..b8d2267
 +    info.presentID = frame_id;
 +    info.marker = type;
 +    dfn.vkSetLatencyMarkerNV(device_->device(), swapchain_, &info);
-+  } else if (marker == LatencyMarker::kPresentStart) {
-+    // The present stage, just before the frame's present.
++  } else if (marker == LatencyMarker::kPresentStart ||
++             marker == LatencyMarker::kOutOfBandPresentStart) {
++    // The present stage, just before the vkQueuePresentKHR of the frame's image (the swapchain's
++    // own present, or the pacer's real frame's).
 +    VkAntiLagPresentationInfoAMD presentation = {VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD};
 +    presentation.stage = VK_ANTI_LAG_STAGE_PRESENT_AMD;
 +    presentation.frameIndex = frame_id;
 +    VkAntiLagDataAMD data = {VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD};
-+    data.mode = anti_lag_on_ ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_OFF_AMD;
++    data.mode = anti_lag_on_ ? VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_DRIVER_CONTROL_AMD;
 +    data.maxFPS = anti_lag_max_fps_;
 +    data.pPresentationInfo = &presentation;
 +    dfn.vkAntiLagUpdateAMD(device_->device(), &data);
@@ -2343,7 +2706,7 @@ index 0000000..b8d2267
 +  }
 +  const VulkanDevice::Functions& dfn = device_->functions();
 +  std::shared_lock lock(swapchain_mutex_);
-+  if (swapchain_ == VK_NULL_HANDLE) {
++  if (shut_down_ || swapchain_ == VK_NULL_HANDLE || !swapchain_latency_mode_) {
 +    return std::string();
 +  }
 +  VkGetLatencyMarkerInfoNV info = {VK_STRUCTURE_TYPE_GET_LATENCY_MARKER_INFO_NV};
@@ -2423,67 +2786,123 @@ index 0000000..b8d2267
 +}  // namespace ui
 +}  // namespace rex
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index b4fe768..42282c5 100644
+index b4fe768..6d23b11 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
-@@ -287,6 +287,9 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
+@@ -287,6 +287,10 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
  }
  
  VulkanPresenter::~VulkanPresenter() {
 +  if (low_latency_) {
 +    LowLatency::Detach(low_latency_.get());
++    low_latency_->Shutdown();
 +  }
    // Frame generation: the pacer stopped and its objects destroyed while the
    // swapchain still exists.
    ShutdownFramePacer();
-@@ -899,6 +902,10 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -892,13 +896,18 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+   if (paint_context_.vulkan_surface != VK_NULL_HANDLE) {
+     VkSwapchainKHR old_swapchain = paint_context_.PrepareForSwapchainRetirement();
+     bool surface_unusable;
++    bool latency_mode;
+     paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
+         vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
+         old_swapchain, paint_context_.present_queue_family, new_swapchain_format,
+         paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable,
          hdr_wanted, hdr, frame_generation_wanted(), paint_context_.pacer_queue_family,
-         paint_context_.pacer_queue_index, paint_context_.swapchain_transfer_dst);
+-        paint_context_.pacer_queue_index, paint_context_.swapchain_transfer_dst);
++        paint_context_.pacer_queue_index, paint_context_.swapchain_transfer_dst, latency_mode);
      paint_context_.swapchain_frame_generation_wanted = frame_generation_wanted();
 +    if (low_latency_) {
 +      // Before the old swapchain is destroyed (waits for the calls being made with it).
-+      low_latency_->SetSwapchain(paint_context_.swapchain);
++      low_latency_->SetSwapchain(paint_context_.swapchain, latency_mode);
 +    }
      // Destroy the old swapchain that may be retired now, once its last
      // presentation is done (rexglue-hdr-ui-layer.patch: the paint submissions
      // were awaited, but not the present, which is invalid -
-@@ -1022,6 +1029,9 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -1015,13 +1024,17 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+       return SurfacePaintConnectResult::kFailure;
+     }
+     bool surface_unusable;
++    bool latency_mode;
+     paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
+         vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
+         VK_NULL_HANDLE, paint_context_.present_queue_family, new_swapchain_format,
+         paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable,
          hdr_wanted, hdr, frame_generation_wanted(), paint_context_.pacer_queue_family,
-         paint_context_.pacer_queue_index, paint_context_.swapchain_transfer_dst);
+-        paint_context_.pacer_queue_index, paint_context_.swapchain_transfer_dst);
++        paint_context_.pacer_queue_index, paint_context_.swapchain_transfer_dst, latency_mode);
      paint_context_.swapchain_frame_generation_wanted = frame_generation_wanted();
 +    if (low_latency_) {
-+      low_latency_->SetSwapchain(paint_context_.swapchain);
++      low_latency_->SetSwapchain(paint_context_.swapchain, latency_mode);
 +    }
      if (paint_context_.swapchain == VK_NULL_HANDLE) {
        // Failed to create the swapchain for the new Vulkan surface - destroy the
        // Vulkan surface.
-@@ -1667,6 +1677,14 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1308,9 +1321,10 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+     const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+     VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out, VkFormat& image_format_out,
+-    VkExtent2D& image_extent_out, bool& is_fifo_out, bool& ui_surface_unusable_out,
+-    bool hdr_wanted, bool& hdr_out, bool frame_generation, uint32_t& pacer_queue_family_out,
+-    uint32_t& pacer_queue_index_out, bool& transfer_dst_out) {
++    VkExtent2D& image_extent_out, bool& is_fifo_out, bool& ui_surface_unusable_out, bool hdr_wanted,
++    bool& hdr_out, bool frame_generation, uint32_t& pacer_queue_family_out,
++    uint32_t& pacer_queue_index_out, bool& transfer_dst_out, bool& latency_mode_out) {
++  latency_mode_out = false;
+   ui_surface_unusable_out = false;
+   hdr_out = false;
+   pacer_queue_family_out = UINT32_MAX;
+@@ -1667,8 +1681,36 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
    }
    swapchain_create_info.clipped = VK_TRUE;
    swapchain_create_info.oldSwapchain = old_swapchain;
-+  // Low latency (rexglue-low-latency.patch): the swapchain takes the driver's latency calls.
++  // Low latency (rexglue-low-latency.patch): the swapchain takes the driver's latency calls. A
++  // driver that refuses it for the first swapchain (nothing to retire yet) is asked again
++  // without, and the reducer is unavailable (it is remembered for the swapchains after).
++  static std::atomic<bool> latency_mode_refused{false};
 +  VkSwapchainLatencyCreateInfoNV latency_create_info = {
 +      VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV};
-+  if (vulkan_device->extensions().ext_NV_low_latency2) {
++  const void* const swapchain_pnext_without_latency = swapchain_create_info.pNext;
++  const bool latency_mode_wanted = vulkan_device->extensions().ext_NV_low_latency2 &&
++                                   !latency_mode_refused.load(std::memory_order_relaxed);
++  if (latency_mode_wanted) {
 +    latency_create_info.latencyModeEnable = VK_TRUE;
 +    latency_create_info.pNext = swapchain_create_info.pNext;
 +    swapchain_create_info.pNext = &latency_create_info;
 +  }
    VkSwapchainKHR swapchain;
-   if (dfn.vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain) != VK_SUCCESS) {
+-  if (dfn.vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain) != VK_SUCCESS) {
++  VkResult swapchain_result =
++      dfn.vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain);
++  if (swapchain_result != VK_SUCCESS && latency_mode_wanted && old_swapchain == VK_NULL_HANDLE) {
++    REXLOG_WARN(
++        "VulkanPresenter: Failed to create a swapchain with the low latency mode ({}); trying "
++        "without it: the reducer won't work",
++        int32_t(swapchain_result));
++    latency_mode_refused.store(true, std::memory_order_relaxed);
++    swapchain_create_info.pNext = swapchain_pnext_without_latency;
++    swapchain_result =
++        dfn.vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain);
++  } else if (swapchain_result == VK_SUCCESS) {
++    latency_mode_out = latency_mode_wanted;
++  }
++  if (swapchain_result != VK_SUCCESS) {
      REXLOG_ERROR("VulkanPresenter: Failed to create a swapchain");
-@@ -1786,6 +1804,10 @@ bool VulkanPresenter::EnsureHdrUiLayer() {
+     return VK_NULL_HANDLE;
+   }
+@@ -1786,6 +1828,10 @@ bool VulkanPresenter::EnsureHdrUiLayer() {
  
  void VulkanPresenter::PaintContext::DestroySwapchainAndVulkanSurface() {
    VkSwapchainKHR old_swapchain = PrepareForSwapchainRetirement();
 +  if (low_latency) {
 +    // Waits for the driver calls being made with it.
-+    low_latency->SetSwapchain(VK_NULL_HANDLE);
++    low_latency->SetSwapchain(VK_NULL_HANDLE, false);
 +  }
    if (old_swapchain != VK_NULL_HANDLE) {
      vulkan_device->functions().vkDestroySwapchainKHR(vulkan_device->device(), old_swapchain,
                                                       nullptr);
-@@ -2725,6 +2747,8 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2725,6 +2771,8 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
        swapchain_image_index < paint_context_.swapchain_present_semaphores.size()
            ? paint_context_.swapchain_present_semaphores[swapchain_image_index]
            : paint_submission.present_semaphore();
@@ -2492,7 +2911,7 @@ index b4fe768..42282c5 100644
    VkSubmitInfo submit_info;
    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
    submit_info.pNext = nullptr;
-@@ -2754,6 +2778,14 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2754,6 +2802,14 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
      submit_info.pWaitDstStageMask = &paced_wait_stage;
      submit_info.pSignalSemaphores = &frame_pacer_paint_timeline_;
    }
@@ -2507,21 +2926,26 @@ index b4fe768..42282c5 100644
    {
      VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
          paint_context_.submission_tracker.AcquireFenceToAdvanceSubmission());
-@@ -2797,7 +2829,12 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2797,7 +2853,17 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    }
  
    if (paced) {
 -    PushFrameToPacer(paced_frame, guest_output_properties.refresh_number, paint_generated);
 +    // Low latency: the guest frame's present is its hand-over to the pacer (the presents the
 +    // pacer makes, generated ones too, are out of band: PushFrameToPacer).
-+    LowLatency::Marker(LatencyMarker::kPresentStart, low_latency_frame);
++    const bool hand_off_markers = low_latency_ && low_latency_->PresentMarkersAtHandOff();
++    if (hand_off_markers) {
++      LowLatency::Marker(LatencyMarker::kPresentStart, low_latency_frame);
++    }
 +    PushFrameToPacer(paced_frame, guest_output_properties.refresh_number, paint_generated,
 +                     low_latency_frame);
-+    LowLatency::Marker(LatencyMarker::kPresentEnd, low_latency_frame);
++    if (hand_off_markers) {
++      LowLatency::Marker(LatencyMarker::kPresentEnd, low_latency_frame);
++    }
      return paced_suboptimal ? PaintResult::kPresentedSuboptimal : PaintResult::kPresented;
    }
  
-@@ -2810,11 +2847,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2810,11 +2876,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    present_info.pSwapchains = &paint_context_.swapchain;
    present_info.pImageIndices = &swapchain_image_index;
    present_info.pResults = nullptr;
@@ -2544,7 +2968,7 @@ index b4fe768..42282c5 100644
    }
  #if REX_PLATFORM_PS5
    if (ps5_log_paint) {
-@@ -2856,6 +2904,23 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+@@ -2856,6 +2933,23 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
    const VulkanDevice::Functions& dfn = vulkan_device_->functions();
    const VkDevice device = vulkan_device_->device();
  
@@ -2569,7 +2993,7 @@ index b4fe768..42282c5 100644
    guest_output_image_sampler_bindings[0].binding = 0;
    guest_output_image_sampler_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 diff --git a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
-index 7d90794..d445365 100644
+index 7d90794..46141b2 100644
 --- a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
 +++ b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
 @@ -183,6 +183,12 @@ void VulkanPresenter::CreateFramePacerFromUIThread() {
@@ -2600,15 +3024,19 @@ index 7d90794..d445365 100644
      frame_pacer_pushed_ = frame_id + 1;
    }
    frame_pacer_condition_.notify_all();
-@@ -1207,7 +1215,11 @@ bool VulkanPresenter::FramePacerPresentImage(const FramePacerFrame& frame,
+@@ -1207,7 +1215,15 @@ bool VulkanPresenter::FramePacerPresentImage(const FramePacerFrame& frame,
        if (last) {
          frame_pacer_copy_signalled_ = value;
        }
 +      // Low latency: each of the pacer's presents, the generated ones too, is out of band, with
 +      // the id of the guest frame it shows.
-+      LowLatency::Marker(LatencyMarker::kOutOfBandPresentStart, frame.low_latency_frame);
++      LowLatency::Marker(
++          generated ? LatencyMarker::kGeneratedPresentStart : LatencyMarker::kOutOfBandPresentStart,
++          frame.low_latency_frame);
        present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
-+      LowLatency::Marker(LatencyMarker::kOutOfBandPresentEnd, frame.low_latency_frame);
++      LowLatency::Marker(
++          generated ? LatencyMarker::kGeneratedPresentEnd : LatencyMarker::kOutOfBandPresentEnd,
++          frame.low_latency_frame);
        if (dump && !last) {
          // The generated frame's readback before the real one's copy reuses
          // the buffer (development only).
