@@ -1,5 +1,6 @@
-"""Checks frame generation's dumps (frame_generation_dump on D3D12: fg_dump_d3d12_<frame>_r<refresh>_
-{real,generated,real_only}_<w>x<h>.ppm, HDR10 codes, the guest output's size).
+"""Checks frame generation's dumps (frame_generation_dump: fg_dump_<d3d12|vulkan>_<frame>_r<refresh>_
+{real,generated,real_only}_<w>x<h>.ppm, HDR10 codes; on D3D12 the guest output's size, on Vulkan
+the presented images, the window's).
 
 For every generated frame G(k) whose neighbours R(k-1) and R(k) were dumped too:
   still: of the pixels equal in R(k-1) and R(k) (the HUD, a still scene), the share where G(k) is
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-NAME = re.compile(r"fg_dump_d3d12_(\d+)_r(\d+)_(real|generated|real_only)_(\d+)x(\d+)\.ppm$")
+NAME = re.compile(r"fg_dump_(?:d3d12|vulkan)_(\d+)_r(\d+)_(real|generated|real_only)_(\d+)x(\d+)\.ppm$")
 
 
 def read_ppm(path):
@@ -84,7 +85,7 @@ def main():
                              "at the window's size")
     args = parser.parse_args()
     frames = {}
-    for path in Path(args.folder).glob("fg_dump_d3d12_*.ppm"):
+    for path in Path(args.folder).glob("fg_dump_*.ppm"):
         m = NAME.match(path.name)
         if m:
             frames.setdefault(int(m.group(1)), {})[m.group(3)] = path

@@ -23,6 +23,7 @@ SHADERS = {
     "hdr_refresh.cs": GPU,
     "hdr_refresh_fg.cs": GPU,
     "fg_hudless_downscale.cs": GPU,
+    "fg_depth_copy.cs": GPU,
     "hdr_fullscreen.vs": GPU,
     "hdr_underlay_restore.ps": GPU,
     "hdr_scene_mcla.cs": GPU,
@@ -34,7 +35,7 @@ SHADERS = {
     "taa_debug_view.cs": GPU,
 }
 # Built for Vulkan only.
-VULKAN_ONLY = {"hdr_rt_copy.cs", "hdr_rt_copy_4xmsaa.cs"}
+VULKAN_ONLY = {"hdr_rt_copy.cs", "hdr_rt_copy_4xmsaa.cs", "fg_depth_copy.cs"}
 INCLUDES = [("src/ui/shaders/hdr_output.xesli", "ui/shaders"),
             ("src/graphics/shaders/hdr_rt_copy.cs.xesl", "gpu/shaders"),
             ("src/graphics/shaders/hdr_refresh.cs.xesl", "gpu/shaders")]

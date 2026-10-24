@@ -1,0 +1,37 @@
+# Phase 3: anti-aliasing switched while frame generation runs (Vulkan): FSR, MSAA,
+# off and FSR again, each with dumps while driving.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.4
+stick lx 0.1
+wait 3s
+mark fsr
+set frame_generation_dump 4
+wait 1500ms
+set frame_generation_dump 0
+set mcla_anti_aliasing msaa
+wait 3s
+mark msaa
+set frame_generation_dump 4
+wait 1500ms
+set frame_generation_dump 0
+set mcla_anti_aliasing off
+wait 3s
+mark aa_off
+set frame_generation_dump 4
+wait 1500ms
+set frame_generation_dump 0
+set mcla_anti_aliasing fsr
+wait 4s
+mark fsr_again
+set frame_generation_dump 4
+wait 1500ms
+set frame_generation_dump 0
+release all
+mark end
+wait 1s
