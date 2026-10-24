@@ -1,0 +1,298 @@
+name: Release (draft only)
+
+# Builds every asset of a release and puts them in a DRAFT GitHub release for the maintainer to look
+# at. It never publishes: the last job creates the release with --draft, no tag is created or
+# pushed (a draft only names its tag), and a published release of the same tag makes it stop.
+# Publishing is done by a person, in the GitHub UI, after looking at the draft.
+#
+#   Actions > Release (draft only) > Run workflow, with the tag name (v0.1.0)
+#   or a push to a branch named draft-release/<anything> (the draft is then called draft-<commit>),
+#   which is how this workflow is tried before it is on main.
+#
+# Nothing of the game is involved: the assets are the launcher, the SDK bundle (with FSR's two
+# DLLs) and files made from them. See scripts/ci/README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag name, e.g. v0.1.0 (letters, digits, . _ -). The draft names it; no tag is created."
+        required: true
+        type: string
+  push:
+    branches:
+      - "draft-release/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  plan:
+    name: Tag and version
+    if: github.repository == 'RenanQueiroz/mcla-recomp'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - id: plan
+        shell: powershell
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:REF -ne "refs/heads/main" -and $env:REF -notlike "refs/heads/draft-release/*") {
+              throw "run this from main (or from a draft-release/ branch, to try it), not from $env:REF"
+          }
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { "draft-" + $env:SHA.Substring(0, 8) }
+          if ($tag -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw "the tag name has characters other than letters, digits, . _ -" }
+          $version = if ($tag -match '^v?(\d+\.\d+\.\d+)') { $Matches[1] } else { "0.0.0" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag $tag, version $version, commit $env:SHA"
+
+  sdk:
+    name: SDK (patched, llvm-mingw)
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No cache here: a release is built from nothing.
+      - name: Build the SDK
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -Until sdk
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-install
+          path: third_party/rexglue-sdk/out/install/win-amd64-mingw
+          if-no-files-found: error
+          retention-days: 3
+
+  fidelityfx:
+    name: FidelityFX DLLs (static C runtime)
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The SDK's sources, patched (its FidelityFX wrapper is built apart below), and the project's
+      # Clang for Windows (hash-checked), which finds the Visual Studio on the runner.
+      - name: SDK source and the project's Clang
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain msvc -InstallTools -Until sdk-source
+
+      - name: Vulkan SDK (pinned, hash-checked)
+        shell: powershell
+        run: .\scripts\ci\install-vulkan-sdk.ps1
+
+      - name: Build the two DLLs
+        shell: powershell
+        run: .\scripts\ci\build-fidelityfx.ps1 -Out "$env:RUNNER_TEMP\ffx-dlls"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fidelityfx
+          path: ${{ runner.temp }}/ffx-dlls
+          if-no-files-found: error
+          retention-days: 3
+
+  launcher:
+    name: Launcher (self-contained)
+    needs: plan
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish and zip the launcher
+        shell: powershell
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: .\scripts\ci\publish-launcher.ps1 -Out "$env:RUNNER_TEMP\launcher" -Zip "$env:RUNNER_TEMP\launcher-zip\MCLA-Launcher-$env:TAG-win-x64.zip" -Version $env:VERSION
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-zip
+          path: ${{ runner.temp }}/launcher-zip
+          if-no-files-found: error
+          retention-days: 3
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-notices
+          path: ${{ runner.temp }}/launcher/notices
+          if-no-files-found: error
+          retention-days: 3
+
+  bundle:
+    name: SDK bundle
+    needs: [plan, sdk, fidelityfx]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      name: ${{ steps.bundle.outputs.bundle_name }}
+      sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The patched SDK source again (for its licences, its submodules' commits and the FidelityFX
+      # pins that go into the bundle's notices) and llvm-mingw (its libc++ and licence).
+      - name: SDK source and llvm-mingw
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -Until sdk-source
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-install
+          path: third_party/rexglue-sdk/out/install/win-amd64-mingw
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fidelityfx
+          path: ${{ runner.temp }}/ffx-dlls
+
+      - name: Assemble the bundle
+        id: bundle
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $epoch = (git log -1 --format=%ct).Trim()
+          python -I scripts\ci\make-sdk-bundle.py `
+              --install third_party\rexglue-sdk\out\install\win-amd64-mingw --sdk third_party\rexglue-sdk --repo . `
+              --mingw tools\llvm-mingw-20250709-ucrt-x86_64 --ffx "$env:RUNNER_TEMP\ffx-dlls" `
+              --out "$env:RUNNER_TEMP\bundle" --stage "$env:RUNNER_TEMP\bundle-stage" --source-date-epoch $epoch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-bundle
+          path: ${{ runner.temp }}/bundle/rexglue-sdk-*.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  verify:
+    name: SDK bundle, used as a player's PC would
+    needs: bundle
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-bundle
+          path: ${{ runner.temp }}/bundle
+
+      # A fresh checkout and a fresh machine: the bundle is unpacked, checked against the patches,
+      # and used by make_pc.ps1 exactly as the wizard's install uses it.
+      - name: Use the bundle
+        shell: powershell
+        env:
+          BUNDLE_NAME: ${{ needs.bundle.outputs.name }}
+          BUNDLE_SHA256: ${{ needs.bundle.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path "$env:RUNNER_TEMP\bundle" $env:BUNDLE_NAME
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $env:BUNDLE_SHA256) { throw "the bundle's SHA-256 is $actual, not $env:BUNDLE_SHA256" }
+          .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -SdkBundle $zip -SdkBundleSha256 $actual -Until sdk
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bin = "$PWD\third_party\rexglue-sdk-bin\bin"
+          # (--help exits with -1: the tool wants a command. It has to run and say what it is.)
+          $help = (& "$bin\rexglue.exe" --help) -join "`n"
+          $help.Split("`n") | Select-Object -First 3
+          if ($help -notmatch 'ReXGlue v\d') { throw "rexglue.exe does not run" }
+          Add-Type -Namespace Win -Name Loader -MemberDefinition '[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr LoadLibraryW(string path);'
+          foreach ($dll in "amd_fidelityfx_dx12.dll", "amd_fidelityfx_vk.dll") {
+              $handle = [Win.Loader]::LoadLibraryW("$bin\$dll")
+              "$dll loads: $($handle -ne [IntPtr]::Zero)$(if ($handle -eq [IntPtr]::Zero) { ' (error ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error() + ')' })"
+              # The Vulkan one needs a Vulkan loader (vulkan-1.dll), which a runner without a GPU has none of.
+              if ($handle -eq [IntPtr]::Zero -and $dll -like "*dx12*") { throw "$dll does not load" }
+          }
+
+      - name: Compile the host sources against the bundle
+        shell: powershell
+        run: .\scripts\ci\host-compile.ps1 -SdkDir third_party\rexglue-sdk-bin
+
+  draft:
+    name: Draft release
+    needs: [plan, bundle, launcher, verify]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-bundle
+          path: ${{ runner.temp }}/assets
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: launcher-zip
+          path: ${{ runner.temp }}/assets
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: launcher-notices
+          path: ${{ runner.temp }}/launcher-notices
+
+      - name: The tools release.json names are what the pins say
+        run: python -I scripts/ci/verify_tools.py
+
+      - name: release.json, NOTICES.txt, SHA256SUMS and the draft's text
+        shell: powershell
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUNDLE_NAME: ${{ needs.bundle.outputs.name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $assets = "$env:RUNNER_TEMP\assets"
+          python -I scripts\ci\assemble-release.py --tag $env:TAG --commit $env:COMMIT --repository $env:REPOSITORY `
+              --assets $assets --launcher-zip "MCLA-Launcher-$env:TAG-win-x64.zip" --sdk-bundle-zip $env:BUNDLE_NAME `
+              --launcher-notices "$env:RUNNER_TEMP\launcher-notices" --out $assets --run-url $env:RUN_URL
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem $assets | ForEach-Object { "{0,-64} {1,14:N0}" -f $_.Name, $_.Length }
+
+      # The only step that writes to the repository, and it can only create a draft.
+      - name: Create the draft release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+        run: .\scripts\ci\create-draft-release.ps1 -Tag $env:TAG -Commit $env:COMMIT -Folder "$env:RUNNER_TEMP\assets"
