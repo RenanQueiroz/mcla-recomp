@@ -287,7 +287,68 @@ static class GameSettings
              + "matter of taste: Brighter is the default, and Normal is the mildest.",
     };
 
-    public static readonly GameSetting[] Graphics = [Resolution, FrameRate, Display, DisplayGamma, AntiAliasing, FsrSharpness, SingleTile, HudRate, GraphicsApi];
+    // frame_generation (the SDK's, rexglue-frame-generation.patch): AMD FSR 3.1
+    // puts one generated frame between each two the game renders. It changes
+    // during play, on both graphics APIs, in the pause menu too. Offered where
+    // the FidelityFX runtime for the graphics API was built (the same as FSR's;
+    // the game itself says in its menu when the graphics card can't run it).
+    public static readonly GameSetting FrameGeneration = new("frame_generation", "Frame generation",
+        [new("Off", "off"), new("FSR 3.1", "fsr")], "off")
+    {
+        Info = "Shows one generated frame between each pair the game renders, so 120 FPS looks like 240. It "
+             + "needs a variable-refresh display (G-Sync or FreeSync) or one of 120 Hz or more, and works best "
+             + "from 60 FPS rendered (80 or more for racing). It adds input lag (6.3 ms from the game's swap to "
+             + "the screen at 116 rendered on a 240 Hz display, against 2.1 ms without it) and some GPU time "
+             + "(about 0.4 ms at native resolution, 1.3 ms at 3x, on an RTX 5080). The frame rate setting "
+             + "becomes the rendered rate, by default Half display, a little under half your refresh rate. "
+             + "The HUD and menus are put over each generated frame as they are, not blended. It takes effect "
+             + "during play on both graphics "
+             + "APIs (the pause menu has the same setting); the game says there when your graphics card or "
+             + "driver can't run it, and plays without it.",
+        Offered = (file, value) => !SettingValues.Same(value, "fsr") || FsrRuntimeBuilt(file),
+        Unavailable = "not built for this graphics API",
+    };
+
+    /// Whether the file has frame generation on, and it can be (its runtime built).
+    public static bool FrameGenerationOn(IReadOnlyDictionary<string, string> file) =>
+        file.TryGetValue(FrameGeneration.Key, out var raw) && SettingValues.Same(SettingValues.Parse(raw), "fsr")
+        && FsrRuntimeBuilt(file);
+
+    /// HALF DISPLAY (src/frame_timing.cpp): floor of 97% of half the refresh rate, rendered, on a display of
+    /// 100 Hz or more; 0 where it isn't offered.
+    public static int HalfDisplayCap(double refreshHz) =>
+        refreshHz >= 100 ? (int)Math.Floor(refreshHz * 0.97 / 2) : 0;
+
+    // mcla_fps_frame_generation (src/frame_timing.cpp): the cap with frame generation on, the
+    // rendered rate. Half display, just under half the refresh rate, is the default, the one that keeps
+    // the presents within what the display takes. mcla_fps is the player's own cap for when it is off.
+    static GameSetting FrameRateWithFrameGeneration(int half) => new("mcla_fps_frame_generation",
+        "Frame rate with frame generation",
+        [new($"Half display ({half} FPS, {2 * half} shown on your display)", -1L),
+         new("30 FPS (60 shown)", 30L), new("40 FPS (80 shown)", 40L), new("45 FPS (90 shown)", 45L),
+         new("50 FPS (100 shown)", 50L), new("60 FPS (120 shown)", 60L), new("120 FPS (240 shown)", 120L),
+         new("Uncapped", 0L)], -1L)
+    {
+        Info = "The frame-rate cap while frame generation is on, counted in rendered frames: 60 shows 120. Half "
+             + "display (the default) is a little under half your display's refresh rate, so the presents stay "
+             + "just under what the display takes and the delay from the game to the screen stays short "
+             + "(about 6 ms at 116 on a 240 Hz display). A higher cap is allowed but adds latency: frames "
+             + "queue behind the display's own limit (about 22 ms at 120 rendered on 240 Hz). A cap below "
+             + "half your refresh rate is fine too, and best from 60 up (30 to 45 look choppy between the "
+             + "frames). The frame rate above is the cap while frame generation is off.",
+    };
+
+    /// The frame rate setting to show: with frame generation on, on a display of 100 Hz or more, the
+    /// one with Half display (the cap of its own); otherwise the player's cap. An old cap in the file stays as
+    /// it is, used again whenever frame generation is off.
+    public static GameSetting FrameRateFor(IReadOnlyDictionary<string, string> file, double refreshHz) =>
+        FrameGenerationOn(file) && HalfDisplayCap(refreshHz) > 0
+            ? FrameRateWithFrameGeneration(HalfDisplayCap(refreshHz))
+            : FrameRate;
+
+    public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz) =>
+        [Resolution, FrameRateFor(file, refreshHz), Display, DisplayGamma, AntiAliasing, FrameGeneration,
+         FsrSharpness, SingleTile, HudRate, GraphicsApi];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Intro, Prompts];

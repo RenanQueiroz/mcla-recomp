@@ -825,7 +825,7 @@ sealed class LauncherApp : Component
         Element Settings() =>
             ScrollViewer(VStack(12,
                 Subtitle("Graphics"),
-                Pairs(GameSettings.Graphics.Select(SettingCombo).ToArray()),
+                Pairs(GameSettings.GraphicsFor(gameSettings, DisplayRefresh.Main.Value).Select(SettingCombo).ToArray()),
                 Subtitle("HDR"),
                 Pairs([.. GameSettings.HdrChoices.Select(SettingCombo), .. GameSettings.HdrLevels.Select(LevelSlider)]),
                 VStack(2, (DisplayHdr.Main.Value?.Describe() ?? DisplayHdr.Unknown)

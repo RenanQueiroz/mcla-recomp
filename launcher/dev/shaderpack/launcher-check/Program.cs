@@ -8,6 +8,9 @@
 //       a ShaderPrepRun on a stand-in game: progress, exit code, message, flags
 //   stop <stand-in game> "<options>" <logs folder> <ms>
 //       the same, ended with Stop() after <ms>: exit code, StopRequested
+//   settings <mcla.toml> <refresh Hz> [key=value ...]
+//       the Graphics rows the settings page shows for the file (its frame rate row depends on frame
+//       generation and the refresh rate), after writing the key=values as the page does, and the file
 //   --...   (as the stand-in game) prints the lines of the file FAKEMCLA_SCRIPT ("sleep <ms>"
 //       waits, "exit <code>" ends), for the run mode
 namespace MclaLauncher;
@@ -17,6 +20,7 @@ static class Program
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0].StartsWith("--")) return Stand_in();
+        if (args.Length >= 3 && args[0] == "settings") return Settings(args);
         if (args.Length >= 4 && args[0] == "check")
         {
             var toml = GameSettingsFile.Read(args[2]);
@@ -61,6 +65,29 @@ static class Program
         }
         Console.Error.WriteLine("usage: see Program.cs");
         return 2;
+    }
+
+    static int Settings(string[] args)
+    {
+        var refresh = double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
+        var set = new Dictionary<string, object>();
+        foreach (var pair in args.Skip(3))
+        {
+            var at = pair.IndexOf('=');
+            set[pair[..at]] = SettingValues.Parse(pair[(at + 1)..]);
+        }
+        // One write per key, as the page does (SetGameSetting).
+        foreach (var (key, value) in set) GameSettingsFile.Set(args[1], new Dictionary<string, object> { [key] = value });
+        var file = GameSettingsFile.Read(args[1]);
+        Console.WriteLine($"half display cap at {refresh} Hz: {GameSettings.HalfDisplayCap(refresh)}");
+        foreach (var setting in GameSettings.GraphicsFor(file, refresh))
+        {
+            var (choices, index) = setting.Show(file);
+            Console.WriteLine($"{setting.Header} [{setting.Key}]: {choices[index].Label} <- {string.Join(" | ", choices.Select(c => c.Label))}");
+        }
+        Console.WriteLine("--- file");
+        Console.Write(File.Exists(args[1]) ? File.ReadAllText(args[1]) : "(none)" + Environment.NewLine);
+        return 0;
     }
 
     static int Stand_in()

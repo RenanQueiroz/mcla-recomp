@@ -153,3 +153,32 @@ sealed record DisplayHdr(bool HdrOn, float PeakNits, float SdrWhiteNits)
         return packet;
     }
 }
+
+/// The main display's refresh rate as Windows reports it (a variable-refresh display: its
+/// highest), for the frame rate settings with frame generation (Half display); 0 if it can't be
+/// read. Read once, when the launcher opens; the game reads the display its window is on.
+static class DisplayRefresh
+{
+    public static readonly Lazy<double> Main = new(Read);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern bool EnumDisplaySettingsW(string? deviceName, int modeNumber, byte[] mode);
+
+    static double Read()
+    {
+        try
+        {
+            // A DEVMODEW: dmSize (a ushort) at 68, dmDisplayFrequency (a uint) at 184, 220 bytes.
+            var mode = new byte[220];
+            BitConverter.GetBytes((ushort)mode.Length).CopyTo(mode, 68);
+            const int ENUM_CURRENT_SETTINGS = -1;
+            if (!EnumDisplaySettingsW(null, ENUM_CURRENT_SETTINGS, mode)) return 0;
+            var hertz = BitConverter.ToUInt32(mode, 184);
+            return hertz > 1 ? hertz : 0;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or MarshalDirectiveException)
+        {
+            return 0;
+        }
+    }
+}

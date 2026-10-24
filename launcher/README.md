@@ -167,6 +167,31 @@ Vulkan one needs the Vulkan SDK when the game is built); where it isn't there
 or fails, the game uses MSAA. An older `mcla_msaa = false` still means off while
 `mcla_anti_aliasing` isn't set.
 
+*Frame generation* (`frame_generation`, off by default) is AMD FSR 3.1's: one
+generated frame between each two the game renders (the pause menu's DISPLAY >
+FRAME GENERATION; it switches during play on both graphics APIs). FSR 3.1 is
+offered only where its runtime for the graphics API in use was built
+(`amd_fidelityfx_dx12.dll`, `amd_fidelityfx_vk.dll` next to `mcla.exe`, as for
+anti-aliasing); a file that has it on without the runtime shows "FSR 3.1 (not
+built for this graphics API)", and the game says why in its menu. While it is on,
+the *Frame rate* setting is replaced by *Frame rate with frame generation*
+(`mcla_fps_frame_generation`; the same row of the pause menu, FPS TARGET): *Half
+display* (-1, the default: floor of 97% of half the refresh rate Windows reports
+for the main display, 116 FPS on 240 Hz, shown as 232), 30 to 120 FPS in
+rendered frames (60 shows 120), or *Uncapped*. A cap above half the display
+adds latency (its tip says so); the game's own limits are in
+`patches\README.md`. The old *Frame rate* (`mcla_fps`) stays as it is in the
+file and is back when frame generation is turned off. On a main display under
+100 Hz *Half display* isn't offered (half would be under 50 rendered), so
+*Frame rate* stays whichever the setting, and the tip of *Frame generation* says
+it is for 120 Hz or more, or G-Sync or FreeSync. The refresh rate is read when
+the launcher opens (`DisplayRefresh` in `src\DisplayHdr.cs`); the game reads the
+display its window is on, so on another display the pause menu's list may differ.
+`dev\shaderpack\launcher-check` has a `settings` mode that prints the Graphics
+rows for a file and a refresh rate after writing `key=value` pairs as the page
+does, to check the round trip and that a file from before this setting stays
+byte for byte as it was.
+
 *Single tile rendering* (`mcla_single_tile`, on by default) draws the scene with
 anti-aliasing on once instead of in the Xbox 360's two tiles, in the larger
 EDRAM (4,096 tiles instead of the console's 2,048) the game asks the GPU plugin
@@ -455,7 +480,8 @@ during a build:
   session lock, the rollback after a crash and the pack disabled after two)
   and the import at a start, through `devrun.py`; `launcher-check\` builds the
   launcher's shader logic without its window (`dotnet build`), to run the check
-  before Play against a stamp and a preparation run against a stand-in game.
+  before Play against a stamp and a preparation run against a stand-in game, and
+  the settings page's rows (`settings <mcla.toml> <refresh Hz> [key=value ...]`).
 - `direct-resolve-2026-10-15.md`: resolves that read the render target
   directly instead of dumping it into the EDRAM buffer
   (`rexglue-direct-resolve.patch`) at any resolution scale, and the 4x MSAA
@@ -508,7 +534,8 @@ in front. A real controller keeps working alongside it.
   `--mcla_pad_exit_on_end` the game; `devrun.py` then reports the run as
   failed. `set <option> <value>` changes an
   option while the game runs, for comparing two settings within one run (the
-  time of day and the traffic differ from run to run). `close` closes the
+  time of day and the traffic differ from run to run), and `get <option>...`
+  logs the values the options have now. `close` closes the
   window as its close button does (waiting for a save being written; `quit`
   doesn't), and `saving` says whether one is (`saving wait`: until one is).
   `--mcla_fixed_dt=N` makes every game update advance exactly 1/N s:
@@ -523,6 +550,13 @@ in front. A real controller keeps working alongside it.
   with none), and what the game saved there (the pause menu's settings) is kept
   as `mcla.toml.after` in the run folder. `--vsync unset` leaves `--vsync` off
   the command line, which otherwise has `--vsync=false`.
+  `--fps` is also the cap with frame generation on (`--mcla_fps_frame_generation`
+  gets the same value, so a run's cap doesn't depend on it); `--fps-fg half` (or a
+  number) sets that one apart, `half` being Half display. `fg\fg-live-switch.pad`
+  switches frame generation on and off while driving, `fg\fg-menu.pad` steps the
+  pause menu's DISPLAY rows (FPS TARGET, FRAME GENERATION) and
+  `fg\fg-menu-unavailable.pad` does the same with generation made to fail
+  (`--extra --frame_generation_debug_fail=1`).
   A RESTART GAME in the run (a new mcla.exe started by the game) is followed
   until the last one exits, before `mcla.toml` is put back and the checks run.
   `run` runs one script, `bench` repeats one per configuration
