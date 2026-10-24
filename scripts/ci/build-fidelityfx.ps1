@@ -32,7 +32,9 @@ if ($ToolsDir) { . "$PSScriptRoot\..\env.ps1" -Toolchain msvc -ToolsDir $ToolsDi
 if (-not $env:MCLA_CC -or -not (Test-Path -LiteralPath $env:MCLA_CC)) { throw "no msvc-target Clang (scripts\make_pc.ps1 -Toolchain msvc installs it)" }
 $cc = $env:MCLA_CC; $cxx = $env:MCLA_CXX
 $readobj = Join-Path (Split-Path $cc -Parent) "llvm-readobj.exe"
-"compiler: $cc ($((& $cc --version | Select-Object -First 1)))"
+# (The output is collected first: a pipeline that stops early leaves a native command's exit code non-zero.)
+$compilerVersion = @(& $cc --version)[0]
+"compiler: $cc ($compilerVersion)"
 
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path -LiteralPath $Out).ProviderPath
@@ -118,10 +120,13 @@ $info = [ordered]@{
     fidelityFxCommit = $commit
     repository = $repository
     staticCrt = (-not $DynamicCrt)
-    compiler = (& $cc --version | Select-Object -First 1)
+    compiler = $compilerVersion
     dlls = $results
 }
 Set-Content -LiteralPath "$Out\fidelityfx-build.json" -Value (ConvertTo-Json -InputObject $info -Depth 5) -Encoding Ascii
 
 "FidelityFX DLLs in $Out"
 Get-ChildItem -LiteralPath $Out | ForEach-Object { "  $($_.Name)  $($_.Length)" }
+# Every step above was checked; what a runner's PowerShell step would still see is the last native
+# command's exit code.
+$global:LASTEXITCODE = 0
