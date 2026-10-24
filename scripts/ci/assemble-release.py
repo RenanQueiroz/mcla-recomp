@@ -180,9 +180,11 @@ body = f"""**Draft** of release `{a.tag}`, built from commit `{a.commit}`{(' by 
 |---|---|---|
 | `{launcher_zip.name}` | {mb(release['launcher']['size'])} | `{release['launcher']['sha256']}` |
 | `{bundle_zip.name}` | {mb(release['sdkBundle']['size'])} | `{release['sdkBundle']['sha256']}` |
-| `release.json` | {(out / 'release.json').stat().st_size} bytes | what the launcher's installer reads |
-| `NOTICES.txt` | {mb((out / 'NOTICES.txt').stat().st_size)} | licences and notices of everything in the assets |
-| `SHA256SUMS` | | |
+| `release.json` | {(out / 'release.json').stat().st_size / 1e3:.1f} KB | `{sha256(out / 'release.json')}` |
+| `NOTICES.txt` | {(out / 'NOTICES.txt').stat().st_size / 1e3:.1f} KB | `{sha256(out / 'NOTICES.txt')}` |
+| `SHA256SUMS` | | the sums of the four above |
+
+`release.json` is what the launcher's installer reads; `NOTICES.txt` has the licences and notices of everything in the assets.
 
 - **Launcher**: unzip and run `MclaLauncher.exe`; .NET and the Windows App SDK are inside. Unsigned.
 - **SDK bundle**: the ReXGlue SDK ({manifest['sdkCommit'][:8]}) with the fork's {len(manifest['patches'])} patches (hash `{patches_hash}`), built with llvm-mingw {m.group(3)}, and FSR's two runtimes (FidelityFX `{ffx['fidelityFxCommit'][:8]}`, built with the C runtime linked in, so no Visual C++ Redistributable is needed). `scripts/make_pc.ps1 -Toolchain mingw -SdkBundle <this zip> -SdkBundleSha256 <the hash>` uses it.
