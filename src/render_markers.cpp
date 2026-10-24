@@ -123,14 +123,17 @@ void EmitMarker(PPCContext& ctx, uint8_t* base, uint32_t kind, uint32_t value) {
     // recompiled code would skip setting it. Put MXCSR back to the caller's
     // rounding and flush modes too.
     ctx.fpscr.restoreGuestBits(saved.fpscr.csr);
-    // Logged at 1, 2, 4, 8... times.
-    if (!(++g_markers_made_room & (g_markers_made_room - 1))) {
-      REXLOG_INFO("Render markers: made room in the command buffer {} times", g_markers_made_room);
+    // Logged at 1, 2, 4, 8... times. (The count is read once: ++x & (x - 1) in
+    // one expression reads and modifies x unsequenced.)
+    const uint32_t made_room = ++g_markers_made_room;
+    if (!(made_room & (made_room - 1))) {
+      REXLOG_INFO("Render markers: made room in the command buffer {} times", made_room);
     }
   }
   if (put < 0x10000) {
-    if (!(++g_markers_dropped & (g_markers_dropped - 1))) {
-      REXLOG_WARN("Render markers: {} skipped (no command buffer)", g_markers_dropped);
+    const uint32_t dropped = ++g_markers_dropped;
+    if (!(dropped & (dropped - 1))) {
+      REXLOG_WARN("Render markers: {} skipped (no command buffer)", dropped);
     }
     return;
   }
