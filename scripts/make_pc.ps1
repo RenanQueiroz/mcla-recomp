@@ -32,8 +32,8 @@
 #                information is split into mcla.exe.debug.
 #   -ToolsDir    a folder with portable tools to use instead of installing or
 #                downloading them: llvm-mingw-*\ (mingw) or clang+llvm-*\
-#                (msvc), cmake*\ and ninja*\ (or ninja.exe) in it; it has to
-#                exist. A tool not found there is looked for as usual. Nothing
+#                (msvc), cmake*\, ninja*\ (or ninja.exe) and mingit*\ (git) in
+#                it; it has to exist. A tool not found there is looked for as usual. Nothing
 #                is added to the PATH outside this process.
 #   -SdkBundle   a prebuilt ReXGlue SDK instead of cloning, patching and building
 #                the SDK: a folder (used where it is, and trusted as it is), or a

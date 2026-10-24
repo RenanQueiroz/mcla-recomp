@@ -1,0 +1,208 @@
+// The install the wizard makes: where everything is in it (InstallLayout), what is recorded about it
+// (install.json), and the rules for the folder it goes in (PathBudget).
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace MclaLauncher.Setup;
+
+/// Where the parts of an install are, below the folder the player chose:
+///   install.json    the record (also a pointer next to the launcher's exe)
+///   tools\          pinned, checked downloads (llvm-mingw, CMake, Ninja, MinGit)
+///   downloads\      what is being downloaded (the SDK bundle, kept until the build has used it)
+///   game-incoming\  the game while it is copied, moved into mcla-recomp\game when complete
+///   logs\           the setup's logs
+///   mcla-recomp\    a git checkout of the fork at the release tag; the build's scripts, game\, generated\, out\
+sealed record InstallLayout(string Root)
+{
+    public const string RepoFolder = "mcla-recomp";
+    public const string RecordName = "install.json";
+
+    public string Repo => Path.Combine(Root, RepoFolder);
+    public string Tools => Path.Combine(Root, "tools");
+    public string Downloads => Path.Combine(Root, "downloads");
+    public string Staging => Path.Combine(Root, "game-incoming");
+    public string LogsDir => Path.Combine(Root, "logs");
+    public string RecordFile => Path.Combine(Root, RecordName);
+    public string GameDir => Path.Combine(Repo, "game");
+    public string LauncherDir => Path.Combine(Repo, "launcher");
+    public string BuildScript => Path.Combine(LauncherDir, "build-game.ps1");
+    public string BuildDir => Path.Combine(Repo, "out", "build", "win-amd64-release");
+    public string GameExe => Path.Combine(BuildDir, "mcla.exe");
+
+    /// The folder of MinGit's git.exe once it is unpacked (tools\mingit-*\cmd), or null.
+    public string? GitDir
+    {
+        get
+        {
+            if (!Directory.Exists(Tools)) return null;
+            foreach (var dir in new DirectoryInfo(Tools).EnumerateDirectories("mingit*"))
+            {
+                var cmd = Path.Combine(dir.FullName, "cmd");
+                if (File.Exists(Path.Combine(cmd, "git.exe"))) return cmd;
+            }
+            return null;
+        }
+    }
+}
+
+/// What the wizard records about an install: where it is, which release it was made from, how far setup got,
+/// and where the game is. Written next to the exe as a pointer (so the launcher finds the install) and in the
+/// install folder.
+sealed record InstallRecord
+{
+    public const int CurrentSchema = 1;
+
+    public int Schema { get; init; } = CurrentSchema;
+    public string InstallRoot { get; init; } = "";
+    /// "setting-up" until the last step is done, then "ready".
+    public string State { get; init; } = "setting-up";
+    /// "release": follows the fork's release tags. (Phase 5 adds "main".)
+    public string Channel { get; init; } = "release";
+    public string Toolchain { get; init; } = "mingw";
+    public string? ReleaseTag { get; init; }
+    public string? ReleaseCommit { get; init; }
+    /// "copy": the game was copied into the install; "in-place": it stays where it was, and game_data_root names it.
+    public string GameMode { get; init; } = "copy";
+    public string? GameSource { get; init; }
+    public string? GameDataRoot { get; init; }
+    public DateTime CreatedUtc { get; init; } = DateTime.UtcNow;
+    public DateTime? FinishedUtc { get; init; }
+    /// The steps that are done, by name (GameCopy, Tools, Source, Build, Shaders).
+    public List<string> StepsDone { get; init; } = [];
+
+    public bool Ready => State == "ready";
+
+    public static InstallRecord? Load(string file)
+    {
+        try
+        {
+            if (!File.Exists(file)) return null;
+            var record = JsonSerializer.Deserialize(File.ReadAllText(file), InstallJson.Default.InstallRecord);
+            return record is { InstallRoot.Length: > 0 } ? record : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// Written whole and renamed, so that a crash can't leave half a file.
+    public void Save(string file)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        var temp = $"{file}.{Environment.ProcessId}.tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(this, InstallJson.Default.InstallRecord), new UTF8Encoding(false));
+        File.Move(temp, file, overwrite: true);
+    }
+
+    /// The pointer beside the launcher's exe: just where the install is.
+    public static string PointerFile(string exeDirectory) => Path.Combine(exeDirectory, InstallLayout.RecordName);
+}
+
+[JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+                             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(InstallRecord))]
+partial class InstallJson : JsonSerializerContext;
+
+/// The rules for the folder the player chooses. The numbers are what the install needs: the longest path
+/// below the folder (measured on a finished install, with the margin the build adds) must stay under what
+/// Windows' programs accept (260 characters, the limit clang, Ninja and CMake have whatever the long-path
+/// setting says), and scripts\make_pc.ps1 itself refuses a checkout folder over 148.
+static class PathBudget
+{
+    /// Windows' MAX_PATH, without the terminating NUL.
+    public const int MaxPath = 259;
+    /// make_pc.ps1: "this folder's path is N characters long, and git cannot clone the SDK into one over 148".
+    public const int MakePcRepoLimit = 148;
+    /// The longest path below the install folder, from the folder: the compiler's object file for the SDK's
+    /// windowed_app_main_sdl.cpp, below mcla-recomp\out\build\...\CMakeFiles\mcla.dir\ (see the wizard's
+    /// documentation, "Folder length"). Measured on a finished install; PathBudgetCheck in the check
+    /// harness measures a real one and fails if this is too small.
+    public const int LongestBelowRoot = 136;
+
+    /// How many characters the install folder's own path may have.
+    public static int MaxRootLength =>
+        Math.Min(MaxPath - 1 - LongestBelowRoot,                                     // "\" + the longest path below it
+                 MakePcRepoLimit - (InstallLayout.RepoFolder.Length + 1));           // make_pc.ps1 looks at ...\mcla-recomp
+
+    /// What is wrong with a folder as an install folder, in plain words; null when it is fine.
+    public static string? Problem(string path, out bool resumes)
+    {
+        resumes = false;
+        if (string.IsNullOrWhiteSpace(path)) return "Choose a folder for the game and its tools.";
+        string full;
+        try { full = Path.GetFullPath(path.Trim()); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "That isn't a folder name Windows accepts.";
+        }
+        if (!Path.IsPathRooted(path.Trim()) || full.StartsWith(@"\\", StringComparison.Ordinal))
+            return "Choose a folder on a drive of this PC (a network location won't do: the build writes thousands of small files).";
+        var root = Path.GetPathRoot(full)!;
+        if (string.Equals(full.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            return "Choose a folder, not the whole drive.";
+        if (full.TrimEnd('\\').Length > MaxRootLength)
+            return $"That path is {full.TrimEnd('\\').Length} characters long, and the build needs it to stay at {MaxRootLength} or fewer: " +
+                   "some of the files it makes have long names, and Windows' tools stop at 260 characters in all. Choose a shorter path, for example C:\\MCLA.";
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var programs = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programsX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        foreach (var protectedFolder in new[] { windows, programs, programsX86 })
+            if (protectedFolder.Length > 0 && IsInside(full, protectedFolder))
+                return "Windows doesn't let programs write there without administrator rights. Choose a folder in your own space, for example C:\\MCLA.";
+        if (Directory.Exists(full))
+        {
+            if (InstallRecord.Load(Path.Combine(full, InstallLayout.RecordName)) is { InstallRoot.Length: > 0 })
+            {
+                resumes = true;
+                return null;
+            }
+            bool empty;
+            try { empty = !Directory.EnumerateFileSystemEntries(full).Any(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return $"That folder can't be read: {ex.Message}"; }
+            if (!empty)
+                return "That folder already has other things in it. Choose a new or empty folder: the setup puts its files there and nothing else.";
+        }
+        return null;
+    }
+
+    /// A warning that doesn't stop the setup: OneDrive (or another cloud folder) makes thousands of small
+    /// files slow and can lock them while it syncs.
+    public static string? Warning(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path.Trim());
+            foreach (var name in new[] { "OneDrive", "OneDriveConsumer", "OneDriveCommercial" })
+                if (Environment.GetEnvironmentVariable(name) is { Length: > 0 } onedrive && IsInside(full, onedrive))
+                    return "This folder is inside OneDrive. OneDrive would sync the game's 8 GB and the thousands of small files the build writes, which makes it slow and can make it fail. A folder outside OneDrive is better, for example C:\\MCLA.";
+            if (full.Split('\\').Any(part => part.StartsWith("OneDrive", StringComparison.OrdinalIgnoreCase)))
+                return "This folder looks like it is inside OneDrive. OneDrive would sync the game's 8 GB and the thousands of small files the build writes. A folder outside OneDrive is better, for example C:\\MCLA.";
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { }
+        return null;
+    }
+
+    public static bool IsInside(string path, string folder)
+    {
+        var a = Path.GetFullPath(path).TrimEnd('\\') + "\\";
+        var b = Path.GetFullPath(folder).TrimEnd('\\') + "\\";
+        return a.StartsWith(b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// Free bytes on the drive the folder is (or will be) on.
+    public static long FreeBytes(string path)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(path.Trim()));
+            return root == null ? 0 : new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException) { return 0; }
+    }
+
+    /// What an install needs besides the disc image: the game (copied), the tools unpacked, the checkout, the
+    /// SDK, the build and the shader storage, with room to spare while the downloads and the unpacked tools exist.
+    public static long RequiredBytes(long gameBytes, bool copiesGame) => (copiesGame ? gameBytes : 0) + 3L * (1L << 30);
+}

@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "title": "Midnight Club: Los Angeles Complete Edition (USA, Europe)",
+  "titleId": "545407F8",
+  "xexVersion": "0.0.0.8",
+  "files": [
+    {
+      "path": "attract576_16x9.bik",
+      "size": 63140548,
+      "sha256": "03812c6eb376f62e37ca570207a767fc58c74b8dd32dfc191b1ab4759ee33924"
+    },
+    {
+      "path": "attract576_4x3.bik",
+      "size": 63136172,
+      "sha256": "9fea4cfe759245c18e2071af787bf5d54c64b7710e5a658fb7915065539a6108"
+    },
+    {
+      "path": "attract720.bik",
+      "size": 63168256,
+      "sha256": "8967304e343c26df93b89c7e049f81f52355fcac788cda0bf6e3728e848690f1"
+    },
+    {
+      "path": "default.xex",
+      "size": 9252864,
+      "sha256": "c386f4001fa569e6ad4b982f441f67412f00b3f47c166134555cd4b59854a432"
+    },
+    {
+      "path": "intro576_16x9.bik",
+      "size": 123833536,
+      "sha256": "be55b718c804d6e1b9e1db97a5f70385bd4fd3295979bf6694655ebc70c36239"
+    },
+    {
+      "path": "intro576_4x3.bik",
+      "size": 123831648,
+      "sha256": "71e4b92f78e8f9e2c1c21a68a71b75287ea90224c1b12dbf7903e41cd8703aab"
+    },
+    {
+      "path": "intro720.bik",
+      "size": 123836692,
+      "sha256": "09435ea27e2117817f2e0e821e3f92c9036b76613b178eb812f65028a1168a79"
+    },
+    {
+      "path": "nxeart",
+      "size": 1425408,
+      "sha256": "c70acab80ec383552c0b821baeff8be7012115fd280a9af01d0e711523656850"
+    },
+    {
+      "path": "root_directory_padding.pad",
+      "size": 30720,
+      "sha256": "4c7eea521d2218c5965fd3666c694a967a939e29a6928d528b6ed1101176b8ac"
+    },
+    {
+      "path": "xarchive_audio.rpf",
+      "size": 1615757312,
+      "sha256": "5eea63203e0d5c32c9ec59d68e46f7941171e32283dc56c344a4e31bf4e4726e"
+    },
+    {
+      "path": "xarchive_audlo.rpf",
+      "size": 1463189504,
+      "sha256": "704b00676eb09e406b5d83add366ca6e72d909867e4f627fee1bcc1c1402bb4c"
+    },
+    {
+      "path": "xarchive_cache.rpf",
+      "size": 2130739200,
+      "sha256": "f46f9a39e797cc0a2f21730014e18e5762fdc0910595f440031e004cce2dd420"
+    },
+    {
+      "path": "xarchive_music.rpf",
+      "size": 780304384,
+      "sha256": "4d391ed71f132760ba4ec9cf5f26a58897ff7bc1bd78ee86acda3d84213eff15"
+    }
+  ]
+}

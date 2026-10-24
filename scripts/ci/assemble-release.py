@@ -6,7 +6,8 @@ r"""Writes the files of a draft release that are not built, from the built ones:
 
   release.json     the one file the wizard reads: what the release holds, with the SHA-256 and size
                    of each asset, the SDK bundle's commit/patches/toolchain, the tools to download
-                   (URL and SHA-256 each), the shader pack. "game" and "installer" are null for now.
+                   (URL and SHA-256 each), the shader pack, and "game": the fingerprints of the supported game (names, sizes,
+                   SHA-256 of its files, title id and version; never content). "installer" is null for now.
                    "commit" is the commit the release was built from: the tag, once it exists, has to
                    point at it (the wizard checks that).
   NOTICES.txt      the licences and notices of what the release's assets hold
@@ -125,6 +126,15 @@ if packs:
     p = packs[0]
     shader_pack = {"path": f"shaderpack/{p.name}", "sha256": cilib.sha256_file(p), "size": p.stat().st_size}
 
+# --- the supported game's fingerprints (names, sizes, SHA-256 of its files; scripts/ci/make-game-files.py made
+# the file from a disc once). Fingerprints only: nothing of the game.
+game = json.loads((repo / "scripts" / "ci" / "game-files.json").read_text(encoding="utf-8"))
+if game.get("format") != 1 or not game["files"] or any(not re.fullmatch(r"[0-9a-f]{64}", f["sha256"]) for f in game["files"]):
+    sys.exit("assemble-release: scripts/ci/game-files.json is not a format 1 list of files with SHA-256")
+if "default.xex" not in {f["path"] for f in game["files"]}:
+    sys.exit("assemble-release: scripts/ci/game-files.json lists no default.xex")
+game_field = {k: game[k] for k in ("title", "titleId", "xexVersion", "files")}
+
 launcher_packages = json.loads((pathlib.Path(a.launcher_notices) / "packages.json").read_text(encoding="utf-8"))
 with zipfile.ZipFile(launcher_zip) as z:
     source_commit = z.read("source-commit.txt").decode("ascii").strip()
@@ -166,7 +176,7 @@ release = {
         "note": "the corresponding source of the SDK bundle's GPL and LGPL parts (SDK tree at the pinned commits, patched, and the fork)",
     },
     "tools": tools,
-    "game": None,
+    "game": game_field,
     "shaderPack": shader_pack,
 }
 
@@ -228,11 +238,11 @@ Release `{a.tag}`, built from commit `{a.commit}`{(' by ' + a.run_url) if a.run_
 - **Launcher**: unzip and run `MclaLauncher.exe`; .NET and the Windows App SDK are inside. Unsigned.
 - **SDK bundle**: the ReXGlue SDK ({manifest['sdkCommit'][:8]}) with the fork's {len(manifest['patches'])} patches (digest `{digest[:12]}`), built with llvm-mingw {m.group(3)}, and FSR's two runtimes (FidelityFX `{ffx['fidelityFxCommit'][:8]}`, built with the C runtime linked in, so no Visual C++ Redistributable is needed). `scripts/make_pc.ps1 -Toolchain mingw -SdkBundle <this zip> -SdkBundleSha256 <the hash>` uses it.
 - **Source archive**: the corresponding source of the bundle's GPL and LGPL parts (the SDK tree at the pinned commits with the patches applied, and the fork at this commit).
-- `MCLA-Setup.exe` is not in this release yet (`installer` is `null` in `release.json`), and `game` is `null`: the installer and the list of the game's files come with the setup wizard.
+- `MCLA-Setup.exe` is not in this release yet (`installer` is `null` in `release.json`); `game` holds the fingerprints of the supported game (names, sizes and SHA-256 of its files: no content) for the launcher's setup wizard.
 - No game data is in any asset. The game is built on the player's PC, from their own disc.
 
 When publishing: leave the Target as it is (`{a.commit[:8]}`), so that the tag is made on the commit this was built from. The tag must point at `{a.commit}`, which `release.json` names; the launcher's installer checks that.
 """
 (out / "release-notes.md").write_text(body, encoding="utf-8", newline="\n")
 print(f"assemble-release: release.json, NOTICES.txt, SHA256SUMS, release-notes.md in {out}")
-print(json.dumps({k: release[k] for k in ("tag", "commit", "installer", "game")}, indent=2))
+print(json.dumps({k: release[k] for k in ("tag", "commit", "installer")} | {"game files": len(release["game"]["files"])}, indent=2))

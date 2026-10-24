@@ -4,7 +4,8 @@
 #                Build Tools' headers and libraries; mingw: llvm-mingw (Clang,
 #                lld, libc++ and mingw-w64, no Microsoft compiler needed).
 #   -ToolsDir    a folder with portable tools to use first: llvm-mingw-*\ (or
-#                clang+llvm-*\), cmake*\ and ninja*\ (or ninja.exe) in it
+#                clang+llvm-*\), cmake*\, ninja*\ (or ninja.exe) and mingit*\
+#                (git) in it
 #   -Sdk         the SDK install to build against (a prebuilt bundle's folder);
 #                by default the one scripts\make_pc.ps1 builds for the toolchain
 # With none of the three, the options of the last build are used
@@ -94,6 +95,9 @@ if (-not $ninjaBin) {
     if ($ninja) { $ninjaBin = $ninja.DirectoryName }
 }
 if ($ninjaBin) { $paths += $ninjaBin }
+# MinGit (a setup-wizard install has no git on its PATH): only from -ToolsDir, like the others.
+$gitBin = if ($ToolsDir) { FindTool "mingit*" "git.exe" "cmd" } else { "" }
+if ($gitBin) { $paths += $gitBin }
 $paths += "C:\Program Files\CMake\bin"
 $env:PATH = ($paths -join ";") + ";" + $env:PATH
 $env:REXSDK = if ($Sdk) { $Sdk }

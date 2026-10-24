@@ -8,35 +8,87 @@ using System.Text.RegularExpressions;
 
 namespace MclaLauncher;
 
-/// The launcher lives in launcher\ of the fork's checkout (published into
-/// launcher\app\); the repository is its parent folder.
+/// How this launcher was started, decided once from where its exe is (see Paths):
+///   Classic    the exe is in launcherpp\ of a fork checkout (build-game.ps1 is found above it): the user's own
+///              install, and development builds. The launcher as it has always been.
+///   Installed  the exe has an install.json beside it that names an install the setup wizard made.
+///   Wizard     neither: the first run, or a setup that did not finish. The setup wizard.
+enum LaunchMode { Classic, Installed, Wizard }
+
+/// The launcher lives in launcher\ of the fork's checkout (published into launcherpp\); the repository is its
+/// parent folder. An install made by the setup wizard has the same checkout (mcla-recomp\ in the install folder),
+/// with the exe elsewhere: install.json beside the exe says where.
 static class Paths
 {
-    public static readonly string LauncherDir = FindLauncherDir();
-    public static readonly string Repo = Path.GetDirectoryName(LauncherDir)!;
-    public static readonly string RepoOut = Path.Combine(Repo, "out");
-    public static readonly string BuildDir = Path.Combine(RepoOut, @"build\win-amd64-release");
-    public static readonly string GameExe = Path.Combine(BuildDir, "mcla.exe");
-    public static readonly string BuildScript = Path.Combine(LauncherDir, "build-game.ps1");
-    public static readonly string UpdateLauncherScript = Path.Combine(LauncherDir, "update-launcher.ps1");
-    public static readonly string BuiltCommitFile = Path.Combine(LauncherDir, "built-commit.txt");
-    public static readonly string SettingsFile = Path.Combine(LauncherDir, "settings.json");
-    public static readonly string LogsDir = Path.Combine(LauncherDir, "logs");
+    public static readonly LaunchMode Mode;
+    /// The install folder of an Installed launcher, or of an unfinished setup the Wizard resumes; else null.
+    public static readonly string? InstallRoot;
+    public static readonly string LauncherDir;
+    public static readonly string Repo;
+    public static readonly string RepoOut;
+    public static readonly string BuildDir;
+    public static readonly string GameExe;
+    public static readonly string BuildScript;
+    public static readonly string UpdateLauncherScript;
+    public static readonly string BuiltCommitFile;
+    public static readonly string SettingsFile;
+    public static readonly string LogsDir;
     public static readonly string Icon = Path.Combine(AppContext.BaseDirectory, "launcher.ico");
     // Written by build-launcher.ps1: the last commit that changed the launcher
     // this exe was built from. Absent in a dev build.
     public static readonly string SourceCommitFile = Path.Combine(AppContext.BaseDirectory, "source-commit.txt");
     public const string RepoUrl = "https://github.com/RenanQueiroz/mcla-recomp";
+    public const string IssuesUrl = "https://github.com/RenanQueiroz/mcla-recomp/issues";
     public const string UpstreamUrl = "https://github.com/holdmysocks/mcla-recomp";
+    /// MinGit's cmd folder in an install made by the wizard (git.exe is not on that PC's PATH); else null.
+    public static readonly string? GitDir;
 
-    // The first folder up from the exe that holds build-game.ps1, so the same
-    // exe works from launcher\app\ and from a dev build under launcher\src\bin\.
-    static string FindLauncherDir()
+    static Paths()
     {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+        (Mode, InstallRoot, LauncherDir) = Detect(AppContext.BaseDirectory);
+        Repo = Path.GetDirectoryName(LauncherDir)!;
+        RepoOut = Path.Combine(Repo, "out");
+        BuildDir = Path.Combine(RepoOut, @"build\win-amd64-release");
+        GameExe = Path.Combine(BuildDir, "mcla.exe");
+        BuildScript = Path.Combine(LauncherDir, "build-game.ps1");
+        UpdateLauncherScript = Path.Combine(LauncherDir, "update-launcher.ps1");
+        BuiltCommitFile = Path.Combine(LauncherDir, "built-commit.txt");
+        SettingsFile = Path.Combine(LauncherDir, "settings.json");
+        LogsDir = Path.Combine(LauncherDir, "logs");
+        if (Mode == LaunchMode.Installed) GitDir = new Setup.InstallLayout(InstallRoot!).GitDir;
+    }
+
+    /// The rule, in order:
+    ///  1. The first folder up from the exe that holds build-game.ps1 is a fork checkout's launcher\: Classic.
+    ///     (Nothing below changes how this works; the wizard is never looked at.)
+    ///  2. Otherwise install.json beside the exe, naming an install folder whose mcla-recomp\launcher\ has
+    ///     build-game.ps1: Installed.
+    ///  3. Otherwise the wizard (install.json beside the exe without a finished checkout: a setup to resume).
+    internal static (LaunchMode Mode, string? InstallRoot, string LauncherDir) Detect(string exeDirectory)
+    {
+        for (var dir = new DirectoryInfo(exeDirectory); dir != null; dir = dir.Parent)
             if (File.Exists(Path.Combine(dir.FullName, "build-game.ps1")))
-                return dir.FullName;
-        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
+                return (LaunchMode.Classic, null, dir.FullName);
+        var pointer = Setup.InstallRecord.Load(Setup.InstallRecord.PointerFile(exeDirectory));
+        if (pointer is { InstallRoot.Length: > 0 })
+        {
+            var layout = new Setup.InstallLayout(pointer.InstallRoot);
+            if (File.Exists(layout.BuildScript) && pointer.Ready) return (LaunchMode.Installed, layout.Root, layout.LauncherDir);
+            return (LaunchMode.Wizard, layout.Root, layout.LauncherDir);
+        }
+        return (LaunchMode.Wizard, null, Path.GetFullPath(Path.Combine(exeDirectory, "..")));
+    }
+
+    /// The program started from the launcher gets MinGit's folder first on its PATH in an install that has one:
+    /// git is not installed on that PC.
+    public static void Prepare(ProcessStartInfo psi)
+    {
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0"; // never wait for a password nobody can type
+        if (GitDir != null)
+        {
+            var path = psi.Environment.TryGetValue("PATH", out var current) ? current : Environment.GetEnvironmentVariable("PATH");
+            psi.Environment["PATH"] = GitDir + ";" + path;
+        }
     }
 }
 
@@ -239,7 +291,7 @@ static class Proc
             StandardErrorEncoding = Encoding.UTF8,
         };
         foreach (var arg in args) psi.ArgumentList.Add(arg);
-        psi.Environment["GIT_TERMINAL_PROMPT"] = "0"; // never wait for a password nobody can type
+        Paths.Prepare(psi);
 
         using var process = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {file}");
         var output = process.StandardOutput.ReadToEndAsync();
@@ -360,6 +412,10 @@ static class Repo
 
 enum BuildKind { Update, Build, ResetSdk }
 
+/// Where and how build-game.ps1 runs when it isn't the launcher's own checkout (the setup wizard's first
+/// build): the launcher folder to run in, and the options to pass (-Toolchain, -ToolsDir, -SdkBundle ...).
+sealed record BuildRunOptions(string LauncherDir, string LogsDir, IReadOnlyList<string> Arguments, string? GitDir = null);
+
 /// One run of build-game.ps1, its output streamed line by line and saved to launcher\logs\.
 sealed class BuildRun
 {
@@ -375,14 +431,16 @@ sealed class BuildRun
     public Task<int> Completion { get; }
     public bool StopRequested { get; private set; }
 
-    public BuildRun(BuildKind kind, Action<string> onLine)
+    public BuildRun(BuildKind kind, Action<string> onLine, BuildRunOptions? options = null)
     {
         Kind = kind;
         this.onLine = onLine;
-        Directory.CreateDirectory(Paths.LogsDir);
-        foreach (var old in new DirectoryInfo(Paths.LogsDir).GetFiles("build-*.log").OrderByDescending(f => f.Name).Skip(KeepLogs - 1))
+        var launcherDir = options?.LauncherDir ?? Paths.LauncherDir;
+        var logsDir = options?.LogsDir ?? Paths.LogsDir;
+        Directory.CreateDirectory(logsDir);
+        foreach (var old in new DirectoryInfo(logsDir).GetFiles("build-*.log").OrderByDescending(f => f.Name).Skip(KeepLogs - 1))
             old.Delete();
-        LogFile = Path.Combine(Paths.LogsDir, $"build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+        LogFile = Path.Combine(logsDir, $"build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
         log = new StreamWriter(LogFile, append: false, new UTF8Encoding(false)) { AutoFlush = true };
 
         var psi = new ProcessStartInfo("powershell.exe")
@@ -391,16 +449,20 @@ sealed class BuildRun
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            WorkingDirectory = Paths.LauncherDir,
+            WorkingDirectory = launcherDir,
         };
         // -NonInteractive: if make_pc.ps1 finds a tool missing and asks to
         // install it, the build fails with that message instead of waiting
         // for an answer nobody can give.
-        string[] args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Paths.BuildScript];
+        string[] args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(launcherDir, "build-game.ps1")];
         foreach (var arg in args) psi.ArgumentList.Add(arg);
         if (kind == BuildKind.Update) psi.ArgumentList.Add("-Update");
         if (kind == BuildKind.ResetSdk) psi.ArgumentList.Add("-ResetSdk");
-        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        foreach (var arg in options?.Arguments ?? []) psi.ArgumentList.Add(arg);
+        Paths.Prepare(psi);
+        // The install's own MinGit, when the build is the wizard's (the launcher's Paths do not know it yet).
+        if (options?.GitDir is { } gitDir && Paths.GitDir == null)
+            psi.Environment["PATH"] = gitDir + ";" + (psi.Environment.TryGetValue("PATH", out var p) ? p : Environment.GetEnvironmentVariable("PATH"));
 
         process = new Process { StartInfo = psi };
         process.OutputDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
@@ -454,13 +516,16 @@ sealed record Activity(string Step, string Detail, double? Percent)
         ["build"] = "Compiling the game",
     };
 
-    public static Activity? Read(DateTime sinceUtc)
+    public static Activity? Read(DateTime sinceUtc) => Read(sinceUtc, Paths.RepoOut);
+
+    /// repoOut: the checkout's out\ folder, where make_pc.ps1 and build.ps1 write their logs.
+    public static Activity? Read(DateTime sinceUtc, string repoOut)
     {
         try
         {
             var logs = new List<FileInfo>();
-            if (Directory.Exists(Paths.RepoOut)) logs.AddRange(new DirectoryInfo(Paths.RepoOut).GetFiles("*.log"));
-            var stepLogs = Path.Combine(Paths.RepoOut, "logs");
+            if (Directory.Exists(repoOut)) logs.AddRange(new DirectoryInfo(repoOut).GetFiles("*.log"));
+            var stepLogs = Path.Combine(repoOut, "logs");
             if (Directory.Exists(stepLogs)) logs.AddRange(new DirectoryInfo(stepLogs).GetFiles("*.log"));
             var newest = logs.Where(f => f.LastWriteTimeUtc >= sinceUtc.AddSeconds(-2))
                              .OrderByDescending(f => f.LastWriteTimeUtc)
