@@ -347,27 +347,35 @@ static class GameSettings
             : FrameRate;
 
     // low_latency (the SDK's, rexglue-low-latency.patch): the GPU vendor's latency reducer, NVIDIA
-    // Reflex or AMD Anti-Lag 2, named in plain text by the GPU the game will use (the first
-    // adapter, as the game takes it). Frame generation turns it on whatever this says (the game's
+    // Reflex or AMD Anti-Lag 2, named in plain text by the GPU the game will most likely use (the
+    // first adapter Windows lists; the game picks its own, so on a laptop with two GPUs the name
+    // can be the other one's). Default is on for NVIDIA Reflex and off for the rest (Anti-Lag 2 is
+    // untested). Frame generation turns it on whatever this says (the game's
     // low_latency_frame_generation, which only mcla.toml sets); it changes during play too.
     public static GameSetting LowLatencyFor(uint gpuVendor)
     {
         const uint Nvidia = 0x10DE, Amd = 0x1002;
         var name = gpuVendor switch { Nvidia => "NVIDIA Reflex", Amd => "AMD Anti-Lag 2", _ => "Low latency" };
-        var choices = new List<SettingChoice> { new("Default", "auto"), new("Off", "off"), new("On", "on") };
+        var choices = new List<SettingChoice>
+        {
+            new(gpuVendor == Nvidia ? "Default (on)" : "Default (off)", "auto"), new("Off", "off"), new("On", "on"),
+        };
         if (gpuVendor == Nvidia) choices.Add(new("On + Boost (the GPU clocks stay high)", "boost"));
         var info = gpuVendor switch
         {
-            Nvidia => "NVIDIA's latency reducer. The game waits at the start of each frame, at the moment the "
-                    + "driver picks, so that the frame meets the GPU just as it is free and the queue of frames "
-                    + "waiting for it (and the input lag that adds) goes away. It matters where the GPU is the "
-                    + "limit, as at 3x resolution; where the GPU has room it changes nothing. On + Boost also "
-                    + "keeps the GPU's clocks high (more power). Frame generation turns it on whatever this "
-                    + "says. Needs a GeForce driver with Reflex.",
-            Amd => "AMD's latency reducer (Radeon RX 5000 series and later, a recent Adrenalin driver). The game "
-                 + "waits at the start of each frame, at the moment the driver picks, so that the queue of "
-                 + "frames waiting for the GPU (and the input lag that adds) goes away. Frame generation turns "
-                 + "it on whatever this says. Untested: written from AMD's documentation, never run on a "
+            Nvidia => "NVIDIA's latency reducer, on by default. The game waits at the start of each frame, at the "
+                    + "moment the driver picks, so that the frame meets the GPU just as it is free and the queue of "
+                    + "frames waiting for it (and the input lag that adds) goes away. It matters where the GPU is the "
+                    + "limit, as at 3x resolution, where it took 13 to 15 ms off the time from the game's swap to the "
+                    + "screen (RTX 5080); where the GPU has room it changes nothing. It costs about 4% of the frame "
+                    + "rate at 3x on Direct3D 12 (none on Vulkan or at native resolution): turn it off if you would "
+                    + "rather have the frames. With a frame-rate cap it also holds the cap, which shows the input 8 to "
+                    + "14 ms newer. On + Boost also keeps the GPU's clocks high (more power). Frame generation turns it "
+                    + "on whatever this says. Needs a GeForce driver with Reflex.",
+            Amd => "AMD's latency reducer (Radeon RX 5000 series and later, a recent Adrenalin driver), off by "
+                 + "default. The game waits at the start of each frame, at the moment the driver picks, so that the "
+                 + "queue of frames waiting for the GPU (and the input lag that adds) goes away. Frame generation "
+                 + "turns it on whatever this says. Untested: written from AMD's documentation, never run on a "
                  + "Radeon.",
             _ => "The GPU's latency reducer (NVIDIA Reflex, AMD Anti-Lag 2). The game found none for this GPU "
                + "(Intel has no equivalent the game can use), so this changes nothing.",
