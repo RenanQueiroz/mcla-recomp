@@ -1,0 +1,10 @@
+# A content header file written by ContentManager::WriteContentHeaderFile from a struct whose padding
+# holds 0xEE (write_content_header): with rexglue-content-header-padding.patch, bytes 308 to 311 and
+# 324 to 327 of Headers/00000001/p4hdr.header come out zero. Run on a scratch save copy.
+wait 8s
+press_until start left_title every=2s timeout=90s
+wait_until roam 120s
+wait 3s
+write_content_header p4hdr
+mark end
+wait 1s

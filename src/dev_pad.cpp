@@ -25,6 +25,8 @@
 //     frame generation's state, the presenter's, not an option)
 //   save_config (what the F4 overlay's "Save to config" does: rex::cvar::SaveConfig
 //     into mcla.toml next to the executable)
+//   write_content_header <name> (a content header file, as the game's saves get, from a
+//     struct whose padding holds 0xEE: rexglue-content-header-padding.patch writes zeros)
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //   cars (race cars' positions)   watch <every> | watch stop (log them)
 //   screens (the UI manager's movies)
@@ -79,6 +81,7 @@
 #include <rex/system/achievement_manager.h>
 #include <rex/system/interfaces/graphics.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xam/content_manager.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
@@ -1663,6 +1666,23 @@ std::string Execute(const std::string& line) {
       new SelfClosingTestDialog(drawer, seconds);
     });
     return "ok";
+  }
+  if (cmd == "write_content_header") {
+    auto* runtime = rex::Runtime::instance();
+    auto* kernel = runtime ? runtime->kernel_state() : nullptr;
+    if (!kernel || !kernel->content_manager() || args.size() != 2) {
+      return "err usage: write_content_header <name> (needs a running game)";
+    }
+    rex::system::xam::XCONTENT_AGGREGATE_DATA data;
+    std::memset(&data, 0xEE, sizeof(data));
+    data.device_id = 1;
+    data.content_type = rex::system::XContentType::kSavedGame;
+    data.set_display_name(u"HEADER TEST");
+    data.set_file_name(args[1]);
+    data.xuid = 0;
+    data.title_id = rex::system::xam::kCurrentlyRunningTitleId;
+    const auto result = kernel->content_manager()->WriteContentHeaderFile(0, data);
+    return result == X_ERROR_SUCCESS ? "ok" : "err " + std::to_string(uint32_t(result));
   }
   if (cmd == "toast") {
     // toast [id]: the achievement pop-up for an achievement (the first one
