@@ -26,7 +26,7 @@ press down 4f
 wait 1s
 press a 4f
 wait 1500ms
-get mcla_fps mcla_fps_frame_generation frame_generation frame_generation_available frame_generation_why
+get mcla_fps mcla_fps_frame_generation frame_generation fg_status
 press down 4f
 wait 1s
 press right 4f

@@ -546,16 +546,19 @@ const ItemDef kFpsItemHalf = {.key = "PM_MxFps",
                               .half_first = true};
 #endif
 
-// Whether frame generation can't run (the SDK's frame_generation_available): the
+// Whether frame generation can't run (the presenter's status, not a setting): the
 // device or the runtime isn't there, or it failed. The console's device gets
 // FSR's features only when the game starts with FSR or frame generation chosen: until
 // then it can be chosen, to take effect at the next start (NEXT START).
 bool FrameGenerationNo() {
-  return OptionGet("frame_generation_available") == "no";
+  return rex::ui::Presenter::GetFrameGenerationStatus().state ==
+         rex::ui::Presenter::FrameGenerationState::kUnavailable;
 }
 
 bool FrameGenerationNextStart() {
-  return FrameGenerationNo() && OptionGet("frame_generation_why") == "NEXT START";
+  const auto status = rex::ui::Presenter::GetFrameGenerationStatus();
+  return status.state == rex::ui::Presenter::FrameGenerationState::kUnavailable &&
+         status.why == "NEXT START";
 }
 
 bool FrameGenerationUnavailable() {
@@ -603,10 +606,10 @@ bool IsFrameGenerationItem(const ItemDef& item) {
 
 // What the rows show depends on this: it changing makes the menu bring them in line.
 std::string MenuStateKey() {
+  const auto status = rex::ui::Presenter::GetFrameGenerationStatus();
   return std::to_string(int(CurrentFpsMode())) + "|" +
          std::to_string(int(rex::ui::Presenter::GetDisplayRefreshHz())) + "|" +
-         OptionGet("frame_generation") + "|" + OptionGet("frame_generation_available") + "|" +
-         OptionGet("frame_generation_why");
+         OptionGet("frame_generation") + "|" + std::to_string(int(status.state)) + "|" + status.why;
 }
 
 // Detail the game can do without when the frame rate matters more; all as
@@ -847,7 +850,7 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
       }
       if (IsFrameGenerationItem(item) && index == 0 && FrameGenerationUnavailable()) {
         // OFF, and why it's all there is: the menu's letters (the SDK's text).
-        const std::string why = OptionGet("frame_generation_why");
+        const std::string why = rex::ui::Presenter::GetFrameGenerationStatus().why;
         return why.empty() ? "OFF (UNAVAILABLE)" : "OFF (" + why + ")";
       }
       return item.value_labels[index];

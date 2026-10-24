@@ -19,7 +19,10 @@
 //   close (as the window's close button: unlike quit, it waits for a save)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
 //   state   log <text>   include <script>   quit   set <option> <value>
-//   get <option>... (the options' values: the reply, and the log)
+//   get <option>... (the options' values: the reply, and the log; fg_status is
+//     frame generation's state, the presenter's, not an option)
+//   save_config (what the F4 overlay's "Save to config" does: rex::cvar::SaveConfig
+//     into mcla.toml next to the executable)
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //   cars (race cars' positions)   watch <every> | watch stop (log them)
 //   screens (the UI manager's movies)
@@ -66,6 +69,7 @@
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/input_system.h>
 #include <rex/logging.h>
@@ -1588,10 +1592,26 @@ std::string Execute(const std::string& line) {
     }
     std::string values;
     for (size_t i = 1; i < args.size(); ++i) {
-      values += (i > 1 ? " " : "") + args[i] + "=" + rex::cvar::GetFlagByName(args[i]);
+      std::string value;
+      if (args[i] == "fg_status") {
+        const auto status = rex::ui::Presenter::GetFrameGenerationStatus();
+        value = status.state == rex::ui::Presenter::FrameGenerationState::kUnknown ? "unknown"
+                : status.state == rex::ui::Presenter::FrameGenerationState::kAvailable
+                    ? "available"
+                    : "unavailable (" + status.why + ")";
+      } else {
+        value = rex::cvar::GetFlagByName(args[i]);
+      }
+      values += (i > 1 ? " " : "") + args[i] + "=" + value;
     }
     REXLOG_INFO("dev pad: get {}", values);
     return "ok " + values;
+  }
+  if (cmd == "save_config") {
+    // The F4 overlay's Save button (src/ui/overlay/settings_overlay.cpp), for checking what
+    // it writes.
+    rex::cvar::SaveConfig(rex::filesystem::GetExecutableFolder() / "mcla.toml");
+    return "ok";
   }
   if (cmd == "key") {
     // key <name>: a key press for the window's key binds (F3 the debug

@@ -535,7 +535,9 @@ in front. A real controller keeps working alongside it.
   failed. `set <option> <value>` changes an
   option while the game runs, for comparing two settings within one run (the
   time of day and the traffic differ from run to run), and `get <option>...`
-  logs the values the options have now. `close` closes the
+  logs the values the options have now (`fg_status` is frame generation's
+  state), and `save_config` does what the F4 overlay's Save does
+  (`rex::cvar::SaveConfig` into `mcla.toml`), to see what it writes. `close` closes the
   window as its close button does (waiting for a save being written; `quit`
   doesn't), and `saving` says whether one is (`saving wait`: until one is).
   `--mcla_fixed_dt=N` makes every game update advance exactly 1/N s:

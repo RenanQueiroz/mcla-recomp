@@ -1,0 +1,20 @@
+# Phase 4 fix: what the F4 overlay's Save (save_config here) writes into mcla.toml after frame
+# generation was turned on: only real settings (frame_generation), none of the presenter's status.
+# Run with --toml <a file with one line> and compare it with mcla.toml.after in the run folder.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+get frame_generation fg_status
+set frame_generation fsr
+wait 3s
+get frame_generation fg_status
+save_config
+wait 1s
+set frame_generation off
+wait 1s
+mark end
+wait 1s

@@ -114,13 +114,14 @@ bool OriginalTiming() {
 // The frame-rate cap now: mcla_fps, or with frame generation on mcla_fps_frame_generation
 // (HALF DISPLAY from the display's refresh rate, read about once a second).
 // Frame generation counts as on while the SDK's frame_generation asks for it and
-// has not said it can't run (frame_generation_available).
+// has not said it can't run (Presenter::GetFrameGenerationStatus).
 uint64_t NowMicros();
 
 int32_t CapFromSettings() {
   const int32_t fps = REXCVAR_GET(mcla_fps);
   if (fps < 0 || rex::cvar::GetFlagByName("frame_generation") == "off" ||
-      rex::cvar::GetFlagByName("frame_generation_available") == "no") {
+      rex::ui::Presenter::GetFrameGenerationStatus().state ==
+          rex::ui::Presenter::FrameGenerationState::kUnavailable) {
     return fps;
   }
   const int32_t cap = REXCVAR_GET(mcla_fps_frame_generation);

@@ -24,17 +24,17 @@ press down 4f
 wait 1s
 press a 4f
 wait 1500ms
-get frame_generation frame_generation_available frame_generation_why
+get frame_generation fg_status
 press down 4f
 wait 1s
 press right 4f
 wait 3s
-get frame_generation frame_generation_available frame_generation_why
+get frame_generation fg_status
 press right 4f
 wait 1500ms
 press left 4f
 wait 1500ms
-get frame_generation frame_generation_available frame_generation_why mcla_fps mcla_fps_frame_generation
+get frame_generation fg_status mcla_fps mcla_fps_frame_generation
 press up 4f
 wait 1s
 press right 4f
