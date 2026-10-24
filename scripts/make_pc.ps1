@@ -27,9 +27,10 @@
 #                the other one builds a second SDK; after that, switching
 #                rebuilds only the game). A game built with mingw needs
 #                libc++.dll and libunwind.dll next to mcla.exe (copied), not the
-#                Visual C++ runtime, except for FSR's DLLs, which are built with
-#                MSVC and do need it (without it the game goes on with MSAA); its
-#                debug information is split into mcla.exe.debug.
+#                Visual C++ runtime, except for FSR's DLLs when they come from this
+#                checkout's msvc SDK build, which need it (without it the game goes
+#                on with MSAA; a release's SDK bundle has them with the C runtime
+#                linked in); its debug information is split into mcla.exe.debug.
 #   -ToolsDir    a folder with portable tools to use instead of installing or
 #                downloading them: llvm-mingw-*\ (mingw) or clang+llvm-*\
 #                (msvc), cmake*\ and ninja*\ (or ninja.exe) in it; it has to
@@ -45,6 +46,11 @@
 #                which this script writes into the SDK it builds) have to be
 #                this checkout's.
 #
+#   -Until       stop after a step, for CI, which has no game: sdk-source (the
+#                tools, the SDK cloned and patched) or sdk (and built and
+#                installed, or the prebuilt one unpacked and checked). The game's
+#                steps (extracting the disc image, codegen, the build) are not run.
+#
 # What a finished build was asked for (-Toolchain, -ToolsDir, -SdkBundle, its
 # SHA-256) is kept in launcher\build-options.json when it is not just the
 # defaults, and launcher\build-game.ps1 (so an update, also the launcher's)
@@ -55,7 +61,8 @@
 # choose it yourself.
 param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset = "win-amd64-release",
       [ValidateSet("msvc", "mingw")][string]$Toolchain = "msvc", [string]$ToolsDir = "",
-      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "")
+      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "",
+      [ValidateSet("", "sdk-source", "sdk")][string]$Until = "")
 
 $ErrorActionPreference = "Stop"
 # The SDK has files deep in its submodules: git on Windows needs core.longpaths
@@ -421,6 +428,8 @@ try {
     # portable build from the LLVM project, unpacked into tools\.
     $llvmVersion = "20.1.8"
     $llvmName = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc"
+    # The SHA-256 of the release's .tar.xz (the digest GitHub shows for the asset).
+    $llvmSha256 = "f229769f11d6a6edc8ada599c0cda964b7dee6ab1a08c6cf9dd7f513e85b107f"
     # -Toolchain mingw: llvm-mingw, Clang $llvmVersion again with lld, libc++ and
     # mingw-w64, in one zip from its release page. Pinned, with the SHA-256 of
     # the zip (the one GitHub shows for the release asset); a download that does
@@ -490,7 +499,11 @@ try {
         if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $list += "Ninja" }
         # The Microsoft Store's placeholder python.exe is not Python.
         $python = Get-Command python -ErrorAction SilentlyContinue
-        if ((-not $SdkBundle -or -not (Test-Path -LiteralPath "$root\game\default.xex")) -and
+        # (Python builds the SDK, where glslang's build_info.py runs, and extracts the
+        # game; -Until stops before the game and, at sdk-source, before the build.)
+        $buildsSdk = -not $SdkBundle -and $Until -ne "sdk-source"
+        $extractsGame = -not $Until -and -not (Test-Path -LiteralPath "$root\game\default.xex")
+        if (($buildsSdk -or $extractsGame) -and
             (-not $python -or $python.Source -like "*WindowsApps*")) { $list += "Python" }
         if ($mingw) {
             # In -ToolsDir, or unpacked into tools\ (env.ps1 found it).
@@ -504,7 +517,7 @@ try {
         }
         # Optional: FSR 3.1's Vulkan runtime is built only with it (and only
         # when the SDK is built here with msvc: llvm-mingw cannot build FSR).
-        if (-not $SdkBundle -and -not $mingw -and -not (HasVulkanSdk)) { $list += "Vulkan SDK" }
+        if (-not $SdkBundle -and -not $mingw -and $Until -ne "sdk-source" -and -not (HasVulkanSdk)) { $list += "Vulkan SDK" }
         $list
     }
     # The Vulkan SDK (its headers and loader library): VULKAN_SDK, as its
@@ -563,8 +576,16 @@ try {
                 # ("unable to run program xz", issue #10).
                 RefreshPath
                 Logged "install-clang" {
-                    curl.exe -L --fail -o $archive "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmName.tar.xz"
+                    curl.exe -L --fail --proto "=https" --proto-redir "=https" -o $archive "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$llvmName.tar.xz"
                     if ($LASTEXITCODE -ne 0) { return }
+                    # Checked before it is unpacked; one that does not match is deleted.
+                    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+                    if ($actualHash -ne $llvmSha256) {
+                        "the download's SHA-256 is $actualHash, not the pinned ${llvmSha256}: deleted, nothing unpacked"
+                        Remove-Item -LiteralPath $archive -Force
+                        $global:LASTEXITCODE = 1
+                        return
+                    }
                     tar.exe -xf $archive -C "$root\tools"
                     if ($LASTEXITCODE -ne 0) {
                         "tar.exe could not unpack the archive; unpacking it with Python instead (about a minute)"
@@ -594,7 +615,7 @@ try {
     }
     "clang: $env:MCLA_CC ($((& $env:MCLA_CC --version | Select-Object -First 1)))"
     if ($mingw) {
-        "toolchain: mingw (llvm-mingw, libc++ and Windows' UCRT; the game needs no Visual C++ runtime, FSR's DLLs do)"
+        "toolchain: mingw (llvm-mingw, libc++ and Windows' UCRT; the game needs no Visual C++ runtime; FSR's DLLs from a msvc SDK build do, a release's do not)"
         if ($env:MCLA_MINGW_ROOT -notlike "*$mingwName") {
             "WARNING: the build is made and tested with llvm-mingw $mingwVersion (Clang $llvmVersion, libc++ 20); this one is $env:MCLA_MINGW_ROOT, and the SDK may not build with it (a newer libc++ can bring declarations the SDK makes itself, and the toolchain's own fixes)"
         }
@@ -676,6 +697,11 @@ try {
             }
         }
 
+        if ($Until -eq "sdk-source") {
+            "stopping after the SDK's sources, patched (-Until sdk-source)"
+            exit 0
+        }
+
         # -----------------------------------------------------------------------
         Step "3/6 build and install the SDK (the long step, once)"
         # -Force on both: a hidden file (the marker often is one) is invisible to
@@ -743,6 +769,11 @@ try {
                 "note: FSR was built for Direct3D 12 only: its Vulkan runtime needs the Vulkan SDK (run with -InstallTools, or install it from vulkan.lunarg.com, then build again)."
             }
         }
+    }
+
+    if ($Until) {
+        "stopping after the SDK (-Until $Until): $install"
+        exit 0
     }
 
     # -----------------------------------------------------------------------
