@@ -1,0 +1,24 @@
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..a2e1a5e 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -214,7 +214,18 @@ X_RESULT ContentManager::WriteContentHeaderFile(uint64_t xuid, XCONTENT_AGGREGAT
+   if (!file) {
+     return X_ERROR_FILE_NOT_FOUND;
+   }
+-  fwrite(&data, 1, sizeof(XCONTENT_AGGREGATE_DATA), file);
++  // The struct has two gaps the compiler pads (4 bytes before xuid and 4 after title_id) that
++  // nothing sets: they held whatever the stack held, so the same save wrote a different header
++  // file from one build to the next. Written as zeros.
++  std::array<uint8_t, sizeof(XCONTENT_AGGREGATE_DATA)> bytes;
++  std::memcpy(bytes.data(), &data, bytes.size());
++  const auto* data_bytes = reinterpret_cast<const uint8_t*>(&data);
++  const size_t xuid_offset = size_t(reinterpret_cast<const uint8_t*>(&data.xuid) - data_bytes);
++  const size_t title_id_end =
++      size_t(reinterpret_cast<const uint8_t*>(&data.title_id) - data_bytes) + sizeof(data.title_id);
++  std::memset(bytes.data() + sizeof(XCONTENT_DATA), 0, xuid_offset - sizeof(XCONTENT_DATA));
++  std::memset(bytes.data() + title_id_end, 0, bytes.size() - title_id_end);
++  fwrite(bytes.data(), 1, bytes.size(), file);
+   if (license_mask != 0) {
+     fwrite(&license_mask, 1, sizeof(license_mask), file);
+   }
