@@ -22,7 +22,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
-nuget = pathlib.Path(os.path.expanduser("~/.nuget/packages"))
+nuget = pathlib.Path(os.environ.get("NUGET_PACKAGES") or os.path.expanduser("~/.nuget/packages"))
 if "--nuget" in sys.argv:
     nuget = pathlib.Path(sys.argv[sys.argv.index("--nuget") + 1])
     args = [a for a in args if a != str(nuget)]
