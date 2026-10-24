@@ -486,10 +486,18 @@ index c355da2..ba34aca 100644
    UIOverlay ui_overlay_;
    // The layer the UI thread last finished drawing into (submitted on the direct
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index 2c37992..b1d310e 100644
+index 2c37992..0effdac 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
-@@ -207,6 +207,9 @@ class Presenter {
+@@ -22,6 +22,7 @@
+ #include <map>
+ #include <memory>
+ #include <mutex>
++#include <string>
+ #include <thread>
+ #include <utility>
+ #include <vector>
+@@ -207,6 +208,9 @@ class Presenter {
      float full_frame_nits = 0.0f;
      float min_nits = 0.0f;
      float sdr_white_nits = 0.0f;  // the system's level for SDR content, 0 = not reported
@@ -499,17 +507,28 @@ index 2c37992..b1d310e 100644
    };
    // What a guest output refresher needs to write HDR10.
    struct HdrOutputState {
-@@ -407,6 +410,9 @@ class Presenter {
+@@ -407,6 +411,20 @@ class Presenter {
    // What the display reported last, and whether the swap chain is HDR10, for
    // settings screens (any thread).
    static HdrDisplayInfo GetLastHdrDisplayInfo();
 +  // The display's refresh rate in Hz (0 = not reported yet), as last read with
 +  // the above.
 +  static float GetDisplayRefreshHz();
++  // Whether frame generation can run, for settings screens (any thread):
++  // unavailable when the presenter (graphics backend, device, runtime) can't, or
++  // found while running that it can't (why is then FAILED); unknown before the
++  // presenter starts. `why` is the reason in the menu's letters (A to Z, 0 to 9,
++  // space, + . ( ) only), empty while it isn't unavailable.
++  enum class FrameGenerationState { kUnknown, kAvailable, kUnavailable };
++  struct FrameGenerationStatus {
++    FrameGenerationState state = FrameGenerationState::kUnknown;
++    std::string why;
++  };
++  static FrameGenerationStatus GetFrameGenerationStatus();
    // Asks for the display's state now, also while `hdr` is off (otherwise it's
    // only read while it isn't), and waits up to `timeout_ms` for the answer, for
    // a settings screen being opened (any thread).
-@@ -419,6 +425,10 @@ class Presenter {
+@@ -419,6 +437,10 @@ class Presenter {
    };
    static HdrAutoLevels GetHdrAutoLevels();
    static bool IsHdrOutputActive();
@@ -520,7 +539,7 @@ index 2c37992..b1d310e 100644
    // For the guest output refresher: whether it can write HDR10 now (for
    // instance not with a PWL gamma ramp); if not, the swap chain stays SDR.
    static void SetGuestOutputHdrAvailable(bool available);
-@@ -850,6 +860,44 @@ class Presenter {
+@@ -850,6 +872,45 @@ class Presenter {
    // implementation's, for the image of the given refresh.
    static void LogPresentFromPacer(uint64_t refresh_number, int result, uint64_t present_ns);
  
@@ -547,8 +566,9 @@ index 2c37992..b1d310e 100644
 +  // implementation that finds it can't (its context or runtime, a dispatch that
 +  // failed) says so with SetFrameGenerationUnavailable (any thread, once is
 +  // logged): the next connection is made without it, and the UI separation it
-+  // needed goes. Its state is the cvars frame_generation_available (yes or no)
-+  // and frame_generation_why, for the settings.
++  // needed goes. Its state for the settings is GetFrameGenerationStatus (a
++  // value of the presenter's, not a setting: nothing of it is saved or read from
++  // a file).
 +  bool frame_generation_wanted() const {
 +    return frame_generation_supported_ &&
 +           frame_generation_requested_.load(std::memory_order_acquire) &&
@@ -565,7 +585,7 @@ index 2c37992..b1d310e 100644
   private:
    enum class PaintMode {
      // Don't paint at all.
-@@ -1135,6 +1183,13 @@ class Presenter {
+@@ -1135,6 +1196,13 @@ class Presenter {
    // Also with implicit vsync or presenting from the UI thread only (frame
    // generation, whose pacer presents).
    bool ui_overlay_paint_forced_ = false;
@@ -6043,10 +6063,10 @@ index 0000000..d7ca5d1
 +
 +}  // namespace rex::ui::d3d12
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 09669f1..26a24d0 100644
+index 09669f1..75d29b1 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -92,6 +92,38 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
+@@ -92,6 +92,32 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
                      "Enable output dithering in the final present pass")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
@@ -6054,12 +6074,6 @@ index 09669f1..26a24d0 100644
 +                      "Frame generation (AMD FSR 3.1): off or fsr, a frame generated between every "
 +                      "two (rexglue-frame-generation.patch). Changes while playing")
 +    .allowed({"off", "fsr"});
-+
-+REXCVAR_DEFINE_STRING(frame_generation_available, "unknown", "GPU",
-+                      "Read-only: whether frame generation can run here: unknown (before the "
-+                      "presenter starts), yes or no (frame_generation_why says why)");
-+REXCVAR_DEFINE_STRING(frame_generation_why, "", "GPU",
-+                      "Read-only: why frame generation can't run, in the settings menu's letters");
 +
 +REXCVAR_DEFINE_STRING(frame_generation_present, "auto", "GPU",
 +                      "With frame generation: auto presents tear-free (vsync, with variable "
@@ -6085,7 +6099,7 @@ index 09669f1..26a24d0 100644
  REXCVAR_DEFINE_BOOL(present_ui_overlay, true, "UI/Presenter",
                      "The guest output thread presents every guest frame even while the "
                      "presenter's UI (overlays, dialogs, pop-ups) is shown: the UI thread draws "
-@@ -489,6 +521,9 @@ Presenter::~Presenter() {
+@@ -489,6 +515,9 @@ Presenter::~Presenter() {
    // it if needed.
    assert_false(is_executing_ui_drawers_);
  
@@ -6095,7 +6109,7 @@ index 09669f1..26a24d0 100644
  #if REX_PLATFORM_WIN32
    if (dxgi_ui_tick_thread_.joinable()) {
      {
-@@ -644,7 +679,7 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+@@ -644,7 +673,7 @@ void Presenter::PaintFromUIThread(bool force_paint) {
    // connection has become outdated and has requested the UI thread to
    // reconnect).
    bool draw_ui = !ui_drawers_.empty();
@@ -6104,7 +6118,7 @@ index 09669f1..26a24d0 100644
      // While suspended, the UI thread paints as without it.
      const bool was_suspended = ui_overlay_paint_suspended_;
      UpdateUIOverlayPaintSuspensionFromUIThread(draw_ui);
-@@ -874,8 +909,9 @@ bool Presenter::IsUIOverlayPaintModeActive() const {
+@@ -874,8 +903,9 @@ bool Presenter::IsUIOverlayPaintModeActive() const {
    // With implicit vsync the guest output thread's presents would wait for it,
    // and without host_present_from_non_ui_thread it doesn't present at all:
    // there the UI thread paints as before.
@@ -6116,7 +6130,7 @@ index 09669f1..26a24d0 100644
  }
  
  void Presenter::UpdateUIOverlayPaintSuspensionFromUIThread(bool draw_ui) {
-@@ -925,6 +961,53 @@ void Presenter::LogPresentFromPacer(uint64_t refresh_number, int result, uint64_
+@@ -925,6 +955,67 @@ void Presenter::LogPresentFromPacer(uint64_t refresh_number, int result, uint64_
    }
  }
  
@@ -6141,18 +6155,32 @@ index 09669f1..26a24d0 100644
 +  frame_generation_ui_separation.store(wanted, std::memory_order_release);
 +}
 +
++namespace {
++// What frame generation's state is, for settings screens. Not a cvar: a cvar set from code
++// is saved with the player's settings (the overlay's Save) and a file or the command line
++// could set it. A mutex, not callbacks: the graphics threads write it, any thread reads it.
++std::mutex frame_generation_status_mutex;
++Presenter::FrameGenerationStatus frame_generation_status;
++}  // namespace
++
 +void Presenter::UpdateFrameGenerationStatus() {
-+  const char* available = "yes";
-+  const char* why = "";
++  FrameGenerationStatus status;
 +  if (!frame_generation_supported_) {
-+    available = "no";
-+    why = FrameGenerationUnsupportedReason();
++    status.state = FrameGenerationState::kUnavailable;
++    status.why = FrameGenerationUnsupportedReason();
 +  } else if (frame_generation_unavailable_.load(std::memory_order_acquire)) {
-+    available = "no";
-+    why = "FAILED";
++    status.state = FrameGenerationState::kUnavailable;
++    status.why = "FAILED";
++  } else {
++    status.state = FrameGenerationState::kAvailable;
 +  }
-+  rex::cvar::SetFlagByName("frame_generation_why", why);
-+  rex::cvar::SetFlagByName("frame_generation_available", available);
++  std::lock_guard lock(frame_generation_status_mutex);
++  frame_generation_status = std::move(status);
++}
++
++Presenter::FrameGenerationStatus Presenter::GetFrameGenerationStatus() {
++  std::lock_guard lock(frame_generation_status_mutex);
++  return frame_generation_status;
 +}
 +
 +void Presenter::SetFrameGenerationUnavailable(const char* reason) {
@@ -6170,7 +6198,7 @@ index 09669f1..26a24d0 100644
  bool Presenter::RefreshGuestOutput(
      uint32_t frontbuffer_width, uint32_t frontbuffer_height, uint32_t display_aspect_ratio_x,
      uint32_t display_aspect_ratio_y,
-@@ -1212,11 +1295,40 @@ void Presenter::RequestUIPaintFromUIThread() {
+@@ -1212,11 +1303,40 @@ void Presenter::RequestUIPaintFromUIThread() {
  
  bool Presenter::InitializeCommonSurfaceIndependent() {
    HdrRegisterSettingCallbacks();
@@ -6213,7 +6241,7 @@ index 09669f1..26a24d0 100644
      } else {
        REXLOG_WARN("Presenter: UI overlay painting isn't available with this graphics backend");
      }
-@@ -2301,6 +2413,12 @@ void Presenter::HdrDisplayWorker::Query() {
+@@ -2301,6 +2421,12 @@ void Presenter::HdrDisplayWorker::Query() {
    DXGI_OUTPUT_DESC1 desc;
    if (output6_ && SUCCEEDED(output6_->GetDesc1(&desc))) {
      info.known = true;
@@ -6226,7 +6254,7 @@ index 09669f1..26a24d0 100644
      info.hdr_enabled = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
      info.peak_nits = desc.MaxLuminance;
      info.full_frame_nits = desc.MaxFullFrameLuminance;
-@@ -2342,22 +2460,27 @@ void Presenter::HdrDisplayWorker::Query() {
+@@ -2342,22 +2468,27 @@ void Presenter::HdrDisplayWorker::Query() {
      changed = info.known != hdr_display_info.known ||
                info.hdr_enabled != hdr_display_info.hdr_enabled ||
                info.peak_nits != hdr_display_info.peak_nits ||
