@@ -51,6 +51,7 @@ Options go after the program name, for example `mcla.exe --fullscreen=true --mcl
 |---|---|
 | The SDK build fails with `'crtversion.h' file not found` | Another Clang on your path was used. Update and run `make_pc.ps1` again: it now uses only its own. |
 | Step 1 fails after downloading Clang, with `unable to run program "xz -d -qq"` | Windows 10's `tar.exe` cannot unpack `.tar.xz`. Update and run `make_pc.ps1` again: it now unpacks the archive with Python when `tar.exe` cannot. |
+| Installing a tool fails with `No package found matching input criteria` | winget's package list on your PC is out of date or broken: run `winget source reset --force` in an administrator PowerShell, then `make_pc.ps1` again, or install that tool yourself (Python from python.org or the Microsoft Store works). |
 | `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
 | The game closes by itself | Start it with `--log_file=run.log --log_level=info` and open an issue with the end of that file. |
 

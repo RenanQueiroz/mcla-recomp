@@ -1,6 +1,9 @@
 # Dot-source to put the project's toolchain on PATH:  . .\scripts\env.ps1
 $root = Split-Path $PSScriptRoot -Parent
-$llvm = Get-ChildItem "$root\tools" -Directory -Filter "clang+llvm-*" -ErrorAction SilentlyContinue | Select-Object -First 1
+# The Clang make_pc.ps1 installs (keep the version in step with it), else any
+# other unpacked LLVM release in tools\.
+$llvm = Get-Item "$root\tools\clang+llvm-20.1.8-x86_64-pc-windows-msvc" -ErrorAction SilentlyContinue
+if (-not $llvm) { $llvm = Get-ChildItem "$root\tools" -Directory -Filter "clang+llvm-*" -ErrorAction SilentlyContinue | Select-Object -First 1 }
 $ninja = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter ninja.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 $paths = @()
 if ($llvm) { $paths += "$($llvm.FullName)\bin" }

@@ -66,6 +66,12 @@ try {
         if (-not (Test-Path $vswhere)) { return $false }
         [bool](& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     }
+    function HasPython {
+        if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $false }
+        $ErrorActionPreference = "Continue"
+        $version = try { python --version 2>&1 | Out-String } catch { "" }
+        ($LASTEXITCODE -eq 0) -and ($version -match "^Python 3")
+    }
     function RefreshPath {
         $env:PATH = [Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
                     [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -77,9 +83,10 @@ try {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $list += "Git" }
         if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { $list += "CMake" }
         if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $list += "Ninja" }
-        # The Microsoft Store's placeholder python.exe is not Python.
-        $python = Get-Command python -ErrorAction SilentlyContinue
-        if (-not $python -or $python.Source -like "*WindowsApps*") { $list += "Python" }
+        # Python counts if it runs: Windows' placeholder python.exe (it only
+        # points at the Microsoft Store) fails, while Python installed from the
+        # Store works from the same folder (issue #13).
+        if (-not (HasPython)) { $list += "Python" }
         if (-not (HasBuildTools)) { $list += "Visual Studio Build Tools" }
         # Only the project's own Clang counts: another one on the path may not
         # find the Microsoft headers (issue #9).
@@ -128,6 +135,11 @@ try {
         $missing = @(MissingTools)
         if ($missing) { Fail "still missing after installing: $($missing -join ', '). A new PowerShell window may be needed; then run this again" }
     }
+    # The compilers by full path from the project's own Clang folder, whatever
+    # else is in tools\.
+    $env:MCLA_CC = "$root\tools\$llvmName\bin\clang.exe"
+    $env:MCLA_CXX = "$root\tools\$llvmName\bin\clang++.exe"
+    if (-not (Test-Path $env:MCLA_CC) -or -not (Test-Path $env:MCLA_CXX)) { Fail "Clang is incomplete in tools\$llvmName; delete that folder and run this again" }
     "clang: $env:MCLA_CC ($((& $env:MCLA_CC --version | Select-Object -First 1)))"
 
     # -----------------------------------------------------------------------
