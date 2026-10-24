@@ -32,6 +32,9 @@
 #   WORK    (/root/mcla)    the SDK checkout and all build trees
 #   MCLA_PS5_FSR (1)       0: without FSR 3.1 anti-aliasing (untested on the console,
 #                           offered for the next start; MSAA stays the default)
+#   MCLA_PS5_FRAMEGEN (1)  0: without FSR 3.1 frame generation (untested on the console,
+#                           offered for the next start, off by default; FSR
+#                           anti-aliasing stays). Needs MCLA_PS5_FSR=1 to matter.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -208,6 +211,7 @@ rexglue-vulkan-pipeline-storage-keep-unsupported.patch src/graphics/vulkan/pipel
 rexglue-shader-storage-prepare.patch src/graphics/shader_storage_progress.h ShaderStorageProgress
 rexglue-content-header-padding.patch src/system/xam/content_manager.cpp Written as zeros.
 rexglue-low-latency.patch src/ui/low_latency.cpp LowLatency::OnFrameStart
+rexglue-frame-generation-nonwindows.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp frame_generation_pacing
 LATER
 
 # ---------------------------------------------------------------------------
@@ -252,14 +256,20 @@ step "6/9 the runtime, for PS5"
 # build folder configured with the other choice is configured again.
 fsr=${MCLA_PS5_FSR:-1}
 case $fsr in 0) fsr_cmake=OFF ;; 1) fsr_cmake=ON ;; *) fail "MCLA_PS5_FSR must be 0 or 1" ;; esac
-if [ ! -f "$rex_build/build.ninja" ] || ! grep -q "^REXGLUE_ENABLE_FSR:BOOL=$fsr_cmake\$" "$rex_build/CMakeCache.txt"; then
+# Frame generation (rexglue-frame-generation.patch): FidelityFX's optical flow and frame
+# interpolation too, in the same static libraries (untested on the console).
+framegen=${MCLA_PS5_FRAMEGEN:-1}
+case $framegen in 0) framegen_cmake=OFF ;; 1) framegen_cmake=ON ;; *) fail "MCLA_PS5_FRAMEGEN must be 0 or 1" ;; esac
+if [ ! -f "$rex_build/build.ninja" ] || ! grep -q "^REXGLUE_ENABLE_FSR:BOOL=$fsr_cmake\$" "$rex_build/CMakeCache.txt" \
+        || ! grep -q "^REXGLUE_FSR_FRAMEGEN:BOOL=$framegen_cmake\$" "$rex_build/CMakeCache.txt"; then
     # -flto=thin: 5-8% more draws a second on the console.
     logged ps5-configure cmake -S "$rex_src" -B "$rex_build" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$sdk/toolchain/prospero.cmake" \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23 \
         -DCMAKE_C_FLAGS="-march=znver2 -flto=thin" \
         -DCMAKE_CXX_FLAGS="-march=znver2 -fexperimental-library -flto=thin" \
-        -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=$fsr_cmake
+        -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=$fsr_cmake \
+        -DREXGLUE_FSR_FRAMEGEN=$framegen_cmake
 fi
 logged ps5-runtime ninja -C "$rex_build" -j "$jobs" rexruntime rexgpu-xenos
 # FidelityFX's static libraries, next to the runtime's (the game links every
@@ -286,6 +296,13 @@ else
         rm -f $fsr_archives
     else
         echo "FSR: FidelityFX's static libraries built; the Vulkan functions it calls directly: $(echo $wanted)"
+        # Frame generation's components are in the same archives (their Vulkan calls are in the
+        # audit above); say so when they are not there.
+        if [ "$framegen" = 1 ] \
+                && { [ ! -f "$rex_src/out/ps5-amd64/libffx_frameinterpolation_x64.a" ] \
+                     || [ ! -f "$rex_src/out/ps5-amd64/libffx_opticalflow_x64.a" ]; }; then
+            echo "note: FidelityFX's frame interpolation and optical flow libraries were not built; frame generation will fail to start in the game (its row says FAILED); FSR anti-aliasing is not affected" >&2
+        fi
     fi
 fi
 

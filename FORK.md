@@ -108,7 +108,12 @@ shader compiler is a Windows program, so Linux and the PS5 build the Vulkan
 runtime from the prebuilt SPIR-V of the permutations rexglue uses, in a patch
 of its own (`patches/rexglue-temporal-aa-shaders-vk.patch`, made by
 `launcher/dev/fsr/fsr_vk_shaders.py`); the PS5 links it statically. Neither
-has been built or run there yet; on
+has been built or run there yet; frame generation's components are in those
+runtimes too (`patches/rexglue-frame-generation-nonwindows.patch`: the Linux
+device looks for `libamd_fidelityfx_vk.so`, the PS5 title checks that FidelityFX
+is linked, the PS5 presents the generated and the real frame back to back on its
+fixed-refresh display; `MCLA_PS5_FRAMEGEN=0` and `REXGLUE_FSR_FRAMEGEN=OFF`
+leave them out). On
 the PS5 FSR is a choice for the next start, marked UNTESTED, as the console's
 Vulkan device gets FSR's features only when the game starts with it chosen. A
 reactive mask for rain and smoke is in but experimental and off by default.
@@ -222,6 +227,7 @@ git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
+git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```

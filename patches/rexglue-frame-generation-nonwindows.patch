@@ -1,0 +1,202 @@
+diff --git a/cmake/fidelityfx/CMakeLists.txt b/cmake/fidelityfx/CMakeLists.txt
+index fef4722..4aa6626 100644
+--- a/cmake/fidelityfx/CMakeLists.txt
++++ b/cmake/fidelityfx/CMakeLists.txt
+@@ -12,18 +12,23 @@
+ #                               (the PS5)
+ #   REXGLUE_FSR_WRAPPER_HASH    this folder's files' hash (only to make a changed wrapper
+ #                               configure and build the runtime again)
++#   REXGLUE_FSR_FRAMEGEN        frame generation's components too (ON; OFF: upscaling only)
+ cmake_minimum_required(VERSION 3.23)
+ project(rexglue_fidelityfx C CXX)
+ if(NOT FFX_ROOT OR NOT FFX_API_BACKEND)
+     message(FATAL_ERROR "FFX_ROOT and FFX_API_BACKEND are required")
+ endif()
+ set(_wrapper_hash "${REXGLUE_FSR_WRAPPER_HASH}")
+-# Upscaling, and on Windows frame generation (rexglue-frame-generation.patch):
+-# the frame generation provider and its optical flow and frame interpolation
+-# components, on Vulkan without AMD's frame-interpolation swapchain (below).
+-# Elsewhere upscaling only, as before, until frame generation is checked there
+-# (phase 5), so FSR anti-aliasing can't be lost to code that isn't used yet.
+-if(WIN32)
++# Upscaling, and frame generation (rexglue-frame-generation.patch): the frame
++# generation provider and its optical flow and frame interpolation components,
++# on Vulkan without AMD's frame-interpolation swapchain (below), on every
++# platform (Linux and the PS5 too, untested there: rexglue-frame-generation-
++# nonwindows.patch). REXGLUE_FSR_FRAMEGEN=OFF leaves them out (upscaling only,
++# so that FSR anti-aliasing can't be lost to code that fails to build somewhere).
++if(NOT DEFINED REXGLUE_FSR_FRAMEGEN)
++    set(REXGLUE_FSR_FRAMEGEN ON)
++endif()
++if(REXGLUE_FSR_FRAMEGEN)
+     set(FFX_API_ENABLE_FRAMEGEN_PROVIDER ON CACHE BOOL "" FORCE)
+ else()
+     set(FFX_API_ENABLE_FRAMEGEN_PROVIDER OFF CACHE BOOL "" FORCE)
+diff --git a/cmake/rexglue_fsr.cmake b/cmake/rexglue_fsr.cmake
+index e3c8932..bbbed20 100644
+--- a/cmake/rexglue_fsr.cmake
++++ b/cmake/rexglue_fsr.cmake
+@@ -30,6 +30,7 @@ if(NOT REXGLUE_ENABLE_FSR)
+ endif()
+ 
+ # What src/graphics/CMakeLists.txt and the summary read.
++option(REXGLUE_FSR_FRAMEGEN "Build FSR's frame generation (the Vulkan provider, optical flow and frame interpolation) with the runtime" ON)
+ set(REXGLUE_FSR_STATIC OFF)
+ if(PS5 OR PROSPERO)
+     set(REXGLUE_FSR_STATIC ON)
+@@ -265,7 +266,8 @@ foreach(api IN LISTS _rexglue_fsr_apis)
+     # Every switch of the wrapper given, empty or off when not used, so that its
+     # cache keeps none from an earlier configure.
+     set(args "-DFFX_ROOT=${_rexglue_fsr_src}" -DFFX_API_BACKEND=${api_upper}_X64
+-             "-DREXGLUE_FSR_WRAPPER_HASH=${_rexglue_fsr_wrapper_hash}")
++             "-DREXGLUE_FSR_WRAPPER_HASH=${_rexglue_fsr_wrapper_hash}"
++             "-DREXGLUE_FSR_FRAMEGEN=${REXGLUE_FSR_FRAMEGEN}")
+     if(api STREQUAL "vk" AND REXGLUE_FSR_VK_PREBUILT)
+         list(APPEND args "-DREXGLUE_FSR_SHADERS_DIR=${REXGLUE_FSR_SHADERS_DIR}"
+              "-DREXGLUE_FSR_SHADERS_HASH=${_rexglue_fsr_shaders_hash}")
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index 6652376..a84f2fe 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -140,6 +140,16 @@ if(REXGLUE_ENABLE_FSR AND WIN32 AND REXGLUE_USE_D3D12)
+     target_compile_definitions(rexui PRIVATE REX_HAS_FRAME_GENERATION_DX12=1)
+ endif()
+ 
++# The Vulkan device checks FidelityFX's runtime before it offers frame generation
++# (vulkan_device.cpp): on Windows its DLL, on Linux its shared object, on the PS5
++# (REX_FSR_STATIC) that the title linked it.
++if(REXGLUE_ENABLE_FSR)
++    target_compile_definitions(rexui PRIVATE REX_HAS_FSR=1)
++    if(REXGLUE_FSR_STATIC)
++        target_compile_definitions(rexui PRIVATE REX_FSR_STATIC=1)
++    endif()
++endif()
++
+ set(REXUI_HAS_FIDELITYFX_RUNTIME OFF)
+ if(TARGET amd_fidelityfx_vk)
+     target_link_libraries(rexui PRIVATE amd_fidelityfx_vk)
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index ffc7d03..4918661 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -33,6 +33,22 @@ REXCVAR_DEFINE_BOOL(temporal_aa_device_features, !REX_PLATFORM_PS5, "GPU",
+                     "FSR can't run on Vulkan until the next start. Off by default on the PS5, "
+                     "whose host turns it on when the game starts with FSR chosen, so that the "
+                     "console's device stays as it was otherwise.");
++#if defined(REX_HAS_FSR) && REX_HAS_FSR && defined(REX_FSR_STATIC) && REX_FSR_STATIC
++// The PS5 can't load modules: FidelityFX's static libraries are linked into the title when its
++// build made them (ps5/make_ps5.sh), and these are null when they were not (weak references, as
++// the GPU plugin's, which take nothing out of an archive: the title's link asks for the first).
++extern "C" int ffxCreateContext();
++extern "C" int ffxDispatch();
++#pragma weak ffxCreateContext
++#pragma weak ffxDispatch
++namespace {
++bool FidelityFxLinked() {
++  return reinterpret_cast<void*>(&ffxCreateContext) != nullptr &&
++         reinterpret_cast<void*>(&ffxDispatch) != nullptr;
++}
++}  // namespace
++#endif
++
+ REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
+                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
+                     "required for Vulkan GPU emulation")
+@@ -605,29 +621,46 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       unavailable_why = "the device has no timeline semaphores";
+       unavailable_menu_why = "NO TIMELINE SEMAPHORES";
+     }
+-#if REX_PLATFORM_WIN32
+-    // Loaded (and kept), not only looked for: a DLL whose imports fail (the Visual C++ runtime
+-    // missing) is there and unusable.
++    // FidelityFX's Vulkan runtime: the DLL next to the executable (Windows), the shared object
++    // next to it (Linux, untested), or linked into the title (the PS5, untested). Loaded (and
++    // kept), not only looked for: a library whose imports fail (the Visual C++ runtime, the
++    // Vulkan loader missing) is there and unusable.
+     std::string runtime_load_error;
+     std::string runtime_why;
+     if (!unavailable_why) {
+-      switch (rex::platform::CheckLoadable(
+-          rex::filesystem::GetExecutableFolder() / "amd_fidelityfx_vk.dll", &runtime_load_error)) {
++#if defined(REX_HAS_FSR) && REX_HAS_FSR && defined(REX_FSR_STATIC) && REX_FSR_STATIC
++      if (!FidelityFxLinked()) {
++        unavailable_why = "FidelityFX isn't linked into the executable";
++        unavailable_menu_why = "NO FIDELITYFX RUNTIME";
++      }
++#elif REX_PLATFORM_WIN32 || (defined(REX_HAS_FSR) && REX_HAS_FSR)
++#if REX_PLATFORM_WIN32
++      const char* const runtime_name = "amd_fidelityfx_vk.dll";
++#else
++      const char* const runtime_name = "libamd_fidelityfx_vk.so";
++#endif
++      switch (rex::platform::CheckLoadable(rex::filesystem::GetExecutableFolder() / runtime_name,
++                                           &runtime_load_error)) {
+         case rex::platform::LibraryCheck::kMissing:
+-          unavailable_why = "amd_fidelityfx_vk.dll isn't next to the executable";
++          runtime_why = std::string(runtime_name) + " isn't next to the executable";
++          unavailable_why = runtime_why.c_str();
+           unavailable_menu_why = "NO FIDELITYFX RUNTIME";
+           break;
+         case rex::platform::LibraryCheck::kFailed:
+           runtime_why =
+-              "amd_fidelityfx_vk.dll is there but doesn't load (" + runtime_load_error + ")";
++              std::string(runtime_name) + " is there but doesn't load (" + runtime_load_error + ")";
+           unavailable_why = runtime_why.c_str();
+           unavailable_menu_why = "RUNTIME NOT LOADED";
+           break;
+         default:
+           break;
+       }
+-    }
++#else
++      // A build without FSR (REXGLUE_ENABLE_FSR off): no runtime to find.
++      unavailable_why = "FidelityFX isn't built into this build";
++      unavailable_menu_why = "NO FIDELITYFX RUNTIME";
+ #endif
++    }
+     if (unavailable_why) {
+       REXLOG_INFO("Vulkan device: frame generation isn't available: {}", unavailable_why);
+       frame_generation_wanted = false;
+diff --git a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
+index 46141b2..9f898e2 100644
+--- a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
++++ b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
+@@ -37,6 +37,16 @@ REXCVAR_DEFINE_STRING(frame_generation_dump_path, "", "GPU",
+                       "Development: the folder frame_generation_dump writes into");
+ REXCVAR_DECLARE(int32_t, frame_generation_debug);
+ REXCVAR_DECLARE(bool, frame_generation_timing);
++REXCVAR_DEFINE_STRING(frame_generation_pacing, "auto", "GPU",
++                      "Vulkan frame generation: how the pacer spaces the generated and the real "
++                      "frame. timed: by the rendered frames' interval, as AMD's presenter does "
++                      "(a variable refresh display, or any whose refresh isn't known); display: "
++                      "back to back, the tear-free (FIFO) swapchain spacing them at the "
++                      "display's refresh, with the back-pressure that holds the game to half of "
++                      "it (a fixed refresh display: the PS5's, 59.94 Hz); auto: display on the "
++                      "PS5, timed elsewhere. display needs the tear-free swapchain "
++                      "(frame_generation_present = auto)")
++    .allowed({"auto", "timed", "display"});
+ 
+ namespace rex {
+ namespace ui {
+@@ -1043,6 +1053,21 @@ void VulkanPresenter::FramePacerPresent(const FramePacerFrame& frame) {
+       const double gap = mean * 0.5 - variation * 0.1 - 100'000.0;
+       gap_ns = gap > 0.0 ? uint64_t(gap) : 0;
+     }
++    // A fixed refresh display (the PS5's VK_KHR_display, FIFO): the swapchain spaces the two
++    // presents at the display's refresh, one blocking in its acquire until the display is
++    // ready for it, and the pacer's back-pressure holds the game to half of the refresh rate
++    // (the limiter, set just above it, never has to).
++    if (gap_ns && paint_context_.swapchain_is_fifo) {
++      const std::string pacing = rex::cvar::GetFlagByName("frame_generation_pacing");
++#if REX_PLATFORM_PS5
++      const bool display_paced = pacing != "timed";
++#else
++      const bool display_paced = pacing == "display";
++#endif
++      if (display_paced) {
++        gap_ns = 0;
++      }
++    }
+     if (gap_ns && frame_pacer_last_present_ns_ &&
+         !FramePacerWaitUntil(frame_pacer_last_present_ns_ + gap_ns)) {
+       drop("stopped waiting to present its generated frame");
