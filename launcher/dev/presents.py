@@ -66,6 +66,23 @@ def load_frames(folder):
     return t0, swaps, marks
 
 
+def load_starts(folder, t0):
+    """The frames' starts (ns on the steady clock): "f" lines of frames.csv, written by the dev
+    pad's timer hook right after the low-latency wait; [] without them."""
+    path = folder / "frames.csv"
+    starts = []
+    if t0 is None or not path.exists():
+        return starts
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        kind, *rest = line.split(",")
+        if kind == "f" and rest:
+            try:
+                starts.append(t0 + int(rest[0]) * 1000)
+            except ValueError:
+                pass
+    return starts
+
+
 def load_present_log(folder):
     refreshes, paints, switches = [], [], []
     path = folder / "present.csv"
@@ -86,13 +103,24 @@ def load_present_log(folder):
     return refreshes, paints, switches
 
 
-def latencies(log, pm, begin, end):
+def latencies(log, pm, begin, end, starts=None, swaps=None):
     """Each real frame's time from its swap (the refresh's log line) to the screen (PresentMon's
     present of it: its CPU start plus DisplayLatency). The frame's present is found from its paint
     line: thread c (D3D12's frame generation callback, logged before the present) takes the first
     present called after it, the others (logged after their present) the last one before it."""
     refreshes, paints, _ = log
     refresh_time = {n: t for t, n in refreshes if n}
+    # A frame's start: the engine timer pass whose frame the swap (the guest's VdSwap, the first
+    # one after the pass) ends; the GPU thread processes the swaps in the same order, so the
+    # refresh at the same position in the log is that swap's (a refresh made by the GPU thread
+    # can come after the next frame's start when it lags).
+    start_of_refresh = {}
+    if starts and swaps:
+        order = [n for _, n in refreshes]
+        for start in starts:
+            k = bisect.bisect_right(swaps, start)
+            if k < len(swaps) and k < len(order) and order[k]:
+                start_of_refresh[order[k]] = start
     calls = []
     for ns, row in pm:
         busy = number(row, "CPUBusy")
@@ -103,7 +131,27 @@ def latencies(log, pm, begin, end):
     calls.sort()
     times = [c for c, _ in calls]
     pacer = any(thread in ("q", "c") for _, _, thread, _, _, _ in paints)
+    # Where PresentMon's present of a frame comes: Direct3D 12's is called before the paint's log
+    # line, Vulkan's (made by the driver's own thread) just after it. Taken from where the nearest
+    # present falls for the paints of the run.
+    after = before = 0
+    # (With a pacer, the GPU thread's "g" lines only hand frames over: the pacer's own presents
+    # are the ones to look at.)
+    voters = ("q",) if pacer else ("g", "u")
+    for t, n, thread, _, _, _ in paints[len(paints) // 3:]:
+        if after + before >= 400:
+            break
+        if thread in voters and times:
+            k = bisect.bisect_left(times, t)
+            after_gap = times[k] - t if k < len(times) else None
+            before_gap = t - times[k - 1] if k > 0 else None
+            if after_gap is not None and (before_gap is None or after_gap < before_gap):
+                after += 1
+            else:
+                before += 1
+    present_after_log = after > before
     result = []
+    from_start = []
     seen = set()
     for t, n, thread, status, _, _ in paints:
         if not (begin < t <= end) or not n or n in seen or n not in refresh_time or status < 0:
@@ -111,14 +159,21 @@ def latencies(log, pm, begin, end):
         if pacer and thread not in ("q", "c"):
             continue
         if thread == "c":
+            # Direct3D 12's frame generation callback runs just after the proxy's present of the
+            # generated frame returned and before the real frame's: the first present after it.
             i = bisect.bisect_left(times, t)
+        elif present_after_log:
+            i = bisect.bisect_left(times, t - 500_000)
         else:
             i = bisect.bisect_right(times, t) - 1
         if i < 0 or i >= len(calls) or abs(calls[i][0] - t) > 50_000_000:
             continue
         seen.add(n)
         result.append((calls[i][1] - refresh_time[n]) / 1e6)
-    return result
+        # From the frame's start (the last engine timer pass before its swap) to the screen.
+        if n in start_of_refresh and refresh_time[n] - start_of_refresh[n] < 200_000_000:
+            from_start.append((calls[i][1] - start_of_refresh[n]) / 1e6)
+    return (result, from_start) if starts is not None else result
 
 
 def report_switches(t0, paints, switches):
@@ -205,6 +260,7 @@ def report(folder):
     t0, swaps, marks = load_frames(folder)
     log = load_present_log(folder)
     pm = load_presentmon(folder)
+    starts = load_starts(folder, t0)
     print(f"{folder.name}: {len(swaps)} swaps" + (", present log" if log else "") +
           (f", PresentMon {len(pm)} presents" if pm is not None else ""))
     if t0 is None:
@@ -268,9 +324,12 @@ def report(folder):
                            + "; "
                            f"paint us {percentiles(paint_us)}")
         if pm and log:
-            lat = latencies(log, pm, begin, end)
+            lat, from_start = latencies(log, pm, begin, end, starts, swaps)
             if lat:
                 details.append(f"real frames' swap to screen ms {percentiles(lat)} ({len(lat)})")
+            if from_start:
+                details.append(f"real frames' start (engine timer) to screen ms {percentiles(from_start)} "
+                               f"({len(from_start)})")
         if pm:
             seg = [row for ns, row in pm if ns is not None and begin < ns <= end]
             if seg:

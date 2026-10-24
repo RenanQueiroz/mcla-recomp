@@ -666,7 +666,7 @@ def run(a, tag=None):
     env.update(kv.split("=", 1) for kv in a.env)
     args = game_args(a, out)
     (out / "args.txt").write_text(" ".join(args), encoding="utf-8")
-    presentmon = start_presentmon(out) if getattr(a, "presentmon", False) else None
+    presentmon = start_presentmon(out, getattr(a, "pm_pcl", False)) if getattr(a, "presentmon", False) else None
     start = time.monotonic()
     proc = None
     restarts = []
@@ -749,7 +749,7 @@ def run(a, tag=None):
     return out
 
 
-def start_presentmon(out):
+def start_presentmon(out, pc_latency=False):
     """PresentMon capturing the game's presents for the run, into presentmon.csv (QPC times, so
     presents.py can line them up with the swaps and the present log)."""
     if not PRESENTMON or not Path(PRESENTMON).exists():
@@ -759,7 +759,8 @@ def start_presentmon(out):
     proc = subprocess.Popen([str(PRESENTMON), "--process_name", EXE.name, "--output_file",
                              str(out / "presentmon.csv"), "--v2_metrics", "--qpc_time",
                              "--terminate_on_proc_exit", "--no_console_stats",
-                             "--stop_existing_session", "--session_name", "mcla-devrun"],
+                             "--stop_existing_session", "--session_name", "mcla-devrun",
+                             *(["--track_pc_latency"] if pc_latency else [])],
                             stdout=log, stderr=subprocess.STDOUT)
     # Its trace session must be up before the game's first present.
     deadline = time.monotonic() + 15
@@ -1027,6 +1028,9 @@ def main():
                        help="environment variable for the game (repeatable)")
         p.add_argument("--presentmon", action="store_true",
                        help="capture the game's presents with PresentMon (presentmon.csv)")
+        p.add_argument("--pm-pcl", action="store_true",
+                       help="with --presentmon: also track the PC latency (the Reflex and "
+                       "Anti-Lag markers' PCLStats events)")
         p.add_argument("--present-log", action="store_true",
                        help="the SDK's log of refreshes and presents (present.csv)")
         p.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
