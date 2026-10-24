@@ -257,12 +257,21 @@ void MclaTickSettingsMenu();
 // time is read (the simulation step then measures the frames' starts, after the wait, and not
 // before it) and before anything reads the input. The timer function has callers on other
 // threads; the first one is the frame's.
+//
+// The hook sits after the timer's first label, which the timer's own retry jumps back to when the
+// low half of the time it read was 0 (about once in 2^32 reads): that pass of the hook, a few
+// instructions after the first, is the same frame and does nothing (no frame is 100 us long).
 void mcla_frame_start(PPCRegister& r3) {
   static const std::thread::id frame_thread = std::this_thread::get_id();
+  static uint64_t last_start_us = 0;  // the frame thread's
   if (std::this_thread::get_id() == frame_thread && !OriginalTiming()) {
+    if (NowMicros() - last_start_us < 100) {
+      return;
+    }
     const int32_t fps = EffectiveFps();
     rex::ui::LowLatency::SetFrameLimit(fps > 0 ? uint32_t(fps) : 0);
     rex::ui::LowLatency::OnFrameStart();
+    last_start_us = NowMicros();  // after the driver's wait
   }
 }
 

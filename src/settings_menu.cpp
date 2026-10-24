@@ -893,7 +893,11 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
         return kFsrNextStartLabel;
       }
       if (IsFrameGenerationItem(item) && index == 1 && FrameGenerationNextStart()) {
+#if REX_PLATFORM_WIN32
         return "FSR 3.1 (NEXT START)";
+#else
+        return "FSR 3.1 (NEXT START, UNTESTED)";
+#endif
       }
       if (IsFrameGenerationItem(item) && index == 0 && FrameGenerationUnavailable()) {
         // OFF, and why it's all there is: the menu's letters (the SDK's text).
