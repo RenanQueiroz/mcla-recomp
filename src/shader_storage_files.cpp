@@ -11,6 +11,8 @@
 
 #include <fmt/format.h>
 
+#include <rex/platform.h>
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,7 +24,12 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+// The session lock is flock(2) everywhere but on the PS5 (REX_PLATFORM_PS5, which the SDK's
+// platform.h also sets for any FreeBSD): there the title is the only process that uses the storage,
+// and it takes no lock. Keyed on the platform macro and not on the compiler's own, so that a
+// toolchain that doesn't define __FreeBSD__ (or one that does, with a flock that doesn't work)
+// can't change it.
+#if !REX_PLATFORM_PS5
 #include <sys/file.h>
 #define MCLA_HAVE_FLOCK 1
 #endif
@@ -39,9 +46,16 @@ bool IsInUseError(DWORD error) {
   return error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION;
 }
 
+// Only a sharing or lock violation is "in use" (another program has the file open, which passes);
+// everything else, a read-only file and a refused permission included, is an error that waiting
+// doesn't fix.
 Failure ErrorFailure(const char* what, const std::filesystem::path& path, DWORD error) {
   if (IsInUseError(error)) {
     return {kInUse, fmt::format("{} is in use by another program", Name(path))};
+  }
+  if (error == ERROR_ACCESS_DENIED) {
+    return {kIoError, fmt::format("can't {} {}: access denied (a read-only file, or no permission)",
+                                  what, path.string())};
   }
   return {kIoError, fmt::format("can't {} {} (error {})", what, path.string(), error)};
 }
@@ -171,7 +185,9 @@ void WriteFileAtomically(const std::filesystem::path& path, const std::vector<ui
     }
   }
   // Another process (an antivirus, a backup, a game of an older version) may have the file open
-  // for a moment.
+  // for a moment: a sharing violation, or access denied while it is mapped. Those are tried again
+  // for two seconds, and a sharing violation that lasts is "in use". Access denied that lasts is
+  // an error (a read-only file, a permission), and a read-only file isn't waited for at all.
   DWORD error = 0;
   for (int attempt = 0; attempt < 20; ++attempt) {
     if (MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -179,10 +195,14 @@ void WriteFileAtomically(const std::filesystem::path& path, const std::vector<ui
     }
     error = GetLastError();
     if (!IsInUseError(error) && error != ERROR_ACCESS_DENIED) break;
+    if (error == ERROR_ACCESS_DENIED) {
+      const DWORD attributes = GetFileAttributesW(path.c_str());
+      if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY)) break;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   DeleteFileW(temp.c_str());
-  throw ErrorFailure("replace", path, error == ERROR_ACCESS_DENIED ? ERROR_SHARING_VIOLATION : error);
+  throw ErrorFailure("replace", path, error);
 #else
   temp += fmt::format(".{}.tmp", int(getpid()));
   {
@@ -269,13 +289,18 @@ void RemoveStaleTemporaries(const std::filesystem::path& folder,
 
 namespace {
 bool g_session_lock_held = false;
-}
 
-bool AcquireSessionLock(const std::filesystem::path& lock_path, const std::string& owner,
-                        uint32_t wait_ms, bool (*keep_waiting)(const std::string& holder),
-                        std::string* holder) {
-  if (g_session_lock_held) return true;
+// The owner text read while the holder rewrites it (truncated, not yet written) is empty: asked
+// again for a moment, for a few 100 ms at most, before the holder is taken for one of no name.
+constexpr int kEmptyOwnerRetries = 10;
+}  // namespace
+
+LockResult AcquireSessionLock(const std::filesystem::path& lock_path, const std::string& owner,
+                              uint32_t wait_ms, bool (*keep_waiting)(const std::string& holder),
+                              std::string* holder) {
+  if (g_session_lock_held) return LockResult::kTaken;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  int empty_owner = 0;
 #ifdef _WIN32
   // Kept open and locked until the process ends; the system releases it then, also after a
   // crash. The lock is on a byte far past the owner text, which stays readable.
@@ -283,8 +308,10 @@ bool AcquireSessionLock(const std::filesystem::path& lock_path, const std::strin
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
-    if (holder) *holder = fmt::format("(the lock file can't be opened: error {})", GetLastError());
-    return false;
+    const DWORD error = GetLastError();
+    if (holder) *holder = fmt::format("the lock file can't be opened: error {}", error);
+    // Opened elsewhere without sharing: a program that has it, not a problem with the file.
+    return IsInUseError(error) ? LockResult::kHeld : LockResult::kError;
   }
   for (;;) {
     OVERLAPPED overlapped = {};
@@ -296,7 +323,15 @@ bool AcquireSessionLock(const std::filesystem::path& lock_path, const std::strin
       SetEndOfFile(file);
       WriteFile(file, owner.data(), DWORD(owner.size()), &written, nullptr);
       g_session_lock_held = true;
-      return true;
+      return LockResult::kTaken;
+    }
+    // Held by another process is ERROR_LOCK_VIOLATION; anything else (a file system without
+    // byte-range locks) won't pass by waiting.
+    const DWORD lock_error = GetLastError();
+    if (lock_error != ERROR_LOCK_VIOLATION) {
+      if (holder) *holder = fmt::format("the lock file can't be locked: error {}", lock_error);
+      CloseHandle(file);
+      return LockResult::kError;
     }
     char text[128] = {};
     DWORD read = 0;
@@ -304,17 +339,19 @@ bool AcquireSessionLock(const std::filesystem::path& lock_path, const std::strin
     ::ReadFile(file, text, sizeof(text) - 1, &read, nullptr);
     const std::string other(text, read);
     if (holder) *holder = other;
-    if (std::chrono::steady_clock::now() >= deadline || !keep_waiting || !keep_waiting(other)) {
+    const bool unnamed = other.empty() && empty_owner++ < kEmptyOwnerRetries;
+    if (std::chrono::steady_clock::now() >= deadline ||
+        (!unnamed && (!keep_waiting || !keep_waiting(other)))) {
       CloseHandle(file);
-      return false;
+      return LockResult::kHeld;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 #elif defined(MCLA_HAVE_FLOCK)
   const int fd = open(lock_path.c_str(), O_RDWR | O_CREAT, 0644);
   if (fd < 0) {
-    if (holder) *holder = fmt::format("(the lock file can't be opened: {})", std::strerror(errno));
-    return false;
+    if (holder) *holder = fmt::format("the lock file can't be opened: {}", std::strerror(errno));
+    return LockResult::kError;
   }
   for (;;) {
     if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
@@ -322,15 +359,26 @@ bool AcquireSessionLock(const std::filesystem::path& lock_path, const std::strin
         [[maybe_unused]] ssize_t written = pwrite(fd, owner.data(), owner.size(), 0);
       }
       g_session_lock_held = true;
-      return true;
+      return LockResult::kTaken;
+    }
+    // Held by another process is EWOULDBLOCK; anything else (a file system without flock) won't
+    // pass by waiting.
+    const int lock_error = errno;
+    if (lock_error == EINTR) continue;
+    if (lock_error != EWOULDBLOCK) {
+      if (holder) *holder = fmt::format("the lock file can't be locked: {}", std::strerror(lock_error));
+      close(fd);
+      return LockResult::kError;
     }
     char text[128] = {};
     const ssize_t read_now = pread(fd, text, sizeof(text) - 1, 0);
     const std::string other(text, read_now > 0 ? size_t(read_now) : 0);
     if (holder) *holder = other;
-    if (std::chrono::steady_clock::now() >= deadline || !keep_waiting || !keep_waiting(other)) {
+    const bool unnamed = other.empty() && empty_owner++ < kEmptyOwnerRetries;
+    if (std::chrono::steady_clock::now() >= deadline ||
+        (!unnamed && (!keep_waiting || !keep_waiting(other)))) {
       close(fd);
-      return false;
+      return LockResult::kHeld;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
@@ -341,8 +389,9 @@ bool AcquireSessionLock(const std::filesystem::path& lock_path, const std::strin
   (void)deadline;
   (void)keep_waiting;
   (void)holder;
+  (void)empty_owner;
   g_session_lock_held = true;
-  return true;
+  return LockResult::kTaken;
 #endif
 }
 

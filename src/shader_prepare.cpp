@@ -27,18 +27,28 @@
 // The player's storage is protected:
 // - Every mcla process holds a session lock (<cache>/shaders/local/545407F8.lock) from before it
 //   reads the storage until it ends: a preparation refuses to run beside a game (code 7), and a
-//   game started during a preparation waits for it.
+//   game started during a preparation waits for it, up to two minutes. That wait is on the
+//   window's thread; it answers the system's messages meanwhile, so the window doesn't show as
+//   "not responding" (but it stays unpainted until the preparation ends).
 // - A file that exists but can't be read stops the import before anything is written: it is
 //   never taken for a missing one.
 // - The pack's lists are accepted only as the four this build knows (names, headers and record
 //   sizes from the SDK's own constants); paths never come from the pack.
 // - Entries already in a file stay, in their order; each file is written beside the old one,
 //   flushed and renamed over it.
-// - A journal (<cache>/shaders/local/545407F8.import) records each file's length before an import.
-//   If the process ends after the import and before the stored pipelines were all created, the
-//   next start cuts the files back to those lengths. After two such failed starts with the same
-//   pack, importing that pack is disabled (the player's own entries stay); More > Prepare shaders
-//   (--mcla_prepare_shaders_retry) or deleting the journal tries again.
+// - A journal (<cache>/shaders/local/545407F8.import) records, for each file an import changed, its
+//   length before, its length after, and the XXH3 of what was added. If the process ends after the
+//   import and before the stored pipelines were all created, the next start cuts the files back
+//   to their lengths before (or removes a file the import created), but only a file that still is
+//   what the import left: its length is the recorded one after and the added part's XXH3 matches.
+//   A file that is longer, because the start went on to play and only the record of its success
+//   failed, or that anything else changed, is left as it is: the player's own entries are never
+//   cut. After two failed starts in a row with the same pack, importing that pack is disabled
+//   (the files stay as they are); More > Prepare shaders (--mcla_prepare_shaders_retry), which
+//   also forgets the shaders recorded as not rebuildable, or deleting the journal tries again.
+//   Any run that ends in that window counts as a failed start, whatever ended it: a crash, the
+//   user ending a preparation, the launcher closing during one, a power cut. The next start that
+//   gets through resets the count.
 // - After the stored pipelines were created, a stamp (<cache>/shaders/local/545407F8.stamp.json)
 //   records what was loaded: the pack, the storage versions, the API, the pipeline storage file
 //   in use (which also says the EDRAM path), the resolution scale, the adapter and its driver,
@@ -53,8 +63,10 @@
 //   done <rebuild ms> <preload ms> <private MB> <GPU MB> <process ms>
 //   error <code> <message>                   (then the process ends with that code)
 // Exit codes: 0 done; permanent: 2 no pack, 3 damaged pack, 4 game files don't match, 5 pack for
-// another version of the graphics code, 6 storage can't be read or written; transient: 7 storage
-// in use by another program (try again later).
+// another version of the graphics code, 6 storage can't be read or written (a read-only file, no
+// permission, a lock file that can't be opened or locked); transient: 7 storage in use by another
+// program (a sharing or lock violation, or the session lock held by a running mcla): try again
+// later. The launcher tries 7 again at the next Play and nothing else.
 //
 // Nothing else is written: not mcla.toml (the overrides here are command-line values, which the
 // settings file never saves), not the save.
@@ -116,7 +128,8 @@ REXCVAR_DEFINE_BOOL(mcla_prepare_shaders, false, "MCLA",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_prepare_shaders_retry, false, "MCLA",
                     "With --mcla_prepare_shaders: also import a shader pack whose import was "
-                    "disabled after failed starts (the launcher's More > Prepare shaders)")
+                    "disabled after failed starts, and try again the shaders it couldn't rebuild "
+                    "(the launcher's More > Prepare shaders)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_shader_pack_auto, true, "MCLA",
                     "At every start, add whatever of the shader pack the shader storage lacks "
@@ -1141,11 +1154,15 @@ StoredFile ReadPipelineStorage(const std::filesystem::path& path, const ListSpec
 //   failures <failed starts with this pack in a row>
 //   disabled <0 | 1>
 //   unbuildable <hash> ...       (shaders of this pack that couldn't be rebuilt here)
-//   file <name> <length before> <length after>     (one per file the last import changed)
+//   file <name> <length before> <length after> <XXH3 of the added part, 16 hex digits>
+//                                  (one per file the last import changed; a journal without the
+//                                   hash, from an earlier build, is trusted by the length alone)
 
 struct JournalFile {
   std::string name;
   uint64_t before = 0, after = 0;
+  uint64_t tail = 0;  // XXH3 of the file's bytes from before to after
+  bool has_tail = false;
 };
 struct Journal {
   uint64_t pack = 0;
@@ -1183,9 +1200,15 @@ bool ReadJournal(const std::filesystem::path& path, Journal& journal) {
     } else if (key == "file") {
       JournalFile f;
       words >> f.name >> f.before >> f.after;
+      const bool whole = !words.fail();
+      std::string hex;
+      if (words >> hex) {
+        f.tail = std::strtoull(hex.c_str(), nullptr, 16);
+        f.has_tail = true;
+      }
       // Only the storage's own files.
       const auto names = StorageFileNames();
-      if (words && std::find(names.begin(), names.end(), f.name) != names.end())
+      if (whole && std::find(names.begin(), names.end(), f.name) != names.end())
         journal.files.push_back(f);
     }
   }
@@ -1201,7 +1224,7 @@ void WriteJournal(const std::filesystem::path& path, const Journal& journal) {
     text += "\n";
   }
   for (const JournalFile& f : journal.files)
-    text += fmt::format("file {} {} {}\n", f.name, f.before, f.after);
+    text += fmt::format("file {} {} {} {:016X}\n", f.name, f.before, f.after, f.tail);
   mcla::shader_storage::WriteFileAtomically(path, std::vector<uint8_t>(text.begin(), text.end()));
 }
 
@@ -1224,39 +1247,54 @@ struct State {
 };
 State g_state;
 
+// Whether a file is still exactly what the import left: as long as the journal says it was after
+// it and, where the journal has the XXH3 of the added part, with that part in it. A file the game
+// appended to since (the start that imported went on to play, and only the record that it got
+// through failed), that was cut or reset, or that anything else wrote to, is not.
+bool IsAsImported(const std::filesystem::path& path, const JournalFile& f) {
+  if (f.before > f.after) return false;
+  if (uint64_t(mcla::shader_storage::FileSizeOrAbsent(path)) != f.after) return false;  // -1 too
+  if (!f.has_tail) return true;
+  std::vector<uint8_t> d;
+  if (!mcla::shader_storage::ReadWholeFile(path, d) || d.size() != f.after) return false;
+  return Hash(d.data() + f.before, size_t(f.after - f.before)) == f.tail;
+}
+
 // The previous run ended after an import and before the stored pipelines were all created (a
-// crash, a hang that was ended, a power cut): the files are cut back to their lengths before it.
-// Two such starts in a row with the same pack disable its import.
+// crash, a hang that was ended, a power cut): the files the import changed are cut back to their
+// lengths before it (or removed, if it created them) as long as they still are what it left.
+// Whatever ended the run counts as a failed start; two in a row with the same pack disable its
+// import.
 void RecoverInterruptedImport() {
   Journal& j = g_state.journal;
   if (j.phase != "merged" && j.phase != "rebuild") return;
-  size_t cut = 0;
+  size_t cut = 0, kept = 0;
   if (j.phase == "merged") {
     for (const JournalFile& f : j.files) {
       const auto path = g_state.folders.File(f.name);
-      const int64_t size = mcla::shader_storage::FileSizeOrAbsent(path);
-      if (size < 0) continue;
+      if (mcla::shader_storage::FileSizeOrAbsent(path) < 0) continue;
+      if (!IsAsImported(path, f)) {
+        // Not what the import left: entries of the player's own may be in it. Never cut.
+        REXLOG_WARN("shader pack: {} changed since the interrupted import; left as it is",
+                    path.string());
+        ++kept;
+        continue;
+      }
       if (f.before == 0) {
         // Created (or replaced, being of another version) by the import.
         mcla::shader_storage::RemoveFile(path);
-        ++cut;
-      } else if (uint64_t(size) >= f.before) {
-        if (uint64_t(size) != f.before) {
-          mcla::shader_storage::TruncateFile(path, f.before);
-          ++cut;
-        }
       } else {
-        REXLOG_WARN("shader pack: {} is shorter than before the interrupted import; left as it is",
-                    path.string());
+        mcla::shader_storage::TruncateFile(path, f.before);
       }
+      ++cut;
     }
   }
   ++j.failures;
   if (j.failures >= kFailuresBeforeDisabling) j.disabled = true;
   REXLOG_WARN(
       "shader pack: the last start ended {} the import of pack {:016X} was finished; {} file(s) "
-      "cut back to their lengths before it. {}",
-      j.phase == "merged" ? "after the import and before" : "before", j.pack, cut,
+      "cut back to their lengths before it, {} left as they are. {}",
+      j.phase == "merged" ? "after the import and before" : "before", j.pack, cut, kept,
       j.disabled ? "Its import is now disabled: More > Prepare shaders in the launcher (or "
                    "deleting shaders/local/545407F8.import) tries again."
                  : "It will be tried once more.");
@@ -1492,7 +1530,10 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
     Journal& j = g_state.journal;
     j.phase = "merged";
     j.files.clear();
-    for (const Out& o : outs) j.files.push_back({o.name, o.before, o.data.size()});
+    for (const Out& o : outs) {
+      j.files.push_back({o.name, o.before, o.data.size(),
+                         Hash(o.data.data() + o.before, o.data.size() - size_t(o.before)), true});
+    }
     WriteJournal(g_state.folders.Local("import"), j);
     size_t replaced = 0;
     try {
@@ -1682,6 +1723,14 @@ void WriteStamp(rex::Runtime* runtime, const std::string& report) {
 }
 
 bool KeepWaitingForPreparation(const std::string& holder) {
+#ifdef _WIN32
+  // This runs on the window's thread, which isn't pumping messages while it waits (up to two
+  // minutes): checking the queue every 100 ms keeps Windows from marking the window "not
+  // responding". PeekMessage also answers what other threads send to the window; the posted
+  // messages are left in the queue (PM_NOREMOVE) for the loop to take after the start goes on.
+  MSG message;
+  PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+#endif
   // A preparation run ends by itself within a minute or so; another game doesn't.
   return holder.rfind("prepare", 0) == 0;
 }
@@ -1748,28 +1797,48 @@ void MclaShaderStorageBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* windo
   const int pid = int(getpid());
 #endif
   std::string holder;
-  const bool locked = mcla::shader_storage::AcquireSessionLock(
+  const auto lock = mcla::shader_storage::AcquireSessionLock(
       g_state.folders.Local("lock"), fmt::format("{} {}", prepare ? "prepare" : "game", pid),
       prepare ? 2000 : 120000, prepare ? nullptr : &KeepWaitingForPreparation, &holder);
-  if (!locked) {
-    if (prepare) Fail({kInUse, "the shader storage is in use by a running game"});
-    REXLOG_WARN("shader pack: the storage is in use by another process ({}); no import", holder);
+  if (lock != mcla::shader_storage::LockResult::kTaken) {
+    if (lock == mcla::shader_storage::LockResult::kHeld) {
+      // Another mcla process has the storage: transient (code 7).
+      if (prepare) {
+        Fail({kInUse, fmt::format("the shader storage is in use by another mcla process ({})",
+                                  holder.empty() ? "unknown" : holder)});
+      }
+      REXLOG_WARN("shader pack: the storage is in use by another process ({}); no import", holder);
+    } else {
+      // The lock file can't be opened or locked: no waiting or trying again helps (code 6).
+      if (prepare) Fail({kIoError, "the shader storage's lock file can't be used: " + holder});
+      REXLOG_WARN("shader pack: the storage's lock file can't be used ({}); no import", holder);
+    }
     g_state.import_state = "unavailable";
     return;
   }
   g_state.storage = true;
   try {
-    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.shareable, StorageFileNames());
-    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.local, {"import", "stamp.json"});
+    // Left by a run that ended mid-write (named like the files they were written for).
+    const auto title = std::string(kTitle) + ".";
+    std::vector<std::string> storage_names = StorageFileNames();
+    for (std::string& name : storage_names) name = title + name;
+    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.shareable, storage_names);
+    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.local,
+                                                 {title + "import", title + "stamp.json"});
     ReadJournal(g_state.folders.Local("import"), g_state.journal);
     RecoverInterruptedImport();
-    if (prepare && rex::cvar::GetFlagByName("mcla_prepare_shaders_retry") == "true" &&
-        g_state.journal.disabled) {
-      REXLOG_INFO("shader pack: importing pack {:016X} is tried again", g_state.journal.pack);
-      g_state.journal.disabled = false;
-      g_state.journal.failures = 0;
-      g_state.journal.unbuildable.clear();
-      WriteJournal(g_state.folders.Local("import"), g_state.journal);
+    if (prepare && rex::cvar::GetFlagByName("mcla_prepare_shaders_retry") == "true") {
+      // Asked for (More > Prepare shaders): a disabled import is tried again, and so are the
+      // shaders that couldn't be rebuilt (a damaged game file may have been repaired since).
+      Journal& j = g_state.journal;
+      if (j.disabled || j.failures || !j.unbuildable.empty()) {
+        REXLOG_INFO("shader pack: importing pack {:016X} is tried again{}", j.pack,
+                    j.unbuildable.empty() ? "" : ", with the shaders it couldn't rebuild");
+        j.disabled = false;
+        j.failures = 0;
+        j.unbuildable.clear();
+        WriteJournal(g_state.folders.Local("import"), j);
+      }
     }
     if (g_state.mode != Mode::kOff) RunImport(runtime);
   } catch (const Failure& failure) {
