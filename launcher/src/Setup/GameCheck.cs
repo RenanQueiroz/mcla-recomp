@@ -209,11 +209,19 @@ static class GameChecker
                 $"Its title id is {info.TitleIdText}; Midnight Club: Los Angeles is {expected.TitleId}. This installer only builds Midnight Club: Los Angeles.",
                 checks, info.TitleIdText, info.VersionText);
         }
-        if (!string.Equals(xexHash, expected.Xex.Sha256, StringComparison.OrdinalIgnoreCase) || info.VersionText != expected.XexVersion)
+        if (info.VersionText != expected.XexVersion)
         {
             return new GameCheckResult(GameVerdict.AnotherRelease, "This is another release of Midnight Club: Los Angeles",
                 $"Its program is version {info.VersionText}; this installer supports the {expected.Title}, version {expected.XexVersion}. "
                 + "A different region's disc or a title update has a different program, and the recompiled game would not match it.",
+                checks, info.TitleIdText, info.VersionText);
+        }
+        if (!string.Equals(xexHash, expected.Xex.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            // The same version number with other contents: the program was changed, or the dump is damaged.
+            return new GameCheckResult(GameVerdict.DamagedDump, "A damaged or modified default.xex",
+                $"Its program says it is the right version ({info.VersionText}), but it is not the original: its contents differ from the {expected.Title}'s. "
+                + "Dump the disc again, or extract default.xex again.",
                 checks, info.TitleIdText, info.VersionText);
         }
 

@@ -78,12 +78,14 @@ static class ToolInstaller
     {
         Directory.CreateDirectory(tools);
         string topFolder;
+        bool singleTop;
         int total;
         using (var zip = ZipFile.OpenRead(zipFile))
         {
             var top = zip.Entries.Select(e => e.FullName.Replace('\\', '/').Split('/')[0]).Distinct().ToList();
             var hasLoose = zip.Entries.Any(e => !e.FullName.Replace('\\', '/').Contains('/') && e.Name.Length > 0);
-            topFolder = top.Count == 1 && !hasLoose ? top[0] : $"{name}-{version}";
+            singleTop = top.Count == 1 && !hasLoose;
+            topFolder = singleTop ? top[0] : $"{name}-{version}";
             total = zip.Entries.Count;
         }
         if (topFolder.Contains("..") || Path.IsPathRooted(topFolder) || topFolder.Length == 0)
@@ -100,7 +102,7 @@ static class ToolInstaller
         var temp = Path.Combine(tools, $".u-{name}");
         SafeFolder.Delete(temp);
         Directory.CreateDirectory(temp);
-        var wrapped = topFolder == $"{name}-{version}";
+        var wrapped = !singleTop;
         var target = wrapped ? Path.Combine(temp, topFolder) : temp;
         Directory.CreateDirectory(target);
         var fullTarget = Path.GetFullPath(target).TrimEnd('\\') + "\\";
