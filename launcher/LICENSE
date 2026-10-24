@@ -1,0 +1,31 @@
+MIT License
+
+Copyright (c) 2026 Renan Queiroz
+
+This licence covers the launcher: the files in this folder (the code in src/
+and the scripts and documents beside it), not those in dev/ (the developer
+tools, which are part of the rest of the repository). The rest of the
+repository is under the licence in the LICENSE file at its root
+(GPL-3.0-or-later); THIRD-PARTY-NOTICES.md at its root lists the code ported
+into that rest. The packages the launcher is built with (the .NET runtime,
+the Windows App SDK, Reactor, ...) are listed with their licences in
+THIRD-PARTY-NOTICES-LAUNCHER.txt, which the published launcher zip holds (made by
+scripts/ci/launcher-notices.py).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

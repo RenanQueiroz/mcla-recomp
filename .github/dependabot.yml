@@ -1,0 +1,13 @@
+# The workflows pin every action by commit SHA; this proposes the new SHA when an action has a new
+# release, one pull request a month for all of them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        patterns:
+          - "*"
