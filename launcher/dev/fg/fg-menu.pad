@@ -1,0 +1,61 @@
+# Phase 4: the pause menu's DISPLAY rows FPS TARGET and FRAME GENERATION: opened, stepped and
+# switched with the pad, the cap going to HALF DISPLAY (mcla_fps_frame_generation, -1) while
+# frame generation is on and back to mcla_fps when it is off, saved when backing out.
+# Run with --fps 45 --fps-fg half (devrun.py) and read the `dev pad: get` lines, the
+# `settings menu:` lines and mcla.toml.after in the run folder.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+press start 4f
+wait 2s
+press rb 4f
+wait 1s
+press rb 4f
+wait 1s
+press down 4f
+wait 700ms
+press down 4f
+wait 700ms
+press down 4f
+wait 700ms
+press down 4f
+wait 1s
+press a 4f
+wait 1500ms
+get mcla_fps mcla_fps_frame_generation frame_generation frame_generation_available frame_generation_why
+press down 4f
+wait 1s
+press right 4f
+wait 2s
+get mcla_fps mcla_fps_frame_generation frame_generation
+press up 4f
+wait 1s
+press right 4f
+wait 1500ms
+get mcla_fps mcla_fps_frame_generation frame_generation
+press left 4f
+wait 1s
+press left 4f
+wait 1500ms
+get mcla_fps mcla_fps_frame_generation frame_generation
+press right 4f
+wait 1500ms
+get mcla_fps mcla_fps_frame_generation frame_generation
+press down 4f
+wait 1s
+press left 4f
+wait 2s
+get mcla_fps mcla_fps_frame_generation frame_generation
+press up 4f
+wait 1s
+press right 4f
+wait 1500ms
+get mcla_fps mcla_fps_frame_generation frame_generation
+press b 4f
+wait 2s
+mark end
+wait 1s

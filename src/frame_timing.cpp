@@ -28,6 +28,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/ui/presenter.h>
 #include <rex/runtime.h>
 
 #ifdef _WIN32
@@ -42,6 +43,18 @@
 REXCVAR_DEFINE_INT32(mcla_fps, 30, "MCLA",
                      "Frame-rate target: 30, 60 or 120. 0 runs uncapped. "
                      "-1 restores the game's original fixed 30 Hz timing")
+    .range(-1, 240);
+
+// The cap while frame generation is on (the SDK's frame_generation): the rendered
+// rate, so 60 shows 120. -1 is HALF DISPLAY, just under half the display's refresh
+// rate (floor of its 97%, so 116 on 240 Hz and 58 on 120 Hz: the presents then
+// stay under the display's own limit and the swap to screen stays short). While
+// frame generation is off, or can't run, mcla_fps applies, as it does with HALF
+// DISPLAY on a display under 100 Hz, where half would be under 50 rendered.
+REXCVAR_DEFINE_INT32(mcla_fps_frame_generation, -1, "MCLA",
+                     "Frame-rate cap with frame generation on: -1 is HALF DISPLAY (just under half "
+                     "the display's refresh rate), 0 uncapped, or the rendered rate. mcla_fps "
+                     "applies while it is off")
     .range(-1, 240);
 
 // Off by default: skipping here also skips whatever puts the game logo on the
@@ -68,6 +81,17 @@ REXCVAR_DEFINE_BOOL(mcla_pace_at_swap, true, "MCLA",
                     "Hold frames to the FPS target at presentation, like a precise vsync, "
                     "instead of before the game's update");
 
+// HALF DISPLAY (mcla_fps_frame_generation = -1): floor(97% of half the refresh rate) rendered,
+// so the presents (twice as many) stay just under what the display takes; 0 where the
+// refresh rate isn't known or is under 100 Hz, where half is under 50 and the
+// player's own cap stays.
+int32_t MclaHalfDisplayCap(float refresh_hz) {
+  if (!(refresh_hz >= 100.0f)) {
+    return 0;
+  }
+  return int32_t(std::floor(double(refresh_hz) * 0.97 / 2.0));
+}
+
 namespace {
 
 // The engine timer object lives at a fixed guest address (sub_821BDA90).
@@ -87,6 +111,40 @@ bool OriginalTiming() {
   return REXCVAR_GET(mcla_fps) < 0;
 }
 
+// The frame-rate cap now: mcla_fps, or with frame generation on mcla_fps_frame_generation
+// (HALF DISPLAY from the display's refresh rate, read about once a second).
+// Frame generation counts as on while the SDK's frame_generation asks for it and
+// has not said it can't run (frame_generation_available).
+uint64_t NowMicros();
+
+int32_t CapFromSettings() {
+  const int32_t fps = REXCVAR_GET(mcla_fps);
+  if (fps < 0 || rex::cvar::GetFlagByName("frame_generation") == "off" ||
+      rex::cvar::GetFlagByName("frame_generation_available") == "no") {
+    return fps;
+  }
+  const int32_t cap = REXCVAR_GET(mcla_fps_frame_generation);
+  if (cap >= 0) {
+    return cap;
+  }
+  // The display's refresh rate comes from the presenter's display reader, which runs
+  // after a window change or when asked: asked again every two seconds, for a window
+  // moved to another display or a changed mode. Not known yet (the first time here:
+  // a moment's wait at most, once), or never (not read on every platform), the
+  // player's cap stays.
+  static std::atomic<uint64_t> asked_us{0};
+  float refresh = rex::ui::Presenter::GetDisplayRefreshHz();
+  const uint64_t now = NowMicros();
+  const uint64_t asked = asked_us.load(std::memory_order_relaxed);
+  if (asked == 0 || now - asked >= 2'000'000) {
+    asked_us.store(now, std::memory_order_relaxed);
+    rex::ui::Presenter::RefreshHdrDisplayInfo(asked == 0 && !(refresh > 0.0f) ? 100 : 0);
+    refresh = rex::ui::Presenter::GetDisplayRefreshHz();
+  }
+  const int32_t half = MclaHalfDisplayCap(refresh);
+  return half > 0 ? half : fps;
+}
+
 uint64_t NowMicros() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                    std::chrono::steady_clock::now().time_since_epoch())
@@ -99,6 +157,25 @@ uint64_t NowMicros() {
 // deadline (the template parameter).
 enum PaceSite { kPaceAtTimer, kPaceAtSwap };
 
+// CapFromSettings, read at most every 250 ms: the frame limiter runs once or twice a
+// frame.
+int32_t EffectiveFps() {
+  static std::atomic<int32_t> cap{0};
+  static std::atomic<uint64_t> checked_us{0};
+  const uint64_t now = NowMicros();
+  const uint64_t last = checked_us.load(std::memory_order_relaxed);
+  if (last == 0 || now - last >= 250'000) {
+    checked_us.store(now, std::memory_order_relaxed);
+    const int32_t value = CapFromSettings();
+    if (cap.exchange(value, std::memory_order_relaxed) != value) {
+      REXLOG_INFO("frame timing: the frame-rate cap is now {} FPS{}", value,
+                  value == 0 ? " (uncapped)" : "");
+    }
+    return value;
+  }
+  return cap.load(std::memory_order_relaxed);
+}
+
 template <PaceSite kSite>
 void WaitForFrameDeadline() {
   static uint64_t next_us = 0;
@@ -109,7 +186,7 @@ void WaitForFrameDeadline() {
     return;
   }
 
-  const int32_t fps = REXCVAR_GET(mcla_fps);
+  const int32_t fps = EffectiveFps();
   if (fps <= 0) {
     next_us = 0;
     return;
@@ -513,6 +590,9 @@ void MclaApp::ConfigureFrameTiming() {
   }
   timeBeginPeriod(1);
 #endif
-  REXLOG_INFO("frame timing: real frame delta, target {} FPS, vsync {}", REXCVAR_GET(mcla_fps),
-              rex::cvar::GetFlagByName("vsync"));
+  REXLOG_INFO(
+      "frame timing: real frame delta, target {} FPS (mcla_fps; with frame generation on "
+      "mcla_fps_frame_generation = {}), vsync {}",
+      REXCVAR_GET(mcla_fps), REXCVAR_GET(mcla_fps_frame_generation),
+      rex::cvar::GetFlagByName("vsync"));
 }

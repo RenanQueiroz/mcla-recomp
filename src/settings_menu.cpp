@@ -59,6 +59,7 @@ bool MclaRelaunchGame();  // src/mcla_app.cpp
 void MclaWaitForSaves();  // src/mcla_app.cpp
 #endif
 bool MclaSingleTileAvailable();  // src/render_perf.cpp
+int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
 bool MclaFsrAvailable();  // src/perf_options.cpp
 bool MclaFsrNextStart();  // src/perf_options.cpp
 
@@ -394,6 +395,12 @@ struct ItemDef {
   // for. A step that would cross it stops at the last value that doesn't.
   const char* range_partner = nullptr;
   bool range_partner_below = false;
+  // kNumberChoice, for the frame rate cap with frame generation on: each
+  // number's text adds how many frames that shows (`60 (120 SHOWN)`), and
+  // half_first makes numbers[0] (-1) HALF DISPLAY, the cap taken from the
+  // display's refresh rate (MclaHalfDisplayCap).
+  bool shown = false;
+  bool half_first = false;
 };
 
 // Display text must stay within A-Z, 0-9, space, '+', '.', and parentheses.
@@ -408,6 +415,20 @@ constexpr double kFpsTargets[] = {30.0, 60.0};
 constexpr double kFpsTargets[] = {30.0, 40.0, 45.0, 50.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
+#if !REX_PLATFORM_PS5
+// With frame generation on, on a display of 100 Hz or more: HALF DISPLAY (-1) first.
+constexpr double kFpsTargetsHalf[] = {-1.0, 30.0, 40.0, 45.0, 50.0, 60.0, 120.0, 0.0};
+constexpr int kFpsTargetHalfCount = int(sizeof(kFpsTargetsHalf) / sizeof(kFpsTargetsHalf[0]));
+#endif
+// frame_generation (the SDK's): off, or AMD FSR 3.1; it changes during play, on
+// both graphics APIs (src/perf_options.cpp has the same for anti-aliasing). Built for
+// Linux and the console, but not yet run on either.
+constexpr const char* kFrameGenerationValues[] = {"off", "fsr"};
+#if REX_PLATFORM_WIN32
+constexpr const char* kFrameGenerationLabels[] = {"OFF", "FSR 3.1"};
+#else
+constexpr const char* kFrameGenerationLabels[] = {"OFF", "FSR 3.1 (UNTESTED)"};
+#endif
 // How often the HUD advances (src/frame_timing.cpp): 0 is every frame.
 #if REX_PLATFORM_PS5
 constexpr double kHudRates[] = {30.0, 60.0, 0.0};
@@ -450,6 +471,8 @@ constexpr const char* kHdrHighlightLabels[] = {"NORMAL", "BRIGHT", "BRIGHTER", "
 const ItemDef kDisplayItems[] = {
     {"PM_MxFps", ItemKind::kNumberChoice, "mcla_fps", "FPS TARGET", nullptr, nullptr, kFpsTargets,
      kFpsTargetCount, "%.0f", "UNCAPPED"},
+    {"PM_MxFrameGeneration", ItemKind::kStringChoice, "frame_generation", "FRAME GENERATION",
+     kFrameGenerationValues, kFrameGenerationLabels, nullptr, 2},
     {"PM_MxHudRate", ItemKind::kNumberChoice, "mcla_ui_hud_rate", "HUD UPDATES", nullptr, nullptr,
      kHudRates, kHudRateCount, "%.0f PER SECOND", "EVERY FRAME"},
 #if !REX_PLATFORM_PS5
@@ -495,6 +518,96 @@ const ItemDef kDisplayItems[] = {
     {"PM_MxMotionBlur", ItemKind::kToggle, "mcla_motion_blur", "MOTION BLUR"},
     {"PM_MxDof", ItemKind::kToggle, "mcla_depth_of_field", "DEPTH OF FIELD"},
 };
+
+// FPS TARGET (kDisplayItems[0]) with frame generation on: the same caps with
+// what they show, and on a display of 100 Hz or more (HALF DISPLAY would be under
+// 50 rendered under it) HALF DISPLAY first, which is the cap of its own
+// (mcla_fps_frame_generation, src/frame_timing.cpp); mcla_fps stays the player's
+// cap for when it is off.
+const ItemDef kFpsItemShown = {.key = "PM_MxFps",
+                               .kind = ItemKind::kNumberChoice,
+                               .option = "mcla_fps",
+                               .label = "FPS TARGET",
+                               .numbers = kFpsTargets,
+                               .value_count = kFpsTargetCount,
+                               .number_format = "%.0f",
+                               .zero_label = "UNCAPPED",
+                               .shown = true};
+#if !REX_PLATFORM_PS5
+const ItemDef kFpsItemHalf = {.key = "PM_MxFps",
+                              .kind = ItemKind::kNumberChoice,
+                              .option = "mcla_fps_frame_generation",
+                              .label = "FPS TARGET",
+                              .numbers = kFpsTargetsHalf,
+                              .value_count = kFpsTargetHalfCount,
+                              .number_format = "%.0f",
+                              .zero_label = "UNCAPPED",
+                              .shown = true,
+                              .half_first = true};
+#endif
+
+// Whether frame generation can't run (the SDK's frame_generation_available): the
+// device or the runtime isn't there, or it failed. The console's device gets
+// FSR's features only when the game starts with FSR or frame generation chosen: until
+// then it can be chosen, to take effect at the next start (NEXT START).
+bool FrameGenerationNo() {
+  return OptionGet("frame_generation_available") == "no";
+}
+
+bool FrameGenerationNextStart() {
+  return FrameGenerationNo() && OptionGet("frame_generation_why") == "NEXT START";
+}
+
+bool FrameGenerationUnavailable() {
+  return FrameGenerationNo() && !FrameGenerationNextStart();
+}
+
+bool FrameGenerationOn() {
+  return OptionGet("frame_generation") != "off" && !FrameGenerationNo();
+}
+
+enum class FpsMode { kNormal, kShown, kHalf };
+
+FpsMode CurrentFpsMode() {
+  if (!FrameGenerationOn()) {
+    return FpsMode::kNormal;
+  }
+#if !REX_PLATFORM_PS5
+  if (MclaHalfDisplayCap(rex::ui::Presenter::GetDisplayRefreshHz()) > 0) {
+    return FpsMode::kHalf;
+  }
+#endif
+  return FpsMode::kShown;
+}
+
+// The item as it is now: FPS TARGET's depends on frame generation.
+const ItemDef& Resolve(const ItemDef& item) {
+  if (&item != &kDisplayItems[0]) {
+    return item;
+  }
+  switch (CurrentFpsMode()) {
+#if !REX_PLATFORM_PS5
+    case FpsMode::kHalf:
+      return kFpsItemHalf;
+#endif
+    case FpsMode::kShown:
+      return kFpsItemShown;
+    default:
+      return item;
+  }
+}
+
+bool IsFrameGenerationItem(const ItemDef& item) {
+  return item.kind == ItemKind::kStringChoice && !std::strcmp(item.option, "frame_generation");
+}
+
+// What the rows show depends on this: it changing makes the menu bring them in line.
+std::string MenuStateKey() {
+  return std::to_string(int(CurrentFpsMode())) + "|" +
+         std::to_string(int(rex::ui::Presenter::GetDisplayRefreshHz())) + "|" +
+         OptionGet("frame_generation") + "|" + OptionGet("frame_generation_available") + "|" +
+         OptionGet("frame_generation_why");
+}
 
 // Detail the game can do without when the frame rate matters more; all as
 // shipped by default (src/perf_options.cpp). Options the game reads once, when
@@ -608,6 +721,9 @@ std::string RowLabel(const ItemDef& item, bool pending) {
 // session with the console's EDRAM (edram_tiles = 2048, or a GPU that can't
 // bind a larger one) doesn't save a value for the next one.
 bool ItemChangeable(const ItemDef& item) {
+  if (IsFrameGenerationItem(item)) {
+    return !FrameGenerationUnavailable();  // OFF (and why) is all it offers then
+  }
   return std::strcmp(item.option, "mcla_single_tile") != 0 || MclaSingleTileAvailable();
 }
 
@@ -627,6 +743,9 @@ bool IsAntiAliasingWithoutFsr(const ItemDef& item) {
 int ItemValueCount(const ItemDef& item) {
   if (IsAntiAliasingWithoutFsr(item)) {
     return item.value_count - 1;
+  }
+  if (IsFrameGenerationItem(item) && FrameGenerationUnavailable()) {
+    return 1;
   }
   return item.kind == ItemKind::kToggle ? 2 : item.value_count;
 }
@@ -723,15 +842,33 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
           MclaFsrNextStart()) {
         return kFsrNextStartLabel;
       }
+      if (IsFrameGenerationItem(item) && index == 1 && FrameGenerationNextStart()) {
+        return "FSR 3.1 (NEXT START)";
+      }
+      if (IsFrameGenerationItem(item) && index == 0 && FrameGenerationUnavailable()) {
+        // OFF, and why it's all there is: the menu's letters (the SDK's text).
+        const std::string why = OptionGet("frame_generation_why");
+        return why.empty() ? "OFF (UNAVAILABLE)" : "OFF (" + why + ")";
+      }
       return item.value_labels[index];
     case ItemKind::kNumberChoice: {
       if (item.value_labels) {
         return item.value_labels[index];
       }
+      char buffer[96];
+      if (item.half_first && index == 0) {
+        const int32_t cap = MclaHalfDisplayCap(rex::ui::Presenter::GetDisplayRefreshHz());
+        std::snprintf(buffer, sizeof buffer, "HALF DISPLAY %d", int(cap));
+        return buffer;
+      }
       if (item.zero_label && item.numbers[index] == 0.0) {
         return item.zero_label;
       }
-      char buffer[48];
+      if (item.shown) {
+        std::snprintf(buffer, sizeof buffer, "%.0f (%.0f SHOWN)", item.numbers[index],
+                      2.0 * item.numbers[index]);
+        return buffer;
+      }
       std::snprintf(buffer, sizeof buffer, item.number_format, item.numbers[index]);
       return buffer;
     }
@@ -749,6 +886,9 @@ int ItemCurrentIndex(const ItemDef& item) {
     case ItemKind::kStringChoice:
       if (IsAntiAliasingWithoutFsr(item) && value == "fsr") {
         return 1;  // MSAA, what the game uses then
+      }
+      if (IsFrameGenerationItem(item) && FrameGenerationUnavailable()) {
+        return 0;
       }
       for (int i = 0; i < item.value_count; ++i) {
         if (value == item.values[i]) {
@@ -856,6 +996,7 @@ struct MenuRows {
   int last_index[kMaxRows] = {};
   std::string label[kMaxRows];       // the text its label has now
   std::string start_value[kMaxRows];  // the option's value when the menus were built
+  std::string state_key;              // MenuStateKey when the rows were last brought in line
   // kNumberRange: left or right held (Hold).
   int held_direction[kMaxRows] = {};
   uint64_t held_since_ms[kMaxRows] = {};
@@ -968,7 +1109,7 @@ bool BuildRows(int menu) {
     return false;
   }
   for (int i = 0; i < def.item_count; ++i) {
-    const ItemDef& item = def.items[i];
+    const ItemDef& item = Resolve(def.items[i]);
     // The row constructor resolves its label through the string table once,
     // so the text has to exist first.
     rows.start_value[i] = OptionGet(item.option);
@@ -1010,6 +1151,7 @@ bool BuildRows(int menu) {
   }
   rows.count = def.item_count;
   rows.array = array;
+  rows.state_key = MenuStateKey();
   REXLOG_INFO("settings menu: '{}' built with {} rows", def.label, rows.count);
   return true;
 }
@@ -1036,7 +1178,7 @@ void UpdateRowLabels(int menu) {
   MenuRows& rows = g_rows[menu];
   const MenuDef& def = kMenus[menu];
   for (int i = 0; i < rows.count; ++i) {
-    const ItemDef& item = def.items[i];
+    const ItemDef& item = Resolve(def.items[i]);
     if (!LabelChanges(item)) {
       continue;
     }
@@ -1055,7 +1197,7 @@ void SyncRowsFromOptions(int menu) {
   MenuRows& rows = g_rows[menu];
   const MenuDef& def = kMenus[menu];
   for (int i = 0; i < rows.count; ++i) {
-    const ItemDef& item = def.items[i];
+    const ItemDef& item = Resolve(def.items[i]);
     const int index = ItemCurrentIndex(item);
     if (item.kind == ItemKind::kToggle) {
       rows.last_index[i] = index;
@@ -1129,7 +1271,7 @@ void PollRows(int menu) {
   MenuRows& rows = g_rows[menu];
   const MenuDef& def = kMenus[menu];
   for (int i = 0; i < rows.count; ++i) {
-    const ItemDef& item = def.items[i];
+    const ItemDef& item = Resolve(def.items[i]);
     const int count = ItemValueCount(item);
     if (item.kind == ItemKind::kToggle) {
       const int checked = ItemCurrentIndex(item);
@@ -1154,12 +1296,23 @@ void PollRows(int menu) {
         CentreRangeWindow(rows, i, item, next);
         continue;
       }
+      if (!ItemChangeable(item)) {
+        CentreRowWindow(rows, i, item, ItemCurrentIndex(item));  // as it was
+        continue;
+      }
       const int index = ((rows.last_index[i] + direction) % count + count) % count;
       ItemSetIndex(item, index);
       CentreRowWindow(rows, i, item, index);
     }
   }
-  // Every render: HDR's label follows the display.
+  // Every render: HDR's label follows the display, FPS TARGET and FRAME
+  // GENERATION follow frame generation (turned on or off here or by another way,
+  // or found to be unavailable) and the refresh rate.
+  const std::string state_key = MenuStateKey();
+  if (state_key != rows.state_key) {
+    rows.state_key = state_key;
+    SyncRowsFromOptions(menu);
+  }
   UpdateRowLabels(menu);
 }
 
@@ -1503,7 +1656,7 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     const uint32_t index = list ? Read32(list + kListSelect) : 0xFFFFFFFFu;
     const MenuDef& def = kMenus[active];
     if (index < uint32_t(def.item_count)) {
-      const ItemDef& item = def.items[index];
+      const ItemDef& item = Resolve(def.items[index]);
       const int count = ItemValueCount(item);
       if (item.kind == ItemKind::kNumberRange) {
         const double value = RangeValue(item);
@@ -1579,8 +1732,10 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     // Read now, also with HDR off (it's only read while it isn't), for HDR's
     // "(NOT AVAILABLE)"; it usually takes well under a millisecond.
     for (int i = 0; i < kMenus[menu].item_count; ++i) {
-      if (std::strcmp(kMenus[menu].items[i].option, "hdr") == 0) {
+      if (std::strcmp(kMenus[menu].items[i].option, "hdr") == 0 ||
+          std::strcmp(kMenus[menu].items[i].option, "frame_generation") == 0) {
         rex::ui::Presenter::RefreshHdrDisplayInfo(250);
+        break;
       }
     }
 #endif

@@ -19,6 +19,7 @@
 //   close (as the window's close button: unlike quit, it waits for a save)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
 //   state   log <text>   include <script>   quit   set <option> <value>
+//   get <option>... (the options' values: the reply, and the log)
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //   cars (race cars' positions)   watch <every> | watch stop (log them)
 //   screens (the UI manager's movies)
@@ -1579,6 +1580,18 @@ std::string Execute(const std::string& line) {
       return "err cannot set " + args[1];
     }
     return "ok " + args[1] + "=" + rex::cvar::GetFlagByName(args[1]);
+  }
+  if (cmd == "get") {
+    // The options' values, in the reply and in the log (a script has no reply to read).
+    if (args.size() < 2) {
+      return "err usage: get <option>...";
+    }
+    std::string values;
+    for (size_t i = 1; i < args.size(); ++i) {
+      values += (i > 1 ? " " : "") + args[i] + "=" + rex::cvar::GetFlagByName(args[i]);
+    }
+    REXLOG_INFO("dev pad: get {}", values);
+    return "ok " + values;
   }
   if (cmd == "key") {
     // key <name>: a key press for the window's key binds (F3 the debug

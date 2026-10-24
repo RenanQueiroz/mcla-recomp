@@ -574,14 +574,18 @@ int main() {
   rex::cvar::SetDefaultValue("mcla_shader_pack", (root / "shaderpack" / "545407F8.shaderpack").string());
   // An older mcla_msaa = false in the settings file still means no anti-aliasing.
   MclaMigrateAntiAliasing();
-  // FSR 3.1 (rexglue-temporal-aa.patch) is untested on the console: the Vulkan
-  // device gets the features it uses only when the game starts with it chosen,
-  // so that everyone else's device stays as it was. Chosen during play, it
-  // takes effect at the next start.
-  const bool fsr_at_start = rex::cvar::GetFlagByName("mcla_anti_aliasing") == "fsr";
+  // FSR 3.1 (rexglue-temporal-aa.patch) and its frame generation
+  // (rexglue-frame-generation.patch) are untested on the console: the Vulkan
+  // device gets the features they use only when the game starts with one of
+  // them chosen (mcla_anti_aliasing = fsr or frame_generation = fsr), so that
+  // everyone else's device stays as it was. Chosen during play (the pause menu
+  // offers both), it takes effect at the next start.
+  const bool fsr_at_start = rex::cvar::GetFlagByName("mcla_anti_aliasing") == "fsr" ||
+                            rex::cvar::GetFlagByName("frame_generation") == "fsr";
   rex::cvar::SetFlagByName("temporal_aa_device_features", fsr_at_start ? "true" : "false");
-  Line("settings: mcla_anti_aliasing = %s (FSR's device features %s)",
-       rex::cvar::GetFlagByName("mcla_anti_aliasing").c_str(), fsr_at_start ? "on" : "off");
+  Line("settings: mcla_anti_aliasing = %s, frame_generation = %s (FSR's device features %s)",
+       rex::cvar::GetFlagByName("mcla_anti_aliasing").c_str(),
+       rex::cvar::GetFlagByName("frame_generation").c_str(), fsr_at_start ? "on" : "off");
   rex::ui::SDLWindowedAppContext app_context;
   if (!app_context.Initialize()) {
     return Finish("the SDL application context did not initialise", 9);

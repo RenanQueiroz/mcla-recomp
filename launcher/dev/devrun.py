@@ -567,6 +567,12 @@ def gpu_watch(seconds, threshold):
     print(gpu_summary(r))
 
 
+def fg_cap(a):
+    """mcla_fps_frame_generation: --fps-fg, or the same as --fps ("half" is -1)."""
+    cap = getattr(a, "fps_fg", None) or a.fps
+    return -1 if cap == "half" else cap
+
+
 def game_args(a, out):
     args = [
         f"--user_data_root={WORK}",
@@ -576,6 +582,9 @@ def game_args(a, out):
         f"--mcla_gpu_backend={a.backend}",
         f"--resolution_scale={a.res}",
         f"--mcla_fps={a.fps}",
+        # The cap with frame generation on: the same as --fps (so a run's cap doesn't
+        # depend on it), or "half" for HALF DISPLAY (-1).
+        f"--mcla_fps_frame_generation={fg_cap(a)}",
         # As the launcher passes it with every frame rate; "unset" leaves it to
         # mcla.toml and the game (src/frame_timing.cpp, ConfigureFrameTiming).
         *([] if a.vsync == "unset" else [f"--vsync={a.vsync}"]),
@@ -990,6 +999,8 @@ def main():
         p.add_argument("--backend", default="d3d12", choices=["d3d12", "vulkan"])
         p.add_argument("--res", default="1")
         p.add_argument("--fps", default="0", help="frame cap, 0 = uncapped")
+        p.add_argument("--fps-fg", default=None, help="the cap with frame generation on "
+                       "(mcla_fps_frame_generation): default the same as --fps; half = HALF DISPLAY")
         p.add_argument("--fixed-dt", type=int, default=0, help="timedemo: updates of exactly 1/N s")
         # "fast" unpaces the start-up logos (src/frame_timing.cpp, PaceUnlimitedSwap);
         # benchmarks keep "normal" so start-up runs as the user sees it.

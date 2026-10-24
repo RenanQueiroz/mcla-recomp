@@ -1,0 +1,31 @@
+# Phase 4: frame generation switched on and off while playing (set frame_generation).
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.4
+stick lx 0.1
+wait 5s
+mark off1
+wait 8s
+set frame_generation fsr
+mark on1
+wait 10s
+set frame_generation off
+mark off2
+wait 8s
+set frame_generation fsr
+mark on2
+wait 10s
+set hdr off
+mark on2_sdr
+wait 6s
+set frame_generation off
+mark off3
+wait 6s
+release all
+mark end
+wait 1s
