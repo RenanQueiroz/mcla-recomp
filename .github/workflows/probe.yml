@@ -1,0 +1,57 @@
+# Temporary: what the hosted Windows runner has. Removed before the CI is finished.
+name: probe
+on:
+  push:
+    branches: [wizard-p3]
+    paths: ['.github/workflows/probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The runner
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          Get-CimInstance Win32_OperatingSystem | ForEach-Object { "$($_.Caption) $($_.Version), memory $([int]($_.TotalVisibleMemorySize/1MB)) GB, free $([int]($_.FreePhysicalMemory/1MB)) GB" }
+          Get-CimInstance Win32_Processor | ForEach-Object { "$($_.Name): $($_.NumberOfCores) cores, $($_.NumberOfLogicalProcessors) threads" }
+          Get-PSDrive -PSProvider FileSystem | ForEach-Object { "$($_.Name): free $([int]($_.Free/1GB)) GB" }
+          "image: $env:ImageOS $env:ImageVersion"
+          "workspace: $env:GITHUB_WORKSPACE"
+      - name: Tools
+        shell: powershell
+        run: |
+          foreach ($c in "git","cmake","ninja","python","python3","pwsh","gh","curl.exe","tar","7z","dotnet","clang","msbuild","vswhere") {
+            $g = Get-Command $c -ErrorAction SilentlyContinue
+            "{0,-10} {1}" -f $c, $(if ($g) { $g.Source } else { "-" })
+          }
+          cmake --version | Select-Object -First 1
+          ninja --version
+          python --version
+          git --version
+          tar --version
+          dotnet --list-sdks
+          dotnet --list-runtimes | Select-Object -First 8
+          "VULKAN_SDK=$env:VULKAN_SDK"
+          Get-ChildItem C:\VulkanSDK -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -property installationPath, installationVersion
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }
+      - name: Network speed and the xz question
+        shell: powershell
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          curl.exe -sL --fail -o $env:TEMP\ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip
+          "ninja zip: $($sw.ElapsedMilliseconds) ms"
+          $sw.Restart()
+          curl.exe -sL --fail -o $env:TEMP\mingit.zip https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip
+          "mingit 40 MB: $($sw.ElapsedMilliseconds) ms"
+          $sw.Restart()
+          curl.exe -sL --fail -r 0-199999999 -o $env:TEMP\part.bin https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe
+          "vulkan sdk, first 200 MB: $($sw.ElapsedMilliseconds) ms"
+          tar --help | Select-String -Pattern "xz|lzma" | Select-Object -First 3
