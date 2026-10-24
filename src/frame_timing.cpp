@@ -28,6 +28,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/ui/low_latency.h>
 #include <rex/ui/presenter.h>
 #include <rex/runtime.h>
 
@@ -187,6 +188,12 @@ void WaitForFrameDeadline() {
     return;
   }
 
+  // The driver's limiter holds the frame rate (low_latency_limiter = driver): never twice.
+  if (rex::ui::LowLatency::DriverLimits()) {
+    next_us = 0;
+    return;
+  }
+
   const int32_t fps = EffectiveFps();
   if (fps <= 0) {
     next_us = 0;
@@ -246,6 +253,15 @@ void MclaApplyMsaaAtSwap();
 void MclaTickSettingsMenu();
 
 void mcla_frame_delta(PPCRegister& r8) {
+  // Low latency (NVIDIA Reflex, AMD Anti-Lag 2): the frame starts here, on the update thread: the
+  // driver's wait comes before anything reads the input. The timer function has callers on other
+  // threads; the first one is the frame's.
+  static const std::thread::id frame_thread = std::this_thread::get_id();
+  if (std::this_thread::get_id() == frame_thread && !OriginalTiming()) {
+    const int32_t fps = EffectiveFps();
+    rex::ui::LowLatency::SetFrameLimit(fps > 0 ? uint32_t(fps) : 0);
+    rex::ui::LowLatency::OnFrameStart();
+  }
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
   MclaTickSettingsMenu();
@@ -315,6 +331,9 @@ static void PaceUnlimitedSwap(bool timed) {
 }
 
 bool mcla_present_interval(PPCRegister& r11) {
+  // Low latency: a guest frame ends at the swap (counted for every swap: the id of a frame is
+  // the ordinal of the swap that ends it).
+  rex::ui::LowLatency::OnGuestSwap();
   MclaDevPadSwap();
   MclaApplyMsaaAtSwap();
   if (OriginalTiming()) {

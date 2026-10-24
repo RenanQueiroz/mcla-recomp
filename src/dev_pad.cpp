@@ -2155,6 +2155,17 @@ void MclaDevPadFrame(uint64_t& ticks) {
     frame = g_frame.fetch_add(1) + 1;
   }
   g_frame_cv.notify_all();
+  {
+    // The frame's start (after the low-latency wait, which comes first in the timer hook), for
+    // presents.py's start to screen time.
+    std::lock_guard lock(g_log_mutex);
+    if (g_frames_csv) {
+      const auto since_start =
+          std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - g_start).count();
+      std::fprintf(g_frames_csv, "f,%lld,0,%llu\n", static_cast<long long>(since_start),
+                   static_cast<unsigned long long>(frame));
+    }
+  }
   if (g_playing.load(std::memory_order_relaxed)) {
     PlayFrame(frame);
   }

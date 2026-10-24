@@ -39,6 +39,7 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/ui/low_latency.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
@@ -429,6 +430,11 @@ constexpr const char* kFrameGenerationLabels[] = {"OFF", "FSR 3.1"};
 #else
 constexpr const char* kFrameGenerationLabels[] = {"OFF", "FSR 3.1 (UNTESTED)"};
 #endif
+// low_latency (the SDK's): the GPU vendor's latency reducer, NVIDIA Reflex or AMD Anti-Lag 2,
+// named in plain text by the row (RowLabel). Boost is Reflex's; frame generation turns it on and
+// locks the row (ItemChangeable).
+constexpr const char* kLowLatencyValues[] = {"off", "on", "boost"};
+constexpr const char* kLowLatencyLabels[] = {"OFF", "ON", "ON + BOOST"};
 // How often the HUD advances (src/frame_timing.cpp): 0 is every frame.
 #if REX_PLATFORM_PS5
 constexpr double kHudRates[] = {30.0, 60.0, 0.0};
@@ -473,6 +479,8 @@ const ItemDef kDisplayItems[] = {
      kFpsTargetCount, "%.0f", "UNCAPPED"},
     {"PM_MxFrameGeneration", ItemKind::kStringChoice, "frame_generation", "FRAME GENERATION",
      kFrameGenerationValues, kFrameGenerationLabels, nullptr, 2},
+    {"PM_MxLowLatency", ItemKind::kStringChoice, "low_latency", "LOW LATENCY", kLowLatencyValues,
+     kLowLatencyLabels, nullptr, 3},
     {"PM_MxHudRate", ItemKind::kNumberChoice, "mcla_ui_hud_rate", "HUD UPDATES", nullptr, nullptr,
      kHudRates, kHudRateCount, "%.0f PER SECOND", "EVERY FRAME"},
 #if !REX_PLATFORM_PS5
@@ -569,6 +577,21 @@ bool FrameGenerationOn() {
   return OptionGet("frame_generation") != "off" && !FrameGenerationNo();
 }
 
+// The low latency row: the SDK's status (the driver's feature, which GPU, working or not).
+bool IsLowLatencyItem(const ItemDef& item) {
+  return item.kind == ItemKind::kStringChoice && !std::strcmp(item.option, "low_latency");
+}
+
+// Where the reducer isn't there (no GPU support, no driver support) the row says why and stays
+// OFF; frame generation turns it on and locks it.
+bool LowLatencyUnavailable() {
+  return rex::ui::LowLatency::GetStatus().state != rex::ui::LowLatency::State::kAvailable;
+}
+
+bool LowLatencyLocked() {
+  return !LowLatencyUnavailable() && FrameGenerationOn();
+}
+
 enum class FpsMode { kNormal, kShown, kHalf };
 
 FpsMode CurrentFpsMode() {
@@ -607,9 +630,13 @@ bool IsFrameGenerationItem(const ItemDef& item) {
 // What the rows show depends on this: it changing makes the menu bring them in line.
 std::string MenuStateKey() {
   const auto status = rex::ui::Presenter::GetFrameGenerationStatus();
+  const auto low_latency = rex::ui::LowLatency::GetStatus();
   return std::to_string(int(CurrentFpsMode())) + "|" +
          std::to_string(int(rex::ui::Presenter::GetDisplayRefreshHz())) + "|" +
-         OptionGet("frame_generation") + "|" + std::to_string(int(status.state)) + "|" + status.why;
+         OptionGet("frame_generation") + "|" + std::to_string(int(status.state)) + "|" +
+         status.why + "|" + std::to_string(int(low_latency.state)) + "|" + low_latency.name + "|" +
+         low_latency.why + "|" + (low_latency.boost_available ? "b" : "-") +
+         OptionGet("low_latency");
 }
 
 // Detail the game can do without when the frame rate matters more; all as
@@ -701,6 +728,13 @@ bool RestartOnly(const char* option) {
 // for it (src/render_perf.cpp), and doesn't change then (ItemChangeable).
 std::string RowLabel(const ItemDef& item, bool pending) {
   std::string label = item.label;
+  if (IsLowLatencyItem(item)) {
+    // The vendor's feature by its name (plain text): NVIDIA REFLEX, AMD ANTI LAG 2.
+    const rex::ui::LowLatency::Status status = rex::ui::LowLatency::GetStatus();
+    if (status.state == rex::ui::LowLatency::State::kAvailable) {
+      label = status.name;
+    }
+  }
   if (RestartOnly(item.option)) {
     label += pending ? " (RESTART NEEDED)" : " (NEXT START)";
   }
@@ -727,12 +761,15 @@ bool ItemChangeable(const ItemDef& item) {
   if (IsFrameGenerationItem(item)) {
     return !FrameGenerationUnavailable();  // OFF (and why) is all it offers then
   }
+  if (IsLowLatencyItem(item)) {
+    return !LowLatencyUnavailable() && !LowLatencyLocked();
+  }
   return std::strcmp(item.option, "mcla_single_tile") != 0 || MclaSingleTileAvailable();
 }
 
 // Whether the row's label can change while the menus are open.
 bool LabelChanges(const ItemDef& item) {
-  return RestartOnly(item.option) || std::strcmp(item.option, "hdr") == 0;
+  return RestartOnly(item.option) || std::strcmp(item.option, "hdr") == 0 || IsLowLatencyItem(item);
 }
 
 // FSR (the last anti-aliasing choice) is offered only where it can run, now or
@@ -749,6 +786,13 @@ int ItemValueCount(const ItemDef& item) {
   }
   if (IsFrameGenerationItem(item) && FrameGenerationUnavailable()) {
     return 1;
+  }
+  if (IsLowLatencyItem(item)) {
+    if (LowLatencyUnavailable() || LowLatencyLocked()) {
+      return 1;
+    }
+    return rex::ui::LowLatency::GetStatus().boost_available ? item.value_count
+                                                            : item.value_count - 1;
   }
   return item.kind == ItemKind::kToggle ? 2 : item.value_count;
 }
@@ -853,6 +897,17 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
         const std::string why = rex::ui::Presenter::GetFrameGenerationStatus().why;
         return why.empty() ? "OFF (UNAVAILABLE)" : "OFF (" + why + ")";
       }
+      if (IsLowLatencyItem(item)) {
+        const rex::ui::LowLatency::Status status = rex::ui::LowLatency::GetStatus();
+        if (status.state != rex::ui::LowLatency::State::kAvailable) {
+          return status.why.empty() ? "OFF (NOT AVAILABLE HERE)" : "OFF (" + status.why + ")";
+        }
+        if (FrameGenerationOn()) {
+          return "ON (FRAME GEN)";
+        }
+        std::string label = item.value_labels[index];
+        return status.untested && index > 0 ? label + " (UNTESTED)" : label;
+      }
       return item.value_labels[index];
     case ItemKind::kNumberChoice: {
       if (item.value_labels) {
@@ -892,6 +947,21 @@ int ItemCurrentIndex(const ItemDef& item) {
       }
       if (IsFrameGenerationItem(item) && FrameGenerationUnavailable()) {
         return 0;
+      }
+      if (IsLowLatencyItem(item)) {
+        const rex::ui::LowLatency::Status status = rex::ui::LowLatency::GetStatus();
+        if (status.state != rex::ui::LowLatency::State::kAvailable) {
+          return 0;
+        }
+        if (LowLatencyLocked()) {
+          return 0;
+        }
+        if (value == "auto") {
+          return status.on_by_default ? 1 : 0;
+        }
+        if (value == "boost" && !status.boost_available) {
+          return 1;  // on, what the driver does then
+        }
       }
       for (int i = 0; i < item.value_count; ++i) {
         if (value == item.values[i]) {
