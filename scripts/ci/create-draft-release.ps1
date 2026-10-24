@@ -15,15 +15,15 @@ $repository = $env:GITHUB_REPOSITORY
 if (-not $repository) { throw "GITHUB_REPOSITORY is not set (this runs in the release workflow)" }
 if (-not $env:GH_TOKEN) { throw "GH_TOKEN is not set" }
 
-function Gh {
-    $output = & gh @args
+function Invoke-Gh {
+    $output = & gh.exe @args
     if ($LASTEXITCODE -ne 0) { throw "gh $($args -join ' ') failed ($LASTEXITCODE)" }
     $output
 }
 
 # The releases with this tag name, published ones and drafts, one JSON object per line.
 function ReleasesOfTag {
-    $lines = Gh api "repos/$repository/releases?per_page=100" --paginate --jq '.[] | {id, tag_name, draft, html_url, published_at, assets: [.assets[] | {name, size, state}]} | tojson'
+    $lines = Invoke-Gh api "repos/$repository/releases?per_page=100" --paginate --jq '.[] | {id, tag_name, draft, html_url, published_at, assets: [.assets[] | {name, size, state}]} | tojson'
     @($lines | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) | Where-Object { $_.tag_name -eq $Tag }
 }
 
@@ -33,7 +33,7 @@ foreach ($r in $existing) {
 }
 foreach ($r in $existing) {
     "replacing the earlier draft of $Tag (id $($r.id))"
-    Gh api -X DELETE "repos/$repository/releases/$($r.id)" | Out-Null
+    Invoke-Gh api -X DELETE "repos/$repository/releases/$($r.id)" | Out-Null
 }
 
 $names = @("MCLA-Launcher-$Tag-win-x64.zip") +
@@ -43,7 +43,7 @@ $files = @($names | ForEach-Object { Join-Path $Folder $_ })
 foreach ($f in $files) { if (-not (Test-Path -LiteralPath $f)) { throw "missing asset: $f" } }
 
 # --draft is what makes it a draft. --target is the commit the tag would be created on at publishing.
-Gh release create $Tag --repo $repository --draft --target $Commit --title "Draft $Tag" --notes-file (Join-Path $Folder "release-notes.md") @files | Out-Null
+Invoke-Gh release create $Tag --repo $repository --draft --target $Commit --title "Draft $Tag" --notes-file (Join-Path $Folder "release-notes.md") @files | Out-Null
 
 # Look at what was made.
 $made = @(ReleasesOfTag)
@@ -55,7 +55,7 @@ if (-not $release.draft) { throw "the release $($release.html_url) is not a draf
 foreach ($asset in $release.assets) { "  {0,-62} {1,12:N0} bytes  {2}" -f $asset.name, $asset.size, $asset.state }
 if ($release.assets.Count -ne $files.Count) { throw "$($release.assets.Count) assets were uploaded, not $($files.Count)" }
 $ErrorActionPreference = "Continue"
-& gh api "repos/$repository/git/ref/tags/$Tag" 2>$null | Out-Null
+& gh.exe api "repos/$repository/git/ref/tags/$Tag" 2>$null | Out-Null
 $tagExists = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = "Stop"
 if ($tagExists) { "note: a tag $Tag exists in the repository already (this workflow did not make it)" } else { "no tag $Tag exists (a draft does not create one)" }
