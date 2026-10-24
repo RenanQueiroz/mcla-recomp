@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -20,6 +21,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #endif
+
+#include <toml++/toml.hpp>
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
@@ -220,13 +223,45 @@ void MclaWaitForSaves() {
   }
 }
 
+namespace {
+
+// A game kept where it is (the setup's "Use it where it is") is named by
+// game_data_root in mcla.toml. The SDK reads that file after it has decided the
+// paths, so the line is read here; a value on the command line wins over it.
+std::filesystem::path GameDataRootFromConfig(const std::filesystem::path& config_path) {
+  std::error_code error;
+  if (config_path.empty() || !std::filesystem::exists(config_path, error)) {
+    return {};
+  }
+  try {
+    std::ifstream stream(config_path, std::ios::binary);
+    const auto table = toml::parse(stream);
+    if (const auto root = table["game_data_root"].value<std::string>(); root && !root->empty()) {
+      // Not logged: the log is not set up yet. A name that is no folder is left to the search below.
+      const std::filesystem::path folder = std::filesystem::u8path(*root);
+      if (std::filesystem::is_directory(folder, error)) {
+        return folder;
+      }
+    }
+  } catch (const toml::parse_error&) {
+  }
+  return {};
+}
+
+}  // namespace
+
 // Started with no options (a double-click on mcla.exe), the game should just
-// run: find the extracted game next to the executable or, as the build leaves
-// it, in the repository a few folders up, and load the Xenos GPU plugin.
+// run: use the folder mcla.toml names, else find the extracted game next to the
+// executable or, as the build leaves it, in the repository a few folders up,
+// and load the Xenos GPU plugin.
 void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
 #ifdef _WIN32
   WaitForRestartedGame();
 #endif
+  if (!paths.game_data_root.empty()) {
+    return;
+  }
+  paths.game_data_root = GameDataRootFromConfig(paths.config_path);
   if (!paths.game_data_root.empty()) {
     return;
   }
