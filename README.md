@@ -123,7 +123,7 @@ A game built this way was compared with the msvc build's on the same Clang versi
 
 ### Updating
 
-The launcher's **Update and rebuild** does it all. From a terminal, `.\launcher\build-game.ps1 -Update` does the same: it fast-forwards to the fork's latest commit, keeping local changes (codegen rewrites `mcla_manifest.toml` and `generated\rexglue.cmake` with other line endings, so they always look modified, and `git pull` can refuse to update them); it patches the SDK afresh when the update changed anything in `patches\`, and builds.
+The launcher's **Update and rebuild** does it all. From a terminal, `.\launcher\build-game.ps1 -Update` does the same: it fast-forwards to the fork's latest commit, keeping local changes (codegen rewrites `mcla_manifest.toml` and `generated\rexglue.cmake` with LF line endings; in a checkout made before `.gitattributes` asked for those they show as modified, and `git pull` can refuse to update them: `git add mcla_manifest.toml generated\rexglue.cmake` once, with nothing else changed in them, clears that); it patches the SDK afresh when the update changed anything in `patches\`, and builds.
 
 By hand: `git pull`, then `.\scripts\make_pc.ps1` again. It adds new SDK patches to an SDK patched earlier, and records each patch it applies: if a patch has changed since it was applied to your SDK, the build stops and names it. Then run `.\launcher\build-game.ps1 -ResetSdk`: it resets the SDK checkout, patches it again and rebuilds it (incrementally), then builds the game.
 

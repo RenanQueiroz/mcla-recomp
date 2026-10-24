@@ -2,3 +2,8 @@
 *.sh text eol=lf
 *.patch text eol=lf
 *.shaderpack binary
+# Files `rexglue codegen` rewrites at every build, always with LF line endings:
+# checked out with LF too, so that they do not show as modified (and `git pull`
+# does not refuse to update them) on Windows, where `text=auto` would give them CRLF.
+mcla_manifest.toml text eol=lf
+generated/rexglue.cmake text eol=lf

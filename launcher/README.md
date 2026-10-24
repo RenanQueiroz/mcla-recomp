@@ -46,8 +46,10 @@ rebuild.
   reset and patched again (incremental SDK rebuild). If the SDK version itself
   changes, the SDK is re-cloned.
 - **Local edits.** Updates use `git merge --ff-only --autostash`. Codegen rewrites
-  `mcla_manifest.toml` and `generated\rexglue.cmake` with LF line endings, so they
-  always look modified; autostash carries them across updates safely.
+  `mcla_manifest.toml` and `generated\rexglue.cmake` with LF line endings, which
+  `.gitattributes` now asks the checkout for too (a clone made before that shows
+  them as modified until `git add` on them); autostash carries them across
+  updates safely.
 - **The toolchain and the other options.** `-Toolchain msvc|mingw`, `-ToolsDir`,
   `-SdkBundle` and `-SdkBundleSha256` go to `make_pc.ps1` (README.md, "Without
   Microsoft's compiler"), which keeps them in `launcher\build-options.json` when a
