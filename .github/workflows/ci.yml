@@ -1,0 +1,99 @@
+name: CI
+
+# On every push and pull request: the fork's host code is compiled against the patched SDK, and the
+# launcher is published. No game data is involved, and nothing built here is kept or released (the
+# release workflow does that). What is and is not covered is written in scripts/ci/README.md.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Read-only, and no secrets are used by any job: a pull request from a fork runs the same.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  checks:
+    name: Scripts, pins and patches
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The pins agree, every patch is applied, no game data is tracked
+        run: python -I scripts/ci/check_pins.py
+
+      - name: The PowerShell scripts parse (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\scripts\ci\check-powershell.ps1
+
+  host:
+    name: Host code against the SDK (llvm-mingw)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The SDK build is the long part (patched ReXGlue SDK, built with the pinned llvm-mingw). It
+      # depends on nothing but the patches and the scripts that apply and build them, so it is
+      # cached under their hash. A restored one is still checked against the patches
+      # (mcla-sdk-bundle.json) before it is used.
+      - name: Restore the SDK build
+        id: sdk-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/rexglue-sdk/out/install/win-amd64-mingw
+          key: sdk-mingw-1-${{ hashFiles('patches/**', 'scripts/make_pc.ps1', 'scripts/mcla-lib.ps1', 'scripts/env.ps1') }}
+
+      - name: Build the SDK (llvm-mingw, no game needed)
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -Until sdk
+
+      - name: Check the cached SDK against the patches
+        if: steps.sdk-cache.outputs.cache-hit == 'true'
+        shell: powershell
+        run: .\scripts\make_pc.ps1 -Toolchain mingw -InstallTools -SdkBundle third_party\rexglue-sdk\out\install\win-amd64-mingw -Until sdk
+
+      - name: Save the SDK build
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/rexglue-sdk/out/install/win-amd64-mingw
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
+
+      # The host sources (src/*.cpp) are compiled with the project's own flags (CMakeLists.txt), against
+      # the SDK just built, with stand-ins for the headers `rexglue codegen` writes from the game
+      # (scripts/ci/host_stub.py). Syntax and types only (-fsyntax-only): the game's recompiled code,
+      # linking and running need the player's game.
+      - name: Compile the host sources
+        shell: powershell
+        run: .\scripts\ci\host-compile.ps1 -SdkDir third_party\rexglue-sdk\out\install\win-amd64-mingw
+
+  launcher:
+    name: Launcher (self-contained publish)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The launcher's source commit is the last one that touched it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish the launcher, with its notices
+        shell: powershell
+        run: .\scripts\ci\publish-launcher.ps1 -Out "$env:RUNNER_TEMP\launcher"
