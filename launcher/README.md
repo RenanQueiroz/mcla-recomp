@@ -559,7 +559,10 @@ in front. A real controller keeps working alongside it.
   window as its close button does (waiting for a save being written; `quit`
   doesn't), and `saving` says whether one is (`saving wait`: until one is).
   `--mcla_fixed_dt=N` makes every game update advance exactly 1/N s:
-  uncapped, a timedemo.
+  uncapped, a timedemo. `--mcla_pad_timeout_shot=<file.png>` saves a screenshot
+  (as `shot` does) when a `wait_until` or `press_until` times out, before the
+  script fails, so that a run that never got where it should leaves a picture
+  of where it was; `devrun.py` gives it `timeout.png` in the run's folder.
 - `dev\devrun.py` runs the game with a script **on a copy of the save data**:
   `prepare` snapshots `Documents\mcla` (career save, achievements) to
   `%LOCALAPPDATA%\mcla-dev\pristine`; every run restores

@@ -591,6 +591,8 @@ def game_args(a, out):
         f"--fullscreen={'true' if a.fullscreen else 'false'}",
         f"--mcla_intro={a.intro}",
         f"--mcla_pad_frames_csv={out / 'frames.csv'}",
+        # A wait_until or press_until that times out leaves a picture of where the game was.
+        f"--mcla_pad_timeout_shot={out / 'timeout.png'}",
     ]
     if getattr(a, "present_log", False):
         args.append(f"--present_log={out / 'present.csv'}")
@@ -742,7 +744,8 @@ def run(a, tag=None):
     if log.exists():
         for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
             if "dev pad: script " in line and " done: err" in line:
-                raise SystemExit(f"{out.name}: SCRIPT FAILED: {line.split(' done: ', 1)[1]}")
+                shot = f" (screenshot: {out / 'timeout.png'})" if (out / "timeout.png").exists() else ""
+                raise SystemExit(f"{out.name}: SCRIPT FAILED: {line.split(' done: ', 1)[1]}{shot}")
     return out
 
 

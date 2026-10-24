@@ -18,6 +18,8 @@
 //     it; with wait, until one is, for up to 10 s)
 //   close (as the window's close button: unlike quit, it waits for a save)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
+//     (mcla_pad_timeout_shot=<file.png>: the same picture when a wait_until or
+//     press_until times out)
 //   state   log <text>   include <script>   quit   set <option> <value>
 //   get <option>... (the options' values: the reply, and the log; fg_status is
 //     frame generation's state, the presenter's, not an option)
@@ -99,6 +101,9 @@ REXCVAR_DEFINE_STRING(mcla_pad_frames_csv, "", "MCLA",
                       "Development: log the time of every swap, with marks, to this CSV");
 REXCVAR_DEFINE_BOOL(mcla_pad_exit_on_end, false, "MCLA",
                     "Development: quit the game when the controller script ends");
+REXCVAR_DEFINE_STRING(mcla_pad_timeout_shot, "", "MCLA",
+                      "Development: when a wait_until or press_until times out, save a screenshot "
+                      "to this PNG before the script fails (devrun.py sets it to the run's folder)");
 REXCVAR_DEFINE_INT32(mcla_fixed_dt, 0, "MCLA",
                      "Development: every game update advances exactly 1/N s (0 = measured "
                      "time). Uncapped this is a timedemo; for A/B measurements only")
@@ -672,6 +677,22 @@ bool Shot(const std::string& path, double scale, std::string& result) {
   }
   result = std::to_string(width) + "x" + std::to_string(height);
   return true;
+}
+
+// What a wait that timed out leaves behind: a picture of where the game was, so
+// that a boot stuck for minutes can be told from a script that waited for the
+// wrong thing (a stuck boot in a run once left nothing to look at). Appended to
+// the failure's reply.
+std::string TimeoutShot() {
+  const std::string path = REXCVAR_GET(mcla_pad_timeout_shot);
+  if (path.empty()) {
+    return "";
+  }
+  std::string result;
+  if (Shot(path, 1.0, result)) {
+    return " shot=" + path + " (" + result + ")";
+  }
+  return " (no screenshot: " + result + ")";
 }
 
 // --- Game facts ---
@@ -1415,7 +1436,7 @@ std::string Execute(const std::string& line) {
     while (!Evaluate(condition)) {
       if (elapsed_ms() > timeout_ms) {
         return "err timeout after " + std::to_string(presses) + " presses frame=" +
-               std::to_string(g_frame.load());
+               std::to_string(g_frame.load()) + TimeoutShot();
       }
       if (bit && std::chrono::duration<double, std::milli>(Clock::now() - last_press).count() >=
                      every_ms) {
