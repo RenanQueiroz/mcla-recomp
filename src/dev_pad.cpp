@@ -2156,13 +2156,16 @@ void MclaDevPadFrame(uint64_t& ticks) {
   }
   g_frame_cv.notify_all();
   {
-    // The frame's start (after the low-latency wait, which comes first in the timer hook), for
-    // presents.py's start to screen time.
+    // The frame's start (after the low-latency wait, which comes first in the timer), and the
+    // simulation step the engine takes (microseconds), for presents.py's start to screen time
+    // and the step against the frames' display times.
     std::lock_guard lock(g_log_mutex);
     if (g_frames_csv) {
       const auto since_start =
           std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - g_start).count();
-      std::fprintf(g_frames_csv, "f,%lld,0,%llu\n", static_cast<long long>(since_start),
+      const uint64_t step_us = ticks * 1'000'000ull / rex::chrono::Clock::guest_tick_frequency();
+      std::fprintf(g_frames_csv, "f,%lld,%llu,%llu\n", static_cast<long long>(since_start),
+                   static_cast<unsigned long long>(step_us),
                    static_cast<unsigned long long>(frame));
     }
   }

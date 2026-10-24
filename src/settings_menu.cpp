@@ -588,8 +588,11 @@ bool LowLatencyUnavailable() {
   return rex::ui::LowLatency::GetStatus().state != rex::ui::LowLatency::State::kAvailable;
 }
 
+// Frame generation forces the reducer on (the SDK's policy), unless the config file's
+// low_latency_frame_generation = "off" (troubleshooting) says it should not.
 bool LowLatencyLocked() {
-  return !LowLatencyUnavailable() && FrameGenerationOn();
+  return !LowLatencyUnavailable() && FrameGenerationOn() &&
+         OptionGet("low_latency_frame_generation") == "auto";
 }
 
 enum class FpsMode { kNormal, kShown, kHalf };
@@ -636,7 +639,7 @@ std::string MenuStateKey() {
          OptionGet("frame_generation") + "|" + std::to_string(int(status.state)) + "|" +
          status.why + "|" + std::to_string(int(low_latency.state)) + "|" + low_latency.name + "|" +
          low_latency.why + "|" + (low_latency.boost_available ? "b" : "-") +
-         OptionGet("low_latency");
+         OptionGet("low_latency") + OptionGet("low_latency_frame_generation");
 }
 
 // Detail the game can do without when the frame rate matters more; all as
@@ -902,7 +905,7 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
         if (status.state != rex::ui::LowLatency::State::kAvailable) {
           return status.why.empty() ? "OFF (NOT AVAILABLE HERE)" : "OFF (" + status.why + ")";
         }
-        if (FrameGenerationOn()) {
+        if (LowLatencyLocked()) {
           return "ON (FRAME GEN)";
         }
         std::string label = item.value_labels[index];

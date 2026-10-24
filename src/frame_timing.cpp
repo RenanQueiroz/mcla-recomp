@@ -252,16 +252,21 @@ void MclaDevPadSwap();
 void MclaApplyMsaaAtSwap();
 void MclaTickSettingsMenu();
 
-void mcla_frame_delta(PPCRegister& r8) {
-  // Low latency (NVIDIA Reflex, AMD Anti-Lag 2): the frame starts here, on the update thread: the
-  // driver's wait comes before anything reads the input. The timer function has callers on other
-  // threads; the first one is the frame's.
+// Low latency (NVIDIA Reflex, AMD Anti-Lag 2): the frame starts at the top of the engine timer,
+// on the update thread, before the timer reads the time: the driver's wait comes before the
+// time is read (the simulation step then measures the frames' starts, after the wait, and not
+// before it) and before anything reads the input. The timer function has callers on other
+// threads; the first one is the frame's.
+void mcla_frame_start(PPCRegister& r3) {
   static const std::thread::id frame_thread = std::this_thread::get_id();
   if (std::this_thread::get_id() == frame_thread && !OriginalTiming()) {
     const int32_t fps = EffectiveFps();
     rex::ui::LowLatency::SetFrameLimit(fps > 0 ? uint32_t(fps) : 0);
     rex::ui::LowLatency::OnFrameStart();
   }
+}
+
+void mcla_frame_delta(PPCRegister& r8) {
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
   MclaTickSettingsMenu();
@@ -331,9 +336,6 @@ static void PaceUnlimitedSwap(bool timed) {
 }
 
 bool mcla_present_interval(PPCRegister& r11) {
-  // Low latency: a guest frame ends at the swap (counted for every swap: the id of a frame is
-  // the ordinal of the swap that ends it).
-  rex::ui::LowLatency::OnGuestSwap();
   MclaDevPadSwap();
   MclaApplyMsaaAtSwap();
   if (OriginalTiming()) {

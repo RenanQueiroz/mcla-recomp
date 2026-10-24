@@ -586,6 +586,17 @@ int main() {
   Line("settings: mcla_anti_aliasing = %s, frame_generation = %s (FSR's device features %s)",
        rex::cvar::GetFlagByName("mcla_anti_aliasing").c_str(),
        rex::cvar::GetFlagByName("frame_generation").c_str(), fsr_at_start ? "on" : "off");
+  // The GPU's latency reducer (rexglue-low-latency.patch: AMD Anti-Lag 2, VK_AMD_anti_lag) is
+  // untested on the console too: the device is asked for the extension only when the game starts
+  // with low_latency on or boost, or with frame generation chosen (which turns it on), so that
+  // everyone else's device stays as it was.
+  const std::string low_latency_choice = rex::cvar::GetFlagByName("low_latency");
+  const bool low_latency_at_start = low_latency_choice == "on" || low_latency_choice == "boost" ||
+                                    rex::cvar::GetFlagByName("frame_generation") == "fsr";
+  rex::cvar::SetFlagByName("low_latency_device_extensions",
+                           low_latency_at_start ? "true" : "false");
+  Line("settings: low_latency = %s (the device's low latency extensions %s)",
+       low_latency_choice.c_str(), low_latency_at_start ? "on" : "off");
   rex::ui::SDLWindowedAppContext app_context;
   if (!app_context.Initialize()) {
     return Finish("the SDL application context did not initialise", 9);

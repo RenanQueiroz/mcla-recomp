@@ -5,6 +5,15 @@
 # used with its author's permission. The original 60 FPS timing pipeline there
 # is credited to BadassBaboon.
 
+# 0x821BDA90: the engine timer's first instruction (`mftb r11`), before it reads the time.
+# Where a frame starts for the GPU vendor's latency reducer (NVIDIA Reflex, AMD Anti-Lag 2):
+# its wait comes here, so that the time the timer then reads, and so the simulation step, is
+# the one after the wait (src/frame_timing.cpp, mcla_frame_start). r3 is the timer object.
+[[midasm_hook]]
+name = "mcla_frame_start"
+address = 0x821BDA90
+registers = ["r3"]
+
 # 0x821BDAB0: `subf r8,r10,r11`, elapsed guest ticks since the previous frame.
 # Hooked after the instruction: clamps a runaway delta and runs the host frame
 # limiter, so the wait is part of the frame the timer then measures.
