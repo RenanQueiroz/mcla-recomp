@@ -37,7 +37,7 @@ You need Windows 10 or 11 (x86-64) with a Direct3D 12 graphics card, and about 2
 
 ### Without any tools (the setup wizard)
 
-The launcher's zip in a release (`MCLA-Launcher-<tag>-win-x64.zip`), unpacked anywhere, starts a **setup wizard** on a PC that has no install: it asks for a folder and your disc image (or the extracted game), then downloads checked, pinned build tools (llvm-mingw, CMake, Ninja, MinGit and the prebuilt SDK, so no Visual Studio, Git or Python), clones this fork at the release's tag, translates and builds the game and prepares shaders, and opens the launcher. It needs the internet and about 10 GB; the folder's path can be at most 129 characters. How it works, its limits and its test tools are in `launcher/README.md`, "The setup wizard". It needs a published release, and none is published yet.
+The launcher's zip in a release (`MCLA-Launcher-<tag>-win-x64.zip`), unpacked anywhere, starts a **setup wizard** on a PC that has no install: it asks for a folder and your disc image (or the extracted game), then downloads checked, pinned build tools (llvm-mingw, CMake, Ninja, MinGit and the prebuilt SDK, so no Visual Studio, Git or Python), clones this fork at the release's tag, translates and builds the game and prepares shaders, and opens the launcher. It needs the internet and about 10 GB; the folder's path can be at most 129 characters, with only plain letters, digits, spaces, dots, dashes and underscores. How it works, its limits and its test tools are in `launcher/README.md`, "The setup wizard". It needs a published release, and none is published yet.
 
 ### With the launcher (recommended)
 

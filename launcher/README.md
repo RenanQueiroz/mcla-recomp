@@ -81,63 +81,90 @@ launcher's exe and an internet connection: no Visual Studio, Git, Python or admi
 
 1. **Classic**: the exe is somewhere below a folder with `build-game.ps1` (a fork checkout's `launcher\`; the
    desktop shortcut of an install made with `scripts\make_pc.ps1`). Nothing changes there; the wizard is never
-   looked at.
+   looked at. (A launcher exe copied out of its checkout used to open with an error bar; it now opens the
+   wizard, as it has no checkout above it.)
 2. **Installed**: `install.json` beside the exe names an install folder that holds a finished setup
    (`state` is `ready`) and `mcla-recomp\launcher\build-game.ps1`. The launcher works on that checkout
-   (settings, Play, Update and rebuild) and puts the install's MinGit first on the `PATH` of what it starts,
-   as git is not installed on that PC.
+   (settings, Play, Update and rebuild). git is not installed on that PC: the launcher starts the install's
+   own MinGit (`Paths.GitExe`) for its git calls and puts its folder first on the `PATH` of the scripts it runs.
 3. **Wizard**: anything else. An `install.json` beside the exe without a finished setup is a setup to resume.
 
-**What it asks.** The folder (default `%LOCALAPPDATA%\MCLA`; it must be new or empty, or hold an earlier
-setup of this wizard, which then continues), then the game: drop the disc image on the window, or **Browse**
-for an `.iso` or for a folder with the game's files. The disc image is read as it is (XDVDFS; no extractor
-and no tool needed). A *Complete Edition (USA, Europe)* disc or folder passes; anything else says why in
-plain words (another game, another release of this one, a damaged or modified file, not a game at all).
-A folder can also be used **where it is**: nothing but `default.xex` is copied, and `game_data_root` in
-`mcla.toml` (next to `mcla.exe`, read by the game itself) names the folder, which then has to stay where it is.
-The check is the file list in the release (`release.json`, `game`: names, sizes, SHA-256; no game data
-leaves the PC and none is in the repository).
+**What it asks.** The folder (default `%LOCALAPPDATA%\MCLA`, or `C:\MCLA` when that path has a character the
+build can't take; it must be new or empty, or hold an earlier setup of this wizard, which then continues), then
+the game: drop the disc image on the window, or **Browse** for an `.iso` or for a folder with the game's files.
+The disc image is read as it is (XDVDFS; no extractor and no tool needed). A *Complete Edition (USA, Europe)*
+disc or folder passes; anything else says why in plain words (another game, another release of this one, a
+damaged or modified file, not a game at all). A folder can also be used **where it is**: nothing but
+`default.xex` is copied, and `game_data_root` in `mcla.toml` (next to `mcla.exe`) names the folder, which then
+has to stay where it is (if it is gone or has lost files, the game says which folder and stops, instead of
+starting with part of its files). The check is the file list in the release (`release.json`, `game`: names,
+sizes, SHA-256; no game data leaves the PC and none is in the repository); `root_directory_padding.pad`, the
+disc's filler, may be missing from a folder.
+
+A folder that already holds a setup **with its game** (the checkout's `game\`, or the kept folder, still passing
+the check) goes straight on: the disc image is not asked for again. Pointing a newer release's wizard at an older
+install replaces the release (the checkout is made again and built; a few minutes) and keeps the player's game
+settings (`mcla.toml`), the launcher's `settings.json`, the saves and the shader storage.
 
 **What it does** (six steps, shown as they run; the first two run together):
 
 | Step | |
 |---|---|
 | Copying your game (or Checking it, in place) | The files into the install (`game-incoming\`, moved into place after the clone) with the SHA-256 of each one checked while it is copied; resumable file by file. |
-| Downloading the build tools | llvm-mingw, CMake, Ninja, MinGit and the prebuilt SDK from the release, each checked against its SHA-256 and size (`downloads\`, `tools\`; an archive that writes outside its folder is refused). |
-| Getting the source | `git clone --branch <tag>` of the fork (not recursive: the SDK comes as the prebuilt bundle), then the tag is checked to point at `release.json`'s commit, and the shader pack to be the release's. |
+| Downloading the build tools | llvm-mingw, CMake, Ninja, MinGit and the prebuilt SDK from the release, each checked against its SHA-256 and size (`downloads\`, `tools\`; an archive that writes outside its folder, or names a file Windows would treat as something else, is refused). A tool that is unpacked from the right archive (`tools\.mcla-tools.txt`) is not fetched again. |
+| Getting the source | `git clone --branch <tag>` of the fork (not recursive: the SDK comes as the prebuilt bundle), then the tag is checked to point at `release.json`'s commit, and the shader pack to be the release's. A checkout counts as there only when the step is recorded finished and every tracked file is in the tree: a clone that was killed half way is made again. |
 | Translating the game's code, Building the game | One `build-game.ps1 -Toolchain mingw -ToolsDir ... -SdkBundle ...` run, with the progress it prints. |
 | Preparing shaders | The game's own shader preparation (see *Preparing shaders*). If it fails the setup is still done: the game compiles shaders as it meets them, and **More > Prepare shaders** tries again. |
 
-The last page opens the launcher (the exe starts again, now in Installed mode). Cancelling, closing the window (it asks
-first) or a failure keeps what was done; the next start of the same folder continues from there. A failure
-says what went wrong in plain words, shows the log under **Details**, and offers **Copy the log** and **Report
-it on GitHub**. Logs are in the install folder's `logs\`.
+The last page opens the launcher (the exe starts again, now in Installed mode); if the folder the exe is in can't
+be written, there is no note of where the install is, the page says so, and the next start of the wizard on the
+same folder opens at once. Cancelling, closing the window (it asks first) or a failure keeps what was done; the
+next start of the same folder continues from there, and the disk space asked for is only what is still left
+to do. A failure says what went wrong in plain words, shows the log under **Details**, and offers **Copy the
+log** and **Report it on GitHub**. Logs are in the install folder's `logs\`.
 
-**Folder length.** The install folder's path is limited to **129 characters** (and the wizard says so before it
-starts): the longest path the install holds is 127 characters below the folder (CMake's own documentation,
-below `tools\`), and Windows' programs, PowerShell 5.1 and Explorer among them, stop at 259. The longest file
-the build reads is 124 below the folder (`mcla-recomp\third_party\rexglue-sdk-bin\include\...`); the compiler's
-object files are longer in a short folder (131) but CMake moves one into a hashed folder when its path would
-pass 250 characters. (`make_pc.ps1` alone refuses a checkout folder over 148, so 129 is the stricter rule.)
-`PathBudget.LongestBelowRoot` holds the number; the check harness's `install` measures a real install and fails
-if it is too small, which is what to run after `tools.json` changes a tool's version. Also refused: a network
-location, a drive's root, `C:\Windows` and `C:\Program Files` (no administrator rights are asked for); a
-folder in OneDrive is warned about. Free space needed: the game's size (when copied) and 3 GB.
+**One setup at a time.** A folder is locked while a setup runs in it (`install.lock`, held open): a second wizard
+on it says so. The programs the setup starts (git, the build) are in a job object that ends with the wizard,
+however it ends; a build can't go on writing into an install after its wizard is gone. Renames and deletes of
+files a virus scanner may hold are retried for about ten seconds; the network has timeouts (30 s for GitHub to
+answer, 60 s without a byte in a download).
+
+**The folder.** The install folder's path may have **129 characters** at most, and only letters without accents,
+digits, spaces, dots, dashes and underscores (the wizard says so before it starts):
+
+- Length: the longest path the install holds is 127 characters below the folder (CMake's own documentation,
+  below `tools\`), and Windows' programs, PowerShell 5.1 and Explorer among them, stop at 259. The longest file
+  the build reads is 124 below the folder (`mcla-recomp\third_party\rexglue-sdk-bin\include\...`); the compiler's
+  object files are longer in a short folder (131) but CMake moves one into a hashed folder when its path would
+  pass 250 characters. (`make_pc.ps1` alone refuses a checkout folder over 148, so 129 is the stricter rule.)
+  `PathBudget.LongestBelowRoot` holds the number; the check harness's `install` measures a real install and
+  fails if it is too small, which is what to run after `tools.json` changes a tool's version.
+- Characters: the SDK's code generator opens its files by a path that is not Unicode (an install in
+  `C:\...\Jogos é` stops at "File could not be opened for reading"), and the commands CMake and Ninja run through
+  `cmd.exe` break at `&` (tested: `'Co' is not recognized`); `^ % ! ' ;` and non-ASCII letters are refused with
+  them. A user name with an accent therefore gets `C:\MCLA` as the suggested folder instead of `%LOCALAPPDATA%`.
+- Also refused: a network location or mapped network drive, a drive that is not NTFS or ReFS (Git refuses folders
+  without owners), a drive's root, `C:\Windows` and `C:\Program Files` (no administrator rights are asked for),
+  a game folder inside the install or the install inside the game's folder; a folder in OneDrive is warned
+  about. Free space needed: the game's size (when copied) and 3 GB, less what the folder holds already.
 
 **Where the release comes from.** The latest published release of the fork
 (`releases/latest/download/release.json`, then the assets of its tag). Until the first release is published
-the wizard says there is none yet.
+the wizard says there is none yet. What `release.json` names (the SDK bundle's file, the tools' addresses and
+versions, the shader pack's path) must be plain file names and `https` addresses, or the release is refused.
 
 **Removing an install.** There is no button yet; `InstallCleanup.Uninstall` (the harness's `uninstall`
-command) removes exactly what the setup made (`mcla-recomp\`, `tools\`, `downloads\`, `game-incoming\`, `logs\`,
-`install.json`, and the pointer beside the exe), never through a link, never a folder that has no `install.json`
-of the setup's own, and never the game's folder of an install made "where it is". Anything else the player put
-in the folder stays, and so does the folder. Saves and shader storage (`Documents\mcla`) are not touched.
+command) removes exactly the names `install.json` lists as made by the setup (`mcla-recomp\`, `tools\`,
+`downloads\`, `game-incoming\`, `kept\`, `logs\`, `install.lock`, `install.json`, and the pointer beside the exe),
+never through a link, never a folder that has no `install.json` of the setup's own, a drive, a link, the user's
+profile or one of its known folders or a folder holding them, never while a setup or the game runs from the folder,
+and never the game's folder of an install made "where it is". Anything else the player put in the folder stays,
+and so does the folder. Saves and shader storage (`Documents\mcla`) are not touched.
 
 ### Developing and testing the wizard
 
-None of this changes what a player's run does; the window shows a banner (*Development options are in use*)
-whenever one is in use.
+None of this changes what a player's run does; the window shows a banner (*Development options are in use*, at
+the top of every page) whenever one is in use.
 
 - `MCLA_RELEASE_SOURCE=<folder>` or `--release-source=<folder or file:// URL>`: `release.json` and the assets
   come from a folder (a downloaded draft; tool archives sit there too, and are used instead of downloads);
@@ -150,8 +177,10 @@ whenever one is in use.
   install's `settings.json` (`ExtraArguments`) and are used for the shader preparation, so that a test never
   touches the real saves or shader storage.
 - `launcher\dev\wizard-check` runs the engine with no window: `xdvdfs`, `verdicts`, `copy` (with a cancel and a
-  resume), `release`, `downloads` (a wrong hash, a wrong size, an archive that leaves its folder), `budget`,
-  `install <release folder> <install folder> <game> [--in-place] [--args "..."]`, `cleanup`, `uninstall`.
+  resume), `release`, `names`, `downloads` (a wrong hash, a wrong size, an archive that leaves its folder),
+  `archive`, `nonhttps`, `budget`, `mode`, `lock`, `orphan` (a child in the job dies with its parent), `retry`,
+  `remaining`, `git` (Installed mode without git on the PATH), `cleanup`, `cleanup2`, `uninstall`, and
+  `install <release folder> <install folder> <game, or "adopt"> [--in-place] [--args "..."]`.
   Everything runs on scratch folders with the game's files only read.
 
 ## The game's settings

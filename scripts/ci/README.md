@@ -77,7 +77,10 @@ The setup wizard checks the player's own game against a list in the release, nev
 `545407F8`, `default.xex` version 0.0.0.8) and nothing else of it. `assemble-release.py` copies it into
 `release.json` (`game`). It is made once, from a disc image or an extracted folder the maintainer has,
 by `make-game-files.py <iso or folder>` (read-only; the output has hashes and sizes only, so it is the
-one file about the game that belongs in the repository). `check_pins.py` checks only its shape (title id,
+one file about the game that belongs in the repository). It was made from a single dump (the maintainer's disc
+image): that every other pressing of the Complete Edition (USA, Europe) is byte for byte the same is an assumption;
+a player whose copy differs is told it is another release or damaged, and has to send the file's names and sizes
+to have it looked at. `check_pins.py` checks only its shape (title id,
 version, plain names, 64-digit hashes, `default.xex` listed): a changed list is a change of what the wizard
 accepts, so it is reviewed like code.
 
