@@ -3,8 +3,9 @@ MIT License
 Copyright (c) 2026 Renan Queiroz
 
 This licence covers the launcher: the files in this folder (the code in src/
-and the scripts and documents beside it), not those in dev/ (the developer
-tools, which are part of the rest of the repository). The rest of the
+and installer/, which is the program MCLA-Setup.exe, and the scripts and
+documents beside it), not those in dev/ (the developer tools, which are part
+of the rest of the repository). The rest of the
 repository is under the licence in the LICENSE file at its root
 (GPL-3.0-or-later); THIRD-PARTY-NOTICES.md at its root lists the code ported
 into that rest. The packages the launcher is built with (the .NET runtime,
