@@ -304,7 +304,9 @@ install, update and uninstall alike. An update refuses a folder that holds anyth
 put inside it, a disc image, notes, a file in one of the launcher's own folders: it names them), and any folder whose `install.json`
 names an install inside it, because the swap deletes the old folder (the launcher looks at the same things before it quits, so
 that the reason is in its bar and it keeps running); an uninstall removes only the files in `installed-files.txt` (or the payload's, for a folder made before
-there was a list) and the folders then empty, and leaves the rest, and the folder with it. The leftovers of a swap are told by an
+there was a list) and the folders then empty, and leaves the rest, and the folder with it. It does not follow a link: a folder of the payload
+that the player replaced by a junction is left as it is, and nothing is deleted behind it. Windows Explorer's own `desktop.ini` and
+`Thumbs.db` are not counted as the player's files (an uninstall removes them), and the list of what is foreign stops at 200 entries. The leftovers of a swap are told by an
 exact stamp (`MCLA.old-20261024-231500-1234`) and Setup's marker inside (`installed.txt`; `.mcla-staging` in a folder being
 unpacked; `.mcla-download` in the folder of downloaded installers), so a player's folder with a similar name is never deleted or put
 back as the launcher. It refuses a drive's or share's root, the user's own folders (profile, Desktop, Documents, Downloads, Windows,

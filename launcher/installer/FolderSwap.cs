@@ -170,8 +170,10 @@ public static class FolderSwap
 
     /// Everything in `folder`, at any depth, that is not one of `ownedPaths` (the files Setup unpacked: installed-files.txt), the
     /// standard names or `keep`: what somebody else put there. A folder that holds none of the owned files is one entry (`name/`),
-    /// and so is a link; the owned folders are looked into. Relative paths with /, sorted.
-    public static List<string> ForeignFiles(string folder, IEnumerable<string> ownedPaths, IEnumerable<string>? keep = null)
+    /// and so is a link; the owned folders are looked into. Relative paths with /, sorted. Explorer's own files (desktop.ini,
+    /// Thumbs.db) are not counted, and the walk stops after `limit` entries (the callers name a few): a player who copied a big tree
+    /// into an owned folder does not make it list every file.
+    public static List<string> ForeignFiles(string folder, IEnumerable<string> ownedPaths, IEnumerable<string>? keep = null, int limit = 200)
     {
         static string Norm(string p) => p.Replace('\\', '/').Trim('/');
         var owned = new HashSet<string>(ownedPaths.Select(Norm), StringComparer.OrdinalIgnoreCase);
@@ -185,7 +187,9 @@ public static class FolderSwap
         {
             foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
             {
+                if (found.Count >= limit) return;
                 var name = Path.GetFileName(entry);
+                if (IsExplorerFile(name)) continue;
                 var path = relative.Length == 0 ? name : relative + "/" + name;
                 if (Directory.Exists(entry))
                 {
@@ -200,9 +204,14 @@ public static class FolderSwap
         return found;
     }
 
+    /// Files Windows Explorer makes in a folder the player has looked at or customised: not something the player put there.
+    public static readonly string[] ExplorerFiles = ["desktop.ini", "Thumbs.db"];
+
+    public static bool IsExplorerFile(string? name) => name != null && ExplorerFiles.Any(f => f.Equals(name, StringComparison.OrdinalIgnoreCase));
+
     /// The entries of `folder` (names, not paths) that are not in `owned`: what somebody else put there.
     public static List<string> ForeignEntries(string folder, ISet<string> owned) =>
-        Directory.EnumerateFileSystemEntries(folder).Select(Path.GetFileName).Where(n => n != null && !owned.Contains(n!)).Select(n => n!).OrderBy(n => n).ToList();
+        Directory.EnumerateFileSystemEntries(folder).Select(Path.GetFileName).Where(n => n != null && !owned.Contains(n!) && !IsExplorerFile(n)).Select(n => n!).OrderBy(n => n).ToList();
 
     /// The install folder that `<folder>\install.json` points at, when it lies inside `folder` (or is it): moving or deleting
     /// the launcher's folder would take the player's install with it. Null when it does not, or there is no pointer.
@@ -246,12 +255,19 @@ public static class FolderSwap
         foreach (var relative in paths.Concat(StandardNames))
         {
             var full = Path.Combine(folder, relative.Replace('/', '\\'));
+            // A folder on the way that is a link (the player replaced a folder of the payload by a junction to one of their own) is not
+            // followed: what is listed under it is not ours.
+            var viaLink = false;
+            for (var dir = Path.GetDirectoryName(full); dir != null && dir.Length > folder.Length; dir = Path.GetDirectoryName(dir))
+                if (IsLink(dir)) { viaLink = true; break; }
+            if (viaLink) continue;
             DeleteFile(full, patience);
             for (var dir = Path.GetDirectoryName(full); dir != null && dir.Length > folder.Length; dir = Path.GetDirectoryName(dir)) directories.Add(dir);
         }
+        foreach (var explorerFile in ExplorerFiles) DeleteFile(Path.Combine(folder, explorerFile), patience);
         foreach (var dir in directories.OrderByDescending(d => d.Length))
         {
-            try { if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir); }
+            try { if (Directory.Exists(dir) && !IsLink(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         var left = Directory.Exists(folder) ? ForeignEntries(folder, new HashSet<string>()) : [];

@@ -75,6 +75,15 @@ static class Program
     }
 
     static string Read(string folder, string name) => File.Exists(Path.Combine(folder, name)) ? File.ReadAllText(Path.Combine(folder, name)).Trim() : "(missing)";
+    /// A junction (no rights needed): link -> target.
+    static void MakeJunction(string link, string target)
+    {
+        var info = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+        using var process = Process.Start(info)!;
+        process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+    }
+
     static void Write(string folder, string name, string text)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(folder, name))!);
@@ -213,6 +222,28 @@ static class Program
         Write(target, ".mcla-staging", "left by a kill");
         var deep = FolderSwap.ForeignFiles(target, FolderSwap.ReadManifest(target)!, ["install.json"]);
         Check(deep.SequenceEqual(["emptyfolder/", "game/", "notes.txt", "sub/mine.txt"]), $"foreign files are looked for at any depth, owned folders included: {string.Join(", ", deep)}");
+        // a link inside a folder of the payload is one entry and is never followed; Explorer's own files are not foreign; the list is capped
+        var outsideTarget = Dir("their-folder");
+        Write(outsideTarget, "theirs.txt", "the player's, behind a junction");
+        var linkInside = Path.Combine(target, "sub", "link");
+        MakeJunction(linkInside, outsideTarget);
+        Write(target, "desktop.ini", "[.ShellClassInfo]");
+        Write(target, "sub/Thumbs.db", "x");
+        var withLink = FolderSwap.ForeignFiles(target, FolderSwap.ReadManifest(target)!, ["install.json"]);
+        Check(withLink.SequenceEqual(["emptyfolder/", "game/", "notes.txt", "sub/link/", "sub/mine.txt"]),
+              $"a link inside a payload folder is one entry, desktop.ini and Thumbs.db are not foreign: {string.Join(", ", withLink)}");
+        Directory.CreateDirectory(Path.Combine(target, "sub", "many"));
+        for (var i = 0; i < 300; i++) Write(target, $"sub/f{i:000}.txt", "x");
+        var capped = FolderSwap.ForeignFiles(target, FolderSwap.ReadManifest(target)!, ["install.json"]);
+        Check(capped.Count == 200, $"the walk stops at 200 entries: {capped.Count}");
+        Check(FolderSwap.ForeignFiles(target, FolderSwap.ReadManifest(target)!, ["install.json"], limit: 7).Count == 7, "... or at the limit given");
+        for (var i = 0; i < 300; i++) File.Delete(Path.Combine(target, "sub", $"f{i:000}.txt"));
+        Directory.Delete(Path.Combine(target, "sub", "many"));
+        Directory.Delete(linkInside);                 // the junction only
+        Check(File.Exists(Path.Combine(outsideTarget, "theirs.txt")), "removing the junction left what it pointed to");
+        File.Delete(Path.Combine(target, "desktop.ini"));
+        File.Delete(Path.Combine(target, "sub", "Thumbs.db"));
+
         // what the launcher itself would say before it quits to hand over
         var why = SelfUpdate.WhyNotUpdatable(target);
         Check(why != null && why.Contains("sub/mine.txt"), "the launcher names what would stop an update, before it quits");
@@ -234,6 +265,23 @@ static class Program
         Directory.Delete(Path.Combine(target, "game"));
         Write(target, "version.txt", "2");
         Write(target, "installed.txt", "version=2");
+
+        // removing the launcher does not follow a link on the way to a listed file (the player replaced a payload folder by a junction to
+        // a folder of their own), and takes Explorer's files away with the rest
+        var removal = Dir("removal");
+        Write(removal, "lib/a.dll", "ours");
+        Write(removal, "own.txt", "ours");
+        Write(removal, "desktop.ini", "explorer");
+        var theirs = Dir("their-lib");
+        Write(theirs, "a.dll", "the player's file with a name of ours");
+        FolderSwap.DeleteFolder(Path.Combine(removal, "lib"), TimeSpan.FromSeconds(2));
+        MakeJunction(Path.Combine(removal, "lib"), theirs);
+        var rest = FolderSwap.DeleteOwned(removal, ["lib/a.dll", "own.txt"], TimeSpan.FromSeconds(2));
+        Check(File.Exists(Path.Combine(theirs, "a.dll")) && Directory.Exists(Path.Combine(removal, "lib")) && !File.Exists(Path.Combine(removal, "own.txt"))
+              && !File.Exists(Path.Combine(removal, "desktop.ini")) && rest.SequenceEqual(["lib"]),
+              $"uninstall: a listed file behind a link is not deleted, the link stays, Explorer's file goes: {string.Join(", ", rest)}");
+        Directory.Delete(Path.Combine(removal, "lib"));
+        Directory.Delete(removal);
 
         // the launcher's clean-up waits while a Setup runs (its mutex exists): the previous folder is for the way back (H1)
         Write(target + ".old-20261001-120000-21", "installed.txt", "x");
