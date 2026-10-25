@@ -33,7 +33,10 @@
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //   cars (race cars' positions)   watch <every> | watch stop (log them)
 //   screens (the UI manager's movies)
-//   follow <route> [speed=1] | follow stop | follow status (drive a route)
+//   follow <route> [speed=1] | follow stop | follow status (drive a route; a car knocked off it
+//     is brought back, see "Route following")
+//   autocontinue on | off | status (press A when a dialog over the race stops the world)
+//   findvec <addr> [floats] [tolerance] (where else in guest memory the same floats are)
 //
 // Conditions: left_title (Start accepted on the title screen), loading (the
 // map zoom-out), roam (the player is in the city), frames N (engine frames
@@ -929,45 +932,205 @@ std::vector<uint32_t> FindCars() {
   return cars;
 }
 
+// Every 4-aligned guest address (committed pages, the whole 4 GB) that holds these big-endian
+// floats, each within `tolerance`.
+std::vector<uint32_t> FindFloats(const float* want, size_t count, float tolerance) {
+  std::vector<uint32_t> hits;
+#if defined(_WIN32)
+  auto* runtime = rex::Runtime::instance();
+  if (!runtime || count < 1) {
+    return hits;
+  }
+  uint8_t* const base = runtime->virtual_membase();
+  auto word = [&](const uint8_t* q) {
+    const uint32_t bits = (uint32_t(q[0]) << 24) | (uint32_t(q[1]) << 16) | (uint32_t(q[2]) << 8) | q[3];
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+  };
+  uint64_t address = 0;
+  while (address < 0x100000000ull) {
+    MEMORY_BASIC_INFORMATION info;
+    if (!VirtualQuery(base + address, &info, sizeof info)) {
+      break;
+    }
+    const uint64_t region_end = std::min<uint64_t>(
+        0x100000000ull, uint64_t(static_cast<uint8_t*>(info.BaseAddress) - base) + info.RegionSize);
+    if (info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+      for (uint64_t a = (address + 3) & ~uint64_t(3); a + 4 * count <= region_end; a += 4) {
+        if (std::fabs(word(base + a) - want[0]) > tolerance) {
+          continue;
+        }
+        bool all = true;
+        for (size_t k = 1; all && k < count; k++) {
+          all = std::fabs(word(base + a + 4 * k) - want[k]) <= tolerance;
+        }
+        if (all) {
+          hits.push_back(static_cast<uint32_t>(a));
+        }
+      }
+    }
+    address = region_end;
+  }
+#else
+  (void)want;
+  (void)count;
+  (void)tolerance;
+#endif
+  return hits;
+}
+
 // --- Route following ---
 
-// follow <route> drives the player's car along a route, a file of "x,z,speed"
-// lines (metres on the ground, m/s) made by launcher/dev/route.py: the stick
-// steers at a point ahead on the route (pure pursuit), the triggers hold the
-// route's speed (the buttons a script holds are left as they are), and a car that stops against
-// something backs off for a second. When the whole world stands still once the car has moved (a
-// tutorial pop-up the first time something happens, "CONTINUE (A)"), A is
-// pressed; in a race A is the handbrake, so a stray press does no harm. It
-// runs in the frame hook, on the game's update thread, so with mcla_fixed_dt
-// the same game state gives the same inputs.
+// follow <route> drives the player's car along a route, a file of "x,z,speed" lines (metres on
+// the ground, m/s; a fourth column, the ground's height, is read and not used) made by
+// launcher/dev/route.py: the stick steers at a point ahead on the route (pure pursuit), the
+// triggers hold the route's speed (the buttons a script holds are left as they are). It runs in the
+// frame hook, on the game's update thread, so with mcla_fixed_dt the same game state gives the same
+// inputs.
+//
+// Shader coverage needs the run to travel the route, not to drive well, so a car that is knocked off
+// it (traffic, a wall, an opponent) is brought back in steps, each one logged and counted:
+// 1. a longer reverse each time, steering toward the route (the nose swings to it), straight back, or
+//    on full lock one way and then the other, each followed by a forward burst on full lock toward
+//    the route;
+// 2. once the car is more than 30 m off, the nearest point of the route by distance, behind or ahead
+//    (not only ahead), is the one it steers for;
+// 3. (tried and left out: putting the car back on the route by writing its position and velocity. Its
+//    state is in the vehicle object and in some 590 other places with the same floats, all written
+//    here, and the car drove on as if nothing had been written: its real state is somewhere that
+//    isn't a copy of those floats. The game has no reset of the car either: the pause menu in a
+//    race has Restart Race, Next Race and Quit Race only. `findvec` is what looked for it.)
+// 4. a car that makes no progress for 20 s of game time, however it moves, counts as stuck too.
+// A run that still did not travel the route is a failed job (coverage.py: less than 80% of it).
+// The summary says how far along the route the car got (best=) and how many recoveries it needed.
+//
+// When the whole world stands still once a car has moved (a tip or dialog over the race: "SLIP
+// STREAM TURBO ... CONTINUE (A)"), A is pressed (TipsStep); in a race A is the handbrake, so a stray
+// press does no harm.
+
+std::mutex g_follow_mutex;
+std::atomic<bool> g_following{false};
+
+// Every race car's position, to tell the world standing still (a dialog the game stops everything
+// for) from one car standing still (stuck). The cars are found once, when it starts: FindCars scans
+// the heap.
+struct Stillness {
+  std::vector<uint32_t> cars;  // the player first
+  std::vector<std::array<float, 3>> previous, origin;
+  bool moved = false;       // a car has gone 20 m from where it first was
+  bool still = false;       // the last reading: no car's position changed
+  int still_frames = 0;     // updates in a row the world stood still, once a car had moved
+  int press_frames = 0;     // A is held while this counts down
+  int dismissed = 0;        // times A was pressed for it
+};
+
+void StartStillness(Stillness& s) {
+  s = Stillness{};
+  s.cars = FindCars();
+  if (s.cars.empty()) {
+    uint32_t player = 0;
+    if (ReadU32(kPlayerVehicle, player) && player) {
+      s.cars.push_back(player);
+    }
+  }
+}
+
+bool WorldStill(Stillness& s) {
+  std::vector<std::array<float, 3>> now(s.cars.size());
+  for (size_t i = 0; i < s.cars.size(); i++) {
+    const uint32_t offset = i == 0 ? kVehiclePositionOffset : kCarLivePositionOffset;
+    for (int k = 0; k < 3; k++) {
+      if (!ReadFloat(s.cars[i] + offset + 4 * k, now[i][k])) {
+        now[i][k] = 0;
+      }
+    }
+  }
+  if (s.origin.size() != now.size()) {
+    s.origin = now;
+  }
+  bool still = !now.empty() && s.previous.size() == now.size();
+  for (size_t i = 0; still && i < now.size(); i++) {
+    still = std::memcmp(now[i].data(), s.previous[i].data(), sizeof(now[i])) == 0;
+  }
+  for (size_t i = 0; i < now.size(); i++) {
+    const double d = std::hypot(now[i][0] - s.origin[i][0], now[i][2] - s.origin[i][2]);
+    s.moved |= d > 20.0;
+  }
+  s.previous = now;
+  s.still = still;
+  return still;
+}
+
+// One update's reading: true while A should be down for a dialog.
+bool TipsStep(Stillness& s) {
+  WorldStill(s);
+  s.still_frames = s.still && s.moved ? s.still_frames + 1 : 0;
+  if (s.press_frames > 0) {
+    s.press_frames--;
+    return true;
+  }
+  if (s.still_frames >= 15) {
+    s.still_frames = 0;
+    s.press_frames = 6;
+    s.dismissed++;
+    REXLOG_INFO("dev pad: the world stands still (a tip or a dialog over the race): A pressed ({} so far)",
+                s.dismissed);
+    return true;
+  }
+  return false;
+}
+
+// autocontinue on | off: TipsStep for a script that doesn't follow a route (the follower does its
+// own), so that a dialog doesn't stop the race it is watching.
+std::atomic<bool> g_autocontinue{false};
+Stillness g_tips;
+bool g_tips_a_down = false;
+
+void AutoContinueFrame() {
+  if (g_following.load(std::memory_order_relaxed)) {
+    return;
+  }
+  const bool down = TipsStep(g_tips);
+  if (down != g_tips_a_down) {
+    g_tips_a_down = down;
+    EditPad([&](PadValues& v) { v.buttons = down ? (v.buttons | 0x1000) : (v.buttons & ~0x1000); });
+  }
+}
+
 struct Route {
   std::vector<std::array<float, 2>> points;
   std::vector<float> speed;
+  std::vector<float> height;  // NaN where the file has none
 };
+
+enum class Recovery { kDrive, kReverse, kForward };
 
 struct Follower {
   std::shared_ptr<Route> route;
   double speed_scale = 1.0;
   size_t index = 0;
+  size_t best = 0;           // the furthest point the car has been nearest to
+  size_t progress_mark = 0;  // best when it last counted as progress
   bool have_prev = false;
   float prev[2] = {};
   double prev_dt = 0;
   double speed = 0;  // m/s over the last update
   bool moved = false;
   int slow_frames = 0;
-  int reverse_frames = 0;
-  int stuck = 0;
-  int frozen_frames = 0;
-  int press_a_frames = 0;
-  bool pressing_a = false;  // the A this follower itself holds (not one a script holds)
-  int popups = 0;
+  int still_run = 0;      // updates in a row nothing moved, A presses included
+  int no_progress = 0;    // updates since the route's best point last advanced
+  Recovery phase = Recovery::kDrive;
+  int phase_frames = 0;
+  int attempt = 0;        // recoveries in a row without progress
+  int recoveries = 0;
+  int retargets = 0;
+  Stillness tips;
   double max_offset = 0;
   uint64_t frames = 0;
 };
 
-std::mutex g_follow_mutex;
 Follower g_follow;
-std::atomic<bool> g_following{false};
 
 std::shared_ptr<Route> LoadRoute(const std::string& path, std::string& error) {
   std::ifstream in(path);
@@ -986,14 +1149,18 @@ std::shared_ptr<Route> LoadRoute(const std::string& path, std::string& error) {
       }
     }
     std::istringstream fields(line);
-    float x, z, speed;
+    float x, z, speed, height = std::nanf("");
     fields >> x >> z >> speed;
     if (fields.fail()) {
       error = "bad line: " + line;
       return nullptr;
     }
+    if (!(fields >> height)) {
+      height = std::nanf("");
+    }
     route->points.push_back({x, z});
     route->speed.push_back(speed);
+    route->height.push_back(height);
   }
   if (route->points.size() < 2) {
     error = "no route in " + path;
@@ -1003,12 +1170,13 @@ std::shared_ptr<Route> LoadRoute(const std::string& path, std::string& error) {
 }
 
 std::string FollowSummary(const Follower& f) {
-  char text[160];
+  char text[240];
+  const size_t last = f.route ? f.route->points.size() : size_t(0);
   std::snprintf(text, sizeof text,
-                "frames=%llu point=%zu/%zu max_offset=%.1f m stuck=%d popups=%d speed=%.1f m/s",
-                static_cast<unsigned long long>(f.frames), f.index,
-                f.route ? f.route->points.size() : size_t(0), f.max_offset, f.stuck, f.popups,
-                f.speed);
+                "frames=%llu point=%zu/%zu best=%zu/%zu max_offset=%.1f m recoveries=%d "
+                "retargets=%d popups=%d speed=%.1f m/s",
+                static_cast<unsigned long long>(f.frames), f.index, last, f.best, last, f.max_offset,
+                f.recoveries, f.retargets, f.tips.dismissed, f.speed);
   return text;
 }
 
@@ -1034,10 +1202,8 @@ void FollowFrame(double dt) {
     return;
   }
   const double px = position[0], pz = position[2];
-  bool frozen = false;
   if (f.have_prev && f.prev_dt > 0) {
     const double moved = std::hypot(px - f.prev[0], pz - f.prev[1]);
-    frozen = moved == 0;
     f.speed = moved / f.prev_dt;
     if (f.speed > 120) {
       f.speed = 0;  // put somewhere else: the race (re)starting, a reset
@@ -1050,10 +1216,12 @@ void FollowFrame(double dt) {
   f.have_prev = true;
   f.frames++;
   f.moved |= f.speed > 5;
-  f.frozen_frames = frozen && f.moved ? f.frozen_frames + 1 : 0;
+  f.tips.moved |= f.moved;
+  const bool a_for_tip = TipsStep(f.tips);
+  f.still_run = f.tips.still && f.moved ? f.still_run + 1 : 0;
 
-  // The nearest point, looking only ahead (100 m), so a route that comes
-  // back past itself is not cut short.
+  // The nearest point, looking only ahead (100 m), so a route that comes back past itself is not
+  // cut short.
   auto distance = [&](size_t i) { return std::hypot(points[i][0] - px, points[i][1] - pz); };
   auto step = [&](size_t i) {
     return std::hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]);
@@ -1067,7 +1235,33 @@ void FollowFrame(double dt) {
       f.index = i + 1;
     }
   }
+  if (nearest > 30) {
+    // Knocked well off: the nearest point by distance within 600 m of where it was, behind or ahead.
+    const size_t low = f.index > 150 ? f.index - 150 : 0;
+    const size_t high = std::min(points.size() - 1, f.index + 300);
+    size_t best = f.index;
+    double best_distance = nearest;
+    for (size_t i = low; i <= high; i++) {
+      if (const double d = distance(i); d < best_distance - 1.0) {
+        best_distance = d;
+        best = i;
+      }
+    }
+    if (best != f.index) {
+      f.index = best;
+      nearest = best_distance;
+      f.retargets++;
+    }
+  }
   f.max_offset = std::max(f.max_offset, nearest);
+  f.best = std::max(f.best, f.index);
+  if (f.best >= f.progress_mark + 5) {
+    f.progress_mark = f.best;
+    f.attempt = 0;
+    f.no_progress = 0;
+  } else if (f.moved) {
+    f.no_progress++;
+  }
   if (f.index + 1 >= points.size()) {
     lock.unlock();
     StopFollowing("reached the end of the route");
@@ -1097,38 +1291,70 @@ void FollowFrame(double dt) {
   }
   wanted *= f.speed_scale;
 
-  // The buttons a script holds meanwhile (nitro, camera, special ability: `down x`, `press lb`)
-  // stay; only the triggers and the left stick are the follower's, and the A it presses itself.
+  // Stuck: against something with the throttle open while the world moves (one car, the player,
+  // standing still is not a dialog), or nowhere for a long while, or the world standing still for
+  // longer than a dialog takes to answer.
   PadValues pad;
   constexpr uint16_t kButtonA = 0x1000;
-  pad.buttons = GetPad().buttons & ~(f.pressing_a ? kButtonA : uint16_t(0));
-  f.pressing_a = false;
-  if (f.frozen_frames >= 15) {
-    f.frozen_frames = 0;
-    f.press_a_frames = 6;
-    f.popups++;
-  }
-  if (f.press_a_frames > 0) {
-    f.press_a_frames--;
+  pad.buttons = GetPad().buttons & ~kButtonA;
+  if (a_for_tip) {
     pad.buttons |= kButtonA;
-    f.pressing_a = true;
-  } else if (f.reverse_frames > 0) {
-    f.reverse_frames--;
+  }
+  auto start_recovery = [&](const char* why) {
+    f.attempt++;
+    f.recoveries++;
+    f.slow_frames = 0;
+    f.still_run = 0;
+    f.no_progress = 0;
+    // Reverse for longer each time, then a burst forward toward the route.
+    f.phase = Recovery::kReverse;
+    f.phase_frames = 60 + 25 * std::min(f.attempt, 8);
+    REXLOG_WARN("dev pad: follow recovery {} ({}): attempt {}, reverse {} updates at point {} of {} ({:.1f} m off, "
+                "{:.1f} m/s)",
+                f.recoveries, why, f.attempt, f.phase_frames, f.index, points.size(), nearest, f.speed);
+  };
+
+  if (f.phase == Recovery::kReverse) {
+    // Attempts take turns: toward the route (the nose swings to it), straight back, on full lock
+    // one way, on full lock the other.
+    switch (f.attempt % 4) {
+      case 1: pad.lx = int16_t(-steer * 32767.0); break;
+      case 2: pad.lx = 0; break;
+      case 3: pad.lx = int16_t((angle > 0 ? -1.0 : 1.0) * 32767.0); break;
+      default: pad.lx = int16_t((angle > 0 ? 1.0 : -1.0) * 32767.0); break;
+    }
     pad.lt = 255;
-    steer = -steer;
-  } else if (std::abs(angle) > 0.8 && f.speed > 12) {
+    if (--f.phase_frames <= 0) {
+      f.phase = Recovery::kForward;
+      f.phase_frames = 45;
+    }
+    SetPad(pad);
+    return;
+  }
+  if (f.phase == Recovery::kForward) {
+    pad.rt = 200;
+    pad.lx = static_cast<int16_t>(std::clamp(4.0 * angle, -1.0, 1.0) * 32767.0);
+    if (--f.phase_frames <= 0) {
+      f.phase = Recovery::kDrive;
+    }
+    SetPad(pad);
+    return;
+  }
+
+  if (std::abs(angle) > 0.8 && f.speed > 12) {
     pad.lt = 200;  // well off line: slow down to turn
   } else if (f.speed > wanted + 6) {
     pad.lt = 255;  // slower ahead
   } else if (f.speed < wanted + 2) {
     pad.rt = 255;
   }
-  // Stopped against something with the throttle open: back off.
-  f.slow_frames = pad.rt && f.moved && !frozen && f.speed < 1.5 ? f.slow_frames + 1 : 0;
-  if (f.slow_frames > 60) {
-    f.slow_frames = 0;
-    f.reverse_frames = 60;
-    f.stuck++;
+  f.slow_frames = pad.rt && f.moved && !f.tips.still && f.speed < 1.5 ? f.slow_frames + 1 : 0;
+  if (f.slow_frames > 45) {
+    start_recovery("pinned");
+  } else if (f.still_run > 150) {
+    start_recovery("still despite A");
+  } else if (f.no_progress > 1200) {
+    start_recovery("no progress for 20 s");
   }
   pad.lx = static_cast<int16_t>(steer * 32767.0);
   SetPad(pad);
@@ -1956,12 +2182,79 @@ std::string Execute(const std::string& line) {
     if (!route) {
       return "err " + error;
     }
+    Stillness tips;
+    StartStillness(tips);  // the heap scan, before the lock
     std::lock_guard lock(g_follow_mutex);
     g_follow = {};
     g_follow.route = route;
     g_follow.speed_scale = scale;
+    g_follow.tips = std::move(tips);
     g_following = true;
-    return "ok " + std::to_string(route->points.size()) + " points";
+    return "ok " + std::to_string(route->points.size()) + " points, " +
+           std::to_string(g_follow.tips.cars.size()) + " cars";
+  }
+  if (cmd == "findvec") {
+    // findvec <addr> [<floats>=3] [<tolerance>=0.02]: where else in guest memory the same floats
+    // are, each within the tolerance (with the world frozen, `set mcla_freeze true`, so that they
+    // are not changing meanwhile). For finding the copies of a car's position, to move it for real.
+    uint32_t address;
+    double count = 3, tolerance = 0.02;
+    if (!EvalAddress(arg(1), address) || (args.size() > 2 && !ParseNumber(arg(2), count)) ||
+        (args.size() > 3 && !ParseNumber(arg(3), tolerance)) || count < 1 || count > 16) {
+      return "err findvec <addr> [floats] [tolerance]";
+    }
+    float want[16];
+    for (size_t k = 0; k < size_t(count); k++) {
+      if (!ReadFloat(address + 4 * uint32_t(k), want[k])) {
+        return "err unreadable";
+      }
+    }
+    const auto hits = FindFloats(want, size_t(count), float(tolerance));
+    uint32_t vehicle = 0;
+    ReadU32(kPlayerVehicle, vehicle);
+    std::string reply = "ok " + std::to_string(hits.size()) + " matches:";
+    for (size_t i = 0; i < hits.size() && i < 64; i++) {
+      char text[64];
+      if (vehicle && hits[i] >= vehicle && hits[i] < vehicle + 0x2000) {
+        std::snprintf(text, sizeof text, " %08X(vehicle+0x%X)", hits[i], hits[i] - vehicle);
+      } else {
+        std::snprintf(text, sizeof text, " %08X", hits[i]);
+      }
+      reply += text;
+      if (i < 6 && !(vehicle && hits[i] >= vehicle && hits[i] < vehicle + 0x2000)) {
+        // What is around a match elsewhere: 24 floats from 0x30 before it.
+        reply += " {";
+        for (int k = -12; k < 12; k++) {
+          float f = 0;
+          ReadFloat(hits[i] + uint32_t(4 * k), f);
+          std::snprintf(text, sizeof text, "%g%s", f, k == 11 ? "" : " ");
+          reply += text;
+        }
+        reply += "}";
+      }
+    }
+    return reply;
+  }
+  if (cmd == "autocontinue") {
+    // autocontinue on | off | status: A for a dialog that stops the world (a tip over the race:
+    // "CONTINUE (A)"), for a script that doesn't follow a route (the follower does it itself).
+    if (arg(1) == "on") {
+      StartStillness(g_tips);
+      g_tips_a_down = false;
+      g_autocontinue = true;
+      return "ok " + std::to_string(g_tips.cars.size()) + " cars";
+    }
+    if (arg(1) == "off") {
+      g_autocontinue = false;
+      if (g_tips_a_down) {
+        g_tips_a_down = false;
+        EditPad([&](PadValues& v) { v.buttons &= ~0x1000; });
+      }
+    } else if (arg(1) != "status") {
+      return "err autocontinue on | off | status";
+    }
+    REXLOG_INFO("dev pad: autocontinue: {} pressed of A for a dialog", g_tips.dismissed);
+    return "ok dismissed=" + std::to_string(g_tips.dismissed) + (g_autocontinue ? " on" : " off");
   }
   if (cmd == "quit") {
     RequestQuit();
@@ -2302,6 +2595,8 @@ void MclaDevPadFrame(uint64_t& ticks) {
   if (g_following.load(std::memory_order_relaxed)) {
     FollowFrame(static_cast<double>(ticks) /
                 static_cast<double>(rex::chrono::Clock::guest_tick_frequency()));
+  } else if (g_autocontinue.load(std::memory_order_relaxed)) {
+    AutoContinueFrame();
   }
   if (g_watching.load(std::memory_order_relaxed)) {
     WatchFrame(frame);
