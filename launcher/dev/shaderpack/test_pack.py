@@ -148,7 +148,7 @@ def test_matrix():
             out = d / "x.pad"
             cv.script_copy(template, d / "shots", out, dict(v.split("=", 1) for v in a.var))
         check("matrix: every generated job parses and its script template expands",
-              len(lines) == 6 + 12 + 12 + 3 + 3 + 4 + 2 and len(set(tags)) == len(tags), f"{len(lines)} jobs, {len(set(tags))} tags")
+              len(lines) == 6 + 2 * (6 + 6 + 2 + 2 + 1) and len(set(tags)) == len(tags), f"{len(lines)} jobs, {len(set(tags))} tags")
 
 
 def test_route_frames():
@@ -160,8 +160,117 @@ def test_route_frames():
               str(cv.route_frames(f)))
 
 
+def test_summaries():
+    log = ("[x] dev pad: follow reached the end of the route: frames=10554 point=1107/1108 best=1107/1108 "
+           "max_offset=5.8 m recoveries=2 teleports=1 retargets=3 popups=3 speed=28.4 m/s\n")
+    f = cv.follow_result(log)
+    check("follow summary: the share of the route, recoveries, teleports, popups",
+          f == {"end": True, "best": 1107, "total": 1108, "share": 0.999, "recoveries": 2, "teleports": 1,
+                "retargets": 3, "popups": 3}, str(f))
+    stopped = log.replace("reached the end of the route", "stopped").replace("best=1107/1108", "best=500/1108")
+    check("follow summary: a stopped follower is not the end, and the share is the best point's",
+          cv.follow_result(stopped)["end"] is False and cv.follow_result(stopped)["share"] == 0.451
+          and cv.follow_result("nothing") is None)
+    v = cv.visible_cost("[x] TMPSS d3d12 frame skipped=12 rescued=1 waited=3.20 endwait=0.00 sync=5.50\n"
+                        "[x] TMPSS vk frame skipped=0 rescued=0 waited=0.00 endwait=1.20 sync=2.00 nopresent=3\n")
+    check("visible cost: draws left out, work on the GPU thread, presents skipped",
+          v["skipped"] == 12 and v["frames_with_skips"] == 1 and v["sync_ms"] == 7.5 and v["max_sync_ms"] == 5.5
+          and v["frames_sync_over_4ms"] == 1 and v["nopresent"] == 3 and v["rescued"] == 1, str(v))
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "r.route"
+        f.write_text("0,0,10,5\n10,0,10,5\n20,0,10,5\n")  # a fourth column (the height) is allowed
+        check("route_frames: a slower car takes longer", cv.route_frames(f, 60, 0.5) == 300 + 600
+              and cv.route_length(f) == 20.0, str(cv.route_frames(f, 60, 0.5)))
+
+
+def test_revalidate():
+    import argparse
+    import os
+    import shutil
+    base = cv.DEV_ROOT / f"test-revalidate-{os.getpid()}"
+    try:
+        (base / "routes").mkdir(parents=True)
+        (base / "cov").mkdir()
+        for tag, meters in (("probe-o05", 6000), ("probe-o06", 150)):
+            (base / "cov" / f"{tag}.json").write_text('{"tag": "%s", "route": "C:mcvshp-devrouteso.route"}' % tag)
+            points = [f"{i * 10},0,30\n" for i in range(meters // 10 + 1)]
+            (base / "routes" / f"{tag[6:]}.route").write_text("# route\n" + "".join(points))
+        code = cv.revalidate(argparse.Namespace(folder=str(base / "cov"), routes=str(base / "routes"), min_route_m=2000,
+                                              redo_truncated=False))
+        import json
+        good = json.loads((base / "cov" / "probe-o05.json").read_text())
+        bad = json.loads((base / "cov" / "probe-o06.json").read_text())
+        check("revalidate: a long probe keeps its result (route fixed), a short one is marked failed and its route set aside",
+              code == 0 and "error" not in good and good["route_m"] == 6000 and good["route"].endswith("o05.route")
+              and "stalled" in bad["error"] and not (base / "routes" / "o06.route").exists()
+              and (base / "routes" / "o06.route.rejected").exists(), str(bad.get("error", ""))[:60])
+        # A leader still driving when the recording ended (a truncated route) and one that finished.
+        for name, end_speed in (("moving", 30.0), ("finished", 0.0)):
+            run = base / name
+            run.mkdir()
+            lines = []
+            for tick in range(0, 3001, 15):  # 50 s of race at 60 ticks a second
+                x = min(tick, 1500) * 0.5 if end_speed == 0 else tick * 0.5
+                lines.append(f"[t] [info] [core] [t1] dev pad: watch tick={tick} frame={tick} | 0.0 0.0 0.0 | {x:.3f} 0.0 5.0")
+            (run / "game.log").write_text("\n".join(lines) + "\n")
+        check("revalidate: a leader still driving at the end of the recording is told from one that finished",
+              cv.leader_still_driving(base / "moving", 60.0) and not cv.leader_still_driving(base / "finished", 60.0)
+              and not cv.leader_still_driving(base / "nothing", 60.0))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def refused(fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except SystemExit as e:
+        return str(e)
+    return None
+
+
+def test_paths():
+    import argparse
+    import shlex
+    dev = cv.DEV_ROOT
+    bs = chr(92)
+    # A jobs line keeps the backslashes of a Windows path (POSIX shlex ate them: "C:mcvshp-devo12.route").
+    line = f"--script x.pad --route-out C:{bs}mcv{bs}shp-dev{bs}routes{bs}o12.route --tag t"
+    args = cv.parse_job_line(line)
+    check("paths: a jobs line keeps the backslashes of a Windows path",
+          args[args.index("--route-out") + 1] == f"C:{bs}mcv{bs}shp-dev{bs}routes{bs}o12.route", str(args))
+    check("paths: what POSIX shlex made of it is refused (a drive letter and no slash)",
+          refused(cv.checked_path, shlex.split(line)[3], "--route-out", write=True) is not None
+          and cv.lost_backslashes("C:mcvshp-devrouteso12.route") and not cv.lost_backslashes("C:/mcv/x"))
+    check("paths: a path inside the dev root is taken, for writing too",
+          cv.checked_path(dev / "routes" / "o12.route", "x", write=True) == dev / "routes" / "o12.route")
+    for what, value in (("relative", "routes/o12.route"), ("the owner's install", "C:/Games/Midnight Club Los Angeles/x.route"),
+                        ("another drive's folder", "D:/somewhere/x.route"), ("up out of the dev root", str(dev / ".." / "x.route"))):
+        check(f"paths: {what} is refused for writing", refused(cv.checked_path, value, "--route-out", write=True) is not None, value)
+    check("paths: the repository is readable but not writable",
+          cv.checked_path(cv.REPO / "shaderpack" / "x.shaderpack", "--pack") is not None
+          and refused(cv.checked_path, cv.REPO / "shaderpack" / "x.shaderpack", "--out", write=True) is not None)
+    check("paths: a pack may be written to the repository's shaderpack folder when it says so",
+          cv.checked_path(cv.REPO / "shaderpack" / "x.shaderpack", "--out", write=True, allow_repo_pack=True) is not None)
+    a = cv.make_parser().parse_args(["soak", "--script", "arcade-race.pad", "--tag", "t", "--out", str(dev / "o"),
+                                     "--route-out", "C:/Games/Midnight Club Los Angeles/mcla-recomp/r.route"])
+    check("paths: a soak refuses an output path in the owner's folder before it starts",
+          refused(cv.checked_args, a) is not None)
+    a = cv.make_parser().parse_args(["soak", "--script", "arcade-race.pad", "--tag", "t", "--out", str(dev / "o"),
+                                     "--var", "ROUTE=C:mcvshp-devrouteso12.route"])
+    check("paths: a template variable that lost its backslashes is refused", refused(cv.checked_args, a) is not None)
+    a = cv.make_parser().parse_args(["soak", "--script", "arcade-race.pad", "--tag", "t", "--out", str(dev / "o"),
+                                     "--var", f"ROUTE={(dev / 'routes' / 'o12.route').as_posix()}", "--var", "KIND=0"])
+    check("paths: a soak with its paths inside the dev root and a route with forward slashes is taken",
+          refused(cv.checked_args, a) is None)
+    import devrun
+    check("paths: devrun refuses a relative output, one outside the dev root, one that lost its backslashes",
+          all(refused(devrun.dev_output, v, "--stdout") is not None
+              for v in ("out.txt", "C:/Games/x.txt", "C:mcvshp-devx.txt"))
+          and devrun.dev_output(dev / "x.txt", "--stdout") == (dev / "x.txt").resolve())
+
+
 for test in (test_retired_entries, test_read_drops, test_templates, test_created_in_play, test_matrix,
-             test_route_frames):
+             test_route_frames, test_paths, test_summaries, test_revalidate):
     test()
 print("ALL PASS" if all(results) else f"{results.count(False)} FAILED")
 sys.exit(0 if all(results) else 1)

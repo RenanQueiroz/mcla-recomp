@@ -1,0 +1,46 @@
+# The race options' values (arcade, ordered race): a screenshot after each change of weather and time of day.
+include boot-to-roam.pad
+wait 1s 60f
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press a 4f
+wait 2500ms 150f
+press a 4f
+wait 1500ms 90f
+press a 4f
+wait 1500ms 90f
+# options: down to Traffic (3 rows down), then each value
+press down 4f
+wait 300ms 18f
+press down 4f
+wait 300ms 18f
+press down 4f
+wait 300ms 18f
+shot {SHOTS}/tr0.png 0.5
+press left 4f
+wait 400ms 24f
+shot {SHOTS}/trl1.png 0.5
+press left 4f
+wait 400ms 24f
+shot {SHOTS}/trl2.png 0.5
+press left 4f
+wait 400ms 24f
+shot {SHOTS}/trl3.png 0.5
+press left 4f
+wait 400ms 24f
+shot {SHOTS}/trl4.png 0.5
+press right 4f
+wait 400ms 24f
+shot {SHOTS}/trr1.png 0.5
+press right 4f
+wait 400ms 24f
+shot {SHOTS}/trr2.png 0.5
+press right 4f
+wait 400ms 24f
+shot {SHOTS}/trr3.png 0.5
+press right 4f
+wait 400ms 24f
+shot {SHOTS}/trr4.png 0.5
+mark end

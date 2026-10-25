@@ -42,43 +42,6 @@ diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline
    }
  
    if (pipeline_storage_file_) {
-@@ -3241,12 +3253,19 @@ void PipelineCache::CreationThread(size_t thread_index) {
-     }
- 
-     PipelineRuntimeDescription runtime_description;
-+    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
-+    double tmpss_tr = 0, tmpss_cr = 0;  // TMPSS
-     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
-       pipeline_to_create->state.store(nullptr, std::memory_order_release);
-     } else {
-+      tmpss_tr = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count();  // TMPSS
-       pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
-                                       std::memory_order_release);
-+      tmpss_cr = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count() - tmpss_tr;  // TMPSS
-     }
-+    if (pipeline_to_create->async_creation_pending.load()) {  // TMPSS
-+      REXGPU_INFO("TMPSS d3d12 pipeline async tr={:.2f} cr={:.2f}", tmpss_tr, tmpss_cr);  // TMPSS
-+    }  // TMPSS
-     bool was_async_pending =
-         pipeline_to_create->async_creation_pending.exchange(false, std::memory_order_acq_rel);
- 
-@@ -3287,12 +3306,16 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
-       creation_queue_.pop();
-     }
-     PipelineRuntimeDescription runtime_description;
-+    auto tmpss_start = std::chrono::steady_clock::now();  // TMPSS
-     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
-       pipeline_to_create->state.store(nullptr, std::memory_order_release);
-     } else {
-       pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
-                                       std::memory_order_release);
-     }
-+    if (pipeline_to_create->async_creation_pending.load()) {  // TMPSS
-+      REXGPU_INFO("TMPSS d3d12 pipeline proc trcr={:.2f}", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_start).count());  // TMPSS
-+    }  // TMPSS
-     // The processor thread is the only one waiting for these, and it's here.
-     pipeline_to_create->async_creation_pending.store(false, std::memory_order_release);
-   }
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
@@ -163,14 +126,6 @@ diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeli
    // Create the pipelines.
    std::vector<PipelineCreationArguments> pipeline_creations;
    pipeline_creations.reserve(pipeline_stored_descriptions.size());
-@@ -877,6 +883,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
- 
-     REXGPU_INFO("Created {} graphics pipelines from Vulkan storage ({} requested)",
-                 created_pipeline_count.load(), pipeline_creations.size());
-+    REXGPU_INFO("TMPSS vk preload create={:.1f} ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tmpss_preload_start).count() - tmpss_translate_ms);  // TMPSS
-     {
-       std::lock_guard<std::mutex> lock(creation_request_lock_);
-       startup_loading_ = false;
 @@ -1250,6 +1257,11 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
  
  bool VulkanPipelineCache::EnsureShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,

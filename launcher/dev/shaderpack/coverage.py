@@ -64,6 +64,71 @@ PATH_BACKEND = {"rtv": "d3d12", "rov": "d3d12", "fbo": "vulkan", "fsi": "vulkan"
 DEFAULT_PACK = REPO / "shaderpack" / f"{TITLE}.shaderpack"
 
 
+# --- paths ---------------------------------------------------------------------------------------
+# A path from a jobs file, a template variable or the command line is checked before anything is
+# written or read through it: output only inside the dev root (MCLA_DEV_ROOT; the repository's
+# shaderpack folder too for a pack), input only inside the dev root or this repository, and always
+# absolute. A relative path would land in whatever folder the batch was started from (on 2026-10-25
+# a jobs file's backslashes were eaten by the parser, "C:\\mcv\\shp-dev\\x" became "C:mcvshp-devx", which is
+# relative to the current directory of drive C, and 28 route files were written into the owner's
+# install folder).
+DEV_ROOT = devrun.DEV
+
+
+def lost_backslashes(text):
+    return bool(re.match(r"^[A-Za-z]:[^/" + chr(92) * 2 + "]", str(text)))
+
+
+def _inside(path, roots):
+    resolved = Path(path).resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(Path(root).resolve())
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def checked_path(value, what, write=False, allow_repo_pack=False):
+    """value as an absolute Path, or SystemExit saying why not."""
+    text = str(value)
+    if lost_backslashes(text):
+        raise SystemExit(f"{what}: {text!r} looks like a Windows path that lost its backslashes "
+                         "(use forward slashes in jobs files)")
+    path = Path(text)
+    if not path.is_absolute():
+        raise SystemExit(f"{what}: {text!r} is not an absolute path")
+    roots = [DEV_ROOT] if write else [DEV_ROOT, REPO]
+    if write and allow_repo_pack:
+        roots.append(REPO / "shaderpack")
+    if not _inside(path, roots):
+        raise SystemExit(f"{what}: {text!r} is outside {' and '.join(str(r) for r in roots)}")
+    return path
+
+
+def checked_args(a):
+    """Every path a soak takes, before it starts."""
+    a.out = str(checked_path(a.out, "--out", write=True))
+    if a.route_out:
+        a.route_out = str(checked_path(a.route_out, "--route-out", write=True))
+    if a.pack:
+        a.pack = str(checked_path(a.pack, "--pack"))
+    script = Path(a.script)
+    if script.is_absolute() or lost_backslashes(a.script):
+        checked_path(a.script, "--script")
+    for item in a.var:
+        name, _, value = item.partition("=")
+        if re.match(r"^[A-Za-z]:", value) or "/" in value or chr(92) in value:
+            if name == "ROUTE" and value in ("none", "0", ""):
+                continue
+            checked_path(value, f"--var {name}")
+    for item in a.extra or []:
+        _, _, value = item.partition("=")
+        if re.match(r"^[A-Za-z]:", value):
+            checked_path(value, f"--extra {item.split('=')[0]}")
+
+
 # --- storages ------------------------------------------------------------------------------------
 def read_storage(folder):
     """{'shaders': {hash: (pixel?, ucode)}, 'lists': {file name: [record bytes]}} of a shareable
@@ -198,18 +263,83 @@ def script_copy(script, shots, dest, variables=None):
     dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def route_frames(path, fps=60):
-    """Frames a route takes to drive (a quarter more, and 10 s), from its points and speeds."""
+def read_route(path):
     pts = []
     for line in Path(path).read_text().splitlines():
         if line[:1] in "-0123456789":
-            x, z, v = map(float, line.split(","))
+            x, z, v = map(float, line.split(",")[:3])
             pts.append((x, z, v))
-    seconds = sum(math.dist(p[:2], q[:2]) / max(q[2], 3.0) for p, q in zip(pts, pts[1:]))
+    return pts
+
+
+def route_length(path):
+    pts = read_route(path)
+    return sum(math.dist(p[:2], q[:2]) for p, q in zip(pts, pts[1:]))
+
+
+def route_frames(path, fps=60, speed=1.0):
+    """Frames a route takes to drive at `speed` times its own (a quarter more, and 10 s)."""
+    pts = read_route(path)
+    seconds = sum(math.dist(p[:2], q[:2]) / max(q[2] * speed, 3.0) for p, q in zip(pts, pts[1:]))
     return int(seconds * fps * 1.25) + 600
 
 
+TMPSS_FRAME = re.compile(r"TMPSS (d3d12|vk) frame (.*)")
+
+
+def visible_cost(log):
+    """What a player would see of the pipelines compiled in play, from the dev build's per-frame
+    counters (shader-stutter-timers.sdk.patch, TMPSS: a line for every frame that left draws out,
+    waited, or did pipeline work on the GPU command thread):
+      skipped  draws left out while their pipeline compiled (objects missing: pop-in), their total,
+               the frames they were in, and the most in one frame;
+      rescued  draws whose pipeline was made on the spot (an occlusion query's draw, a pipeline an
+               earlier draw had queued): the frame waited for them;
+      waited   the frame's wait for pipelines within the 4 ms budget, in ms: total and largest;
+      endwait  the wait at the end of a submission (the other kind of wait), total ms;
+      sync     pipeline work on the GPU command thread (depth-only pipelines and shader translation
+               on D3D12, translation on Vulkan), total ms, the largest frame, frames over 4 ms;
+      nopresent  Vulkan: presents skipped because the frame was incomplete (held up to 100 ms)."""
+    out = {"frames_with_skips": 0, "skipped": 0, "max_skipped": 0, "rescued": 0, "waited_ms": 0.0,
+           "max_waited_ms": 0.0, "endwait_ms": 0.0, "sync_ms": 0.0, "max_sync_ms": 0.0,
+           "frames_sync_over_4ms": 0, "nopresent": 0, "lines": 0}
+    for api, text in TMPSS_FRAME.findall(log):
+        f = {k: float(v) for k, v in re.findall(r"(\w+)=([0-9.]+)", text)}
+        out["lines"] += 1
+        skipped = int(f.get("skipped", 0))
+        out["frames_with_skips"] += skipped > 0
+        out["skipped"] += skipped
+        out["max_skipped"] = max(out["max_skipped"], skipped)
+        out["rescued"] += int(f.get("rescued", 0))
+        out["waited_ms"] += f.get("waited", 0.0)
+        out["max_waited_ms"] = max(out["max_waited_ms"], f.get("waited", 0.0))
+        out["endwait_ms"] += f.get("endwait", 0.0)
+        out["sync_ms"] += f.get("sync", 0.0)
+        out["max_sync_ms"] = max(out["max_sync_ms"], f.get("sync", 0.0))
+        out["frames_sync_over_4ms"] += f.get("sync", 0.0) > 4.0
+        out["nopresent"] += int(f.get("nopresent", 0))
+    return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}
+
+
+FOLLOW_LINE = re.compile(r"dev pad: follow (reached the end of the route|stopped): (.*)")
+
+
+def follow_result(log):
+    """The follower's last summary in a run's log: how far it got and what it took."""
+    found = FOLLOW_LINE.findall(log)
+    if not found:
+        return None
+    end, text = found[-1]
+    fields = {k: v for k, v in re.findall(r"(\w+)=(\S+)", text)}
+    best, total = (int(x) for x in fields.get("best", "0/1").split("/"))
+    return {"end": end.startswith("reached"), "best": best, "total": total,
+            "share": round(best / max(total, 1), 3),
+            "recoveries": int(fields.get("recoveries", 0)), "teleports": int(fields.get("teleports", 0)),
+            "retargets": int(fields.get("retargets", 0)), "popups": int(fields.get("popups", 0))}
+
+
 def soak(a):
+    checked_args(a)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     result_path = out / f"{a.tag}.json"
@@ -226,10 +356,15 @@ def soak(a):
     run_script = out / a.tag / script.name
     variables = dict(v.split("=", 1) for v in a.var)
     route = variables.get("ROUTE", "none")
-    if route not in ("none", "0", "") and "RACEFRAMES" not in variables:
+    auto_length = False
+    if route not in ("none", "0", ""):
         found = Path(route) if Path(route).is_absolute() else script.parent / route
-        if found.exists():
-            variables["RACEFRAMES"] = str(route_frames(found, a.fixed_dt or 60))
+        if a.min_route_m and found.exists() and route_length(found) < a.min_route_m:
+            raise SystemExit(f"{route}: only {route_length(found):.0f} m long (< {a.min_route_m} m): the probe that made "
+                             "it stalled; make it again")
+        if "RACEFRAMES" not in variables and found.exists():
+            auto_length = True
+            variables["RACEFRAMES"] = str(route_frames(found, a.fixed_dt or 60, float(variables.get("SPEED", "0.85"))))
     script_copy(script, shots, run_script, variables)
     cmd = [sys.executable, str(DEVRUN), "run", "--script", str(run_script), "--backend", backend,
            "--res", str(a.res), "--cache-root", str(cache), "--timeout", str(a.timeout)]
@@ -240,6 +375,8 @@ def soak(a):
     if a.vsync is not None:
         cmd += ["--vsync", a.vsync]
     cmd += ["--intro", "fast"]
+    if a.track:
+        cmd.append("--track")  # the car's position twice a second in the run's pad.csv
     extra = list(a.extra or [])
     if a.path:
         extra.append(PATH_CVAR[a.path])
@@ -277,6 +414,14 @@ def soak(a):
             route_tool.from_log(argparse.Namespace(log=str(folder), file=str(a.route_out), spacing=4.0,
                                                    fps=float(a.fixed_dt or 60)))
             result["route"] = str(a.route_out)
+            result["route_m"] = round(route_length(a.route_out))
+            if a.min_route_m and result["route_m"] < a.min_route_m:
+                # A route that stopped early (a tip's dialog stopped the race, or the leader was held
+                # up) would make every run that drives it worthless: it is kept aside, not used.
+                os.replace(a.route_out, str(a.route_out) + ".rejected")
+                result["error"] = (f"stalled: the leader's route is only {result['route_m']} m (< {a.min_route_m} m); "
+                                   f"kept as {Path(a.route_out).name}.rejected; the race's last picture: "
+                                   f"{out / a.tag / 'shots' / 'race-end.png'}")
         except SystemExit as e:
             result["error"] = f"route: {e}"
     gpu = devrun.gpu_report(folder)
@@ -289,6 +434,19 @@ def soak(a):
         result["pack_added"] = [int(m2.group(1)), int(m2.group(2))]
     if (folder / "frames.csv").exists():
         result["frames"], result["segments"] = frame_stats(folder)
+    result["visible"] = visible_cost(log)
+    tips = re.findall(r"A pressed \((\d+) so far\)", log)
+    result["tips_dismissed"] = int(tips[-1]) if tips else 0
+    if route not in ("none", "0", ""):
+        follow = follow_result(log)
+        result["follow"] = follow
+        if "error" not in result:
+            if follow is None:
+                result["error"] = "the follower reported nothing (the script ended before it?)"
+            elif auto_length and not follow["end"] and follow["share"] < a.min_share:
+                result["error"] = (f"stalled: the route was covered {follow['share']:.0%} (< {a.min_share:.0%}) with "
+                                   f"{follow['recoveries']} recoveries ({follow['teleports']} teleports)")
+
     storage = read_storage(cache / "shaders" / "shareable")
     result["stored"] = {n: len(r) for n, r in storage["lists"].items()}
     result["stored_shaders"] = len(storage["shaders"])
@@ -318,7 +476,17 @@ def soak(a):
 
 
 # --- batch ---------------------------------------------------------------------------------------
+def parse_job_line(line):
+    """The arguments of a jobs file line. Not POSIX: a backslash is a character of a path, not an
+    escape (the jobs files use forward slashes anyway); a token in quotes loses them."""
+    return [t[1:-1] if len(t) > 1 and t[0] == t[-1] and t[0] in "\"'" else t
+            for t in shlex.split(line, posix=False)]
+
+
 def batch(a):
+    a.out = str(checked_path(a.out, "--out", write=True))
+    if a.pack:
+        a.pack = str(checked_path(a.pack, "--pack"))
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     lockrun = os.environ.get("COVERAGE_LOCKRUN")
@@ -327,11 +495,13 @@ def batch(a):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        args = shlex.split(line)
+        args = parse_job_line(line)
         if "--tag" in args:
             args[args.index("--tag") + 1] += a.suffix
         if a.pack:
             args += ["--pack", a.pack]
+        if a.salt_base and "--salt" not in args:
+            args += ["--salt", str(a.salt_base + n)]
         tag = args[args.index("--tag") + 1] if "--tag" in args else f"job{n}"
         if (out / f"{tag}.json").exists() and "error" not in json.loads((out / f"{tag}.json").read_text()):
             print(f"[batch] {tag}: done already", flush=True)
@@ -350,6 +520,63 @@ def batch(a):
     return 1 if failed else 0
 
 
+# --- revalidate ----------------------------------------------------------------------------------
+def leader_still_driving(run_folder, fps, seconds=10, metres=50):
+    """Whether, in a probe's `watch` lines, an opponent was still going somewhere in the last `seconds`
+    of the recording: the recording ended (RACEFRAMES) before the race did, so its route is the race's
+    first part only. A leader that finished the race stands still."""
+    if not run_folder or not Path(run_folder).exists():
+        return False
+    watched = devrun.watch(Path(run_folder))
+    ticks = sorted(watched)
+    if len(ticks) < 2:
+        return False
+    last = ticks[-1]
+    earlier = [t for t in ticks if t <= last - seconds * fps]
+    if not earlier:
+        return False
+    a, b = watched[earlier[-1]], watched[last]
+    for i in range(1, min(len(a), len(b))):  # the player (0) isn't the leader
+        if math.dist((a[i][0], a[i][2]), (b[i][0], b[i][2])) > metres:
+            return True
+    return False
+
+
+def revalidate(a):
+    """Probe results made before the checks existed (or with the route in the wrong place): each probe's
+    route is looked up in --routes by its tag (probe-o05 -> o05.route), measured, and a probe whose route is
+    shorter than --min-route-m is marked failed (its route kept aside as .rejected), so that a batch redoes
+    it and skips the others."""
+    routes = checked_path(a.routes, "--routes", write=True)
+    folder = checked_path(a.folder, "folder", write=True)
+    good = bad = 0
+    for f in sorted(folder.glob("probe-*.json")):
+        r = json.loads(f.read_text())
+        route = routes / (r["tag"][len("probe-"):] + ".route")
+        r.pop("error", None)
+        if route.exists() and route_length(route) >= a.min_route_m and a.redo_truncated and \
+                leader_still_driving(r.get("run_folder"), float(r.get("fixed_dt") or 60)):
+            os.replace(route, str(route) + ".truncated")
+            r["error"] = ("truncated: the leader was still driving when the recording ended, so the route is only "
+                          "the race's first part; redone with a longer recording")
+            r["route"], r["route_m"] = None, 0
+            bad += 1
+        elif route.exists() and route_length(route) >= a.min_route_m:
+            r["route"], r["route_m"] = str(route), round(route_length(route))
+            good += 1
+        else:
+            length = round(route_length(route)) if route.exists() else 0
+            if route.exists():
+                os.replace(route, str(route) + ".rejected")
+            r["error"] = (f"stalled: the leader's route is only {length} m (< {a.min_route_m} m): a tip's dialog "
+                          f"stopped the race (the batch of 2026-10-25 had no autocontinue); redone by the next batch")
+            r["route"], r["route_m"] = None, length
+            bad += 1
+        f.write_text(json.dumps(r, indent=1))
+    print(f"{good} probes valid, {bad} marked failed")
+    return 0
+
+
 # --- report --------------------------------------------------------------------------------------
 def report(a):
     rows = []
@@ -362,8 +589,9 @@ def report(a):
     if a.match:
         rows = [r for r in rows if re.search(a.match, r["tag"])]
     print(f"{'tag':34} {'script':20} {'api/path':10} {'preload':>7} {'new pipe':>9} {'new sh':>6} "
-          f"{'>50ms':>5} {'>100':>5} {'worst':>6} {'frames':>7}")
-    totals = dict(runs=0, failed=0, new=0, shaders=0, over50=0, over100=0, frames=0, seconds=0.0)
+          f"{'>50ms':>5} {'>100':>5} {'worst':>6} {'frames':>7} {'left out':>8} {'sync ms':>7} {'nopres':>6}")
+    totals = dict(runs=0, failed=0, new=0, shaders=0, over50=0, over100=0, frames=0, seconds=0.0,
+                  skipped=0, sync_ms=0.0, nopresent=0, rescued=0)
     for r in rows:
         fr = r.get("frames") or {}
         new = sum((r.get("new_pipelines") or {}).values())
@@ -375,13 +603,22 @@ def report(a):
         totals["over100"] += fr.get("over100", 0)
         totals["frames"] += fr.get("frames", 0)
         totals["seconds"] += fr.get("seconds", 0.0)
+        v = r.get("visible") or {}
+        totals["skipped"] += v.get("skipped", 0)
+        totals["sync_ms"] += v.get("sync_ms", 0.0)
+        totals["nopresent"] += v.get("nopresent", 0)
+        totals["rescued"] += v.get("rescued", 0)
         print(f"{r['tag'][:34]:34} {r['script'][:20]:20} {(r['backend'][:3] + '/' + (r['path'] or '-')):10} "
               f"{r.get('preloaded_at_start', 0):7d} {new:9d} {r.get('new_shaders', 0):6d} "
-              f"{fr.get('over50', 0):5d} {fr.get('over100', 0):5d} {fr.get('worst_ms', 0):6.0f} {fr.get('frames', 0):7d}"
+              f"{fr.get('over50', 0):5d} {fr.get('over100', 0):5d} {fr.get('worst_ms', 0):6.0f} {fr.get('frames', 0):7d} "
+              f"{(r.get('visible') or {}).get('skipped', 0):8d} {(r.get('visible') or {}).get('sync_ms', 0):7.0f} "
+              f"{(r.get('visible') or {}).get('nopresent', 0):6d}"
               + (f"  ERROR {r['error'][:60]}" if r.get("error") else ""))
     print(f"total: {totals['runs']} runs ({totals['failed']} failed), {totals['new']} pipelines and "
           f"{totals['shaders']} shaders created in play, {totals['over50']} frames over 50 ms "
-          f"({totals['over100']} over 100) in {totals['frames']} frames, {totals['seconds'] / 60:.1f} min")
+          f"({totals['over100']} over 100) in {totals['frames']} frames, {totals['seconds'] / 60:.1f} min; "
+          f"{totals['skipped']} draws left out, {totals['rescued']} made on the spot, {totals['sync_ms']:.0f} ms of "
+          f"pipeline work on the GPU thread, {totals['nopresent']} presents skipped")
     return 0
 
 
@@ -393,7 +630,11 @@ def grow(a):
             storages.append(cache)
     if not storages:
         raise SystemExit("no soak storages found")
-    out = Path(a.out)
+    out = checked_path(a.out, "--out", write=True, allow_repo_pack=True)
+    if a.previous:
+        checked_path(a.previous, "--previous")
+    if a.drop:
+        checked_path(a.drop, "--drop")
     previous = Path(a.previous) if a.previous else (DEFAULT_PACK if DEFAULT_PACK.exists() else None)
     if previous and previous.resolve() == out.resolve():
         # The pack is being replaced: the previous one is kept aside for the comparison.
@@ -431,6 +672,11 @@ def make_parser():
     p.add_argument("--salt", type=int, default=0)
     p.add_argument("--var", action="append", default=[], metavar="NAME=VALUE",
                    help="a value for a script template's {NAME} (repeatable)")
+    p.add_argument("--track", action="store_true", help="log the car's path (devrun --track): pad.csv")
+    p.add_argument("--min-route-m", type=int, default=0, help="a route (made by --route-out, or driven by "
+                   "--var ROUTE) shorter than this many metres is a failure: the race stalled")
+    p.add_argument("--min-share", type=float, default=0.8, help="a run that drives a route for its whole "
+                   "length (no --var RACEFRAMES) fails when the car covered less of it than this")
     p.add_argument("--route-out", help="write the route of the leading opponent (from a run whose script "
                    "had `watch`: arcade-race.pad WATCH=15) to this file")
     p.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
@@ -441,8 +687,17 @@ def make_parser():
     p.add_argument("--normal-priority", action="store_true", default=True)
     p.add_argument("--max-min", type=float, default=40)
     p.add_argument("--pack", help="the pack every job imports (instead of the repository's)")
+    p.add_argument("--salt-base", type=int, default=0, help="give job n the driver-cache salt BASE+n (a new "
+                   "one each: the driver compiles what the pack lacks cold, as on a first start; needs a "
+                   "dev build with tmp_shader_salt)")
     p.add_argument("--suffix", default="", help="added to every job's tag, to run a jobs file again "
                    "with another pack")
+    p = sub.add_parser("revalidate")
+    p.add_argument("folder")
+    p.add_argument("--routes", required=True)
+    p.add_argument("--min-route-m", type=int, default=2000)
+    p.add_argument("--redo-truncated", action="store_true", help="also mark failed a probe whose recording "
+                   "ended while the leader was still driving (the route is the race's first part only)")
     p = sub.add_parser("report")
     p.add_argument("folders", nargs="+")
     p.add_argument("--match", help="only the runs whose tag matches this regular expression")
@@ -460,7 +715,7 @@ def make_parser():
 
 def main():
     a = make_parser().parse_args()
-    sys.exit({"soak": soak, "batch": batch, "report": report, "grow": grow}[a.cmd](a))
+    sys.exit({"soak": soak, "batch": batch, "report": report, "grow": grow, "revalidate": revalidate}[a.cmd](a))
 
 
 if __name__ == "__main__":

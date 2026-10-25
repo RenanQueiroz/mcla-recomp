@@ -70,8 +70,11 @@ def length(track):
     return sum(math.dist(p[2], q[2]) for p, q in zip(track, track[1:]))
 
 
-def write_route(a, tracks):
-    """tracks {car: [(time s, frame, (x, z))]}: the route of the car that went furthest."""
+def write_route(a, tracks, heights=None):
+    """tracks {car: [(time s, frame, (x, z))]}: the route of the car that went furthest.
+    heights {(x, z): y} gives each point a fourth column, the ground's height there (follow's
+    teleport puts a car back at it)."""
+    heights = heights or {}
     if not tracks:
         raise SystemExit("no opponents: is a race on?")
     address, track = max(tracks.items(), key=lambda kv: length(kv[1]))
@@ -82,7 +85,7 @@ def write_route(a, tracks):
           f"in {track[-1][0] - track[0][0]:.0f} s")
 
     # Resample every --spacing metres, with the speed it had there.
-    points = [(track[0][2], 0.0)]
+    points = [(track[0][2], 0.0, heights.get(track[0][2]))]
     carry = 0.0
     for (t0, _, p0), (t1, _, p1) in zip(track, track[1:]):
         d = math.dist(p0, p1)
@@ -94,15 +97,15 @@ def write_route(a, tracks):
             p0 = (p0[0] + (p1[0] - p0[0]) * u, p0[1] + (p1[1] - p0[1]) * u)
             d = math.dist(p0, p1)
             carry = 0.0
-            points.append((p0, speed))
+            points.append((p0, speed, heights.get(p1)))
         carry += d
     # The leader's speed from the start: the first point gets the second's.
-    points[0] = (points[0][0], points[1][1] if len(points) > 1 else 0.0)
+    points[0] = (points[0][0], points[1][1] if len(points) > 1 else 0.0, points[0][2])
     with open(a.file, "w", encoding="utf-8", newline="\n") as out:
         out.write(f"# route recorded from opponent {address}: {len(points)} points, "
-                  f"{a.spacing} m apart; x,z,speed (m/s)\n")
-        for (x, z), speed in points:
-            out.write(f"{x:.2f},{z:.2f},{speed:.1f}\n")
+                  f"{a.spacing} m apart; x,z,speed (m/s)[,height (m)]\n")
+        for (x, z), speed, y in points:
+            out.write(f"{x:.2f},{z:.2f},{speed:.1f}" + ("" if y is None else f",{y:.2f}") + "\n")
     print(f"{a.file}: {len(points)} points")
 
 
@@ -114,24 +117,25 @@ def from_log(a):
     watched = devrun.watch(a.log)
     if not watched:
         raise SystemExit("no 'watch' lines in the log: run the script with `watch 15` (or so)")
-    tracks = {}
+    tracks, heights = {}, {}
     for tick in sorted(watched):
         for i, p in enumerate(watched[tick]):
             if i == 0:
                 continue  # the player
+            heights[(p[0], p[2])] = p[1]
             track = tracks.setdefault(i, [])
             # A jump (a reset after a crash) starts over.
             if track and math.dist(track[-1][2], (p[0], p[2])) > 30:
                 track.clear()
             track.append((tick / a.fps, tick, (p[0], p[2])))
-    write_route(a, tracks)
+    write_route(a, tracks, heights)
 
 
 def show(a):
     points = []
     for line in open(a.file, encoding="utf-8"):
         if line[:1] in "-0123456789":
-            x, z, s = map(float, line.split(","))
+            x, z, s = map(float, line.split(",")[:3])
             points.append(((x, z), s))
     total = sum(math.dist(p[0], q[0]) for p, q in zip(points, points[1:]))
     speeds = [s for _, s in points]
