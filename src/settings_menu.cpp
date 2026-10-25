@@ -658,8 +658,10 @@ constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE
 constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (UNTESTED)"};
 #endif
 // While FSR can run only after a restart (the PS5 started without it chosen:
-// its device features are enabled only then, ps5/game/main_ps5.cpp).
-constexpr const char* kFsrNextStartLabel = "FSR 3.1 (NEXT START, UNTESTED)";
+// its device features are enabled only then, ps5/game/main_ps5.cpp). A row's value is clipped
+// at about 27 characters ("FSR 3.1 (NEXT START, UNTESTED)" lost its end and its arrow), so
+// the plain label says UNTESTED and this one doesn't.
+constexpr const char* kFsrNextStartLabel = "FSR 3.1 (NEXT START)";
 constexpr int kAntiAliasingCount = int(sizeof(kAntiAliasingValues) / sizeof(kAntiAliasingValues[0]));
 constexpr double kSharpness[] = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
 constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
@@ -893,11 +895,7 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
         return kFsrNextStartLabel;
       }
       if (IsFrameGenerationItem(item) && index == 1 && FrameGenerationNextStart()) {
-#if REX_PLATFORM_WIN32
-        return "FSR 3.1 (NEXT START)";
-#else
-        return "FSR 3.1 (NEXT START, UNTESTED)";
-#endif
+        return kFsrNextStartLabel;
       }
       if (IsFrameGenerationItem(item) && index == 0 && FrameGenerationUnavailable()) {
         // OFF, and why it's all there is: the menu's letters (the SDK's text).

@@ -21,8 +21,11 @@
 //     (mcla_pad_timeout_shot=<file.png>: the same picture when a wait_until or
 //     press_until times out)
 //   state   log <text>   include <script>   quit   set <option> <value>
+//   window minimize|restore|hide|show|cover|uncover|state (Windows: the game's own window,
+//     for checking what a minimised, hidden or covered window does to the frame loop)
 //   get <option>... (the options' values: the reply, and the log; fg_status is
-//     frame generation's state, the presenter's, not an option)
+//     frame generation's state, the presenter's, not an option; so is ll_status, the low
+//     latency feature's)
 //   save_config (what the F4 overlay's "Save to config" does: rex::cvar::SaveConfig
 //     into mcla.toml next to the executable)
 //   write_content_header <name> (a content header file, as the game's saves get, from a
@@ -85,6 +88,7 @@
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/low_latency.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/virtual_key.h>
 #include <rex/ui/window.h>
@@ -645,6 +649,104 @@ bool WritePng(const std::string& path, uint32_t width, uint32_t height,
   std::fclose(f);
   return ok;
 }
+
+#if defined(_WIN32)
+// The game's own window (the process's largest top-level one), for the `window` command.
+HWND g_game_hwnd = nullptr;
+std::thread g_cover_thread;
+DWORD g_cover_thread_id = 0;
+std::atomic<bool> g_cover_ready{false};
+
+HWND FindGameWindow() {
+  if (g_game_hwnd && IsWindow(g_game_hwnd)) {
+    return g_game_hwnd;
+  }
+  struct Search {
+    DWORD pid;
+    HWND best;
+    LONG area;
+  } search{GetCurrentProcessId(), nullptr, 0};
+  EnumWindows(
+      [](HWND hwnd, LPARAM param) -> BOOL {
+        Search* s = reinterpret_cast<Search*>(param);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        RECT rect;
+        if (pid != s->pid || GetWindow(hwnd, GW_OWNER) || !IsWindowVisible(hwnd) ||
+            !GetWindowRect(hwnd, &rect)) {
+          return TRUE;
+        }
+        const LONG area = (rect.right - rect.left) * (rect.bottom - rect.top);
+        if (area > s->area) {
+          s->area = area;
+          s->best = hwnd;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&search));
+  g_game_hwnd = search.best;
+  return g_game_hwnd;
+}
+
+std::string WindowCommand(const std::string& what) {
+  HWND hwnd = FindGameWindow();
+  if (!hwnd) {
+    return "err no window";
+  }
+  if (what == "minimize") {
+    ShowWindow(hwnd, SW_MINIMIZE);
+  } else if (what == "restore") {
+    ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+  } else if (what == "hide") {
+    ShowWindow(hwnd, SW_HIDE);
+  } else if (what == "show") {
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+  } else if (what == "cover") {
+    // A black pop-up of ours over the window (not activated): the window is occluded, as by
+    // another program's window, and loses the focus the way an alt-tab does when it is clicked.
+    if (g_cover_thread.joinable()) {
+      return "err already covered";
+    }
+    RECT rect;
+    GetWindowRect(hwnd, &rect);
+    g_cover_ready = false;
+    g_cover_thread = std::thread([rect] {
+      g_cover_thread_id = GetCurrentThreadId();
+      HWND cover = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"STATIC", L"",
+                                   WS_POPUP | WS_VISIBLE | SS_BLACKRECT, rect.left, rect.top,
+                                   rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr,
+                                   nullptr, nullptr);
+      SetForegroundWindow(cover);
+      g_cover_ready = true;
+      MSG msg;
+      while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+      DestroyWindow(cover);
+    });
+    for (int i = 0; i < 200 && !g_cover_ready; ++i) {
+      Sleep(10);
+    }
+  } else if (what == "uncover") {
+    if (!g_cover_thread.joinable()) {
+      return "err not covered";
+    }
+    PostThreadMessageW(g_cover_thread_id, WM_QUIT, 0, 0);
+    g_cover_thread.join();
+    SetForegroundWindow(hwnd);
+  } else if (what != "state") {
+    return "err usage: window minimize|restore|hide|show|cover|uncover|state";
+  }
+  const std::string state = std::string("iconic=") + (IsIconic(hwnd) ? "1" : "0") +
+                            " visible=" + (IsWindowVisible(hwnd) ? "1" : "0") +
+                            " foreground=" + (GetForegroundWindow() == hwnd ? "1" : "0");
+  REXLOG_INFO("dev pad: window {}: {}", what, state);
+  return "ok " + state;
+}
+#endif
 
 bool Shot(const std::string& path, double scale, std::string& result) {
   auto* runtime = rex::Runtime::instance();
@@ -1588,6 +1690,13 @@ std::string Execute(const std::string& line) {
     std::string result;
     return Shot(rest(1, last), scale, result) ? "ok " + result : "err " + result;
   }
+  if (cmd == "window") {
+#if defined(_WIN32)
+    return WindowCommand(arg(1));
+#else
+    return "err window is for Windows";
+#endif
+  }
   if (cmd == "state") {
     const uint64_t elapsed = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - g_start).count());
@@ -1623,6 +1732,12 @@ std::string Execute(const std::string& line) {
                 : status.state == rex::ui::Presenter::FrameGenerationState::kAvailable
                     ? "available"
                     : "unavailable (" + status.why + ")";
+      } else if (args[i] == "ll_status") {
+        const auto status = rex::ui::LowLatency::GetStatus();
+        value = status.state == rex::ui::LowLatency::State::kUnknown ? "unknown"
+                : status.state == rex::ui::LowLatency::State::kAvailable
+                    ? std::string(status.active ? "active" : "idle") + " (" + status.name + ")"
+                    : "unavailable (" + status.name + ": " + status.why + ")";
       } else {
         value = rex::cvar::GetFlagByName(args[i]);
       }
