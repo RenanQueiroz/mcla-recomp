@@ -59,6 +59,8 @@ static class PayloadFormat
     public const int FooterSize = 16;
     public const int MaxFiles = 20000;
     public const long MaxBytes = 2L * 1024 * 1024 * 1024;
+    /// All the files together (the launcher folder is 0.2 GB).
+    public const long MaxTotalBytes = 4L * 1024 * 1024 * 1024;
 }
 
 /// A read-only window onto part of a stream (the payload inside the exe).
@@ -130,10 +132,12 @@ sealed class Payload : IDisposable
         catch { file.Dispose(); throw; }
     }
 
-    /// Unpacks every file into `folder` (which must be new or empty), checking each one's SHA-256 and the
-    /// total. `progress` gets (bytes done, bytes total); `cancelled` is looked at between files.
-    public void Extract(string folder, Action<long, long>? progress = null, Func<bool>? cancelled = null)
+    /// Unpacks every file into `folder` (which must be new or empty, or hold only Setup's own marker), checking each one's SHA-256 and the
+    /// total, and returns the relative paths (with /) of the files it wrote. `progress` gets (bytes done, bytes total); `cancelled` is
+    /// looked at between files. More bytes than the header says (or than any launcher is) is refused.
+    public List<string> Extract(string folder, Action<long, long>? progress = null, Func<bool>? cancelled = null)
     {
+        var written = new List<string>();
         Directory.CreateDirectory(folder);
         var root = Path.GetFullPath(folder).TrimEnd('\\') + "\\";
         var end = start + length;
@@ -145,6 +149,7 @@ sealed class Payload : IDisposable
             var count = ReadInt32(brotli);
             if (count < 0 || count > PayloadFormat.MaxFiles) throw new InvalidDataException("the installer's payload is damaged (file count)");
             long total = Meta.Bytes, done = 0;
+            if (total > PayloadFormat.MaxTotalBytes) throw new InvalidDataException("the installer's payload is damaged (its size)");
             var hash = new byte[32];
             for (var i = 0; i < count; i++)
             {
@@ -171,14 +176,53 @@ sealed class Payload : IDisposable
                         output.Write(buffer, 0, n);
                         left -= n;
                         done += n;
+                        if (done > PayloadFormat.MaxTotalBytes || (total > 0 && done > total))
+                            throw new InvalidDataException("the installer's payload holds more than its header says: the installer file is damaged. Download it again.");
                         progress?.Invoke(done, total);
                     }
                 }
                 if (!sha.GetHashAndReset().AsSpan().SequenceEqual(hash))
                     throw new InvalidDataException($"{relative} does not match its checksum: the installer file is damaged. Download it again.");
+                written.Add(relative);
             }
         }
         finally { ArrayPool<byte>.Shared.Return(buffer); }
+        return written;
+    }
+
+    /// The relative paths (with /) of the files in the payload, without writing any (the content is read and dropped).
+    public List<string> ListPaths()
+    {
+        var names = new List<string>();
+        var end = start + length;
+        using var window = new WindowStream(file, streamStart, end - streamStart);
+        using var brotli = new BrotliStream(window, CompressionMode.Decompress);
+        var buffer = ArrayPool<byte>.Shared.Rent(1 << 20);
+        try
+        {
+            var count = ReadInt32(brotli);
+            if (count < 0 || count > PayloadFormat.MaxFiles) throw new InvalidDataException("the installer's payload is damaged (file count)");
+            var hash = new byte[32];
+            for (var i = 0; i < count; i++)
+            {
+                var nameLength = ReadInt32(brotli);
+                if (nameLength <= 0 || nameLength > 1024) throw new InvalidDataException("the installer's payload is damaged (a name)");
+                var nameBytes = new byte[nameLength];
+                brotli.ReadExactly(nameBytes);
+                names.Add(Encoding.UTF8.GetString(nameBytes));
+                var size = ReadInt64(brotli);
+                if (size < 0 || size > PayloadFormat.MaxBytes) throw new InvalidDataException("the installer's payload is damaged (a size)");
+                brotli.ReadExactly(hash);
+                for (var left = size; left > 0;)
+                {
+                    var n = brotli.Read(buffer, 0, (int)Math.Min(left, buffer.Length));
+                    if (n <= 0) throw new InvalidDataException("the installer's payload ends early");
+                    left -= n;
+                }
+            }
+        }
+        finally { ArrayPool<byte>.Shared.Return(buffer); }
+        return names;
     }
 
     /// A relative path from the payload, resolved below `root`; anything that would leave it is refused.

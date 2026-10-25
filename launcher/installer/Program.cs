@@ -21,7 +21,7 @@
 //   --import-pointer <install.json>   use this file as the new folder's install.json when it has none (a launcher
 //                         that was unpacked from a zip moves into %LOCALAPPDATA%\Programs\MCLA)
 //   --launch-args <text>  arguments for the launcher (tests)
-//   --health-timeout <s>  how long the start check waits (default 40; tests)
+//   --health-timeout <s>  how long the start check waits (default 90: the first start of 480 new files can wait for a virus scanner)
 //   --rename-timeout <s>  how long to wait for Windows to let the old folder be renamed (default 60; tests)
 //   --shortcut-dir <dir>  put the shortcuts under this folder instead of the Start menu and desktop (tests)
 // The environment variables MCLA_SETUP_DIR and MCLA_SETUP_SHORTCUT_DIR stand for --dir and --shortcut-dir when those are not given (a
@@ -46,7 +46,7 @@ sealed class Options
     public string Mode = "install"; // install | update | uninstall | compose | info | extract
     public string? Dir, ShortcutDir, Stub, ComposeFolder, ComposeOut, ExtractTo, InfoExe, LaunchArgs, ReadyFile, ImportPointer;
     public bool Silent, NoLaunch, NoShortcuts, Force;
-    public int WaitPid, RenameSeconds = 60, HealthSeconds = 40;
+    public int WaitPid, RenameSeconds = 60, HealthSeconds = 90;
     public string Health = "window";
     public int Quality = 9;
     public PayloadMeta Meta = new();
@@ -86,9 +86,9 @@ static unsafe class Program
         var work = new Thread(() =>
         {
             try { exit = Run(o); }
-            catch (OperationCanceledException) { Log("cancelled"); exit = 2; }
-            catch (SetupFailure ex) { Log("FAILED: " + ex.Message); Fail(o, ex.Message); exit = 1; }
-            catch (Exception ex) { Log("FAILED: " + ex); Fail(o, "Something went wrong: " + ex.Message + "\n\nThe log is " + Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")); exit = 1; }
+            catch (OperationCanceledException) { Log("cancelled"); RestartOldLauncher(); exit = 2; }
+            catch (SetupFailure ex) { Log("FAILED: " + ex.Message); RestartOldLauncher(); Fail(o, ex.Message); exit = 1; }
+            catch (Exception ex) { Log("FAILED: " + ex); RestartOldLauncher(); Fail(o, "Something went wrong: " + ex.Message + "\n\nThe log is " + Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")); exit = 1; }
             finally { if (!o.Silent) Dialogs.Close(); }
         });
         work.Start();
@@ -196,11 +196,29 @@ static unsafe class Program
 
     // ---- install, update, uninstall ---------------------------------------------------------------------------------
 
+    /// Set during an update from the moment the old launcher has quit until the swap is made (or the old one is back): the old
+    /// launcher is started again if the update fails before the folders change, since the person was left with no window.
+    static string? restartOldExe, restartOldDir, restartOldArguments;
+
+    static void RestartOldLauncher()
+    {
+        var exe = restartOldExe;
+        var dir = restartOldDir;
+        restartOldExe = null;
+        if (exe == null || dir == null || !File.Exists(exe)) return;
+        try
+        {
+            if (FolderSwap.ProcessesUnder(dir).Count > 0) return;
+            Log("starting the launcher that was there before");
+            TryStart(exe, dir, restartOldArguments);
+        }
+        catch (Exception ex) { Log("could not start the previous launcher: " + ex.Message); }
+    }
+
     static int Run(Options o)
     {
         if (!o.Silent) Dialogs.WaitForDialog(3000);
-        var target = Path.GetFullPath(o.Dir ?? DefaultDir()).TrimEnd('\\');
-        Guard(target);
+        var target = Guard(Path.GetFullPath(o.Dir ?? DefaultDir()));
         FolderSwap.Recover(target);
         return o.Mode == "uninstall" ? Uninstall(o, target) : Install(o, target);
     }
@@ -213,19 +231,61 @@ static unsafe class Program
         if (permille != null) Dialogs.SetProgress(permille.Value);
     }
 
-    /// Nothing is ever put over a folder of a fork checkout (the launcher built from source lives there), over a
-    /// drive's root, or over the folder this program runs from.
-    static void Guard(string target)
+    /// The folders Setup never uses as the launcher's: the user's own (profile, Desktop, Documents, Downloads, Windows, Program
+    /// Files, AppData and the Programs folder itself), and any folder that holds one of them.
+    static IEnumerable<string> ProtectedFolders()
     {
-        var root = Path.GetPathRoot(target);
-        if (string.IsNullOrEmpty(target) || string.Equals(target + "\\", root, StringComparison.OrdinalIgnoreCase))
-            throw new SetupFailure($"{target} is a drive's root; choose a folder for the launcher.");
+        string Known(Environment.SpecialFolder f) => Environment.GetFolderPath(f);
+        var profile = Known(Environment.SpecialFolder.UserProfile);
+        var local = Known(Environment.SpecialFolder.LocalApplicationData);
+        foreach (var path in new[]
+        {
+            profile, Known(Environment.SpecialFolder.DesktopDirectory), Known(Environment.SpecialFolder.MyDocuments),
+            profile.Length > 0 ? Path.Combine(profile, "Downloads") : "", Known(Environment.SpecialFolder.Windows),
+            Known(Environment.SpecialFolder.ProgramFiles), Known(Environment.SpecialFolder.ProgramFilesX86),
+            Known(Environment.SpecialFolder.ApplicationData), local, local.Length > 0 ? Path.Combine(local, "Programs") : "",
+            Known(Environment.SpecialFolder.System),
+        })
+            if (path.Length > 0) yield return Path.GetFullPath(path).TrimEnd('\\');
+    }
+
+    /// Nothing is ever put over a folder of a fork checkout (the launcher built from source lives there), over a drive's
+    /// or share's root, over the user's own folders (or a folder that holds them), over a link, or over the folder this program
+    /// runs from. Returns the folder without a trailing backslash.
+    static string Guard(string full)
+    {
+        var root = (Path.GetPathRoot(full) ?? "").TrimEnd('\\');
+        var target = full.TrimEnd('\\');
+        if (target.Length == 0 || target.Equals(root, StringComparison.OrdinalIgnoreCase) || target.Length <= 2)
+            throw new SetupFailure($"{full} is a drive's or share's root; choose a folder for the launcher.");
+        foreach (var protectedFolder in ProtectedFolders())
+            if (protectedFolder.Equals(target, StringComparison.OrdinalIgnoreCase) || protectedFolder.StartsWith(target + "\\", StringComparison.OrdinalIgnoreCase))
+                throw new SetupFailure($"{target} is one of your own folders, or holds one; choose a folder of its own for the launcher.");
+        if (Directory.Exists(target) && FolderSwap.IsLink(target))
+            throw new SetupFailure($"{target} is a link to another folder; choose the folder itself.");
         for (var dir = new DirectoryInfo(target); dir != null; dir = dir.Parent)
             if (File.Exists(Path.Combine(dir.FullName, "build-game.ps1")))
                 throw new SetupFailure($"{target} is inside a copy of the game's source ({dir.FullName}), which has its own launcher. Choose another folder.");
         var self = Environment.ProcessPath;
         if (self != null && self.StartsWith(target + "\\", StringComparison.OrdinalIgnoreCase))
             throw new SetupFailure("Run MCLA-Setup.exe from outside the launcher's folder (for example from Downloads).");
+        return target;
+    }
+
+    /// Refuses (with the reason, in plain words) to replace or remove a folder that is not wholly Setup's: one without Setup's
+    /// installed.txt, one that holds things Setup did not unpack, or one that holds the install its install.json names.
+    /// Returns what Setup unpacked there (the list in the folder, or `fallback()` for a folder made before there was one).
+    static List<string> CheckOwned(string target, string verb, IEnumerable<string>? keep, Func<List<string>> fallback)
+    {
+        if (!File.Exists(Path.Combine(target, FolderSwap.OwnerMarker)))
+            throw new SetupFailure($"{target} was not made by this setup (it has no {FolderSwap.OwnerMarker}), so it is not {verb}. Choose another folder or empty this one.");
+        if (FolderSwap.InstallRootInside(target) is { } inside)
+            throw new SetupFailure($"Your install ({inside}) is inside the launcher's folder {target}, which would take it along. Nothing was {(verb.StartsWith("replaced") ? "replaced" : "removed")}. Move the launcher's folder or the install first.");
+        var owned = FolderSwap.ReadManifest(target) ?? fallback();
+        var foreign = FolderSwap.ForeignEntries(target, FolderSwap.TopLevelNames(owned, keep));
+        if (foreign.Count > 0 && verb.StartsWith("replaced"))
+            throw new SetupFailure($"{target} holds things the setup did not put there ({string.Join(", ", foreign.Take(5))}{(foreign.Count > 5 ? ", ..." : "")}), and replacing the folder would delete them. Move them out and run the setup again.");
+        return owned;
     }
 
     static int Install(Options o, string target)
@@ -233,10 +293,10 @@ static unsafe class Program
         var self = Environment.ProcessPath ?? throw new SetupFailure("can't tell where this program is");
         using var payload = Payload.Open(self) ?? throw new SetupFailure("This installer has no launcher inside it. Download MCLA-Setup.exe again from the releases page.");
         var meta = payload.Meta;
-        var exists = Directory.Exists(target);
-        var launcherExe = Path.Combine(target, meta.Exe);
-        if (exists && !File.Exists(launcherExe) && Directory.EnumerateFileSystemEntries(target).Any())
-            throw new SetupFailure($"{target} exists and is not the launcher's folder. Remove it or choose another folder.");
+        var exists = Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any();
+        if (o.Mode == "update" && !exists) throw new SetupFailure($"There is no launcher in {target} to update.");
+        if (exists) CheckOwned(target, "replaced", o.Keep, payload.ListPaths);
+        if (o.Mode == "update") { restartOldExe = Path.Combine(target, meta.Exe); restartOldDir = target; restartOldArguments = o.LaunchArgs; }
 
         if (exists && o.Mode == "install" && !o.Force && Newer(Installed(target), meta.Version))
         {
@@ -248,20 +308,22 @@ static unsafe class Program
         var parent = Path.GetDirectoryName(target)!;
         Directory.CreateDirectory(parent);
         FolderSwap.CleanLeftovers(target);
-        var staged = FolderSwap.NewStagingPath(target);
+        var staged = FolderSwap.CreateStaging(target);
+        var keepStaged = false;
         var cancelled = () => !o.Silent && Dialogs.CancelRequested;
         try
         {
             Status(o, $"Unpacking {meta.Files} files...", 0);
             var lastPermille = -1;
-            payload.Extract(staged, (done, total) =>
+            var unpacked = payload.Extract(staged, (done, total) =>
             {
                 var permille = total > 0 ? (int)(done * 900 / total) : 0;
                 if (permille != lastPermille) { lastPermille = permille; if (!o.Silent) Dialogs.SetProgress(permille); }
             }, cancelled);
-            File.WriteAllText(Path.Combine(staged, "installed.txt"),
-                $"version={meta.Version}\ntag={meta.Tag}\ncommit={meta.Commit}\ninstalled={DateTime.UtcNow:O}\n");
             if (!File.Exists(Path.Combine(staged, meta.Exe))) throw new SetupFailure($"The installer's payload has no {meta.Exe}.");
+            File.WriteAllLines(Path.Combine(staged, FolderSwap.ManifestName), unpacked);
+            File.WriteAllText(Path.Combine(staged, FolderSwap.OwnerMarker),
+                $"version={meta.Version}\ntag={meta.Tag}\ncommit={meta.Commit}\ninstalled={DateTime.UtcNow:O}\n");
 
             // 2. The old launcher must be closed before its folder can be renamed.
             if (exists)
@@ -277,6 +339,8 @@ static unsafe class Program
                     if (!FolderSwap.WaitUntilFree(target, TimeSpan.FromMinutes(o.Silent || o.Mode == "update" ? 2 : 10), cancelled))
                         throw cancelled() ? new OperationCanceledException() : new SetupFailure("The launcher is still running. Close it and run MCLA-Setup.exe again.");
                 }
+                // What the launcher wrote while it ran (its pointer) is looked at now, with the folder at rest.
+                CheckOwned(target, "replaced", o.Keep, payload.ListPaths);
             }
             if (cancelled()) throw new OperationCanceledException();
             if (!o.Silent) Dialogs.DisableCancel();
@@ -290,7 +354,14 @@ static unsafe class Program
                 File.Copy(o.ImportPointer, Path.Combine(staged, "install.json"));
             SwapRecord swap;
             try { swap = FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(o.RenameSeconds)); }
+            catch (SwapFailedException ex)
+            {
+                // The staged folder stays when the old one could not be put back: it is the launcher, until the next run repairs the folder.
+                keepStaged = !ex.OldFolderIsBack;
+                throw new SetupFailure(ex.Message);
+            }
             catch (IOException ex) { throw new SetupFailure($"Windows would not let the launcher's folder be replaced ({ex.Message}). Close anything that has it open (Explorer, a virus scanner's scan) and try again."); }
+            restartOldExe = null; // the folders changed: from here the way back is RollBack's
 
             // 4. Shortcuts and the first start; the old launcher comes back if the new one doesn't start.
             // An update renews the shortcuts that are there; it never makes one (the person may have deleted it).
@@ -306,7 +377,9 @@ static unsafe class Program
                     // see what is wrong, instead of an empty folder and shortcuts that lead nowhere.
                     if (swap.Previous == null)
                         throw new SetupFailure($"The launcher was installed in {target} but did not start ({result.Why}). Try its shortcut again; if it still fails, the log is {Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")}.");
-                    var restored = FolderSwap.RollBack(swap);
+                    bool restored;
+                    try { restored = FolderSwap.RollBack(swap); }
+                    catch (SwapFailedException ex) { throw new SetupFailure($"The new launcher did not start ({result.Why}). {ex.Message}"); }
                     if (restored)
                     {
                         Log("the previous launcher was put back");
@@ -323,16 +396,16 @@ static unsafe class Program
         }
         finally
         {
-            // A staged folder that was never swapped in (cancelled, failed) is not left behind.
-            if (Directory.Exists(staged)) FolderSwap.DeleteFolder(staged, TimeSpan.FromSeconds(3));
+            // A staged folder that was never swapped in (cancelled, failed) is not left behind, unless it is all there is of the launcher.
+            if (!keepStaged && Directory.Exists(staged)) FolderSwap.DeleteFolder(staged, TimeSpan.FromSeconds(3));
         }
     }
 
     static int Uninstall(Options o, string target)
     {
         if (!Directory.Exists(target)) { Status(o, "The launcher is not installed there."); return 0; }
-        if (!File.Exists(Path.Combine(target, "MclaLauncher.exe")))
-            throw new SetupFailure($"{target} is not the launcher's folder; nothing was removed.");
+        using var payload = Payload.Open(Environment.ProcessPath ?? "");
+        var owned = CheckOwned(target, "removed", o.Keep, () => payload?.ListPaths() ?? throw new SetupFailure($"{target} has no list of its files and this installer has no launcher inside it to take one from."));
         if (!o.Silent && !Dialogs.YesNo($"Remove the launcher from {target} and its shortcuts? Your game install and your saves are not touched."))
             throw new OperationCanceledException();
         if (o.WaitPid != 0) FolderSwap.WaitForProcess(o.WaitPid, TimeSpan.FromSeconds(90));
@@ -340,10 +413,9 @@ static unsafe class Program
         if (!FolderSwap.WaitUntilFree(target, TimeSpan.FromMinutes(o.Silent ? 1 : 5)))
             throw new SetupFailure("The launcher is still running. Close it and try again.");
         RemoveShortcuts(o, target);
-        var moved = target + FolderSwap.OldTag + DateTime.Now.ToString("yyyyMMdd-HHmmss");
-        FolderSwap.RenameWithRetry(target, moved, TimeSpan.FromSeconds(30));
-        FolderSwap.DeleteFolder(moved, TimeSpan.FromSeconds(10));
-        Status(o, "The launcher was removed.", 1000);
+        // Only what Setup unpacked: anything else in the folder stays, and so does the folder.
+        var left = FolderSwap.DeleteOwned(target, owned, TimeSpan.FromSeconds(10));
+        Status(o, left.Count == 0 ? "The launcher was removed." : $"The launcher was removed; {string.Join(", ", left.Take(5))} in {target} is not the setup's and was left.", 1000);
         return 0;
     }
 
@@ -370,16 +442,18 @@ static unsafe class Program
         {
             try
             {
-                // A shortcut of that name that starts something else (the launcher built from source has one on
-                // the desktop) is not ours to replace.
-                var existing = Shortcuts.ReadTarget(lnk);
-                if (existing == null && !createMissing) continue;
-                if (existing != null && !string.Equals(Path.GetFullPath(existing), exe, StringComparison.OrdinalIgnoreCase)
-                    && File.Exists(existing))
+                // A shortcut file that is there is renewed only when it starts this launcher; one that starts something else
+                // (the launcher built from source has one on the desktop), or that can't be read, is not ours to replace.
+                if (File.Exists(lnk))
                 {
-                    Log($"left {lnk} alone: it starts {existing}");
-                    continue;
+                    var existing = Shortcuts.ReadTarget(lnk);
+                    if (existing == null || !string.Equals(Path.GetFullPath(existing), exe, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"left {lnk} alone: it starts {existing ?? "something that could not be read"}");
+                        continue;
+                    }
                 }
+                else if (!createMissing) continue;
                 var made = Shortcuts.Create(lnk, exe, target, Path.Combine(target, "launcher.ico"),
                     "Set up, update and play the Midnight Club: Los Angeles recompilation");
                 Log(made ? $"shortcut {lnk}" : $"could not make {lnk}");
@@ -419,9 +493,11 @@ static unsafe class Program
     }
 
     /// Starts the launcher and waits until it has come up: a window, still there 3 s later (or, for tests,
-    /// "alive:N": still running after N seconds). A process that ends first, or has no window after 40 s, did not start.
-    /// With --ready-file the launcher is told the file's path (the MCLA_READY_FILE variable) and has come up when it
-    /// writes it: its own word that it ran for a while is stronger than a window, and replaces the window check.
+    /// "alive:N": still running after N seconds). A process that ends first, or has no window within the health timeout
+    /// (90 s: the first start of 480 new files can wait for a virus scanner), did not start.
+    /// With --ready-file the launcher is told the file's path (the MCLA_READY_FILE variable) and writes it from its window's
+    /// thread once the window has been up for a while; it has come up when the file is there and the process has a window (or,
+    /// for tests, "alive:N" says it need not).
     static Started LaunchAndCheck(Options o, string exe, string workingDirectory)
     {
         if (o.ReadyFile != null) { try { File.Delete(o.ReadyFile); } catch (Exception) { } }
@@ -436,7 +512,7 @@ static unsafe class Program
             if (process.HasExited) return new Started(false, $"it ended with code {process.ExitCode} after {watch.Elapsed.TotalSeconds:N1} s");
             if (o.ReadyFile != null)
             {
-                if (File.Exists(o.ReadyFile)) return new Started(true, "");
+                if (File.Exists(o.ReadyFile) && (aliveSeconds != null || process.MainWindowHandle != 0)) return new Started(true, "");
             }
             else if (aliveSeconds != null)
             {
@@ -450,7 +526,7 @@ static unsafe class Program
             Thread.Sleep(100);
         }
         try { process.Kill(entireProcessTree: true); } catch (Exception) { }
-        return new Started(false, o.ReadyFile != null ? $"it did not say it was ready in {o.HealthSeconds} seconds" : $"it showed no window in {o.HealthSeconds} seconds");
+        return new Started(false, o.ReadyFile != null ? $"it did not say it was ready, with a window, in {o.HealthSeconds} seconds" : $"it showed no window in {o.HealthSeconds} seconds");
     }
 
     // ---- versions --------------------------------------------------------------------------------------------------------
