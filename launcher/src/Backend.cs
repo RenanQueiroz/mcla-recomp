@@ -378,7 +378,7 @@ static class Repo
         string? fetchError = null;
         Setup.UpdateTarget? target = null;
         // An update that began and was not built (the launcher closed, a crash): the options are made to name its SDK bundle.
-        try { await Setup.UpdateEngine.RepairPendingAsync(new Setup.InstallLayout(Paths.InstallRoot!)); }
+        try { await Setup.UpdateEngine.RepairPendingAsync(new Setup.InstallLayout(Paths.InstallRoot!), AppContext.BaseDirectory); }
         catch (Exception) { }   // best effort: the status below is what the window needs
         try
         {

@@ -141,7 +141,11 @@ sealed record InstallRecord
 }
 
 /// What an update that has begun is moving to. Tag: the release's (or "main"); the bundle is the release's SDK, null for main.
-sealed record PendingUpdate(string Ref, string Commit, string Tag, string? BundleAsset, string? BundleSha256);
+sealed record PendingUpdate(string Ref, string Commit, string Tag, string? BundleAsset, string? BundleSha256, PendingTool[]? Tools = null);
+
+/// A tool an update unpacked beside the one in use: its folder in tools\, the SHA-256 of its archive, and the archive's file name
+/// in downloads\ (kept until the tool is the one in use). It becomes the tool in use once the checkout has moved.
+sealed record PendingTool(string Name, string Folder, string Sha256, string Archive);
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
                              DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

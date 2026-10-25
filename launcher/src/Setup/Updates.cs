@@ -10,9 +10,11 @@
 //
 // The order of an update, so that a stop, a crash or a power cut at any point leaves something the next start can finish
 // or build: everything is downloaded and checked first (nothing in the install changes); the update is then written into
-// install.json (Pending); a replaced build tool takes the build folder's CMakeCache.txt and build.ninja with it, and the folders of the
-// tools it replaces go (nothing refers to them any more); the checkout moves; build-options.json names the new SDK bundle.
-// A plain Rebuild after that builds the new version, and a start that finds Pending repairs the options (RepairPendingAsync).
+// install.json (Pending, with the new tools that were unpacked beside the old ones but are not yet the tools in use); the checkout
+// moves; build-options.json names the new SDK bundle; then the new tools become the tools in use, the build folder forgets what it
+// was configured with (CMakeCache.txt and build.ninja name the tools that made it) and the folders of the tools replaced go.
+// A stop at any point leaves a checkout, a bundle and tools that belong together (before the move: all old; after it, a start finds
+// Pending and finishes the rest, RepairPendingAsync), and a plain Rebuild builds the new version.
 //
 // The window drives this (LauncherApp), and so does the check harness (dev/wizard-check: update-run).
 namespace MclaLauncher.Setup;
@@ -123,6 +125,10 @@ static class UpdateEngine
     public static async Task<UpdateSession> PrepareAsync(InstallLayout layout, UpdateTarget target, Action<string> log, IProgress<string> progress, CancellationToken ct)
     {
         var folderLock = InstallLock.Acquire(layout.Root);
+        // What the record said before this update wrote its own (an earlier update, stopped after its move and not yet built,
+        // is still waiting): it comes back if this one fails before its move.
+        PendingUpdate? previous = null;
+        var recorded = false;
         try
         {
             // The checkout is moved here, not by build-game.ps1 -Ref: the script of the install being updated is the old one,
@@ -135,7 +141,8 @@ static class UpdateEngine
                                              + "Stay on the release, or wait for the next one.", changed.Output);
                 log("main does not change the SDK's patches");
                 var mainChanged = await FilesChangedAsync(layout, target);
-                SetPending(layout, target);
+                previous = SetPending(layout, target, []);
+                recorded = true;
                 await MoveToAsync(layout, target, log);
                 return new UpdateSession(folderLock, new BuildRunOptions(layout.LauncherDir, layout.LogsDir, [], layout.GitDir, IsUpdate: true), target, mainChanged);
             }
@@ -168,84 +175,111 @@ static class UpdateEngine
             await Verified.FetchAsync("the SDK bundle", zip, bundle.Size, bundle.Sha256,
                 (dest, p, token) => source.FetchAssetAsync(bundle.Asset, dest, p, token), new Progress<long>(_ => { }), log, ct);
 
-            // 3. The new tools, unpacked beside the old ones (which keep working until the update is recorded).
-            var oldFolders = new List<string>();
+            // 3. The new tools, unpacked beside the old ones. They are not recorded as the tools in use yet: until the checkout has
+            //    moved, a build (a plain Rebuild after a stop) must still use the tools the old checkout and its SDK were built with.
+            var staged = new List<PendingTool>();
             foreach (var name in toInstall)
             {
                 var tool = release.Tools[name];
-                var oldFolder = ToolInstaller.FolderOf(layout.Tools, name);
                 progress.Report($"Unpacking {name}");
-                var file = Path.Combine(layout.Downloads, Path.GetFileName(new Uri(tool.Url).AbsolutePath));
-                var folder = await ToolInstaller.InstallAsync(layout.Tools, name, tool.Version, file, tool.Sha256, log, new Progress<(int, int)>(), ct);
-                Retry.Io(() => File.Delete(file), ct: ct);
-                if (oldFolder != null && !SetupEngine.SamePath(oldFolder, folder)) oldFolders.Add(oldFolder);
+                var archive = Path.GetFileName(new Uri(tool.Url).AbsolutePath);
+                var folder = await ToolInstaller.InstallAsync(layout.Tools, name, tool.Version, Path.Combine(layout.Downloads, archive), tool.Sha256,
+                                                              log, new Progress<(int, int)>(), ct, record: false);
+                staged.Add(new PendingTool(name, Path.GetFileName(folder), tool.Sha256, archive));
             }
             var gameChanged = toInstall.Count > 0 || BundleInUse(layout) != bundle.Sha256.ToLowerInvariant() || await FilesChangedAsync(layout, target);
 
-            // 4. Recorded, and the build folder let go of the tools it was made with: a configured build folder names the CMake
-            //    and Ninja (and compiler) that made it, and the folders of the tools just replaced go now, so that no build, now
-            //    or later, runs with one of them or breaks for lack of it. The next build configures the folder again.
-            SetPending(layout, target);
-            if (toInstall.Any(name => name != "mingit"))
-            {
-                // build.ps1 configures when there is no build.ninja (it reads the cache only when there is one), and CMake then finds
-                // the tools again because there is no cache to remember the old ones.
-                var forgotten = false;
-                foreach (var name in new[] { "CMakeCache.txt", "build.ninja" })
-                {
-                    var file = Path.Combine(layout.BuildDir, name);
-                    if (File.Exists(file)) { Retry.Io(() => File.Delete(file), ct: ct); forgotten = true; }
-                }
-                if (forgotten) log("the build folder will be configured again (a build tool changed)");
-            }
-            foreach (var old in oldFolders) DeleteToolFolder(layout, old, log);
-
-            // 5. The checkout moves, and the build options name the bundle that goes with it.
+            // 4. Recorded, then the checkout moves, and the build options name the bundle that goes with it.
+            previous = SetPending(layout, target, staged);
+            recorded = true;
             progress.Report("Moving to the release");
             await MoveToAsync(layout, target, log);
             WriteOptions(layout, bundle.Asset, bundle.Sha256);
+
+            // 5. The new tools become the tools in use, the build folder forgets the tools it was configured with, and the tools
+            //    replaced go: nothing refers to them any more, so no build, now or later, runs with one of them or breaks for lack
+            //    of it. The next build configures the folder again.
+            progress.Report("Switching to the new tools");
+            ActivateTools(layout, staged, log, ct);
+
             string[] arguments = ["-Toolchain", "mingw", "-ToolsDir", layout.Tools, "-SdkBundle", zip, "-SdkBundleSha256", bundle.Sha256];
             return new UpdateSession(folderLock, new BuildRunOptions(layout.LauncherDir, layout.LogsDir, arguments, layout.GitDir, IsUpdate: true), target, gameChanged);
         }
         catch
         {
-            // A move that did not happen leaves no update recorded (the downloads stay: they are checked, and kept for a retry).
-            try { if (HeadOf(layout) != target.Commit) ClearPending(layout); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or TimeoutException) { }
-            folderLock.Dispose();
+            // A move that did not happen: what was recorded before this update comes back (the downloads and the unpacked tools stay,
+            // checked, for a retry). A move that did happen leaves this update recorded, for the next start to finish.
+            try { if (recorded && HeadOf(layout) != target.Commit) RestorePending(layout, target.Commit, previous); }
+            catch (Exception) { }
+            finally { folderLock.Dispose(); }
             throw;
         }
     }
 
     // ---- the record of an update that has begun -------------------------------------------------------------------------
 
-    static void SetPending(InstallLayout layout, UpdateTarget target)
+    /// Writes this update's record and returns the one it replaced (null when there was none).
+    static PendingUpdate? SetPending(InstallLayout layout, UpdateTarget target, IReadOnlyList<PendingTool> tools)
     {
-        if (InstallRecord.Load(layout.RecordFile) is not { } record) return;
+        if (InstallRecord.Load(layout.RecordFile) is not { } record) return null;
         var bundle = target.Release?.SdkBundle;
-        (record with { Pending = new PendingUpdate(target.Ref, target.Commit, target.IsMain ? "main" : target.Release!.Tag, bundle?.Asset, bundle?.Sha256) })
+        (record with { Pending = new PendingUpdate(target.Ref, target.Commit, target.IsMain ? "main" : target.Release!.Tag, bundle?.Asset, bundle?.Sha256, tools.ToArray()) })
             .Save(layout.RecordFile);
+        return record.Pending;
     }
 
-    static void ClearPending(InstallLayout layout)
+    /// An update that failed before its move takes its own record away, and puts back the one it had replaced; a record that
+    /// is not its own (another update's) is left as it is.
+    static void RestorePending(InstallLayout layout, string commit, PendingUpdate? previous)
     {
-        if (InstallRecord.Load(layout.RecordFile) is { Pending: not null } record) (record with { Pending = null }).Save(layout.RecordFile);
+        if (InstallRecord.Load(layout.RecordFile) is { Pending: { } current } record && current.Commit == commit)
+            (record with { Pending = previous }).Save(layout.RecordFile);
     }
 
     static string HeadOf(InstallLayout layout) =>
         Proc.RunAsync("git", ["-C", layout.Repo, "rev-parse", "HEAD"], TimeSpan.FromSeconds(30)).GetAwaiter().GetResult().Output.Trim();
 
-    /// At the launcher's start (Installed mode): an update that began and was not built (the launcher was closed, crashed or
-    /// the power went) is looked at. If the checkout is at its commit, build-options.json is made to name the bundle that goes
-    /// with it (the move and the options are two steps), so that a plain Rebuild builds it; if the checkout never moved, nothing
-    /// was changed and the record is dropped.
-    public static async Task RepairPendingAsync(InstallLayout layout)
+    /// At the launcher's start (Installed mode), when no update, build or setup is running in the folder: an update that began and
+    /// was not built (the launcher was closed, crashed or the power went) is looked at.
+    ///  - The checkout never moved: nothing was changed (the tools in use are the old ones); the record is dropped, and the
+    ///    new tools that were unpacked and not used are removed (their archives stay, for a retry).
+    ///  - It moved: build-options.json is made to name the bundle that goes with it, the new tools become the tools in use (the
+    ///    last steps of the update, ActivateTools), and if what was built is still current (a release that changed only the
+    ///    launcher or documentation) the update is complete; otherwise the Rebuild that is offered completes it.
+    public static async Task RepairPendingAsync(InstallLayout layout, string exeDirectory)
     {
-        if (InstallRecord.Load(layout.RecordFile) is not { Pending: { } pending }) return;
-        var head = (await Proc.RunAsync("git", ["-C", layout.Repo, "rev-parse", "HEAD"], TimeSpan.FromSeconds(30))).Output.Trim();
-        if (head != pending.Commit) { ClearPending(layout); return; }
-        if (pending.BundleAsset != null && pending.BundleSha256 != null && BundleInUse(layout) != pending.BundleSha256.ToLowerInvariant()
-            && File.Exists(Path.Combine(layout.Downloads, pending.BundleAsset)))
-            WriteOptions(layout, pending.BundleAsset, pending.BundleSha256);
+        if (InstallRecord.Load(layout.RecordFile) is not { Pending: not null }) return;   // nothing begun (the usual case): no lock taken
+        InstallLock folderLock;
+        try { folderLock = InstallLock.Acquire(layout.Root); }
+        catch (SetupException) { return; }   // an update (of this or another window) is running: its record is not stale
+        using (folderLock)
+        {
+            if (InstallRecord.Load(layout.RecordFile) is not { Pending: { } pending } record) return;
+            var head = (await Proc.RunAsync("git", ["-C", layout.Repo, "rev-parse", "HEAD"], TimeSpan.FromSeconds(30))).Output.Trim();
+            if (head != pending.Commit)
+            {
+                (record with { Pending = null }).Save(layout.RecordFile);
+                RemoveSupersededTools(layout, _ => { }, CancellationToken.None);
+                return;
+            }
+            if (pending.BundleAsset != null && pending.BundleSha256 != null && BundleInUse(layout) != pending.BundleSha256.ToLowerInvariant()
+                && File.Exists(Path.Combine(layout.Downloads, pending.BundleAsset)))
+                WriteOptions(layout, pending.BundleAsset, pending.BundleSha256);
+            ActivateTools(layout, pending.Tools ?? [], _ => { }, CancellationToken.None);
+            if (await BuiltIsCurrentAsync(layout, head)) CompletePending(layout, exeDirectory);
+        }
+    }
+
+    /// The last finished build is of this commit, or of one that differs from it only in the launcher and the documentation.
+    static async Task<bool> BuiltIsCurrentAsync(InstallLayout layout, string head)
+    {
+        var file = Path.Combine(layout.LauncherDir, "built-commit.txt");
+        if (!File.Exists(file) || !File.Exists(layout.GameExe)) return false;
+        var built = File.ReadAllText(file).Trim();
+        if (built == head) return true;
+        if (built.Length == 0) return false;
+        var diff = await Proc.RunAsync("git", ["-C", layout.Repo, "diff", "--name-only", built, head, "--", ".", ":(exclude)launcher", ":(exclude)*.md"], TimeSpan.FromSeconds(60));
+        return diff.ExitCode == 0 && diff.Output.Trim().Length == 0;
     }
 
     /// A plain Rebuild finished well after an update had begun: the install is at that update.
@@ -256,6 +290,63 @@ static class UpdateEngine
         done.Save(layout.RecordFile);
         InstallChannel.SavePointer(done, exeDirectory);
         if (pending.BundleAsset != null) RemoveOtherBundles(layout, pending.BundleAsset);
+    }
+
+    // ---- the tools ------------------------------------------------------------------------------------------------------
+
+    /// The last steps of an update, once the checkout is at its commit: each unpacked tool becomes the tool in use (the record of
+    /// tools\ names it), its archive goes, and the folders of the tools it replaced are removed. Safe to run again.
+    static void ActivateTools(InstallLayout layout, IReadOnlyList<PendingTool> tools, Action<string> log, CancellationToken ct)
+    {
+        foreach (var tool in tools)
+        {
+            // (The record names the folder and the archive's SHA-256: both are checked, so that a repackaged tool that unpacks into
+            // a folder of the same name is switched too.)
+            if (!ToolInstaller.IsInstalled(layout.Tools, tool.Name, tool.Sha256) && ToolInstaller.IsUnpacked(layout.Tools, tool.Folder, tool.Sha256))
+            {
+                ToolInstaller.Activate(layout.Tools, tool.Name, tool.Folder, tool.Sha256);
+                log($"{tool.Name}: {tool.Folder} is the one in use now");
+            }
+            if (ToolInstaller.IsInstalled(layout.Tools, tool.Name, tool.Sha256) && tool.Archive.Length > 0 && Path.GetFileName(tool.Archive) == tool.Archive)
+            {
+                var archive = Path.Combine(layout.Downloads, tool.Archive);
+                if (File.Exists(archive)) Retry.Io(() => File.Delete(archive), ct: ct);
+            }
+        }
+        RemoveSupersededTools(layout, log, ct);
+    }
+
+    /// Removes the folders in tools\ that this program unpacked (they carry its marker) and that the record no longer names, and
+    /// the temporary folders of an unpacking that was cut short. If the build folder was configured with one of them (CMakeCache.txt
+    /// names the CMake, Ninja and compiler that made it), it first forgets that: CMakeCache.txt and build.ninja go, and build.ps1
+    /// configures again when there is no build.ninja.
+    static void RemoveSupersededTools(InstallLayout layout, Action<string> log, CancellationToken ct)
+    {
+        var folders = ToolInstaller.Superseded(layout.Tools);
+        if (folders.Count == 0) return;
+        if (BuildFolderUses(layout, folders))
+        {
+            foreach (var name in new[] { "CMakeCache.txt", "build.ninja" })
+            {
+                var file = Path.Combine(layout.BuildDir, name);
+                if (File.Exists(file)) Retry.Io(() => File.Delete(file), ct: ct);
+            }
+            log("the build folder will be configured again (a build tool changed)");
+        }
+        foreach (var folder in folders) DeleteToolFolder(layout, folder, log);
+    }
+
+    /// The configured build folder names (in its CMakeCache.txt) a tool in one of these folders.
+    static bool BuildFolderUses(InstallLayout layout, List<string> folders)
+    {
+        var cache = Path.Combine(layout.BuildDir, "CMakeCache.txt");
+        try
+        {
+            if (!File.Exists(cache)) return File.Exists(Path.Combine(layout.BuildDir, "build.ninja"));
+            var text = File.ReadAllText(cache).Replace('\\', '/');
+            return folders.Any(f => text.Contains("/" + Path.GetFileName(f) + "/", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
     }
 
     /// build-options.json as make_pc.ps1 writes it (UTF-8 with a mark), naming the update's bundle and the install's tools:
@@ -307,10 +398,10 @@ static class UpdateEngine
         var head = (await Proc.RunAsync("git", ["-C", layout.Repo, "rev-parse", "HEAD"], TimeSpan.FromSeconds(30))).Output.Trim();
         if (head == target.Commit) { log($"already at {target.Label}"); return; }
         var ancestor = (await Proc.RunAsync("git", ["-C", layout.Repo, "merge-base", "--is-ancestor", head, target.Commit], TimeSpan.FromSeconds(30))).ExitCode == 0;
+        await RestoreCodegenFilesAsync(layout, log);
         ProcResult moved;
         if (ancestor)
         {
-            await Proc.RunAsync("git", ["-C", layout.Repo, "checkout", "--quiet", "--", "mcla_manifest.toml", "generated/rexglue.cmake"], TimeSpan.FromSeconds(30));
             moved = await Proc.RunAsync("git", ["-c", "user.name=mcla", "-c", "user.email=mcla@localhost", "-C", layout.Repo, "merge", "--ff-only", "--autostash", target.Commit], TimeSpan.FromSeconds(120));
         }
         else
@@ -325,6 +416,28 @@ static class UpdateEngine
         if (unmerged.Output.Trim().Length > 0)
             throw new SetupException("The install has changes of its own that clash with the new version, so it was not updated cleanly. Run the setup again on this folder to rebuild it.", unmerged.Output);
         log($"moved to {target.Commit[..7]}");
+    }
+
+    /// What codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) is made again by every build, so before the checkout moves it is
+    /// put back to the commit's version: nothing has to be stashed, and nothing can clash with the new version of those files. A change
+    /// someone made in either (the first is also the recompiler's configuration) is saved first, in kept\codegen-edits, and the log says so.
+    static async Task RestoreCodegenFilesAsync(InstallLayout layout, Action<string> log)
+    {
+        foreach (var file in new[] { "mcla_manifest.toml", "generated/rexglue.cmake" })
+        {
+            // Not tracked in this checkout (an older one): nothing to save or put back.
+            if ((await Proc.RunAsync("git", ["-C", layout.Repo, "ls-files", "--error-unmatch", "--", file], TimeSpan.FromSeconds(30))).ExitCode != 0) continue;
+            // Line endings alone are not an edit (codegen writes LF, and git may be set to check out CRLF).
+            var differs = await Proc.RunAsync("git", ["-C", layout.Repo, "diff", "--ignore-cr-at-eol", "--quiet", "HEAD", "--", file], TimeSpan.FromSeconds(30));
+            if (differs.ExitCode == 1)
+            {
+                var copy = Path.Combine(layout.Kept, "codegen-edits", $"{file.Replace('/', '_')}.{DateTime.Now:yyyyMMdd-HHmmss}");
+                Directory.CreateDirectory(Path.GetDirectoryName(copy)!);
+                Retry.Io(() => File.Copy(Path.Combine(layout.Repo, file.Replace('/', '\\')), copy, overwrite: true));
+                log($"{file} had changes: a copy is in {copy}");
+            }
+            await Proc.RunAsync("git", ["-C", layout.Repo, "checkout", "--quiet", "--", file], TimeSpan.FromSeconds(30));
+        }
     }
 
     /// Files outside the launcher, the documentation and the release's own machinery differ between HEAD and the target.

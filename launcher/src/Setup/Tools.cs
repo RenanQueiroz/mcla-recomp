@@ -106,6 +106,42 @@ static class ToolInstaller
         return false;
     }
 
+    /// The tool was unpacked into tools\<folder> from the zip with this SHA-256 (its marker says so), whether or not the record names it.
+    public static bool IsUnpacked(string tools, string folder, string sha256)
+    {
+        try
+        {
+            var marker = Path.Combine(tools, folder, Marker);
+            return File.Exists(marker) && string.Equals(File.ReadAllText(marker).Trim(), sha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
+    }
+
+    /// Makes an unpacked tool the one the record names (the one builds use).
+    public static void Activate(string tools, string name, string folder, string sha256) => Record(tools, name, folder, sha256);
+
+    /// Folders in tools\ that were unpacked here (they carry the marker) and that the record no longer names (what a newer tool
+    /// replaced, or what an update unpacked and did not use), and the temporary folders of an unpacking that was cut short.
+    public static List<string> Superseded(string tools)
+    {
+        var result = new List<string>();
+        if (!Directory.Exists(tools)) return result;
+        var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var file = Path.Combine(tools, RecordName);
+        if (File.Exists(file))
+            foreach (var line in File.ReadAllLines(file))
+            {
+                var parts = line.Split('\t');
+                if (parts.Length == 3) named.Add(parts[1]);
+            }
+        foreach (var dir in new DirectoryInfo(tools).EnumerateDirectories())
+        {
+            if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint) || named.Contains(dir.Name)) continue;
+            if (dir.Name.StartsWith(".u-", StringComparison.Ordinal) || File.Exists(Path.Combine(dir.FullName, Marker))) result.Add(dir.FullName);
+        }
+        return result;
+    }
+
     /// The folder a tool was unpacked into, from the record (null when there is none).
     public static string? FolderOf(string tools, string name)
     {
@@ -159,7 +195,7 @@ static class ToolInstaller
     /// CMake) keeps its name; one without (Ninja, MinGit) goes in tools\<name>-<version>. The marker holds the zip's
     /// SHA-256: a tool already unpacked from this zip is left alone. Returns the folder.
     public static async Task<string> InstallAsync(string tools, string name, string version, string zipFile, string sha256,
-                                                  Action<string> log, IProgress<(int Done, int Total)> progress, CancellationToken ct)
+                                                  Action<string> log, IProgress<(int Done, int Total)> progress, CancellationToken ct, bool record = true)
     {
         Directory.CreateDirectory(tools);
         string topFolder;
@@ -183,7 +219,7 @@ static class ToolInstaller
         {
             log($"{name}: already unpacked");
             progress.Report((total, total));
-            Record(tools, name, topFolder, sha256);
+            if (record) Record(tools, name, topFolder, sha256);
             return final;
         }
 
@@ -226,7 +262,7 @@ static class ToolInstaller
         SafeFolder.Delete(final);
         Retry.Io(() => Directory.Move(unpacked, final));
         SafeFolder.Delete(temp);
-        Record(tools, name, topFolder, sha256);
+        if (record) Record(tools, name, topFolder, sha256);
         log($"{name}: unpacked into {final}");
         return final;
     }

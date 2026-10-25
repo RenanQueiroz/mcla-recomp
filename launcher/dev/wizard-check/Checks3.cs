@@ -60,7 +60,7 @@ static partial class Program
         Check("this run is in Installed mode", Paths.Mode == LaunchMode.Installed);
         ChildJob.Enabled = true;
         var layout = new InstallLayout(Paths.InstallRoot!);
-        await UpdateEngine.RepairPendingAsync(layout);
+        await UpdateEngine.RepairPendingAsync(layout, AppContext.BaseDirectory);
         using var folderLock = InstallLock.Acquire(layout.Root);
         var run = new BuildRun(BuildKind.Build, line => { if (Brief(line) is { Length: > 0 } text) Console.WriteLine(text); });
         var exit = await run.Completion;

@@ -205,27 +205,34 @@ An install made by the setup wizard (Installed mode) doesn't follow `main`; the 
   1. Room is checked (the archives, what they unpack to, and the build), then the tools and the SDK bundle the release names
      are downloaded and checked (SHA-256, size) when they differ from the ones in the install. Nothing in the install has
      changed yet.
-  2. The new tools are unpacked beside the old ones.
-  3. The update is written into `install.json` (`pending`). If a build tool (CMake, Ninja, the compiler) was replaced, the build
-     folder's `CMakeCache.txt` and `build.ninja` go (a configured build folder names the tools that made it; the next build configures it
-     again), and the folders of the tools replaced are removed: nothing refers to them any more, so no build, now or later, runs
-     with an old one or breaks for lack of it.
-  4. The checkout moves to the tag (`git merge --ff-only`, after putting back the two files codegen rewrites so that nothing is
-     stashed; or a checkout when going back from `main`). A merge that leaves conflicts is a failure.
-  5. `build-options.json` names the new SDK bundle, and `build-game.ps1` runs with `-Toolchain mingw -ToolsDir -SdkBundle
-     -SdkBundleSha256`: `make_pc.ps1` unpacks the bundle when it is another one (the SDK is swapped, not patched and built again),
-     checks it is this checkout's, and Ninja rebuilds only what changed.
-  When the build worked, `pending` is cleared and the record names the release; older bundle zips are removed. A plain
-  **Rebuild** after a stop builds the new version (the options already name its bundle) and finishes the update; a start that
-  finds `pending` with the checkout at its commit repairs the options if the stop came between steps 4 and 5, and drops it if the
-  checkout never moved. Every build the launcher starts for an install takes the folder's lock (`install.lock`) and ends with the
-  launcher (the job object), so no two overlap and none outlives a crashed launcher.
+  2. The new tools are unpacked beside the old ones, but the record of `tools\` still names the old ones: until the checkout has
+     moved, a build must use the tools the old checkout and its SDK were built with.
+  3. The update is written into `install.json` (`pending`, with the unpacked tools). If an earlier update was waiting for its
+     build, its record comes back when this one fails before its move.
+  4. The checkout moves to the tag (`git merge --ff-only`, or a checkout when going back from `main`). What codegen rewrites
+     (`mcla_manifest.toml`, `generated\rexglue.cmake`) is put back first so that nothing is stashed; a change someone made in
+     either is saved in `kept\codegen-edits` (and the log says so). A merge that leaves conflicts is a failure.
+  5. `build-options.json` names the new SDK bundle.
+  6. The new tools become the tools in use, their archives go, and the folders of the tools they replaced are removed. If the build
+     folder was configured with one of those (its `CMakeCache.txt` names the CMake, Ninja and compiler that made it), its
+     `CMakeCache.txt` and `build.ninja` go first and the next build configures it again: no build, now or later, runs with an old
+     tool or breaks for lack of it.
+  7. `build-game.ps1` runs with `-Toolchain mingw -ToolsDir -SdkBundle -SdkBundleSha256`: `make_pc.ps1` unpacks the bundle when it
+     is another one (the SDK is swapped, not patched and built again), checks it is this checkout's, and Ninja rebuilds only what
+     changed.
+  When the build worked, `pending` is cleared and the record names the release; older bundle zips are removed. A stop leaves a
+  checkout, a bundle and tools that belong together (before the move: all old). A start that finds `pending` (when no update, build or
+  setup is running in the folder) looks at it: if the checkout never moved, the record is dropped and the unused new tools removed;
+  if it did, steps 5 and 6 are finished, and when what was built is still current (a release that changed only the launcher or the
+  documentation) the update is complete; otherwise the Rebuild that is offered completes it. Every build the launcher starts for an
+  install takes the folder's lock (`install.lock`) and ends with the launcher (the job object), so no two overlap and none outlives
+  a crashed launcher.
 - The shaders are prepared again only when something the game is made of changed (files outside `launcher\`, the documentation
   and the release's machinery, a new SDK bundle or tool). A release that changes only the launcher or the documentation takes
   seconds. The player's `mcla.toml`, `settings.json`, saves and shader storage are not touched (they are not in git).
 - The move is made by the launcher, not by `build-game.ps1 -Ref`: the script of the install being updated is the old one,
   which has no `-Ref`; the new script comes with the checkout. `.\build-game.ps1 -Ref <tag>` (or `-Ref origin/main`) does
-  the same step from a terminal.
+  the same step from a terminal (an edit of the two codegen files is saved in `kept\codegen-edits` beside an install, else in `out\kept-edits`).
 - **The launcher itself** is not swapped by the launcher: it can't know what else is in its folder (the zip is flat and
   "unpacked anywhere"). When the release's launcher (`release.json`'s `launcher.sourceCommit`) is not the one running (its
   `source-commit.txt`), a bar says so and its button opens the release's page. `Setup\LauncherUpdate.cs` is the seam for the

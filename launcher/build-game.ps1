@@ -44,6 +44,30 @@ function Invoke-Git {
     if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit code $LASTEXITCODE)" }
 }
 
+# What codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) is made again by every build, so before the checkout moves
+# they are put back to the commit's version: nothing has to be stashed, and nothing can clash with the new commit's version of
+# them. A change someone made in either (the first is also the recompiler's configuration) is saved first: in kept\codegen-edits
+# beside an install made by the setup (install.json is next to the checkout's folder), else in out\kept-edits.
+function Restore-CodegenFiles {
+    $ErrorActionPreference = "Continue"   # a file this checkout does not track, or a notice on stderr, is not an error here
+    $parent = Split-Path -Parent $repo
+    $saveTo = if (Test-Path -LiteralPath "$parent\install.json") { "$parent\kept\codegen-edits" } else { "$repo\out\kept-edits" }
+    foreach ($file in "mcla_manifest.toml", "generated/rexglue.cmake") {
+        & git.exe -C $repo ls-files --error-unmatch -- $file 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { continue }
+        # Line endings alone are not an edit (codegen writes LF, and git may be set to check out CRLF).
+        & git.exe -C $repo diff --ignore-cr-at-eol --quiet HEAD -- $file 2>$null
+        if ($LASTEXITCODE -eq 1) {
+            New-Item -ItemType Directory -Force -Path $saveTo | Out-Null
+            $copy = Join-Path $saveTo (($file -replace '[\\/]', '_') + "." + (Get-Date -Format "yyyyMMdd-HHmmss"))
+            Copy-Item -LiteralPath (Join-Path $repo ($file -replace '/', '\')) -Destination $copy
+            "$file had changes: a copy is in $copy"
+        }
+        & git.exe -C $repo checkout --quiet -- $file 2>$null
+    }
+    $global:LASTEXITCODE = 0
+}
+
 # The fork follows holdmysocks/mcla-recomp only when asked to (FORK.md); this
 # just says how far behind it is. Information only: a failure here is not one.
 function Show-UpstreamLag {
@@ -98,19 +122,18 @@ try {
             $changed = @(Invoke-Git -C $repo diff --name-only $old $target "--" "patches/*.patch")
             & git.exe -C $repo merge-base --is-ancestor $old $target
             if ($LASTEXITCODE -eq 0) {
-                # Forward. What codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) is put back first, as it is made again by
-                # the build: nothing is stashed, so nothing can clash with the new commit's version of those files. Anything else
-                # modified is carried across (autostash; an identity is given for its commit, MinGit has none).
-                & git.exe -C $repo checkout --quiet -- mcla_manifest.toml generated/rexglue.cmake 2>$null
-                $global:LASTEXITCODE = 0
+                # Forward. What codegen rewrites is put back first (an edit of the player's saved); anything else modified is carried
+                # across (autostash; an identity is given for its commit, MinGit has none).
+                Restore-CodegenFiles
                 Invoke-Git -c user.name=mcla -c user.email=mcla@localhost -C $repo merge --ff-only --autostash $target
                 # git exits 0 when an autostash could not be put back, leaving conflict markers: that is a failure.
                 $unmerged = @(& git.exe -C $repo ls-files --unmerged)
                 if ($unmerged.Count -gt 0) { throw "the checkout has changes of its own that clash with $Ref (git ls-files --unmerged lists files); it was not updated cleanly" }
             } else {
                 # Back to a release from main, or to another line: a plain checkout. What it discards is
-                # what codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) and builds again.
+                # what codegen rewrites (saved first if it was edited) and builds again.
                 "$($old.Substring(0, 7)) is not an ancestor of $($target.Substring(0, 7)): checking it out"
+                Restore-CodegenFiles
                 Invoke-Git -c advice.detachedHead=false -C $repo checkout --quiet --force --detach $target
             }
             Invoke-Git -C $repo log --oneline -20 "$old..HEAD"
