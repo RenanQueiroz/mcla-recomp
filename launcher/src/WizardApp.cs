@@ -516,8 +516,8 @@ sealed class WizardApp : Component
                 Button(HStack(8, Icon(Symbol.Play), TextBlock("Open the launcher")), OpenLauncher).AccentButton().AutomationName("Open the launcher"),
                 engineRef.Current?.PointerSaved == false
                     ? Info("The launcher can't remember this install",
-                           "The folder this program is in can't be written to, so it can't leave a note of where the install is. The install is fine. Next time, start this program, "
-                           + "choose the same install folder, and it opens the launcher straight away; or keep the program in a folder you can write to.", InfoBarSeverity.Warning)
+                           "The folder this program is in can't be written to, so it can't leave a note of where the install is, and starting it again opens this setup. The install is fine. "
+                           + "Move this program to a folder you can write to (Documents or the Desktop), start it there and choose this install folder: it checks it, writes the note and opens the launcher.", InfoBarSeverity.Warning)
                     : Empty());
 
         Element Footer()

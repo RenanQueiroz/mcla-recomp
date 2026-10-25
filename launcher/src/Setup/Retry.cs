@@ -16,20 +16,24 @@ static class Retry
         _ => false,
     };
 
-    public static void Io(Action action, TimeSpan? patience = null)
+    /// Cancelling ends the wait at once (an OperationCanceledException), not after the ten seconds.
+    public static void Io(Action action, TimeSpan? patience = null, CancellationToken ct = default)
     {
         var until = DateTime.UtcNow + (patience ?? Patience);
         for (var wait = 50; ; wait = Math.Min(wait * 2, 500))
         {
             try { action(); return; }
-            catch (Exception ex) when (Worth(ex) && DateTime.UtcNow < until) { Thread.Sleep(wait); }
+            catch (Exception ex) when (Worth(ex) && DateTime.UtcNow < until)
+            {
+                if (ct.WaitHandle.WaitOne(wait)) ct.ThrowIfCancellationRequested();
+            }
         }
     }
 
-    public static T Io<T>(Func<T> action, TimeSpan? patience = null)
+    public static T Io<T>(Func<T> action, TimeSpan? patience = null, CancellationToken ct = default)
     {
         T result = default!;
-        Io(() => result = action(), patience);
+        Io(() => result = action(), patience, ct);
         return result;
     }
 

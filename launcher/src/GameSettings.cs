@@ -765,6 +765,33 @@ static class GameSettingsFile
         WriteDurably(path, new UTF8Encoding(false).GetBytes(Join(text)));
     }
 
+    /// Removes these top-level keys from the file (nothing when it isn't there or has none of them). Throws, leaving
+    /// the file as it was, when it can't be read as UTF-8 or written.
+    public static void Remove(string path, params string[] keys)
+    {
+        if (!File.Exists(path)) return;
+        string content;
+        try
+        {
+            content = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(File.ReadAllBytes(path));
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new IOException($"{path} isn't UTF-8 text; it was left as it is");
+        }
+        var text = Split(content);
+        var statements = Scan(text.Lines, out _);
+        var any = false;
+        for (var k = statements.Count - 1; k >= 0; k--)
+        {
+            var s = statements[k];
+            if (s.Table.Length != 0 || !keys.Contains(s.Key)) continue;
+            text.Lines.RemoveRange(s.First, s.Last - s.First + 1);
+            any = true;
+        }
+        if (any) WriteDurably(path, new UTF8Encoding(false).GetBytes(Join(text)));
+    }
+
     /// A one-line double-quoted value whose backslashes aren't TOML escapes,
     /// as older saves of the game wrote Windows paths, as the same text in a
     /// literal string; null when it isn't one (as the SDK's).

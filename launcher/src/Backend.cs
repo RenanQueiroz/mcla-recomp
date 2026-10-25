@@ -353,7 +353,9 @@ sealed record RepoStatus(
     bool LauncherOutdated,             // the checkout has a newer launcher than this exe
     string? FetchError)
 {
-    public bool UpdateAvailable => Incoming.Count > 0;
+    /// Installed mode: where the install would move to (a release, or main); null in a clone or when not looked at.
+    public Setup.UpdateTarget? Target { get; init; }
+    public bool UpdateAvailable => Incoming.Count > 0 || Target is { SwitchBack: true };
 }
 
 static class Repo
@@ -370,10 +372,50 @@ static class Repo
             .Select(parts => new Commit(parts[0], parts[1], parts[2]))
             .ToList();
 
+    /// An install made by the setup wizard: what it would move to is a release (release.json on GitHub) or, when the
+    /// player asked for it, origin/main; the commits between are the "What's new".
+    static async Task<RepoStatus> GetInstalledStatusAsync(bool fetch)
+    {
+        string? fetchError = null;
+        Setup.UpdateTarget? target = null;
+        try
+        {
+            target = await Setup.UpdateResolver.ResolveAsync(Paths.Repo, Setup.InstallChannel.Read(Paths.InstallRoot!), fetch, CancellationToken.None);
+        }
+        catch (Setup.SetupException ex) { fetchError = ex.Plain; }
+        catch (TimeoutException) { fetchError = "GitHub didn't answer in time."; }
+
+        var head = (await Git("rev-parse", "HEAD")).Output.Trim();
+        var recent = ParseLog((await Git("log", "-8", LogFormat)).Output);
+        var incoming = new List<Commit>();
+        var patchesChanged = false;
+        if (target != null)
+        {
+            incoming = ParseLog((await Git("log", LogFormat, $"HEAD..{target.Commit}")).Output);
+            if (incoming.Count > 0 || target.SwitchBack)
+                patchesChanged = (await Git("diff", "--name-only", "HEAD", target.Commit, "--", "patches/*.patch")).Output.Trim().Length > 0;
+        }
+
+        // The release names the commit its launcher was built from, as source-commit.txt (beside the exe) says for this one.
+        var launcherOutdated = false;
+        if (target?.Release?.Launcher is { SourceCommit: { Length: > 0 } wanted } && File.Exists(Paths.SourceCommitFile))
+            launcherOutdated = File.ReadAllText(Paths.SourceCommitFile).Trim() != wanted;
+
+        var builtCommit = File.Exists(Paths.BuiltCommitFile) ? File.ReadAllText(Paths.BuiltCommitFile).Trim() : null;
+        var buildCurrent = builtCommit is null || builtCommit == head
+            || (await Git("diff", "--name-only", builtCommit, head, "--", ".", ":(exclude)launcher", ":(exclude)*.md"))
+                   is { ExitCode: 0, Output: var changed } && changed.Trim().Length == 0;
+        return new RepoStatus(head, recent, incoming, patchesChanged, File.Exists(Paths.GameExe), buildCurrent, 0, launcherOutdated, fetchError)
+        {
+            Target = target,
+        };
+    }
+
     public static async Task<RepoStatus> GetStatusAsync(bool fetch)
     {
         if (!Directory.Exists(Path.Combine(Paths.Repo, ".git")))
             throw new DirectoryNotFoundException($"There is no mcla-recomp checkout at {Paths.Repo}.");
+        if (Paths.Mode == LaunchMode.Installed) return await GetInstalledStatusAsync(fetch);
 
         string? fetchError = null;
         var hasUpstream = (await Git("remote")).Output.Split('\n').Any(r => r.Trim() == "upstream");
@@ -444,7 +486,9 @@ enum BuildKind { Update, Build, ResetSdk }
 
 /// Where and how build-game.ps1 runs when it isn't the launcher's own checkout (the setup wizard's first
 /// build): the launcher folder to run in, and the options to pass (-Toolchain, -ToolsDir, -SdkBundle ...).
-sealed record BuildRunOptions(string LauncherDir, string LogsDir, IReadOnlyList<string> Arguments, string? GitDir = null);
+/// IsUpdate: the run is an update of an install made by the setup (the window says "Updating"); the checkout was moved to
+/// its new commit before, so the script is run as a plain build.
+sealed record BuildRunOptions(string LauncherDir, string LogsDir, IReadOnlyList<string> Arguments, string? GitDir = null, bool IsUpdate = false);
 
 /// One run of build-game.ps1, its output streamed line by line and saved to launcher\logs\.
 sealed class BuildRun
@@ -456,6 +500,9 @@ sealed class BuildRun
     readonly Action<string> onLine;
 
     public BuildKind Kind { get; }
+    /// An update, whatever the script is asked to do.
+    public bool IsUpdate => Kind == BuildKind.Update || isUpdate;
+    readonly bool isUpdate;
     public DateTime StartedUtc { get; } = DateTime.UtcNow;
     public string LogFile { get; }
     public Task<int> Completion { get; }
@@ -464,6 +511,7 @@ sealed class BuildRun
     public BuildRun(BuildKind kind, Action<string> onLine, BuildRunOptions? options = null)
     {
         Kind = kind;
+        isUpdate = options?.IsUpdate == true;
         this.onLine = onLine;
         var launcherDir = options?.LauncherDir ?? Paths.LauncherDir;
         var logsDir = options?.LogsDir ?? Paths.LogsDir;

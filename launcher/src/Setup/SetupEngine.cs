@@ -83,7 +83,7 @@ sealed class SetupEngine
     public static AdoptedGame? FindInstalledGame(InstallLayout layout, GameFingerprint fingerprint)
     {
         var existing = InstallRecord.Load(layout.RecordFile);
-        if (existing == null || !existing.StepsDone.Contains("Game")) return null;
+        if (existing == null || !existing.StepsDone.Contains("Game") || !SamePath(existing.InstallRoot, layout.Root)) return null;
         var inPlace = existing.GameMode == "in-place";
         var wanted = inPlace ? new GameFingerprint(fingerprint.Title, fingerprint.TitleId, fingerprint.XexVersion, [fingerprint.Xex]) : fingerprint;
         if (!GameCopier.IsComplete(layout.GameDir, wanted)) return null;
@@ -307,7 +307,10 @@ sealed class SetupEngine
         var release = ctx.Release;
         bool toolsDone = ReleaseInfo.RequiredTools.All(name => ToolInstaller.IsInstalled(layout.Tools, name, release.Tools[name].Sha256));
         bool built = BuiltAlready();
-        var needed = PathBudget.RemainingBytes(layout, record, release.Game!.Files.Sum(f => f.Size), !ctx.Choices.UseInPlace, toolsDone, built);
+        var gameWillChange = record.GameSource != null
+            && ((record.GameMode == "in-place") != ctx.Choices.UseInPlace || !SamePath(record.GameSource, ctx.Choices.GamePath));
+        var forCount = gameWillChange ? record with { StepsDone = record.StepsDone.Where(s => s != "Game").ToList() } : record;
+        var needed = PathBudget.RemainingBytes(layout, forCount, release.Game!.Files.Sum(f => f.Size), !ctx.Choices.UseInPlace, toolsDone, built);
         var have = PathBudget.FreeBytes(layout.Root);
         if (have < needed)
             throw new SetupException($"There is not enough room on that drive: the setup needs about {GameChecker.FormatSize(needed)} more and {GameChecker.FormatSize(have)} is free. Free some space or choose another drive.",
@@ -744,6 +747,7 @@ sealed class SetupEngine
         RestoreSettings();
         WriteInitialSettings();
         if (ctx.Choices.UseInPlace) WriteGameDataRoot();
+        else RemoveGameDataRoot();
         if (!File.Exists(Path.Combine(layout.Repo, "shaderpack", "545407F8.shaderpack")) || !File.Exists(layout.GameExe))
         {
             Set(StepId.Shaders, s => s with { State = StepState.Skipped, Text = "This version has no shader pack" }, force: true);
@@ -796,6 +800,21 @@ sealed class SetupEngine
         if (folder.Length == 2 && folder[1] == ':') folder += "\\";
         GameSettingsFile.Set(file, new Dictionary<string, object> { ["game_data_root"] = folder });
         Log(StepId.Shaders, $"game_data_root = {ctx.Choices.GamePath} in {file}");
+    }
+
+    /// A game kept inside the install: no key may send the game to a folder an earlier setup of this install named.
+    void RemoveGameDataRoot()
+    {
+        var file = GameSettingsFile.PathIn(ctx.Layout.BuildDir);
+        if (!File.Exists(file)) return;
+        try
+        {
+            GameSettingsFile.Remove(file, "game_data_root");
+        }
+        catch (IOException ex)
+        {
+            throw new SetupException("mcla.toml can't be changed: " + ex.Message);
+        }
     }
 
     void Finish()

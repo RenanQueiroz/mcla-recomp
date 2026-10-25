@@ -26,7 +26,8 @@ static class InstallCleanup
         if (GameRunningFrom(layout.Root))
             throw new SetupException("The game is running from that folder; close it first. Nothing was removed.");
 
-        var owned = record.Owned;
+        // Only names the setup makes, whatever the file says: a record edited or forged to list another folder deletes nothing.
+        var owned = record.Owned.Where(n => InstallLayout.OwnedNames.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
         foreach (var name in owned)
             if (string.IsNullOrEmpty(name) || name != Path.GetFileName(name) || name is "." or ".." || name.Contains(':'))
                 throw new SetupException($"install.json lists a name that is not a plain name in the install folder ({name}). Nothing was removed.");

@@ -6,7 +6,9 @@ using System.Text.Json.Serialization;
 
 namespace MclaLauncher.Setup;
 
-sealed record ReleaseAsset(string Asset, string Sha256, long Size);
+/// A file of the release. SourceCommit: for the launcher, the last commit that changed its source (what its
+/// source-commit.txt says), which is how a running launcher knows that a release has a newer one.
+sealed record ReleaseAsset(string Asset, string Sha256, long Size, string? SourceCommit = null);
 
 sealed record ReleaseTool(string Version, string Url, string Sha256, long Size);
 
@@ -68,6 +70,8 @@ sealed record ReleaseInfo
                 || !IsPlainFileName(Path.GetFileName(uri.AbsolutePath)))
                 throw new SetupException($"The release's description names {name}'s download in a way that can't be used (it has to be an https address of a file).", tool.Url);
         }
+        if (Launcher is { } launcher && (!IsPlainFileName(launcher.Asset) || !IsSha256(launcher.Sha256) || launcher.Size <= 0))
+            throw new SetupException("The release's description names the launcher in a way that can't be used.");
         if (ShaderPack is { } pack
             && (pack.Path.Length == 0 || pack.Path.Contains("..") || pack.Path.Contains(':') || Path.IsPathRooted(pack.Path)
                 || pack.Path.StartsWith('/') || pack.Path.StartsWith('\\') || !IsSha256(pack.Sha256)))

@@ -78,7 +78,7 @@ static class GameCopier
                                                 $"expected sha256 {file.Sha256}, got {hash}");
                 }
             }
-            Retry.Io(() => File.Move(partial, target, overwrite: true));
+            Retry.Io(() => File.Move(partial, target, overwrite: true), ct: ct);
             ledger[file.Path] = file.Sha256;
             WriteLedger(destination, ledger);
             done += file.Size;

@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Windows.System;
+using MclaLauncher.Setup;
 using static Microsoft.UI.Reactor.Factories;
 using MenuItemBase = Microsoft.UI.Reactor.Core.MenuFlyoutItemBase;
 
@@ -53,6 +54,11 @@ sealed class LauncherApp : Component
         var (notice, setNotice) = UseState<string?>(null);
         var (build, setBuild) = UseState<BuildRun?>(null);
         var (buildResult, setBuildResult) = UseState<int?>(null);
+        // An install made by the setup wizard (Installed mode) updates from a release (Setup\Updates.cs), and may update itself.
+        var installed = Paths.Mode == LaunchMode.Installed;
+        var (updating, setUpdating) = UseState<string?>(null, threadSafe: true);
+        var updateCtsRef = UseRef<CancellationTokenSource?>(null);
+        var (channel, setChannel) = UseState(installed ? InstallChannel.Read(Paths.InstallRoot!) : InstallChannel.Release);
         var (log, updateLog) = UseReducer(ImmutableList<string>.Empty, threadSafe: true);
         var (step, setStep) = UseState<string?>(null);
         var (activity, setActivity) = UseState<Activity?>(null);
@@ -82,7 +88,7 @@ sealed class LauncherApp : Component
         var logScroller = this.UseElementRef<ScrollViewer>();
         var logText = UseMemo(() => string.Join("\n", log), log);
 
-        var busy = build != null && buildResult == null;
+        var busy = (build != null && buildResult == null) || updating != null;
         var preparing = prep != null && prepResult == null;
         var failed = buildResult is int exit && exit != 0 && build?.StopRequested != true;
         var gameBuilt = status?.GameBuilt ?? File.Exists(Paths.GameExe);
@@ -167,10 +173,56 @@ sealed class LauncherApp : Component
             }
         }
 
-        void StartBuild(BuildKind kind)
+        // An install made by the setup: the update is a release's (or main's) tag, fetched and checked out, with the tools and
+        // the SDK bundle it names downloaded first (Setup\Updates.cs); then the build runs as for any update.
+        async void StartInstalledUpdate()
         {
             if (Process.GetProcessesByName("mcla").Length > 0)
             {
+                setNotice("Close the game first: the build can't replace mcla.exe while it's running.");
+                return;
+            }
+            if (status?.Target is not { } target)
+            {
+                setNotice("Check for updates first.");
+                return;
+            }
+            setNotice(null);
+            setUpdating("Getting ready…");
+            var cts = new CancellationTokenSource();
+            updateCtsRef.Current = cts;
+            UpdateSession session;
+            try
+            {
+                session = await Task.Run(() => UpdateEngine.PrepareAsync(new InstallLayout(Paths.InstallRoot!), target, line => Debug.WriteLine($"update: {line}"),
+                                                                         new Progress<string>(text => setUpdating(text + "…")), cts.Token));
+            }
+            catch (SetupException ex)
+            {
+                setUpdating(null);
+                setNotice(ex.Plain);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                setUpdating(null);
+                setNotice("The update was stopped. What was downloaded is kept.");
+                return;
+            }
+            setUpdating(null);
+            StartBuild(BuildKind.Build, session.Options, session);
+        }
+
+        void StartBuild(BuildKind kind, BuildRunOptions? options = null, UpdateSession? session = null)
+        {
+            if (installed && kind == BuildKind.Update && options == null)
+            {
+                StartInstalledUpdate();
+                return;
+            }
+            if (Process.GetProcessesByName("mcla").Length > 0)
+            {
+                session?.Dispose();
                 setNotice("Close the game first: the build can't replace mcla.exe while it's running.");
                 return;
             }
@@ -188,10 +240,11 @@ sealed class LauncherApp : Component
                 {
                     updateLog(lines => (lines.Count >= MaxLogLines ? lines.RemoveAt(0) : lines).Add(line));
                     if (line.StartsWith("==> ")) setStep(line[4..]);
-                });
+                }, options);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
+                session?.Dispose();
                 setNotice($"Couldn't start the build: {ex.Message}");
                 return;
             }
@@ -199,9 +252,21 @@ sealed class LauncherApp : Component
             setBuild(run);
             _ = run.Completion.ContinueWith(task =>
             {
+                if (session != null)
+                {
+                    var layout = new InstallLayout(Paths.InstallRoot!);
+                    try
+                    {
+                        if (task.Result == 0 && !run.StopRequested) UpdateEngine.Finish(layout, AppContext.BaseDirectory, session);
+                        else UpdateEngine.KeepOptionsAfterFailure(layout, session);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Debug.WriteLine($"update: {ex.Message}"); }
+                    finally { session.Dispose(); }
+                }
                 setBuildResult(task.Result);
                 _ = CheckAsync(fetch: false);
-                if (task.Result == 0 && !run.StopRequested) StartPrepare(PrepareKind.AfterBuild);
+                // After an update the shaders are prepared again only when something the game is made of changed.
+                if (task.Result == 0 && !run.StopRequested && (session == null || session.GameChanged)) StartPrepare(PrepareKind.AfterBuild);
             }, TaskScheduler.Default);
         }
 
@@ -522,6 +587,8 @@ sealed class LauncherApp : Component
             var subtitle = head is null
                 ? "Static recompilation for PC"
                 : $"Static recompilation for PC  ·  version {head.Hash} from {head.Date}";
+            if (installed && head != null && InstallRecord.Load(Path.Combine(Paths.InstallRoot!, InstallLayout.RecordName))?.ReleaseTag is { Length: > 0 } releaseTag)
+                subtitle += $"  ·  {releaseTag}";
             // Routine states read as a line under the title; the bars below are
             // for things that need a decision.
             var state = checking ? "checking for updates…"
@@ -544,8 +611,11 @@ sealed class LauncherApp : Component
                    MenuItem("Recent changes on GitHub", () => Open(Paths.RepoUrl + "/commits/main")),
                    MenuItem(upstream, () => Open(Paths.UpstreamUrl))]
                 : [MenuItem("Check for updates", () => _ = CheckAsync(fetch: true)),
+                   .. (installed
+                       ? (MenuItemBase[])[MenuItem(channel == InstallChannel.Main ? "Follow the releases again" : "Latest changes (main, untested)", SwitchChannel)]
+                       : []),
                    MenuItem("Rebuild the game", () => StartBuild(BuildKind.Build)),
-                   MenuItem("Re-patch and rebuild the SDK", () => StartBuild(BuildKind.ResetSdk)),
+                   .. (installed ? [] : (MenuItemBase[])[MenuItem("Re-patch and rebuild the SDK", () => StartBuild(BuildKind.ResetSdk))]),
                    MenuItem("Run the build in a terminal", BuildInTerminal),
                    MenuItem("Prepare shaders", () => StartPrepare(PrepareKind.Manual)),
                    MenuSeparator(),
@@ -570,8 +640,10 @@ sealed class LauncherApp : Component
         {
             if (error != null)
                 return Info("Can't read the mcla-recomp folder", error, InfoBarSeverity.Error);
+            if (updating != null)
+                return Info("Updating", updating, InfoBarSeverity.Informational);
             if (busy)
-                return Info(build!.Kind == BuildKind.Update ? "Updating and rebuilding" : "Building",
+                return Info(build!.IsUpdate ? "Updating and rebuilding" : "Building",
                             step is null ? "Starting…" : $"Step {step}", InfoBarSeverity.Informational);
             if (build?.StopRequested == true)
                 return Info("Build stopped", "Finished steps are kept, so the next build continues where this one stopped.", InfoBarSeverity.Warning);
@@ -583,6 +655,22 @@ sealed class LauncherApp : Component
                             InfoBarSeverity.Informational);
             if (checking || status == null)
                 return Empty();
+            if (installed && status.Target is { } target && status.UpdateAvailable)
+            {
+                if (target.IsMain && status.PatchesChanged)
+                    return Info("The latest changes can't be installed",
+                                "They change the ReXGlue SDK, and an install made by the setup has the SDK that came with its release (it can't build one). "
+                                + "More > Follow the releases again goes back to the release; the next release will have the new SDK.", InfoBarSeverity.Warning);
+                if (target.SwitchBack)
+                    return Info($"You're on newer code than {target.Label}",
+                                "Going back checks out that release and builds it again.", InfoBarSeverity.Informational);
+                return Info(target.IsMain ? $"The latest changes (main, untested) have {status.Incoming.Count} new change{(status.Incoming.Count == 1 ? "" : "s")}"
+                                          : $"An update is available: {target.Label}",
+                            "Updating downloads what is new (and, for a release, the SDK and tools it names when they changed) and rebuilds the game, "
+                            + "which takes a few minutes." + (target.IsMain ? " These changes are not tested." : "")
+                            + (status.PatchesChanged && !target.IsMain ? " This release has a new SDK." : ""),
+                            InfoBarSeverity.Informational);
+            }
             if (status.UpdateAvailable)
                 return Info(status.Incoming.Count == 1 ? "An update is available" : $"{status.Incoming.Count} updates are available",
                             "Updating downloads the changes and rebuilds the game, which takes a few minutes."
@@ -619,14 +707,70 @@ sealed class LauncherApp : Component
                 .HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch)
             : null;
 
-        Element? LauncherUpdateBar() => status is { LauncherOutdated: true } && !busy && !preparing
-            ? (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with
-              {
-                  IsOpen = true,
-                  IsClosable = false,
-                  ActionButtonContent = "Restart to update the launcher",
-                  OnActionButtonClick = RestartToUpdateLauncher,
-              }).Severity(InfoBarSeverity.Informational)
+        Element? LauncherUpdateBar()
+        {
+            if (status is not { LauncherOutdated: true } || busy || preparing) return null;
+            if (installed && status.Target?.Release is { Launcher: not null } release)
+            {
+                var canSwap = LauncherSwap.CanSwap(AppContext.BaseDirectory);
+                return (InfoBar($"A newer launcher is in {release.Tag}",
+                                canSwap ? "It is downloaded and checked, then the launcher restarts with it (about a minute). If the new one doesn't start, this one comes back."
+                                        : "The folder this launcher is in can't be written to, so it can't replace itself. Download the new launcher from the releases page.") with
+                {
+                    IsOpen = true,
+                    IsClosable = false,
+                    ActionButtonContent = canSwap ? "Update the launcher" : "Open the releases page",
+                    OnActionButtonClick = canSwap ? StartLauncherSwap : () => Open(Paths.RepoUrl + "/releases/latest"),
+                }).Severity(InfoBarSeverity.Informational);
+            }
+            return (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with
+            {
+                IsOpen = true,
+                IsClosable = false,
+                ActionButtonContent = "Restart to update the launcher",
+                OnActionButtonClick = RestartToUpdateLauncher,
+            }).Severity(InfoBarSeverity.Informational);
+        }
+
+        // A wizard install's launcher: the release's package is downloaded and checked, unpacked beside this folder, and a
+        // script swaps the folders once this launcher has quit, starts the new one and puts this one back if it doesn't start.
+        async void StartLauncherSwap()
+        {
+            if (status?.Target is not { Release: { Launcher: { } package }, Source: { } source }) return;
+            setNotice(null);
+            setUpdating("Downloading the new launcher…");
+            var layout = new InstallLayout(Paths.InstallRoot!);
+            try
+            {
+                var staging = await Task.Run(() => LauncherSwap.StageAsync(layout, source, package, AppContext.BaseDirectory,
+                    new Progress<long>(n => setUpdating($"Downloading the new launcher… {GameChecker.FormatSize(n)} of {GameChecker.FormatSize(package.Size)}")),
+                    line => Debug.WriteLine($"launcher update: {line}"), CancellationToken.None));
+                LauncherSwap.StartSwap(layout, staging, AppContext.BaseDirectory, Environment.ProcessId);
+                exitingRef.Current = true;
+                prepRef.Current?.Stop();
+                ReactorApp.Exit();
+            }
+            catch (Exception ex) when (ex is SetupException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+            {
+                setUpdating(null);
+                setNotice(ex is SetupException setup ? setup.Plain : $"Couldn't update the launcher: {ex.Message}");
+            }
+        }
+
+        void SwitchChannel()
+        {
+            var next = channel == InstallChannel.Main ? InstallChannel.Release : InstallChannel.Main;
+            InstallChannel.Write(Paths.InstallRoot!, AppContext.BaseDirectory, next);
+            setChannel(next);
+            setNotice(next == InstallChannel.Main
+                ? "You follow the latest changes (main) now. They are not tested and can be broken. More > Follow the releases again goes back."
+                : "You follow the releases again.");
+            _ = CheckAsync(fetch: true);
+        }
+
+        // The development override of the release source (a folder), when it is in use: said in words, as the wizard does.
+        Element? DevBar() => installed && DevOptions.Current.Any
+            ? Info("Development options are in use", DevOptions.Current.Banner(), InfoBarSeverity.Warning)
             : null;
 
         Element? CountdownBar() => countdown is int seconds
@@ -867,11 +1011,13 @@ sealed class LauncherApp : Component
         {
             var buttons = new List<Element>();
             if (busy)
-                buttons.Add(Button("Stop build", () => buildRef.Current?.Stop()));
+                buttons.Add(Button("Stop build", () => { updateCtsRef.Current?.Cancel(); buildRef.Current?.Stop(); }));
             else if (status != null && error == null)
             {
-                if (status.UpdateAvailable)
-                    buttons.Add(Button("Update and rebuild", () => StartBuild(BuildKind.Update)).AccentButton());
+                if (status.UpdateAvailable && installed && status.Target is { IsMain: true } && status.PatchesChanged)
+                    buttons.Add(Button("Follow the releases again", SwitchChannel).AccentButton());
+                else if (status.UpdateAvailable)
+                    buttons.Add(Button(status.Target?.SwitchBack == true ? "Go back to the release" : "Update and rebuild", () => StartBuild(BuildKind.Update)).AccentButton());
                 else if (!status.GameBuilt)
                     buttons.Add(Button("Build the game", () => StartBuild(BuildKind.Build)).AccentButton());
                 else if (!status.BuildCurrent || failed)
@@ -921,7 +1067,7 @@ sealed class LauncherApp : Component
             columns: [GridSize.Star()],
             rows: [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto],
             Header().Grid(row: 0),
-            VStack(8, StatusBar(), WhatsNew(), LauncherUpdateBar(), CountdownBar(), NoticeBar()).Margin(0, 16, 0, 0).Grid(row: 1),
+            VStack(8, DevBar(), StatusBar(), WhatsNew(), LauncherUpdateBar(), CountdownBar(), NoticeBar()).Margin(0, 16, 0, 0).Grid(row: 1),
             MainPane().Grid(row: 2),
             ActivityRow().Grid(row: 3),
             Actions().Grid(row: 4),

@@ -106,6 +106,23 @@ static class ToolInstaller
         return false;
     }
 
+    /// The folder a tool was unpacked into, from the record (null when there is none).
+    public static string? FolderOf(string tools, string name)
+    {
+        try
+        {
+            var file = Path.Combine(tools, RecordName);
+            if (!File.Exists(file)) return null;
+            foreach (var line in File.ReadAllLines(file))
+            {
+                var parts = line.Split('\t');
+                if (parts.Length == 3 && parts[0] == name) return Path.Combine(tools, parts[1]);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
+        return null;
+    }
+
     static void Record(string tools, string name, string folder, string sha256)
     {
         var file = Path.Combine(tools, RecordName);

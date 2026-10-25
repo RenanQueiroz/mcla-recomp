@@ -5,6 +5,18 @@ using MclaLauncher;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 
+// A launcher that replaced the one before it (Setup\LauncherSwap.cs) says it started: five seconds alive. The swap
+// puts the old launcher back when it doesn't. Not passed on to the game or anything else this launcher starts.
+if (Environment.GetEnvironmentVariable(MclaLauncher.Setup.LauncherSwap.MarkerVariable) is { Length: > 0 } swapMarker)
+{
+    Environment.SetEnvironmentVariable(MclaLauncher.Setup.LauncherSwap.MarkerVariable, null);
+    _ = Task.Delay(5000).ContinueWith(_ =>
+    {
+        try { File.WriteAllText(swapMarker, "started"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    });
+}
+
 var wizard = Paths.Mode == LaunchMode.Wizard;
 var spec = new WindowSpec
 {
