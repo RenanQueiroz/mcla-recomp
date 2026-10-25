@@ -302,7 +302,8 @@ installer waits for that process to end, unpacks the new launcher beside the fol
 `settings.json` (and any `--keep <name>`) over, and swaps the two folders with two renames (`FolderSwap`: atomic, so
 a crash between them is repaired by the next run). It then starts the new launcher and waits for a window that is still
 there 3 s later. If the new launcher ends or shows none in 40 s, the folders are swapped back, the old launcher is
-started again and the installer exits 1 with a message. What is left (`MCLA.old-*`, `.failed-*`) is deleted at the
+started again and the installer exits 1 with a message (a first install has nothing to go back to: its files stay,
+and the message says so). Only one setup runs at a time. What is left (`MCLA.old-*`, `.failed-*`) is deleted at the
 end, or by `SelfUpdate.CleanUp()` at a later start. A folder that is held open by something else is waited for
 (60 s) and, if it stays held, nothing is changed.
 
@@ -315,9 +316,9 @@ removes it on scratch folders. Unsigned (see the README).
 **Testing it.** `dotnet run --project dev\update-check -c Release -- all <the bare installer program>` (CI runs it; the
 bare program is `build-installer.ps1 -StubOut <file>`): 20 checks of the folder swap (replace, carry over, way back, a
 held file, a swap killed half way, clean-up), 16 of the verified download (a local server: wrong hash, wrong size, cut
-short, stalled, 500, cancelled, refused addresses) and 24 of the real installer with fake launchers (a system program
+short, stalled, 500, cancelled, refused addresses) and 27 of the real installer with fake launchers (a system program
 stands in for `MclaLauncher.exe`): fresh install, update that waits for the old launcher, a new launcher that ends at
-once (rolled back), an older installer, a damaged file, a held file, an interrupted swap, refusals, shortcuts, uninstall.
+once (rolled back; a first install keeps its files), an older installer, a damaged file, a held file, an interrupted swap, two setups at once, refusals, shortcuts, uninstall.
 They use scratch folders under `%TEMP%` and never the desktop or the Start menu.
 
 ## The game's settings

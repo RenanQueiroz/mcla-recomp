@@ -405,6 +405,22 @@ static class Program
         Run(v2, $"{common} --no-launch --force", out code);
         Check(code == 0 && Read(app, "version.txt") == "2.0.0" && !FolderSwap.Leftovers(app).Any(), "after a swap that was killed half way, the next run recovers and installs");
 
+        // a first install whose launcher does not start keeps its files (nothing to go back to) and says so
+        var app3 = Path.Combine(root, "Programs3", "MCLA");
+        output = Run(bad, $"--silent --dir \"{app3}\" --shortcut-dir \"{Path.Combine(root, "lnk3")}\" --health alive:2", out code);
+        Check(code == 1 && Read(app3, "version.txt") == "3.0.0", "a first install whose launcher ends at once: exit 1, the files stay");
+
+        // one setup at a time
+        var app4 = Path.Combine(root, "Programs4", "MCLA");
+        var firstRun = Process.Start(new ProcessStartInfo(v1, $"--silent --dir \"{app4}\" --shortcut-dir \"{Path.Combine(root, "lnk4")}\" --health alive:4 --launch-args \"-n 6 127.0.0.1\"") { UseShellExecute = false, CreateNoWindow = true })!;
+        Thread.Sleep(1500);
+        var watch2 = Stopwatch.StartNew();
+        Run(v1, $"--silent --dir \"{app4}\" --no-launch --no-shortcuts", out code);
+        Check(code == 2 && watch2.Elapsed.TotalSeconds < 3, $"a second setup while one runs is turned away at once (exit 2, {watch2.Elapsed.TotalSeconds:N1} s)");
+        firstRun.WaitForExit(30000);
+        Check(firstRun.ExitCode == 0 && Read(app4, "version.txt") == "1.0.0", "the first setup finished normally");
+        WaitFree(app4);
+
         // refusals: another program's folder, and a fork checkout
         var foreign = Dir("foreign");
         Write(foreign, "notes.txt", "mine");

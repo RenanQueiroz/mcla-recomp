@@ -62,6 +62,15 @@ static unsafe class Program
 
         if (o.Mode is "compose" or "info" or "extract") { Console(); return RunTool(o); }
 
+        // One setup at a time for this user: a second double-click (or an update while an install runs) would
+        // unpack into and clean up the same folders.
+        using var single = new Mutex(true, @"Local\MCLA-Setup", out var first);
+        if (!first)
+        {
+            if (!o.Silent) Dialogs.Info("Setup is already running. Wait for it to finish.");
+            return 2;
+        }
+
         try { log = new StreamWriter(Path.Combine(Path.GetTempPath(), "MCLA-Setup.log"), false) { AutoFlush = true }; }
         catch (Exception) { /* no log */ }
         Log($"MCLA-Setup {string.Join(' ', args)}  ({DateTime.Now:yyyy-MM-dd HH:mm:ss}, process {Environment.ProcessId})");
@@ -276,6 +285,10 @@ static unsafe class Program
                 if (!result.Ok)
                 {
                     Log("the new launcher did not start: " + result.Why);
+                    // A first install has nothing to go back to: the files stay, so that the person (and the log) can
+                    // see what is wrong, instead of an empty folder and shortcuts that lead nowhere.
+                    if (swap.Previous == null)
+                        throw new SetupFailure($"The launcher was installed in {target} but did not start ({result.Why}). Try its shortcut again; if it still fails, the log is {Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")}.");
                     var restored = FolderSwap.RollBack(swap);
                     if (restored)
                     {
@@ -283,7 +296,7 @@ static unsafe class Program
                         TryStart(Path.Combine(target, meta.Exe), target, o.LaunchArgs);
                         throw new SetupFailure($"The new launcher ({meta.Version}) did not start ({result.Why}), so the previous one was put back and started. Nothing was lost.");
                     }
-                    throw new SetupFailure($"The launcher did not start ({result.Why}). The log is {Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")}.");
+                    throw new SetupFailure($"The previous launcher could not be put back ({result.Why}). The log is {Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")}.");
                 }
             }
             FolderSwap.Commit(swap);
