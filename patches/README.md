@@ -17,7 +17,15 @@ git apply ../../patches/rexglue-linux-wait-sleep.patch
 
 They make page-protection lookups and multi-handle waits cheap on Linux. The Windows build needs neither. The PS5 build also applies `rexglue-linux-wait-sleep.patch` (`ps5/make_ps5.sh` does it): the PS5 runs the same POSIX threading code, where a wait shorter than 1 ms spun instead of sleeping.
 
-The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all three, and add the second to an SDK checkout that was patched before it existed.
+The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all three, and add the second to an SDK checkout that was patched before it existed; `make_pc.ps1` does the same for the paint pipeline fix.
+
+On Windows and Linux, one more goes on top of those:
+
+```
+git apply ../../patches/rexglue-vulkan-paint-pipeline-format.patch
+```
+
+It changes the Vulkan presenter, which the PS5 build runs too, so `ps5/make_ps5.sh` does not apply it until it has been tested on a console.
 
 ## rexglue-v0.10.0-mcla.patch
 
@@ -42,3 +50,13 @@ Host render target path only (the default on both backends).
 ## rexglue-ffmpeg-ps5-config.patch
 
 FFmpeg selects a configuration header per platform. This adds `config_ps5_x86_64.h`, generated from the Linux x86-64 one with `HAVE_MALLOC_H`, `CONFIG_ICONV`, `HAVE_MEMALIGN`, `HAVE_SCHED_GETAFFINITY` and `HAVE_LINUX_PERF_EVENT_H` turned off, and selects it for `__PROSPERO__`.
+
+## rexglue-vulkan-paint-pipeline-format.patch
+
+The Vulkan presenter keeps the pipeline that draws the game's frame into the swapchain together with the format of the render pass it was made for (`GuestOutputPaintPipeline::swapchain_format`), and makes it again when the swapchain's format changes. Nothing ever assigned that member, so it stayed `VK_FORMAT_UNDEFINED` and every paint after the first found the pipeline stale: it waited on the CPU for the GPU to finish the paint before it (`AwaitSubmissionCompletion`), destroyed the pipeline and made it again. That paint is queued behind the game's own GPU work, so the wait grows with GPU load: on the GPU command thread it took 2.4 to 2.7 ms of every frame at native resolution and 13 ms at 3× (Windows, RTX 5080). The UI thread also paints while a UI drawer is registered (the F4 overlay or the console; before #18, the achievement pop-up all session), and each of those paints waits the same way; with the pop-up registered, about every other frame was never shown. The same code is in Xenia, which the presenter comes from. The format is now recorded when the pipeline is made, so it is made again only when the swapchain's format changes.
+
+PS5: not applied until tested on a console.
+
+| Change | Files | Affects |
+|---|---|---|
+| The final pipeline's swapchain format recorded when it is made | `src/ui/vulkan/vulkan_presenter.cpp` | Vulkan: Windows and Linux; the PS5 once enabled |

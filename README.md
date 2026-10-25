@@ -71,6 +71,7 @@ git apply ../../patches/rexglue-minmax-blend-factor.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.patch
 git apply ../../patches/rexglue-linux-procmap-query.patch
 git apply ../../patches/rexglue-linux-wait-sleep.patch
+git apply ../../patches/rexglue-vulkan-paint-pipeline-format.patch
 CC=clang-20 CXX=clang++-20 cmake --preset linux-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF
 cmake --build out/build/linux-amd64 --config Release
 cmake --install out/build/linux-amd64 --config Release
