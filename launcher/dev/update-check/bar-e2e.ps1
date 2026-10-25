@@ -138,9 +138,13 @@ try {
     if (-not $button) { throw 'no button to click' }
     if ($Way -eq 'Other') {
         # Not clicked (it opens a folder window). Nothing may have been started or changed.
-        Check ($bar.Current.Name -like '*already in*') 'the bar says a launcher installed by the setup is already there'
+        Check ($null -ne (Find-Ui $oldProcess.Id '*already in*')) 'the bar says a launcher installed by the setup is already there'
         Start-Sleep -Seconds 3
-        Check ((-not $oldProcess.HasExited) -and (-not (Get-Process 'MCLA-Setup' -ErrorAction SilentlyContinue)) -and ((Get-Content -LiteralPath (Join-Path $programs 'source-commit.txt') -Raw).Trim() -eq $oldCommit)) 'no installer was started and the launcher in Setup''s folder is as it was'
+        $oldProcess.Refresh()
+        Check (-not $oldProcess.HasExited) 'the launcher is still running (nothing was clicked, nothing started)'
+        Check (-not (Get-Process 'MCLA-Setup' -ErrorAction SilentlyContinue)) 'no installer is running'
+        $programsCommit = (Get-Content -LiteralPath (Join-Path $programs 'source-commit.txt') -Raw).Trim()
+        Check ($programsCommit -eq $oldCommit) "the launcher in Setup's folder is as it was ($($programsCommit.Substring(0, 8)))"
         throw 'done'
     }
     $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
