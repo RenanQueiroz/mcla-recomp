@@ -213,10 +213,12 @@ byte for byte as it was.
 *NVIDIA Reflex* / *AMD Anti-Lag 2* (`low_latency`: Default, Off, On, and On +
 Boost on a GeForce) is the GPU maker's latency reducer, named by the GPU the game
 will most likely use (the adapter the game used at its last start, from its shader
-record, `ShaderStamp.LastAdapterVendor`; before the first start the first adapter
-Windows lists, `GpuVendor.First` in `src\DisplayHdr.cs`, and on a laptop with two
-GPUs the game may pick the other; "Low latency" for any other GPU, where it does
-nothing).
+record, `ShaderStamp.LastAdapterVendor`, read again only when the file changes, and
+only while an adapter of that vendor is still in the machine: a swapped card or a
+removed external one leaves the old vendor in the record until the next start;
+before the first start the first adapter Windows lists, `GpuVendor.First` in
+`src\DisplayHdr.cs`, and on a laptop with two GPUs the game may pick the other;
+"Low latency" for any other GPU, where it does nothing).
 Default is on for NVIDIA Reflex and off for AMD Anti-Lag 2 (untested), and says
 so in the list ("Default (on)"). The tip states the price next to the gain: about
 4% of the frame rate at 3x on Direct3D 12 (none on Vulkan or at native
@@ -577,7 +579,9 @@ in front. A real controller keeps working alongside it.
   option while the game runs, for comparing two settings within one run (the
   time of day and the traffic differ from run to run), and `get <option>...`
   logs the values the options have now (`fg_status` is frame generation's
-  state), and `save_config` does what the F4 overlay's Save does
+  state, `ll_status` the low latency feature's), `window minimize|restore|hide|show|cover|uncover|state`
+  does that to the game's own window (`cover`: a black pop-up of the game's over it), to see what a minimised, hidden or covered
+  window does to the frame loop (Windows), and `save_config` does what the F4 overlay's Save does
   (`rex::cvar::SaveConfig` into `mcla.toml`), to see what it writes, and
   `write_content_header <name>` writes a content header file from a struct
   whose padding holds 0xEE (`scripts\content-header.pad`). `close` closes the

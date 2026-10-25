@@ -113,7 +113,8 @@ runtimes too (`patches/rexglue-frame-generation-nonwindows.patch`: the Linux
 device looks for `libamd_fidelityfx_vk.so`, the PS5 title checks that FidelityFX
 is linked, the PS5 presents the generated and the real frame back to back on its
 fixed-refresh display; `MCLA_PS5_FRAMEGEN=0` and `REXGLUE_FSR_FRAMEGEN=OFF`
-leave them out). On
+leave them out, and `ps5/make_ps5.sh` builds without them by itself if FidelityFX
+fails to build with them, so that FSR anti-aliasing is kept). On
 the PS5 FSR is a choice for the next start, marked UNTESTED, as the console's
 Vulkan device gets FSR's features only when the game starts with it chosen. A
 reactive mask for rain and smoke is in but experimental and off by default.
