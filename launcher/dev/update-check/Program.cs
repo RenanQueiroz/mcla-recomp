@@ -393,11 +393,14 @@ static class Program
         // the update: waits for the old launcher, swaps, starts the new one
         var v2 = Compose(stub, "v2", "2.0.0", "ping.exe");
         var oldPid = FolderSwap.ProcessesUnder(app).First().Id;
+        var deletedLnk = Directory.GetFiles(lnk, "*.lnk", SearchOption.AllDirectories).OrderBy(f => f).First(); // the player deleted one
+        File.Delete(deletedLnk);
         watch.Restart();
         output = Run(v2, $"--update --wait-pid {oldPid} {common} --health alive:1 --launch-args \"-n 3 127.0.0.1\"", out code);
         Check(code == 0, $"update exits 0 ({watch.Elapsed.TotalSeconds:N1} s){(code == 0 ? "" : "\n" + output)}");
         Check(Read(app, "version.txt") == "2.0.0" && Read(app, "installed.txt").Contains("version=2.0.0"), "the new version is in place");
         Check(Read(app, "install.json").Contains("D:"), "install.json was carried over");
+        Check(!File.Exists(deletedLnk) && Directory.GetFiles(lnk, "*.lnk", SearchOption.AllDirectories).Length == 1, "an update renews the shortcuts that are there and does not make a deleted one again");
         Check(watch.Elapsed.TotalSeconds >= 2, "the update waited for the old launcher to end first");
         WaitFree(app);
         Check(!FolderSwap.Leftovers(app).Any(), "the old folder was deleted");

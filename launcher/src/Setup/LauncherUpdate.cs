@@ -25,6 +25,11 @@ static class LauncherUpdate
 
     public enum Way { ReleasePage, InPlace, Move }
 
+    /// Where MCLA-Setup.exe puts the launcher it installs (its default, or what a test sets in MCLA_SETUP_DIR).
+    static string SetupFolder => Environment.GetEnvironmentVariable("MCLA_SETUP_DIR") is { Length: > 0 } dir
+        ? dir
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA");
+
     public static string ReleasePage(ReleaseInfo release) => $"{Paths.RepoUrl}/releases/tag/{Uri.EscapeDataString(release.Tag)}";
 
     /// What the bar's button does for this launcher and this release.
@@ -43,8 +48,8 @@ static class LauncherUpdate
     {
         var installer = release.Installer ?? throw new SetupException("This release has no installer for the launcher.");
         var asset = new UpdateAsset(installer.Asset, source.LocalFolder == null ? source.AssetUrl(installer.Asset) : "", installer.Sha256, installer.Size);
-        // Beside the launcher's folder when Setup made it (the folder is ours to write beside); else in the temp folder.
-        var folder = SelfUpdate.InstalledBySetup ? SelfUpdate.DownloadFolder() : Path.Combine(Path.GetTempPath(), "MCLA.download");
+        // Beside the folder the new launcher will be in, where its clean-up (App.cs) looks for it afterwards.
+        var folder = SelfUpdate.DownloadFolder(SelfUpdate.InstalledBySetup ? null : SetupFolder);
         try
         {
             return source.LocalFolder is { } local

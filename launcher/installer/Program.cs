@@ -24,6 +24,8 @@
 //   --health-timeout <s>  how long the start check waits (default 40; tests)
 //   --rename-timeout <s>  how long to wait for Windows to let the old folder be renamed (default 60; tests)
 //   --shortcut-dir <dir>  put the shortcuts under this folder instead of the Start menu and desktop (tests)
+// The environment variables MCLA_SETUP_DIR and MCLA_SETUP_SHORTCUT_DIR stand for --dir and --shortcut-dir when those are not given (a
+// test that starts the real launcher, which starts this program, sets them so that nothing lands in the real profile).
 //
 // For building and checking the release (a console program from a terminal):
 //   --compose <folder> <out.exe> [--stub <exe>] [--quality 9] [--version V] [--tag T] [--commit C] [--exe MclaLauncher.exe]
@@ -149,6 +151,9 @@ static unsafe class Program
                 default: throw new SetupFailure($"unknown option {args[i]}");
             }
         }
+        // For tests that start the real launcher (which starts the installer): where Setup puts things, without the installer's own options.
+        o.Dir ??= Environment.GetEnvironmentVariable("MCLA_SETUP_DIR") is { Length: > 0 } dir ? dir : null;
+        o.ShortcutDir ??= Environment.GetEnvironmentVariable("MCLA_SETUP_SHORTCUT_DIR") is { Length: > 0 } shortcuts ? shortcuts : null;
         if (o.Mode == "update" && o.WaitPid == 0) throw new SetupFailure("--update needs --wait-pid <the old launcher's process id>");
         return o;
     }
@@ -288,7 +293,8 @@ static unsafe class Program
             catch (IOException ex) { throw new SetupFailure($"Windows would not let the launcher's folder be replaced ({ex.Message}). Close anything that has it open (Explorer, a virus scanner's scan) and try again."); }
 
             // 4. Shortcuts and the first start; the old launcher comes back if the new one doesn't start.
-            if (!o.NoShortcuts) MakeShortcuts(o, target, meta);
+            // An update renews the shortcuts that are there; it never makes one (the person may have deleted it).
+            if (!o.NoShortcuts) MakeShortcuts(o, target, meta, createMissing: o.Mode != "update");
             if (!o.NoLaunch)
             {
                 Status(o, "Starting the launcher...", 980);
@@ -357,7 +363,7 @@ static unsafe class Program
         yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), ShortcutName);
     }
 
-    static void MakeShortcuts(Options o, string target, PayloadMeta meta)
+    static void MakeShortcuts(Options o, string target, PayloadMeta meta, bool createMissing)
     {
         var exe = Path.Combine(target, meta.Exe);
         foreach (var lnk in ShortcutPaths(o))
@@ -367,6 +373,7 @@ static unsafe class Program
                 // A shortcut of that name that starts something else (the launcher built from source has one on
                 // the desktop) is not ours to replace.
                 var existing = Shortcuts.ReadTarget(lnk);
+                if (existing == null && !createMissing) continue;
                 if (existing != null && !string.Equals(Path.GetFullPath(existing), exe, StringComparison.OrdinalIgnoreCase)
                     && File.Exists(existing))
                 {

@@ -332,6 +332,13 @@ stands in for `MclaLauncher.exe`): fresh install, update that waits for the old 
 once (rolled back; a first install keeps its files), the ready-file protocol, a pointer to import, an older installer, a damaged file, a held file, an interrupted swap, two setups at once, refusals, shortcuts, uninstall.
 They use scratch folders under `%TEMP%` and never the desktop or the Start menu.
 
+`dev\update-check\bar-e2e.ps1 -Stub <the bare installer> -Launcher <a published launcher folder> -ReleaseJson <a release.json> -GitUrl <its repository> [-Way InPlace|Move]`
+(a desktop session, UI Automation; not in CI) runs the real launcher's update bar end to end with no game: an older launcher installed by
+Setup (or unpacked as a zip), a local release source that names a newer launcher and holds its `MCLA-Setup.exe`, a click on the bar's
+button, and what must be true afterwards (the old launcher quit, the new one runs from the same folder, or from Setup's folder with the
+same pointer, the version, no leftovers, no bar, the download cleaned up). The old and the new launcher are copies of one build that
+differ in `source-commit.txt`, so it tests the mechanism, not a code change.
+
 ## The game's settings
 
 The drop-downs are the game's own settings, in `mcla.toml` next to `mcla.exe`
