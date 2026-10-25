@@ -64,8 +64,10 @@ rebuild.
   do nothing with it; an update that changes the patches makes it stale
   (`mcla-sdk-bundle.json` says what it was built from), and it is refused until a
   matching one is given.
-- **Python.** `make_pc.ps1` rejects any `python.exe` under `WindowsApps`, which is
-  where the Python install manager puts its working one; the wrapper hands that one over.
+- **Python.** `make_pc.ps1` counts a Python that runs (`python --version` says
+  Python 3), also from `WindowsApps`, where the Microsoft Store and the Python
+  install manager put theirs, and not Windows' placeholder `python.exe` there, which
+  fails. (This wrapper used to hand over a working one itself.)
 
 The fork's changes to the game and the SDK are ordinary commits, each described
 in `KNOWN-ISSUES.md` (game) or `patches\README.md` (SDK).

@@ -136,21 +136,6 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # make_pc.ps1 takes any python.exe under WindowsApps for the Microsoft
-    # Store placeholder, but the Python install manager (Python 3.14 and later)
-    # puts its real python.exe there too. If that one works, hand it to
-    # make_pc.ps1 as a function, which Get-Command finds before any program.
-    $python = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($python -and $python.Source -like "*WindowsApps*") {
-        $ErrorActionPreference = "Continue"
-        & $python.Source -c "import sys" 2>$null
-        $ErrorActionPreference = "Stop"
-        if ($LASTEXITCODE -eq 0) {
-            $global:MclaPython = $python.Source
-            function global:python { & $global:MclaPython @args }
-        }
-    }
-
     $params = @{}
     if ($InstallTools) { $params.InstallTools = $true }
     $params.Toolchain = $Toolchain
