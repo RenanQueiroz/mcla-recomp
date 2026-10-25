@@ -5,12 +5,14 @@
 # The options of the last build, kept in launcher\build-options.json by
 # make_pc.ps1 when it finishes: what an update needs to build the same way
 # (-Toolchain, -ToolsDir, -SdkBundle with its SHA-256, and the SDK folder that was
-# used). None when there is no record, or a record that cannot be read.
+# used). None when there is no record, or a record that cannot be read. The file is
+# UTF-8 (with a mark, as Save-BuildOptions writes it; one without reads the same, and the
+# ASCII file of an older build too): an install folder's name may have any character.
 function Get-BuildOptions([string]$root) {
     $file = Join-Path $root "launcher\build-options.json"
     if (-not (Test-Path -LiteralPath $file)) { return $null }
     try {
-        $text = Get-Content -LiteralPath $file -Raw
+        $text = [System.IO.File]::ReadAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($file), (New-Object System.Text.UTF8Encoding $false))
         if (-not $text -or -not $text.Trim()) { return $null }
         $o = $text | ConvertFrom-Json
     } catch { return $null }
@@ -33,7 +35,7 @@ function Save-BuildOptions([string]$root, [string]$toolchain, [string]$toolsDir,
         sdkBundleSha256 = $sdkBundleSha256; sdkDir = $(if ($sdkBundle) { $sdkDir } else { "" })
     }
     New-Item -ItemType Directory -Force (Split-Path $file -Parent) | Out-Null
-    Set-Content -LiteralPath $file -Encoding Ascii (($record | ConvertTo-Json) + "`r`n")
+    [System.IO.File]::WriteAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($file), (($record | ConvertTo-Json) + "`r`n"), (New-Object System.Text.UTF8Encoding $true))
 }
 
 # The version in a tool folder's name (cmake-4.4.4-windows-x86_64,
