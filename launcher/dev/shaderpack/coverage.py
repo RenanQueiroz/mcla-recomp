@@ -13,6 +13,9 @@ draw left out while it compiled), and the frames over 50 ms.
                            [--suffix <text>]      (--pack and --suffix: the same jobs again, with
                            another pack and tags that don't collide)
   python coverage.py report <folder>... [--match <regex>]
+  python coverage.py compare <folder>... --old <pack> --new <pack> [--match <regex>]
+                           what the runs' storages hold beyond each pack (the runs of a hold-out, made
+                           with the old pack: what a player on either pack would have compiled)
   python coverage.py grow  <folder>... --out <pack> [--check] [--previous <pack>] [--drop <file>]
                            the pack plus what the soaks in the folders created in play (through
                            build_pack.py, which refuses a pack that lacks entries of the previous
@@ -503,6 +506,8 @@ def batch(a):
         if a.salt_base and "--salt" not in args:
             args += ["--salt", str(a.salt_base + n)]
         tag = args[args.index("--tag") + 1] if "--tag" in args else f"job{n}"
+        if a.only and not re.search(a.only, tag[:-len(a.suffix)] if a.suffix else tag):
+            continue
         if (out / f"{tag}.json").exists() and "error" not in json.loads((out / f"{tag}.json").read_text()):
             print(f"[batch] {tag}: done already", flush=True)
             continue
@@ -553,6 +558,22 @@ def revalidate(a):
     for f in sorted(folder.glob("probe-*.json")):
         r = json.loads(f.read_text())
         route = routes / (r["tag"][len("probe-"):] + ".route")
+        if a.from_logs and r.get("run_folder") and (Path(r["run_folder"]) / "game.log").exists():
+            import route as route_tool
+            fresh = route.with_name(route.name + ".new")
+            try:
+                route_tool.from_log(argparse.Namespace(log=r["run_folder"], file=str(fresh), spacing=4.0,
+                                                       fps=float(r.get("fixed_dt") or 60)))
+            except SystemExit as e:
+                print(f"{r['tag']}: no route from the log ({e})")
+                continue
+            if route.exists() and route_length(fresh) >= route_length(route) + 200:
+                print(f"{r['tag']}: the route from the log is {route_length(fresh):.0f} m, the one kept "
+                      f"{route_length(route):.0f} m: replaced (old kept as .cut)")
+                os.replace(route, str(route) + ".cut")
+                os.replace(fresh, route)
+            else:
+                os.remove(fresh)
         r.pop("error", None)
         if route.exists() and route_length(route) >= a.min_route_m and a.redo_truncated and \
                 leader_still_driving(r.get("run_folder"), float(r.get("fixed_dt") or 60)):
@@ -623,6 +644,46 @@ def report(a):
 
 
 # --- grow ----------------------------------------------------------------------------------------
+def compare(a):
+    """What the storages of the runs hold beyond the old pack and beyond the new one (the hold-out's
+    runs: races played with a pack, in conditions the new pack's soaks did not use). A storage holds the
+    pack's entries (preloaded) and what the run created, so both are known without running the game on
+    the new pack: the new pack's misses are the old pack's misses it does not contain. (What it cannot
+    say: how many draws that would leave out: run the races again with the new pack for that.)"""
+    old, new = pack_content(checked_path(a.old, "--old")), pack_content(checked_path(a.new, "--new"))
+    print(f"{'tag':30} {'pipelines':>9} {'beyond old':>10} {'beyond new':>10} {'shaders':>7} {'old':>5} {'new':>5}")
+    tot = {"old": set(), "new": set(), "sh_old": set(), "sh_new": set()}
+    runs = 0
+    for folder in a.folders:
+        for f in sorted(Path(folder).glob("*.json")):
+            try:
+                r = json.loads(f.read_text())
+            except ValueError:
+                continue
+            st = f.with_suffix("") / "cache" / "shaders" / "shareable"
+            if not st.exists() or (a.match and not re.search(a.match, r["tag"])):
+                continue
+            storage = read_storage(st)
+            sh_o, li_o = created_in_play(storage, old)
+            sh_n, li_n = created_in_play(storage, new)
+            ko = {(n, record_key(x)) for n, recs in li_o.items() for x in recs}
+            kn = {(n, record_key(x)) for n, recs in li_n.items() for x in recs}
+            total = sum(len(v) for v in storage["lists"].values())
+            print(f"{r['tag']:30} {total:9} {len(ko):10} {len(kn):10} {len(storage['shaders']):7} "
+                  f"{len(sh_o):5} {len(sh_n):5}")
+            tot["old"] |= ko
+            tot["new"] |= kn
+            tot["sh_old"] |= set(sh_o)
+            tot["sh_new"] |= set(sh_n)
+            runs += 1
+    print(f"{runs} runs: beyond the old pack {len(tot['old'])} pipelines and {len(tot['sh_old'])} shaders (distinct), "
+          f"beyond the new pack {len(tot['new'])} and {len(tot['sh_new'])}")
+    if tot["old"]:
+        print(f"the new pack covers {100 * (1 - len(tot['new']) / len(tot['old'])):.0f}% of the pipelines and "
+              f"{100 * (1 - len(tot['sh_new']) / max(1, len(tot['sh_old']))):.0f}% of the shaders the old one missed")
+    return 0
+
+
 def grow(a):
     storages = []
     for folder in a.folders:
@@ -692,14 +753,26 @@ def make_parser():
                    "dev build with tmp_shader_salt)")
     p.add_argument("--suffix", default="", help="added to every job's tag, to run a jobs file again "
                    "with another pack")
+    p.add_argument("--only", help="run only the jobs whose tag (without --suffix) matches this regular "
+                   "expression (the salt still follows the line's number, so a subset of the file gets "
+                   "the salts it would have in a whole run)")
     p = sub.add_parser("revalidate")
     p.add_argument("folder")
     p.add_argument("--routes", required=True)
     p.add_argument("--min-route-m", type=int, default=2000)
     p.add_argument("--redo-truncated", action="store_true", help="also mark failed a probe whose recording "
                    "ended while the leader was still driving (the route is the race's first part only)")
+    p.add_argument("--from-logs", action="store_true", help="first make each probe's route again from its "
+                   "run's log; one that comes out 200 m or more longer than the one in --routes replaces it "
+                   "(the old kept as .cut): routes made before the log's single bad readings were skipped "
+                   "(races 5 and 15) lacked their first part")
     p = sub.add_parser("report")
     p.add_argument("folders", nargs="+")
+    p.add_argument("--match", help="only the runs whose tag matches this regular expression")
+    p = sub.add_parser("compare")
+    p.add_argument("folders", nargs="+")
+    p.add_argument("--old", required=True)
+    p.add_argument("--new", required=True)
     p.add_argument("--match", help="only the runs whose tag matches this regular expression")
     p = sub.add_parser("grow")
     p.add_argument("folders", nargs="+")
@@ -715,7 +788,8 @@ def make_parser():
 
 def main():
     a = make_parser().parse_args()
-    sys.exit({"soak": soak, "batch": batch, "report": report, "grow": grow, "revalidate": revalidate}[a.cmd](a))
+    sys.exit({"soak": soak, "batch": batch, "report": report, "grow": grow, "revalidate": revalidate,
+            "compare": compare}[a.cmd](a))
 
 
 if __name__ == "__main__":

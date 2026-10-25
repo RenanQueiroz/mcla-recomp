@@ -46,13 +46,14 @@ PATH_CVAR = {"rtv": "--render_target_path_d3d12=rtv", "rov": "--render_target_pa
              "fbo": "--render_target_path_vulkan=fbo", "fsi": "--render_target_path_vulkan=fsi"}
 
 
-def prepare(backend, res, salt, cache, tag, path=None):
+def prepare(backend, res, salt, cache, tag, path=None, pack=None):
     # The game's standard output, as the launcher reads it (ShaderPrep.cs).
     stdout = Path(os.environ["MCLA_DEV_ROOT"]) / f"measure-{tag}.stdout"
     _, folder = run_devrun(["--backend", backend, "--res", str(res), "--cache-root", str(cache),
                             "--timeout", "1800", "--no-gpu-guard", "--stdout", str(stdout),
                             "--extra", "--mcla_prepare_shaders=true", f"--tmp_shader_salt={salt}",
-                            *([PATH_CVAR[path]] if path else [])], tag)
+                            *([PATH_CVAR[path]] if path else []),
+                            *([f"--mcla_shader_pack={pack}"] if pack else [])], tag)
     out = stdout.read_text(encoding="utf-8", errors="replace") if stdout.exists() else ""
     r = {"tag": tag, "run": folder.name if folder else None,
          "progress_lines": sum(1 for line in out.splitlines() if line.startswith("SHADERPREP preload "))}
@@ -135,15 +136,22 @@ def main():
     ap.add_argument("--salt", type=int, required=True)
     ap.add_argument("--twice", action="store_true")
     ap.add_argument("--prepared", action="store_true")
+    ap.add_argument("--pack", help="the shader pack to prepare from (absolute, inside the dev root or the "
+                    "repository); the repository's by default")
+    ap.add_argument("--label", default="", help="a name for these runs in measure-results.jsonl (old, grown, ...)")
     a = ap.parse_args()
     root = Path(os.environ["MCLA_DEV_ROOT"])
+    pack = None
+    if a.pack:
+        import coverage
+        pack = str(coverage.checked_path(a.pack, "--pack"))
     stamp = time.strftime("%H%M%S")
     cache = root / f"cache-{a.what}-{a.backend}-{a.salt}-{stamp}"
     results = []
     if a.what == "prepare":
-        results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-1", a.path))
+        results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-1", a.path, pack))
         if a.twice:
-            results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-2", a.path))
+            results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-2", a.path, pack))
     else:
         if a.prepared:
             results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}"))

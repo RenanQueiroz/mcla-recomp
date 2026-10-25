@@ -196,7 +196,7 @@ def test_revalidate():
             points = [f"{i * 10},0,30\n" for i in range(meters // 10 + 1)]
             (base / "routes" / f"{tag[6:]}.route").write_text("# route\n" + "".join(points))
         code = cv.revalidate(argparse.Namespace(folder=str(base / "cov"), routes=str(base / "routes"), min_route_m=2000,
-                                              redo_truncated=False))
+                                              redo_truncated=False, from_logs=False))
         import json
         good = json.loads((base / "cov" / "probe-o05.json").read_text())
         bad = json.loads((base / "cov" / "probe-o06.json").read_text())
@@ -216,6 +216,74 @@ def test_revalidate():
         check("revalidate: a leader still driving at the end of the recording is told from one that finished",
               cv.leader_still_driving(base / "moving", 60.0) and not cv.leader_still_driving(base / "finished", 60.0)
               and not cv.leader_still_driving(base / "nothing", 60.0))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_route_from_log():
+    """A route from a run's watch lines: one reading far away that the next one undoes (every car at
+    once, 600 m off and back: races 5 and 15 had it) is a glitch of the log; a jump that stays (a reset
+    after a crash) starts the route over."""
+    import argparse
+    import os
+    import shutil
+    import route as route_tool
+    base = cv.DEV_ROOT / f"test-route-{os.getpid()}"
+    try:
+        base.mkdir(parents=True)
+
+        def run(name, xs):
+            (base / name).mkdir()
+            lines = [f"[t] [info] [core] [t1] dev pad: watch tick={15 * i} frame={15 * i} | 0.0 0.0 0.0 | "
+                     f"{x:.3f} 0.0 5.0 | {x + 5:.3f} 0.0 5.0" for i, x in enumerate(xs)]
+            (base / name / "game.log").write_text("\n".join(lines) + "\n")
+            out = base / f"{name}.route"
+            route_tool.from_log(argparse.Namespace(log=str(base / name), file=str(out), spacing=4.0, fps=60.0))
+            return cv.route_length(out), cv.read_route(out)[0]
+
+        steady = [i * 4.0 for i in range(100)]
+        length, first = run("steady", steady)
+        check("route from a log: a steady drive is all of it", abs(length - 396) < 8 and first[0] < 1, f"{length:.0f} m")
+        glitch = list(steady)
+        glitch[40] = 640.0  # one reading 600 m off
+        length, first = run("glitch", glitch)
+        check("route from a log: one reading far off that the next undoes is skipped, the route keeps its start",
+              abs(length - 396) < 8 and first[0] < 1, f"{length:.0f} m from x={first[0]:.0f}")
+        reset = steady[:40] + [i * 4.0 + 2000 for i in range(60)]
+        length, first = run("reset", reset)
+        check("route from a log: a jump that stays starts the route over",
+              abs(length - 236) < 8 and first[0] > 1990, f"{length:.0f} m from x={first[0]:.0f}")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_batch_only():
+    """batch --only runs the jobs whose tag matches (without the suffix) and gives every job the salt
+    of its line's number, so a subset gets the salts it would have in the whole run."""
+    import argparse
+    import contextlib
+    import io
+    import json
+    import os
+    import shutil
+    base = cv.DEV_ROOT / f"test-batch-{os.getpid()}"
+    try:
+        base.mkdir(parents=True)
+        jobs = base / "jobs.txt"
+        jobs.write_text("# jobs\n--script s.pad --tag h-o00-v3-rtv\n--script s.pad --tag h-o03-v3-rtv\n"
+                        "--script s.pad --tag h-c06-v3-rtv\n")
+        for tag in ("h-o00-v3-rtv-after", "h-o03-v3-rtv-after"):
+            (base / "out").mkdir(exist_ok=True)
+            (base / "out" / f"{tag}.json").write_text(json.dumps({"tag": tag}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cv.batch(argparse.Namespace(jobs=str(jobs), out=str(base / "out"), pack=None, suffix="-after",
+                                               only="^h-o0", salt_base=100, lock=False, max_min=5,
+                                               normal_priority=True))
+        out = buf.getvalue()
+        check("batch --only: the jobs that match and have a result are skipped, the others not looked at",
+              code == 0 and "h-o00-v3-rtv-after: done already" in out and "h-o03-v3-rtv-after: done already" in out
+              and "c06" not in out, out.strip().replace("\n", " | ")[:100])
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -270,7 +338,7 @@ def test_paths():
 
 
 for test in (test_retired_entries, test_read_drops, test_templates, test_created_in_play, test_matrix,
-             test_route_frames, test_paths, test_summaries, test_revalidate):
+             test_route_frames, test_paths, test_summaries, test_revalidate, test_route_from_log, test_batch_only):
     test()
 print("ALL PASS" if all(results) else f"{results.count(False)} FAILED")
 sys.exit(0 if all(results) else 1)

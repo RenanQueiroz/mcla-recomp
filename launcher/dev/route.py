@@ -118,16 +118,25 @@ def from_log(a):
     if not watched:
         raise SystemExit("no 'watch' lines in the log: run the script with `watch 15` (or so)")
     tracks, heights = {}, {}
-    for tick in sorted(watched):
+    ticks = sorted(watched)
+    for n, tick in enumerate(ticks):
         for i, p in enumerate(watched[tick]):
             if i == 0:
                 continue  # the player
-            heights[(p[0], p[2])] = p[1]
             track = tracks.setdefault(i, [])
-            # A jump (a reset after a crash) starts over.
-            if track and math.dist(track[-1][2], (p[0], p[2])) > 30:
+            here = (p[0], p[2])
+            if track and math.dist(track[-1][2], here) > 30:
+                # One reading far away that the next one undoes (every car at once, 600 m off and
+                # back, seen in races 5 and 15) is a glitch of the log, not a reset: skipped. Taking
+                # it for a reset cut the route's first part off, so the cars started where it
+                # never went.
+                after = [(q[0], q[2]) for m in ticks[n + 1:n + 3] for q in [watched[m][i]] if i < len(watched[m])]
+                if any(math.dist(track[-1][2], b) <= 30 * (k + 2) for k, b in enumerate(after)):
+                    continue
+                # A jump that stays (a reset after a crash) starts over.
                 track.clear()
-            track.append((tick / a.fps, tick, (p[0], p[2])))
+            heights[here] = p[1]
+            track.append((tick / a.fps, tick, here))
     write_route(a, tracks, heights)
 
 
