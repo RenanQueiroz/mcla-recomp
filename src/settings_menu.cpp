@@ -367,7 +367,8 @@ struct ItemDef {
 // The console's display is 60 Hz.
 constexpr double kFpsTargets[] = {30.0, 60.0};
 #else
-constexpr double kFpsTargets[] = {30.0, 60.0, 120.0, 0.0};
+// 40 to 50 are for variable-refresh displays.
+constexpr double kFpsTargets[] = {30.0, 40.0, 45.0, 50.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
 // How often the HUD advances (mcla_ui_hud_rate, src/frame_timing.cpp): 0 is
