@@ -1,0 +1,79 @@
+# A tour of Modes > Arcade: the race kinds, the maps and the race options (a screenshot after each
+# step). Run through coverage.py soak (which fills in the screenshots folder).
+include boot-to-roam.pad
+wait 1s 60f
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+shot {SHOTS}/00-modes.png 0.5
+press a 4f
+wait 2500ms 150f
+screens
+shot {SHOTS}/01-arcade.png 0.5
+press down 4f
+wait 600ms 36f
+shot {SHOTS}/02-arcade-down1.png 0.5
+press down 4f
+wait 600ms 36f
+shot {SHOTS}/03-arcade-down2.png 0.5
+press down 4f
+wait 600ms 36f
+shot {SHOTS}/04-arcade-down3.png 0.5
+press up 4f
+wait 300ms 18f
+press up 4f
+wait 300ms 18f
+press up 4f
+wait 600ms 36f
+press a 4f
+wait 1500ms 90f
+screens
+shot {SHOTS}/05-kind1.png 0.5
+press a 4f
+wait 1500ms 90f
+screens
+shot {SHOTS}/06-map1.png 0.5
+press down 4f
+wait 600ms 36f
+shot {SHOTS}/07-map2.png 0.5
+press up 4f
+wait 600ms 36f
+press a 4f
+wait 1500ms 90f
+screens
+shot {SHOTS}/08-options0.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/09-options1.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/10-options2.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/11-options3.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/12-options4.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/13-options5.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/14-options6.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/15-options7.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/16-options8.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/17-options9.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/18-options10.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/19-options11.png 0.5
+mark end

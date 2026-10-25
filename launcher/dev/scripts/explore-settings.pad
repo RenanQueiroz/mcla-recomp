@@ -1,0 +1,52 @@
+# A tour of Pause > Settings: Options (controls), Statistics, Cheat codes, Display, Performance.
+include boot-to-roam.pad
+wait 1s 60f
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press rb 4f
+wait 1000ms 60f
+shot {SHOTS}/00-settings.png 0.5
+press a 4f
+wait 1500ms 90f
+screens
+shot {SHOTS}/01-options.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/02-options-d1.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/03-options-d2.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/04-options-d3.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/05-options-d4.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/06-options-d5.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/07-options-d6.png 0.5
+press down 4f
+wait 400ms 24f
+shot {SHOTS}/08-options-d7.png 0.5
+press b 4f
+wait 1500ms 90f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOTS}/09-statistics.png 0.5
+press b 4f
+wait 1500ms 90f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOTS}/10-cheats.png 0.5
+press b 4f
+wait 1500ms 90f
+mark end

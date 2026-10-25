@@ -1,0 +1,44 @@
+# Pause > Settings > Options > Controller, Game, Camera pages.
+include boot-to-roam.pad
+wait 1s 60f
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press rb 4f
+wait 1000ms 60f
+press a 4f
+wait 1500ms 90f
+press a 4f
+wait 1500ms 90f
+shot {SHOTS}/00-controller.png 0.6
+press down 4f
+wait 600ms 36f
+shot {SHOTS}/01-controller-d1.png 0.6
+press right 4f
+wait 600ms 36f
+shot {SHOTS}/02-controller-r1.png 0.6
+press b 4f
+wait 1500ms 90f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOTS}/03-game.png 0.6
+press b 4f
+wait 1500ms 90f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOTS}/04-audio.png 0.6
+press b 4f
+wait 1500ms 90f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOTS}/05-camera.png 0.6
+mark end

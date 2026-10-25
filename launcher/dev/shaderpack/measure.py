@@ -42,12 +42,17 @@ def run_devrun(args, tag):
     return out, folder
 
 
-def prepare(backend, res, salt, cache, tag):
+PATH_CVAR = {"rtv": "--render_target_path_d3d12=rtv", "rov": "--render_target_path_d3d12=rov",
+             "fbo": "--render_target_path_vulkan=fbo", "fsi": "--render_target_path_vulkan=fsi"}
+
+
+def prepare(backend, res, salt, cache, tag, path=None):
     # The game's standard output, as the launcher reads it (ShaderPrep.cs).
     stdout = Path(os.environ["MCLA_DEV_ROOT"]) / f"measure-{tag}.stdout"
     _, folder = run_devrun(["--backend", backend, "--res", str(res), "--cache-root", str(cache),
                             "--timeout", "1800", "--no-gpu-guard", "--stdout", str(stdout),
-                            "--extra", "--mcla_prepare_shaders=true", f"--tmp_shader_salt={salt}"], tag)
+                            "--extra", "--mcla_prepare_shaders=true", f"--tmp_shader_salt={salt}",
+                            *([PATH_CVAR[path]] if path else [])], tag)
     out = stdout.read_text(encoding="utf-8", errors="replace") if stdout.exists() else ""
     r = {"tag": tag, "run": folder.name if folder else None,
          "progress_lines": sum(1 for line in out.splitlines() if line.startswith("SHADERPREP preload "))}
@@ -124,6 +129,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("what", choices=["prepare", "race"])
     ap.add_argument("--backend", default="d3d12")
+    ap.add_argument("--path", choices=sorted(PATH_CVAR), help="pin the render target path "
+                    "(rtv/rov on d3d12, fbo/fsi on vulkan) for a preparation")
     ap.add_argument("--res", default="3")
     ap.add_argument("--salt", type=int, required=True)
     ap.add_argument("--twice", action="store_true")
@@ -134,9 +141,9 @@ def main():
     cache = root / f"cache-{a.what}-{a.backend}-{a.salt}-{stamp}"
     results = []
     if a.what == "prepare":
-        results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-1"))
+        results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-1", a.path))
         if a.twice:
-            results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-2"))
+            results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}-2", a.path))
     else:
         if a.prepared:
             results.append(prepare(a.backend, a.res, a.salt, cache, f"prep-{a.backend}-{a.salt}"))
