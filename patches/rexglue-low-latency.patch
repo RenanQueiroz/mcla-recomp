@@ -1812,10 +1812,10 @@ index d7ca5d1..82c318a 100644
    if (generate) {
 diff --git a/src/ui/low_latency.cpp b/src/ui/low_latency.cpp
 new file mode 100644
-index 0000000..b6c0f6b
+index 0000000..647b0f8
 --- /dev/null
 +++ b/src/ui/low_latency.cpp
-@@ -0,0 +1,696 @@
+@@ -0,0 +1,706 @@
 +/**
 + * Low latency: the frame bookkeeping, the policy and the cvars; the vendors' calls are the
 + * backends' (d3d12/d3d12_low_latency.cpp, vulkan/vulkan_low_latency.cpp).
@@ -1921,6 +1921,10 @@ index 0000000..b6c0f6b
 +// OnFrameStart): an update thread that is a frame ahead of the swaps (the usual state while the
 +// game is CPU-bound) looks the same, so that takes longer to call a loss.
 +constexpr int64_t kLeadHeldNs = 500'000'000;
++// The first passes after the driver took the mode make no wait: it has seen no markers of the
++// frames before (none were sent while the reducer was off), and on Vulkan its first wait then
++// took about 100 ms, once or twice (4 of 7 re-arms after a give-up; none of 6 with two passes).
++constexpr uint32_t kWarmupPasses = 2;
 +std::atomic<int64_t> g_last_swap_ns{0};
 +std::atomic<uint64_t> g_swaps_executed{0};  // the GPU command thread's swap packets
 +std::atomic<uint32_t> g_frame_limit{0};
@@ -1975,6 +1979,7 @@ index 0000000..b6c0f6b
 +  int64_t rearm_at_ns = 0;  // 0: not coming back
 +  int64_t rearmed_at_ns = 0;
 +  uint32_t give_ups = 0;
++  uint32_t warmup = 0;             // passes left before the first wait after the mode went on
 +  uint32_t long_wait_history = 0;  // bit set: the wait (the latest in bit 0) was a long one
 +  // The warning for a long wait is given at most every 5 s, with the count of the ones since.
 +  int64_t long_wait_logged_ns = 0;
@@ -2311,6 +2316,9 @@ index 0000000..b6c0f6b
 +    }
 +    const bool refused_for_test = (debug & 64) || ((debug & 32) && g_applied.refusals < 2);
 +    if (!refused_for_test && backend->SetMode(policy.on, policy.boost, policy.interval_us)) {
++      if (policy.on && !g_applied.on) {
++        g_applied.warmup = kWarmupPasses;
++      }
 +      g_applied.on = policy.on;
 +      g_applied.boost = policy.boost;
 +      g_applied.interval_us = policy.interval_us;
@@ -2345,7 +2353,9 @@ index 0000000..b6c0f6b
 +  static uint64_t sleep_us_total = 0;  // the update thread's: the debug log's average
 +  static uint32_t sleep_count = 0;
 +  bool held = false;
-+  if (working) {
++  if (working && g_applied.warmup) {
++    --g_applied.warmup;
++  } else if (working) {
 +    const auto sleep_start = std::chrono::steady_clock::now();
 +    held = backend->Sleep(id);
 +    if (debug & 128) {
