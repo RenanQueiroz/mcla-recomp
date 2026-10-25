@@ -257,6 +257,69 @@ under the folder's lock. In *main* mode the same bar shows main's new commits; u
 SDK the install has, so it is refused (with the reason) when `main` changes `patches\*.patch`: an install made by the setup has
 the SDK that came with its release and can't build one. Going back to the releases checks the release's tag out again.
 
+## The installer (MCLA-Setup.exe)
+
+The one file a player downloads. It is a small native program (`installer\`, C# compiled with NativeAOT: 2.4 MB, no
+.NET runtime, starts at once) with the launcher's whole folder appended to it, compressed (Brotli): 55 MB for the
+175 MB launcher folder. **No administrator rights, no registry, nothing outside the user's own folders.**
+
+```
+MCLA-Setup.exe                      install (or repair) the launcher for the current user, then start it
+MCLA-Setup.exe --update --wait-pid N --dir <folder>
+                                    the same, for a launcher that updates itself (below)
+MCLA-Setup.exe --uninstall          remove the launcher and its shortcuts (not the game's install, not the saves)
+```
+
+What a plain run does: unpacks into `%LOCALAPPDATA%\Programs\MCLA` (a sibling folder first, each file checked against
+the SHA-256 stored with it, so a damaged download is found before anything is touched), swaps it in, makes
+`Midnight Club Los Angeles.lnk` in the Start menu and on the desktop, and starts the launcher, which is the setup
+wizard on a PC with no install. A progress window (a Task Dialog) shows while it works; errors are message boxes;
+the log is `%TEMP%\MCLA-Setup.log`.
+
+**Why an installer and not one self-contained exe.** A single-file publish of this launcher was tried first and
+does not give one file. The Windows App SDK 2.x supports `PublishSingleFile` (with `EnableMsixTooling`; it extracts
+every file, managed and native, to `%TEMP%\.net\MclaLauncher\<hash>` on the first start and runs from there: 96 MB
+compressed, 219 MB in the temp folder, again for every version), but Reactor loads its `ReactorApplication.xaml` and
+`.xbf` with `ms-appx:///`, which an unpackaged app resolves next to the exe, not in the extraction folder: the exe
+alone ends with 0xC000027B (a XAML parse failure) at start, and works only with `Reactor\Hosting\` beside it. Also
+`AppContext.BaseDirectory` becomes the temp folder, where `install.json`, the icon and `source-commit.txt` are not.
+An exe that has to write two files beside itself (in Downloads, maybe read-only) and keeps a 219 MB copy per
+version in `%TEMP%` is worse than a folder that is unpacked once where it belongs, which is what this does.
+
+**Where things live.** The launcher is a folder, `%LOCALAPPDATA%\Programs\MCLA`, always writable: the wizard's pointer
+`install.json` goes next to `MclaLauncher.exe` there (the case of a read-only folder beside the exe does not come up for
+an installed launcher). `installed.txt` in it says which setup made it (`version`, `tag`, `commit`, when). The shortcut
+names are the ones `build-launcher.ps1` uses for the launcher built from source: a shortcut of that name that starts
+something else is **never replaced**, and the installer **refuses** any folder inside a fork checkout (a folder with
+`build-game.ps1` above it), over a drive's root, over a folder that is not a launcher's, or the one it runs from. That
+is what keeps the launcher built from source (Classic) and its desktop shortcut safe from it.
+
+**Updating the launcher** (`SelfUpdate.cs`, a building block; the screens do not call it yet). A running program can't be
+replaced, so another program does it: the launcher downloads the new `MCLA-Setup.exe` (a release asset; its SHA-256 and
+size are in `release.json`, `installer`) with `SelfUpdate.DownloadAsync` (https only, exact SHA-256 and size, three
+tries for network trouble, nothing left behind when it fails), starts it with `SelfUpdate.HandOver` and quits. The
+installer waits for that process to end, unpacks the new launcher beside the folder, carries `install.json` and
+`settings.json` (and any `--keep <name>`) over, and swaps the two folders with two renames (`FolderSwap`: atomic, so
+a crash between them is repaired by the next run). It then starts the new launcher and waits for a window that is still
+there 3 s later. If the new launcher ends or shows none in 40 s, the folders are swapped back, the old launcher is
+started again and the installer exits 1 with a message. What is left (`MCLA.old-*`, `.failed-*`) is deleted at the
+end, or by `SelfUpdate.CleanUp()` at a later start. A folder that is held open by something else is waited for
+(60 s) and, if it stays held, nothing is changed.
+
+**Building it.** `scripts\ci\build-installer.ps1 -LauncherDir <what publish-launcher.ps1 made> -Out <folder>` (the release
+workflow does exactly this): publishes `installer\MclaSetup.csproj` with NativeAOT (needs the .NET 10 SDK and the Visual
+Studio Build Tools' C++ tools, which the CI runner has), appends the payload (`MCLA-Setup.exe --compose`), and checks
+the result by unpacking it again and comparing every file. `scripts\ci\smoke-installer.ps1` installs, reinstalls and
+removes it on scratch folders. Unsigned (see the README).
+
+**Testing it.** `dotnet run --project dev\update-check -c Release -- all <the bare installer program>` (CI runs it; the
+bare program is `build-installer.ps1 -StubOut <file>`): 20 checks of the folder swap (replace, carry over, way back, a
+held file, a swap killed half way, clean-up), 16 of the verified download (a local server: wrong hash, wrong size, cut
+short, stalled, 500, cancelled, refused addresses) and 24 of the real installer with fake launchers (a system program
+stands in for `MclaLauncher.exe`): fresh install, update that waits for the old launcher, a new launcher that ends at
+once (rolled back), an older installer, a damaged file, a held file, an interrupted swap, refusals, shortcuts, uninstall.
+They use scratch folders under `%TEMP%` and never the desktop or the Start menu.
+
 ## The game's settings
 
 The drop-downs are the game's own settings, in `mcla.toml` next to `mcla.exe`
@@ -583,7 +646,10 @@ launcher, it offers **Restart to update the launcher**, which does the same via
 commit that changed the launcher in `app\source-commit.txt` for that check.
 
 Package versions float: each build takes the newest Reactor preview and the newest
-stable Windows App SDK 2.x. Reactor is pre-1.0 and a new preview can change its API,
+stable Windows App SDK 2.x of its WinUI component (not the whole `Microsoft.WindowsAppSDK`
+metapackage, whose AI, ML, Search and Widgets parts the launcher does not use: `app\` is
+99 MB instead of 159 MB; files left in `app\` by an older build stay and are harmless, delete
+the folder and rebuild to drop them). Reactor is pre-1.0 and a new preview can change its API,
 so if a rebuild suddenly fails to compile, check what changed in
 `%USERPROFILE%\.nuget\packages\microsoft.ui.reactor\<version>\agentkit\reactor.api.txt`
 (the index for the version actually used; Reactor's GitHub main runs ahead of it).
