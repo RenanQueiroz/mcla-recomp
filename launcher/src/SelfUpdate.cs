@@ -58,7 +58,7 @@ static class SelfUpdate
     /// network trouble or a short file; bytes that are the right size but the wrong SHA-256 are not retried: whoever
     /// served them is not serving this release. Nothing is left behind on failure.
     public static async Task<string> DownloadAsync(UpdateAsset asset, string folder, Action<long, long>? progress, CancellationToken cancel,
-        bool allowLoopbackHttp = false, HttpMessageHandler? handler = null, TimeSpan? stall = null)
+        bool allowLoopbackHttp = false, HttpMessageHandler? handler = null, TimeSpan? stall = null, TimeSpan? retryDelay = null)
     {
         Validate(asset, allowLoopbackHttp);
         Directory.CreateDirectory(folder);
@@ -83,7 +83,7 @@ static class SelfUpdate
             {
                 last = ex;
                 TryDelete(part);
-                if (attempt < 3) await Task.Delay(TimeSpan.FromSeconds(attempt * 2), cancel);
+                if (attempt < 3) await Task.Delay((retryDelay ?? TimeSpan.FromSeconds(2)) * attempt, cancel);
             }
             catch { TryDelete(part); throw; }
         }
@@ -163,16 +163,36 @@ static class SelfUpdate
 
     /// Starts the downloaded MCLA-Setup.exe as the updater for this launcher. The caller then closes the launcher
     /// (the installer waits for this process to end); until it has, nothing in the folder changes.
-    public static Process HandOver(string setupExe, string? appFolder = null)
+    /// `readyFile`: a path the new launcher is told (the MCLA_READY_FILE environment variable) and is to write once it
+    /// has run well for a while (the wizard writes it 5 s after its start); the installer then takes the update as
+    /// good only when the file is there (the way back otherwise). Without it the check is a window that is still
+    /// there 3 s later.
+    public static Process HandOver(string setupExe, string? appFolder = null, string? readyFile = null)
     {
         var folder = (appFolder ?? AppFolder).TrimEnd('\\', '/');
+        var arguments = new List<string> { "--update", "--wait-pid", Environment.ProcessId.ToString(), "--dir", folder };
+        if (readyFile != null) arguments.AddRange(["--ready-file", readyFile]);
+        return StartSetup(setupExe, arguments);
+    }
+
+    /// For a launcher that Setup did not install (unpacked from the zip, in any folder): installs the launcher into
+    /// Setup's own folder with this launcher's `install.json` as its pointer, so that the new launcher finds the same
+    /// install. The old folder is left alone (the player may delete it). The caller then closes the launcher.
+    public static Process MigrateTo(string setupExe, string installJson, string? readyFile = null)
+    {
+        var arguments = new List<string> { "--import-pointer", installJson };
+        if (readyFile != null) arguments.AddRange(["--ready-file", readyFile]);
+        return StartSetup(setupExe, arguments);
+    }
+
+    static Process StartSetup(string setupExe, IEnumerable<string> arguments)
+    {
         var psi = new ProcessStartInfo(setupExe)
         {
             UseShellExecute = false,
             WorkingDirectory = Path.GetDirectoryName(setupExe)!,
         };
-        foreach (var arg in new[] { "--update", "--wait-pid", Environment.ProcessId.ToString(), "--dir", folder })
-            psi.ArgumentList.Add(arg);
+        foreach (var arg in arguments) psi.ArgumentList.Add(arg);
         return Process.Start(psi) ?? throw new UpdateException("Windows would not start the installer");
     }
 

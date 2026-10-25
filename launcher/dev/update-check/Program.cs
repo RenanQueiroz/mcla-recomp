@@ -20,6 +20,7 @@ using MclaLauncher;
 static class Program
 {
     static int failures, checks;
+    static bool quiet;
     static readonly string Scratch = Path.Combine(Path.GetTempPath(), "mcla-update-check-" + Environment.ProcessId);
 
     static int Main(string[] args)
@@ -31,12 +32,20 @@ static class Program
             var stub = args.Length > 1 ? args[1] : Environment.GetEnvironmentVariable("MCLA_SETUP_STUB");
             if (command is "swap" or "all") Swap();
             if (command is "download" or "all") Download().GetAwaiter().GetResult();
+            if (command == "download-loop")
+            {
+                // The download checks over and over (a race in them, or in the test server, would show as a failure
+                // or a crash somewhere in the loop): download-loop <times>
+                var times = args.Length > 1 && int.TryParse(args[1], out var n) ? n : 50;
+                quiet = true;
+                for (var i = 1; i <= times; i++) { Download().GetAwaiter().GetResult(); if (i % 10 == 0) Console.WriteLine($"  {i} rounds, {checks - failures} of {checks} checks passed so far"); }
+            }
             if (command is "setup" or "all")
             {
                 if (stub == null || !File.Exists(stub)) { Console.Error.WriteLine("setup needs the path of the bare MCLA-Setup.exe"); return 2; }
                 Setup(Path.GetFullPath(stub));
             }
-            if (command is not ("swap" or "download" or "setup" or "all")) { Console.Error.WriteLine("swap | download | setup <MCLA-Setup.exe> | all <MCLA-Setup.exe>"); return 2; }
+            if (command is not ("swap" or "download" or "download-loop" or "setup" or "all")) { Console.Error.WriteLine("swap | download | download-loop <times> | setup <MCLA-Setup.exe> | all <MCLA-Setup.exe>"); return 2; }
         }
         finally
         {
@@ -52,10 +61,10 @@ static class Program
     {
         checks++;
         if (!ok) failures++;
-        Console.WriteLine($"  {(ok ? "ok  " : "FAIL")} {what}");
+        if (!ok || !quiet) Console.WriteLine($"  {(ok ? "ok  " : "FAIL")} {what}");
     }
 
-    static void Section(string name) => Console.WriteLine($"\n{name}");
+    static void Section(string name) { if (!quiet) Console.WriteLine($"\n{name}"); }
 
     static string Dir(string name)
     {
@@ -157,34 +166,43 @@ static class Program
 
     // ---- the verified download -----------------------------------------------------------------------------------------
 
+    static readonly TimeSpan Quick = TimeSpan.FromMilliseconds(50); // the pause between download tries, short for the tests
+
     sealed class Server : IDisposable
     {
-        readonly HttpListener listener = new();
+        HttpListener listener = new();
         public int Requests;
         public Func<HttpListenerContext, int, Task> Handler = (_, _) => Task.CompletedTask;
         public string Url { get; }
+        public int Port { get; }
         readonly Task loop;
-        public Server()
+        public Server(int? firstPort = null)
         {
-            var port = new Random().Next(20000, 60000);
-            while (true)
+            var port = firstPort ?? Random.Shared.Next(20000, 60000);
+            for (var tries = 0; ; tries++)
             {
-                try { listener.Prefixes.Clear(); listener.Prefixes.Add($"http://127.0.0.1:{port}/"); listener.Start(); break; }
-                catch (HttpListenerException) { port++; }
+                // A listener whose Start failed (the port is taken) is closed by the failure and cannot be used again:
+                // each try has a new one. (This was a bug of the harness: it reused it, and a port clash showed as
+                // "Cannot access a disposed object" at the next prefix.)
+                listener = new HttpListener();
+                try { listener.Prefixes.Add($"http://127.0.0.1:{port}/"); listener.Start(); break; }
+                catch (HttpListenerException) when (tries < 50) { listener.Close(); port = port >= 65000 ? 20000 : port + 1; }
             }
+            Port = port;
             Url = $"http://127.0.0.1:{port}/MCLA-Setup.exe";
+            var mine = listener;
             loop = Task.Run(async () =>
             {
-                while (listener.IsListening)
+                while (true)
                 {
                     HttpListenerContext ctx;
-                    try { ctx = await listener.GetContextAsync(); } catch (Exception) { return; }
+                    try { ctx = await mine.GetContextAsync(); } catch (Exception) { return; } // closed
                     var n = Interlocked.Increment(ref Requests);
                     _ = Task.Run(async () => { try { await Handler(ctx, n); } catch (Exception) { try { ctx.Response.Abort(); } catch (Exception) { } } });
                 }
             });
         }
-        public void Dispose() { listener.Stop(); listener.Close(); }
+        public void Dispose() { try { listener.Stop(); } catch (Exception) { } listener.Close(); }
     }
 
     static async Task Serve(HttpListenerContext ctx, byte[] body, int? sendOnly = null, bool stallAfter = false)
@@ -204,6 +222,12 @@ static class Program
         new Random(7).NextBytes(data);
         var good = new UpdateAsset("MCLA-Setup.exe", "", Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant(), data.Length);
         var folder = Dir("download");
+
+        // a test server whose first port is taken goes on to the next one (it once failed with "Cannot access a disposed
+        // object": a listener whose Start failed was used again)
+        using (var first = new Server())
+        using (var second = new Server(first.Port))
+            Check(second.Port != first.Port, $"a test server asked for a port that is taken picks another ({first.Port}, {second.Port})");
 
         using (var server = new Server())
         {
@@ -243,7 +267,7 @@ static class Program
         using (var server = new Server())
         {
             server.Handler = (ctx, n) => Serve(ctx, data, sendOnly: data.Length / 2);
-            var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true));
+            var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true, retryDelay: Quick));
             Check(error != null && server.Requests == 3 && Directory.GetFiles(folder).Length == 0, $"a file cut short is tried 3 times, then refused, nothing left ({error?.GetType().Name})");
         }
 
@@ -255,7 +279,7 @@ static class Program
                 if (n == 1) { ctx.Response.StatusCode = 500; ctx.Response.Close(); return Task.CompletedTask; }
                 return Serve(ctx, data);
             };
-            var path = await SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true);
+            var path = await SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true, retryDelay: Quick);
             Check(File.Exists(path) && server.Requests == 2, "a 500 answer is retried and the second try succeeds");
         }
 
@@ -264,7 +288,7 @@ static class Program
         {
             server.Handler = (ctx, n) => Serve(ctx, data, sendOnly: 100000, stallAfter: true);
             var watch = Stopwatch.StartNew();
-            var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true, stall: TimeSpan.FromSeconds(1)));
+            var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true, stall: TimeSpan.FromMilliseconds(500), retryDelay: Quick));
             Check(error != null && server.Requests == 3 && Directory.GetFiles(folder).Length == 0, $"a stalled download is given up after the stall limit, 3 tries, nothing left ({watch.Elapsed.TotalSeconds:N0} s)");
         }
 
@@ -420,6 +444,29 @@ static class Program
         firstRun.WaitForExit(30000);
         Check(firstRun.ExitCode == 0 && Read(app4, "version.txt") == "1.0.0", "the first setup finished normally");
         WaitFree(app4);
+
+        // the ready-file protocol: the launcher is given a path (MCLA_READY_FILE) and writes it when it has run well
+        // (cmd.exe stands in: it writes the file, or just stays up); no file in time, no good
+        var app5 = Path.Combine(root, "Programs5", "MCLA");
+        var readyFile = Path.Combine(root, "ready.txt");
+        var withReady = $"--silent --dir \"{app5}\" --shortcut-dir \"{Path.Combine(root, "lnk5")}\" --ready-file \"{readyFile}\" --health-timeout 4";
+        var writes = Compose(stub, "ready", "5.0.0", "cmd.exe");
+        output = Run(writes, $"{withReady} --launch-args \"/c echo ready>%MCLA_READY_FILE% & ping -n 4 127.0.0.1 >nul\"", out code);
+        Check(code == 0 && File.Exists(readyFile) && Read(app5, "version.txt") == "5.0.0", $"a launcher that writes the ready file passes the start check{(code == 0 ? "" : "\n" + output)}");
+        var silent = Compose(stub, "silent", "6.0.0", "cmd.exe");
+        output = Run(silent, $"--update --wait-pid {int.MaxValue / 2} {withReady} --launch-args \"/c ping -n 8 127.0.0.1 >nul\"", out code);
+        Check(code == 1 && Read(app5, "version.txt") == "5.0.0" && !FolderSwap.Leftovers(app5).Any(), "a launcher that stays up but never writes the ready file is rolled back (the old version is back)");
+        Thread.Sleep(1500);
+
+        // a pointer to import: used when the new folder has none, never over one it has
+        var pointer = Path.Combine(root, "old-install.json");
+        File.WriteAllText(pointer, "{\"installRoot\":\"E:\\\\MCLA-elsewhere\"}");
+        var app6 = Path.Combine(root, "Programs6", "MCLA");
+        Run(v1, $"--silent --dir \"{app6}\" --no-launch --no-shortcuts --import-pointer \"{pointer}\"", out code);
+        Check(code == 0 && Read(app6, "install.json").Contains("elsewhere"), "--import-pointer gives a new install the pointer of the install the launcher had");
+        Write(app6, "install.json", "{\"installRoot\":\"D:\\\\mine\"}");
+        Run(v2, $"--silent --dir \"{app6}\" --no-launch --no-shortcuts --import-pointer \"{pointer}\"", out code);
+        Check(code == 0 && Read(app6, "install.json").Contains("mine") && !Read(app6, "install.json").Contains("elsewhere"), "--import-pointer does not replace the pointer the folder has");
 
         // refusals: another program's folder, and a fork checkout
         var foreign = Dir("foreign");

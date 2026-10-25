@@ -17,7 +17,11 @@
 //                         are always kept: the pointer from the launcher to its install)
 //   --health window|alive:<seconds>   what "the new launcher started" means (default: a window, still
 //                         open 3 s later; alive:N is for tests)
+//   --ready-file <path>   the new launcher is given this path (MCLA_READY_FILE) and has started when it writes the file
+//   --import-pointer <install.json>   use this file as the new folder's install.json when it has none (a launcher
+//                         that was unpacked from a zip moves into %LOCALAPPDATA%\Programs\MCLA)
 //   --launch-args <text>  arguments for the launcher (tests)
+//   --health-timeout <s>  how long the start check waits (default 40; tests)
 //   --rename-timeout <s>  how long to wait for Windows to let the old folder be renamed (default 60; tests)
 //   --shortcut-dir <dir>  put the shortcuts under this folder instead of the Start menu and desktop (tests)
 //
@@ -38,9 +42,9 @@ sealed class SetupFailure(string message) : Exception(message);
 sealed class Options
 {
     public string Mode = "install"; // install | update | uninstall | compose | info | extract
-    public string? Dir, ShortcutDir, Stub, ComposeFolder, ComposeOut, ExtractTo, InfoExe, LaunchArgs;
+    public string? Dir, ShortcutDir, Stub, ComposeFolder, ComposeOut, ExtractTo, InfoExe, LaunchArgs, ReadyFile, ImportPointer;
     public bool Silent, NoLaunch, NoShortcuts, Force;
-    public int WaitPid, RenameSeconds = 60;
+    public int WaitPid, RenameSeconds = 60, HealthSeconds = 40;
     public string Health = "window";
     public int Quality = 9;
     public PayloadMeta Meta = new();
@@ -129,8 +133,11 @@ static unsafe class Program
                 case "--keep": o.Keep.Add(Next()); break;
                 case "--wait-pid": o.WaitPid = int.TryParse(Next(), out var pid) ? pid : throw new SetupFailure("--wait-pid needs a number"); break;
                 case "--health": o.Health = Next(); break;
+                case "--health-timeout": o.HealthSeconds = int.TryParse(Next(), out var ht) && ht > 0 ? ht : throw new SetupFailure("--health-timeout needs seconds"); break;
                 case "--rename-timeout": o.RenameSeconds = int.TryParse(Next(), out var rt) && rt > 0 ? rt : throw new SetupFailure("--rename-timeout needs seconds"); break;
                 case "--launch-args": o.LaunchArgs = Next(); break;
+                case "--ready-file": o.ReadyFile = Path.GetFullPath(Next()); break;
+                case "--import-pointer": o.ImportPointer = Path.GetFullPath(Next()); break;
                 case "--shortcut-dir": o.ShortcutDir = Next(); break;
                 case "--stub": o.Stub = Next(); break;
                 case "--quality": o.Quality = int.TryParse(Next(), out var q) && q is >= 0 and <= 11 ? q : throw new SetupFailure("--quality is 0 to 11"); break;
@@ -272,6 +279,10 @@ static unsafe class Program
             // 3. Swap.
             Status(o, "Installing...", 950);
             if (exists) FolderSwap.CopyKept(target, staged, o.Keep);
+            // A pointer to an install made elsewhere (a launcher that was unpacked from a zip and moves here): used
+            // only when the folder has none of its own.
+            if (o.ImportPointer != null && File.Exists(o.ImportPointer) && !File.Exists(Path.Combine(staged, "install.json")))
+                File.Copy(o.ImportPointer, Path.Combine(staged, "install.json"));
             SwapRecord swap;
             try { swap = FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(o.RenameSeconds)); }
             catch (IOException ex) { throw new SetupFailure($"Windows would not let the launcher's folder be replaced ({ex.Message}). Close anything that has it open (Explorer, a virus scanner's scan) and try again."); }
@@ -387,12 +398,13 @@ static unsafe class Program
 
     sealed record Started(bool Ok, string Why);
 
-    static Process? TryStart(string exe, string workingDirectory, string? arguments)
+    static Process? TryStart(string exe, string workingDirectory, string? arguments, string? readyFile = null)
     {
         try
         {
             var psi = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = workingDirectory };
             if (!string.IsNullOrEmpty(arguments)) psi.Arguments = arguments;
+            if (readyFile != null) psi.Environment["MCLA_READY_FILE"] = readyFile;
             return Process.Start(psi);
         }
         catch (Exception ex) { Log($"could not start {exe}: {ex.Message}"); return null; }
@@ -400,18 +412,25 @@ static unsafe class Program
 
     /// Starts the launcher and waits until it has come up: a window, still there 3 s later (or, for tests,
     /// "alive:N": still running after N seconds). A process that ends first, or has no window after 40 s, did not start.
+    /// With --ready-file the launcher is told the file's path (the MCLA_READY_FILE variable) and has come up when it
+    /// writes it: its own word that it ran for a while is stronger than a window, and replaces the window check.
     static Started LaunchAndCheck(Options o, string exe, string workingDirectory)
     {
-        var process = TryStart(exe, workingDirectory, o.LaunchArgs);
+        if (o.ReadyFile != null) { try { File.Delete(o.ReadyFile); } catch (Exception) { } }
+        var process = TryStart(exe, workingDirectory, o.LaunchArgs, o.ReadyFile);
         if (process == null) return new Started(false, "Windows would not start it");
         var watch = Stopwatch.StartNew();
         DateTime? windowAt = null;
         var aliveSeconds = o.Health.StartsWith("alive:") && double.TryParse(o.Health[6..], out var s) ? s : (double?)null;
-        while (watch.Elapsed < TimeSpan.FromSeconds(40))
+        while (watch.Elapsed < TimeSpan.FromSeconds(o.HealthSeconds))
         {
             process.Refresh();
             if (process.HasExited) return new Started(false, $"it ended with code {process.ExitCode} after {watch.Elapsed.TotalSeconds:N1} s");
-            if (aliveSeconds != null)
+            if (o.ReadyFile != null)
+            {
+                if (File.Exists(o.ReadyFile)) return new Started(true, "");
+            }
+            else if (aliveSeconds != null)
             {
                 if (watch.Elapsed.TotalSeconds >= aliveSeconds) return new Started(true, "");
             }
@@ -423,7 +442,7 @@ static unsafe class Program
             Thread.Sleep(100);
         }
         try { process.Kill(entireProcessTree: true); } catch (Exception) { }
-        return new Started(false, "it showed no window in 40 seconds");
+        return new Started(false, o.ReadyFile != null ? $"it did not say it was ready in {o.HealthSeconds} seconds" : $"it showed no window in {o.HealthSeconds} seconds");
     }
 
     // ---- versions --------------------------------------------------------------------------------------------------------
