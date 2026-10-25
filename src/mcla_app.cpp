@@ -22,6 +22,7 @@
 #include <shellapi.h>
 #endif
 
+#include <fmt/format.h>
 #include <toml++/toml.hpp>
 
 #include <rex/cvar.h>
@@ -30,6 +31,7 @@
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/runtime.h>
+#include <rex/system.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/object_table.h>
@@ -228,6 +230,11 @@ namespace {
 // A game kept where it is (the setup's "Use it where it is") is named by
 // game_data_root in mcla.toml. The SDK reads that file after it has decided the
 // paths, so the line is read here; a value on the command line wins over it.
+// A relative value is relative to the folder of mcla.toml, not to wherever the
+// game was started from. The folder is returned whether or not it exists: a
+// folder that is gone must be said (ConstructRuntime below), not replaced by
+// another one. Empty when the file or the line is not there (or the file is not
+// valid TOML), which leaves everything as it was.
 std::filesystem::path GameDataRootFromConfig(const std::filesystem::path& config_path) {
   std::error_code error;
   if (config_path.empty() || !std::filesystem::exists(config_path, error)) {
@@ -237,16 +244,22 @@ std::filesystem::path GameDataRootFromConfig(const std::filesystem::path& config
     std::ifstream stream(config_path, std::ios::binary);
     const auto table = toml::parse(stream);
     if (const auto root = table["game_data_root"].value<std::string>(); root && !root->empty()) {
-      // Not logged: the log is not set up yet. A name that is no folder is left to the search below.
-      const std::filesystem::path folder = std::filesystem::u8path(*root);
-      if (std::filesystem::is_directory(folder, error)) {
-        return folder;
+      std::filesystem::path folder = std::filesystem::u8path(*root);
+      if (folder.is_relative()) {
+        folder = std::filesystem::absolute(config_path.parent_path() / folder, error);
       }
+      return folder.lexically_normal();
     }
   } catch (const toml::parse_error&) {
   }
   return {};
 }
+
+// What the game needs from its folder: the program and the archives. Names of the
+// 13 files of the one supported release (scripts/ci/game-files.json); the others
+// (videos, art) are not checked.
+constexpr const char* kRequiredGameFiles[] = {
+    "default.xex", "xarchive_audio.rpf", "xarchive_audlo.rpf", "xarchive_cache.rpf", "xarchive_music.rpf"};
 
 }  // namespace
 
@@ -263,6 +276,8 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
   }
   paths.game_data_root = GameDataRootFromConfig(paths.config_path);
   if (!paths.game_data_root.empty()) {
+    configured_game_root_ = paths.game_data_root;
+    configured_game_root_file_ = paths.config_path;
     return;
   }
   std::filesystem::path folder = rex::filesystem::GetExecutableFolder();
@@ -277,6 +292,36 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
     }
     folder = folder.parent_path();
   }
+}
+
+bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
+  if (!configured_game_root_.empty() && paths.game_data_root == configured_game_root_) {
+    std::error_code error;
+    std::string problem;
+    if (!std::filesystem::is_directory(configured_game_root_, error)) {
+      problem = "That folder is not there.";
+    } else {
+      for (const char* name : kRequiredGameFiles) {
+        if (!std::filesystem::exists(configured_game_root_ / name, error)) {
+          problem += (problem.empty() ? "These files are missing from it: " : ", ");
+          problem += name;
+        }
+      }
+      if (!problem.empty()) {
+        problem += ".";
+      }
+    }
+    if (!problem.empty()) {
+      const std::string message = fmt::format(
+          "The game's files are not where {} says they are.\n\n{}\n{}\n\nPut the game back there, or change game_data_root "
+          "in that file to where it is now (or delete the line to use the game inside this install).",
+          configured_game_root_file_.string(), configured_game_root_.string(), problem);
+      REXLOG_ERROR("{}", message);
+      rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, message);
+      return false;
+    }
+  }
+  return rex::ReXApp::ConstructRuntime(paths);
 }
 
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {

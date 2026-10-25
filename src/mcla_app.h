@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <filesystem>
+
 #include <rex/rex_app.h>
 
 #include "achievement_toast.h"
@@ -20,6 +22,9 @@ class MclaApp : public rex::ReXApp {
 
  protected:
   void OnConfigurePaths(rex::PathConfig& paths) override;
+  // A game folder named by game_data_root in mcla.toml that is gone, or has lost files, stops the start with a
+  // message that says which folder; the SDK's own check says only that a folder does not exist.
+  bool ConstructRuntime(const rex::PathConfig& paths) override;
   void OnPreSetup(rex::RuntimeConfig& config) override;
   void OnPostSetup() override;
   void OnPreLaunchModule() override;
@@ -47,4 +52,8 @@ class MclaApp : public rex::ReXApp {
   void ApplyPcDefaults();
   void FollowCursorSetting();
   void StartProfilerIfRequested();
+
+  // The game folder and the mcla.toml it came from, when mcla.toml named it (empty otherwise).
+  std::filesystem::path configured_game_root_;
+  std::filesystem::path configured_game_root_file_;
 };
