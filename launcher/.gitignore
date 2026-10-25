@@ -9,3 +9,5 @@ build-options.json
 __pycache__/
 dev/**/bin/
 dev/**/obj/
+installer/bin/
+installer/obj/

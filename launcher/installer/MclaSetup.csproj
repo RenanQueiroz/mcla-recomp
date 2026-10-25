@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The program MCLA-Setup.exe that installs, updates and removes the launcher (see Program.cs). Built
+       with NativeAOT: about 3 MB, no .NET runtime needed, starts at once. The release workflow then appends
+       the launcher's files to it (the compose option of MCLA-Setup.exe; see scripts\ci\build-installer.ps1). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64</Platforms>
+    <AssemblyName>MCLA-Setup</AssemblyName>
+    <RootNamespace>Mcla.Setup</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StackTraceSupport>false</StackTraceSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\src\launcher.ico</ApplicationIcon>
+    <Product>Midnight Club: Los Angeles Launcher setup</Product>
+    <Description>Installs, updates and removes the Midnight Club: Los Angeles launcher</Description>
+    <Company>RenanQueiroz/mcla-recomp</Company>
+    <Version Condition="'$(Version)' == ''">1.0.0</Version>
+  </PropertyGroup>
+
+</Project>

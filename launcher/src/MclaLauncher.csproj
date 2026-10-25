@@ -45,6 +45,8 @@
 
   <ItemGroup>
     <Content Include="launcher.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The folder swap of an update (SelfUpdate.cs), shared with the installer program. -->
+    <Compile Include="..\installer\FolderSwap.cs" Link="SelfUpdate\FolderSwap.cs" />
   </ItemGroup>
 
   <!-- Publishing an unpackaged WinUI app leaves out the app's own .pri, the
