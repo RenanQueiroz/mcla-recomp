@@ -109,6 +109,10 @@ static class ShaderStamp
         return new(reason, watch.ElapsedMilliseconds);
     }
 
+    // The record's vendor, kept for as long as the file is as it was (the settings page asks at
+    // every render, the sliders' drags among them): a stat per ask, a parse per change.
+    static ((string File, DateTime Written, long Length) Key, uint Vendor)? lastAdapterVendor;
+
     /// The vendor of the adapter the game used at its last start, from its shader record (0: no
     /// record, or none with an adapter in it).
     public static uint LastAdapterVendor(string arguments, string workingDirectory)
@@ -116,12 +120,20 @@ static class ShaderStamp
         try
         {
             var stampFile = Path.Combine(CacheRoot(arguments, workingDirectory), "shaders", "local", Title + ".stamp.json");
-            if (!File.Exists(stampFile)) return 0;
-            using var stamp = JsonDocument.Parse(ReadShared(stampFile));
-            if (stamp.RootElement.TryGetProperty("storage", out var storage) && storage.ValueKind == JsonValueKind.Object &&
-                storage.TryGetProperty("adapter", out var adapter) && adapter.ValueKind == JsonValueKind.Object &&
-                adapter.TryGetProperty("vendor", out var vendor) && vendor.ValueKind == JsonValueKind.Number)
-                return vendor.GetUInt32();
+            var info = new FileInfo(stampFile);
+            if (!info.Exists) return 0;
+            var key = (stampFile, info.LastWriteTimeUtc, info.Length);
+            if (lastAdapterVendor is { } known && known.Key == key) return known.Vendor;
+            uint found = 0;
+            using (var stamp = JsonDocument.Parse(ReadShared(stampFile)))
+            {
+                if (stamp.RootElement.TryGetProperty("storage", out var storage) && storage.ValueKind == JsonValueKind.Object &&
+                    storage.TryGetProperty("adapter", out var adapter) && adapter.ValueKind == JsonValueKind.Object &&
+                    adapter.TryGetProperty("vendor", out var vendor) && vendor.ValueKind == JsonValueKind.Number)
+                    found = vendor.GetUInt32();
+            }
+            lastAdapterVendor = (key, found);
+            return found;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException
                                        or NotSupportedException or InvalidOperationException or FormatException)
