@@ -218,6 +218,13 @@ static unsafe class Program
     static int Run(Options o)
     {
         if (!o.Silent) Dialogs.WaitForDialog(3000);
+        // From the start: whatever refuses or fails before the folders change, the launcher that quit to hand over is started again.
+        if (o.Mode == "update")
+        {
+            restartOldDir = Path.GetFullPath(o.Dir ?? DefaultDir()).TrimEnd('\\');
+            restartOldExe = Path.Combine(restartOldDir, "MclaLauncher.exe");
+            restartOldArguments = o.LaunchArgs;
+        }
         var target = Guard(Path.GetFullPath(o.Dir ?? DefaultDir()));
         FolderSwap.Recover(target);
         return o.Mode == "uninstall" ? Uninstall(o, target) : Install(o, target);
@@ -282,11 +289,20 @@ static unsafe class Program
         if (FolderSwap.InstallRootInside(target) is { } inside)
             throw new SetupFailure($"Your install ({inside}) is inside the launcher's folder {target}, which would take it along. Nothing was {(verb.StartsWith("replaced") ? "replaced" : "removed")}. Move the launcher's folder or the install first.");
         var owned = FolderSwap.ReadManifest(target) ?? fallback();
-        var foreign = FolderSwap.ForeignEntries(target, FolderSwap.TopLevelNames(owned, keep));
-        if (foreign.Count > 0 && verb.StartsWith("replaced"))
-            throw new SetupFailure($"{target} holds things the setup did not put there ({string.Join(", ", foreign.Take(5))}{(foreign.Count > 5 ? ", ..." : "")}), and replacing the folder would delete them. Move them out and run the setup again.");
+        if (verb.StartsWith("replaced"))
+        {
+            // At any depth: a file of the player's in a folder the payload also has would be deleted with the old folder.
+            var foreign = FolderSwap.ForeignFiles(target, owned, keep);
+            if (foreign.Count > 0)
+                throw new SetupFailure($"{target} holds things the setup did not put there ({string.Join(", ", foreign.Take(5))}{(foreign.Count > 5 ? ", ..." : "")}), and replacing the folder would delete them. Move them out and run the setup again.");
+        }
         return owned;
     }
+
+    /// Where to find this program again, for the messages that say to run it (an update's copy is in a folder the player never saw).
+    static string WhereTheInstallerIs => $" This installer is {Environment.ProcessPath}; a new copy is on {ReleasesPage}.";
+
+    const string ReleasesPage = "https://github.com/RenanQueiroz/mcla-recomp/releases";
 
     static int Install(Options o, string target)
     {
@@ -296,7 +312,6 @@ static unsafe class Program
         var exists = Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any();
         if (o.Mode == "update" && !exists) throw new SetupFailure($"There is no launcher in {target} to update.");
         if (exists) CheckOwned(target, "replaced", o.Keep, payload.ListPaths);
-        if (o.Mode == "update") { restartOldExe = Path.Combine(target, meta.Exe); restartOldDir = target; restartOldArguments = o.LaunchArgs; }
 
         if (exists && o.Mode == "install" && !o.Force && Newer(Installed(target), meta.Version))
         {
@@ -358,7 +373,7 @@ static unsafe class Program
             {
                 // The staged folder stays when the old one could not be put back: it is the launcher, until the next run repairs the folder.
                 keepStaged = !ex.OldFolderIsBack;
-                throw new SetupFailure(ex.Message);
+                throw new SetupFailure(ex.OldFolderIsBack ? ex.Message : ex.Message + WhereTheInstallerIs);
             }
             catch (IOException ex) { throw new SetupFailure($"Windows would not let the launcher's folder be replaced ({ex.Message}). Close anything that has it open (Explorer, a virus scanner's scan) and try again."); }
             restartOldExe = null; // the folders changed: from here the way back is RollBack's
@@ -379,7 +394,7 @@ static unsafe class Program
                         throw new SetupFailure($"The launcher was installed in {target} but did not start ({result.Why}). Try its shortcut again; if it still fails, the log is {Path.Combine(Path.GetTempPath(), "MCLA-Setup.log")}.");
                     bool restored;
                     try { restored = FolderSwap.RollBack(swap); }
-                    catch (SwapFailedException ex) { throw new SetupFailure($"The new launcher did not start ({result.Why}). {ex.Message}"); }
+                    catch (SwapFailedException ex) { throw new SetupFailure($"The new launcher did not start ({result.Why}). {ex.Message}{WhereTheInstallerIs}"); }
                     if (restored)
                     {
                         Log("the previous launcher was put back");

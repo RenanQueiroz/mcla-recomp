@@ -19,7 +19,7 @@
 //
 // What this code may delete, and what it must never:
 //  * A folder is the launcher's only when Setup made it: it holds installed.txt (OwnerMarker). The installer refuses
-//    any other folder, and a launcher folder that holds anything Setup did not unpack (ForeignEntries: the player's
+//    any other folder, and a launcher folder that holds anything Setup did not unpack (ForeignFiles, at any depth: the player's
 //    install put inside it, notes, a disc image), or whose install.json names an install inside it (InstallRootInside).
 //  * The leftovers are named with an exact stamp (<dir>.old-20261024-231500-1234) and carry Setup's marker inside
 //    (installed.txt in .old/.failed, StagingMarker in .new); a folder that merely has a similar name is not touched.
@@ -62,7 +62,8 @@ public static class FolderSwap
     /// Written into the folder a downloaded installer is kept in.
     public const string DownloadMarker = ".mcla-download";
     /// Names a launcher folder may hold besides the payload: Setup's own two, and what the launcher and the wizard write.
-    public static readonly string[] StandardNames = [OwnerMarker, ManifestName, "install.json", "settings.json"];
+    /// (StagingMarker too: one that a kill left in a folder is not a reason to refuse it, and is removed with it.)
+    public static readonly string[] StandardNames = [OwnerMarker, ManifestName, "install.json", "settings.json", StagingMarker];
 
     static string Trim(string folder) => Path.GetFullPath(folder).TrimEnd('\\', '/');
 
@@ -167,6 +168,38 @@ public static class FolderSwap
         return names;
     }
 
+    /// Everything in `folder`, at any depth, that is not one of `ownedPaths` (the files Setup unpacked: installed-files.txt), the
+    /// standard names or `keep`: what somebody else put there. A folder that holds none of the owned files is one entry (`name/`),
+    /// and so is a link; the owned folders are looked into. Relative paths with /, sorted.
+    public static List<string> ForeignFiles(string folder, IEnumerable<string> ownedPaths, IEnumerable<string>? keep = null)
+    {
+        static string Norm(string p) => p.Replace('\\', '/').Trim('/');
+        var owned = new HashSet<string>(ownedPaths.Select(Norm), StringComparer.OrdinalIgnoreCase);
+        foreach (var name in StandardNames) owned.Add(name);
+        foreach (var name in keep ?? []) owned.Add(Norm(name));
+        var ownedDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in owned)
+            for (var at = path.LastIndexOf('/'); at > 0; at = path.LastIndexOf('/', at - 1)) ownedDirs.Add(path[..at]);
+        var found = new List<string>();
+        void Walk(string dir, string relative)
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
+            {
+                var name = Path.GetFileName(entry);
+                var path = relative.Length == 0 ? name : relative + "/" + name;
+                if (Directory.Exists(entry))
+                {
+                    if (FolderSwap.IsLink(entry) || !ownedDirs.Contains(path)) found.Add(path + "/");
+                    else Walk(entry, path);
+                }
+                else if (!owned.Contains(path)) found.Add(path);
+            }
+        }
+        Walk(folder, "");
+        found.Sort(StringComparer.OrdinalIgnoreCase);
+        return found;
+    }
+
     /// The entries of `folder` (names, not paths) that are not in `owned`: what somebody else put there.
     public static List<string> ForeignEntries(string folder, ISet<string> owned) =>
         Directory.EnumerateFileSystemEntries(folder).Select(Path.GetFileName).Where(n => n != null && !owned.Contains(n!)).Select(n => n!).OrderBy(n => n).ToList();
@@ -263,7 +296,6 @@ public static class FolderSwap
         target = Trim(target);
         staged = Trim(staged);
         if (!Directory.Exists(staged)) throw new DirectoryNotFoundException($"the new folder is not there: {staged}");
-        try { File.Delete(Path.Combine(staged, StagingMarker)); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         string? previous = null;
         if (Directory.Exists(target))
         {
@@ -272,12 +304,13 @@ public static class FolderSwap
         }
         try
         {
+            // The staged folder keeps its marker through the renames (a kill in between leaves a folder the clean-up knows), and loses it
+            // once it is the launcher's folder.
             RenameWithRetry(staged, target, timeout);
+            try { File.Delete(Path.Combine(target, StagingMarker)); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         catch (Exception ex)
         {
-            // The staged folder keeps its marker, so that a later clean-up knows it.
-            try { File.WriteAllText(Path.Combine(staged, StagingMarker), "Setup is unpacking a launcher here\n"); } catch (Exception inner) when (inner is IOException or UnauthorizedAccessException) { }
             if (previous == null) throw;
             try { RenameWithRetry(previous, target, TimeSpan.FromSeconds(30)); }
             catch (Exception back)
