@@ -50,6 +50,7 @@ git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
+git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -1451,6 +1452,19 @@ With frame generation on (FSR 3.1; 3x uncapped, and the Half display cap, 116 re
 | The guest memory section committed up front under Wine | `src/core/memory_win.cpp` | Windows build under Wine/Proton (native Windows takes no new branch) |
 | The shared memory name dropped after creation | `src/core/memory_posix.cpp` | Linux (not the PS5) |
 | `DynamicLibrary::Attach`; RenderDoc only attached | `include/rex/platform/dynlib.h`, `src/core/dynlib_win.cpp`, `src/core/dynlib_posix.cpp`, `src/ui/renderdoc_api.cpp` | all platforms |
+
+## rexglue-upstream-small-fixes.patch
+
+**Why.** Two unrelated corrections, both in code this game runs.
+- **Profile settings written with no data** (`src/kernel/xam/xam_user.cpp`, `include/rex/system/xam/user_profile.h`). `XamUserWriteProfileSettings` copied a binary setting with `memcpy(bytes.data(), ptr, size)` into an empty vector, whose `data()` is null: undefined behaviour even when the size is 0, and with clang 22 the compiler used the promise that `memcpy`'s pointers are never null to drop `resize()`'s size check, which ended in a `memset` of `SIZE_MAX` bytes after `operator new(0)` and a heap abort at the next `free` (upstream issue #502, Gears of War on Linux). The vector is now made at its size (zero-filled, which also covers a null data pointer) and copied into only when there is something to copy. The same patch gives `UserProfile::Setting` a virtual destructor: settings are owned and replaced through `std::unique_ptr<Setting>`, so without one the derived buffers leaked and the object was freed with the base class's size.
+- **The texture fetch's exponent bias on Vulkan** (`src/graphics/pipeline/shader/spirv_translator_fetch.cpp`). The Vulkan (SPIR-V) shader translator applied the result exponent bias of a texture fetch from bits 13 to 18 of fetch constant word 4; the hardware's is word 3 (D3D12's translator already reads word 3). The patch loads word 3 and uses it for the bias (word 4 is still loaded for the LOD bias and the stacked texture filter). A bias of 0, as nearly every texture has, is the same either way. Xenia Canary found the same and fixed it; the pull request's screenshots show Daytona USA's textures right after.
+
+**From upstream.** Two pull requests to rexglue-sdk, open when this was taken (2026-10-25), not merged: [#503](https://github.com/rexglue/rexglue-sdk/pull/503), "fix(xam): heap corruption on zero-size binary profile settings", by JTM-rootstorm (Michael); and [#490](https://github.com/rexglue/rexglue-sdk/pull/490), "Vulkan: Use fetch_constant_word_3 for exponent bias in SPIR-V translator", by synthic (Alex Abbatiello), a port of xenia-canary's commit [32889f5](https://github.com/xenia-canary/xenia-canary/commit/32889f51beafc207ef3c4e73c807d363dfa133c3). The code is theirs; not this fork's work. Licence: BSD 3-Clause, the SDK's own (`LICENSE` of rexglue-sdk, repeated in `THIRD-PARTY-NOTICES.md`); xenia-canary is BSD 3-Clause too (Copyright (c) 2015, Ben Vanik).
+
+| Change | Files | Affects |
+|---|---|---|
+| Binary profile settings: no `memcpy` into an empty vector; virtual destructor | `src/kernel/xam/xam_user.cpp`, `include/rex/system/xam/user_profile.h` | all platforms |
+| Texture fetch exponent bias from fetch constant word 3 | `src/graphics/pipeline/shader/spirv_translator_fetch.cpp` | Vulkan (all platforms) |
 
 ## rexglue-mingw.patch
 
