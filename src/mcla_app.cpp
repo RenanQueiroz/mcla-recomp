@@ -314,7 +314,7 @@ bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
     if (!problem.empty()) {
       const std::string message = fmt::format(
           "The game's files are not where {} says they are.\n\n{}\n{}\n\nPut the game back there, or change game_data_root "
-          "in that file to where it is now (or delete the line to use the game inside this install).",
+          "in that file to where it is now (or run the setup again on this install folder to choose where the game is).",
           configured_game_root_file_.string(), configured_game_root_.string(), problem);
       REXLOG_ERROR("{}", message);
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, message);
