@@ -40,12 +40,13 @@ static class Paths
     public const string RepoUrl = "https://github.com/RenanQueiroz/mcla-recomp";
     public const string IssuesUrl = "https://github.com/RenanQueiroz/mcla-recomp/issues";
     public const string UpstreamUrl = "https://github.com/holdmysocks/mcla-recomp";
-    /// MinGit's cmd folder in an install made by the wizard (git.exe is not on that PC's PATH); else null.
-    public static readonly string? GitDir;
+    /// MinGit's cmd folder in an install made by the wizard (git.exe is not on that PC's PATH); else null. Looked for at
+    /// every use: an update may replace the folder it was in.
+    public static string? GitDir => Mode == LaunchMode.Installed ? new Setup.InstallLayout(InstallRoot!).GitDir : null;
     /// What to start for "git": MinGit's git.exe from the install (Installed mode), else the first git.exe on this
     /// process's PATH (CreateProcess looks a bare name up in the PATH of the process that starts it, not in the
     /// environment it gives the child), else Git for Windows' usual place, else just "git".
-    public static readonly string GitExe;
+    public static string GitExe => FindGit(GitDir, Environment.GetEnvironmentVariable("PATH"));
 
     static Paths()
     {
@@ -59,8 +60,6 @@ static class Paths
         BuiltCommitFile = Path.Combine(LauncherDir, "built-commit.txt");
         SettingsFile = Path.Combine(LauncherDir, "settings.json");
         LogsDir = Path.Combine(LauncherDir, "logs");
-        if (Mode == LaunchMode.Installed) GitDir = new Setup.InstallLayout(InstallRoot!).GitDir;
-        GitExe = FindGit(GitDir, Environment.GetEnvironmentVariable("PATH"));
     }
 
     internal static string FindGit(string? gitDir, string? path)
@@ -378,6 +377,9 @@ static class Repo
     {
         string? fetchError = null;
         Setup.UpdateTarget? target = null;
+        // An update that began and was not built (the launcher closed, a crash): the options are made to name its SDK bundle.
+        try { await Setup.UpdateEngine.RepairPendingAsync(new Setup.InstallLayout(Paths.InstallRoot!)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or TimeoutException) { }
         try
         {
             target = await Setup.UpdateResolver.ResolveAsync(Paths.Repo, Setup.InstallChannel.Read(Paths.InstallRoot!), fetch, CancellationToken.None);

@@ -22,9 +22,9 @@
 #
 # The real work is done by scripts\make_pc.ps1; this wrapper only covers what
 # that script leaves to the user.
-param([switch]$Update, [string]$Ref = "", [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "",
+param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "",
       [ValidateSet("", "msvc", "mingw")][string]$Toolchain = "", [string]$ToolsDir = "",
-      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "")
+      [string]$SdkBundle = "", [string]$SdkBundleSha256 = "", [string]$Ref = "")
 
 $ErrorActionPreference = "Stop"
 if ($Ref) { $Update = $true }
@@ -98,8 +98,15 @@ try {
             $changed = @(Invoke-Git -C $repo diff --name-only $old $target "--" "patches/*.patch")
             & git.exe -C $repo merge-base --is-ancestor $old $target
             if ($LASTEXITCODE -eq 0) {
-                # Forward: codegen's rewritten files are carried across (autostash), as for a branch.
+                # Forward. What codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) is put back first, as it is made again by
+                # the build: nothing is stashed, so nothing can clash with the new commit's version of those files. Anything else
+                # modified is carried across (autostash; an identity is given for its commit, MinGit has none).
+                & git.exe -C $repo checkout --quiet -- mcla_manifest.toml generated/rexglue.cmake 2>$null
+                $global:LASTEXITCODE = 0
                 Invoke-Git -c user.name=mcla -c user.email=mcla@localhost -C $repo merge --ff-only --autostash $target
+                # git exits 0 when an autostash could not be put back, leaving conflict markers: that is a failure.
+                $unmerged = @(& git.exe -C $repo ls-files --unmerged)
+                if ($unmerged.Count -gt 0) { throw "the checkout has changes of its own that clash with $Ref (git ls-files --unmerged lists files); it was not updated cleanly" }
             } else {
                 # Back to a release from main, or to another line: a plain checkout. What it discards is
                 # what codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) and builds again.

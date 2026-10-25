@@ -42,7 +42,10 @@ sealed record InstallLayout(string Root)
         get
         {
             if (!Directory.Exists(Tools)) return null;
-            foreach (var dir in new DirectoryInfo(Tools).EnumerateDirectories("mingit*"))
+            // The one the record names (an update unpacks the new MinGit beside the old one), else the newest.
+            if (ToolInstaller.FolderOf(Tools, "mingit") is { } recorded && File.Exists(Path.Combine(recorded, "cmd", "git.exe")))
+                return Path.Combine(recorded, "cmd");
+            foreach (var dir in new DirectoryInfo(Tools).EnumerateDirectories("mingit*").OrderByDescending(d => d.Name, StringComparer.OrdinalIgnoreCase))
             {
                 var cmd = Path.Combine(dir.FullName, "cmd");
                 if (File.Exists(Path.Combine(cmd, "git.exe"))) return cmd;
@@ -78,6 +81,9 @@ sealed record InstallRecord
     public List<string> StepsDone { get; init; } = [];
     /// The names in the install folder that this setup made: all a removal may delete there, nothing else.
     public List<string> Owned { get; init; } = [.. InstallLayout.OwnedNames];
+    /// An update that has begun and not been built yet: set before the checkout moves, cleared when its build worked. A start
+    /// that finds it sees the checkout at its commit and puts the SDK bundle it needs into build-options.json.
+    public PendingUpdate? Pending { get; init; }
 
     public bool Ready => State == "ready";
 
@@ -133,6 +139,9 @@ sealed record InstallRecord
     /// The pointer beside the launcher's exe: just where the install is.
     public static string PointerFile(string exeDirectory) => Path.Combine(exeDirectory, InstallLayout.RecordName);
 }
+
+/// What an update that has begun is moving to. Tag: the release's (or "main"); the bundle is the release's SDK, null for main.
+sealed record PendingUpdate(string Ref, string Commit, string Tag, string? BundleAsset, string? BundleSha256);
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
                              DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

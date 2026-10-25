@@ -1,5 +1,5 @@
-// Checks of the updates of a wizard install (phase 5). `update-status` and `update-run` run in Installed mode: from a
-// copy of this program with an install.json beside it (the pointer), as the launcher's exe has after the setup.
+// Checks of the updates of a wizard install (phase 5). `update-status`, `update-run`, `rebuild` and `channel` run in Installed
+// mode: from a copy of this program with an install.json beside it (the pointer), as the launcher's exe has after the setup.
 using System.Diagnostics;
 using MclaLauncher.Setup;
 
@@ -13,17 +13,26 @@ static partial class Program
         var channel = InstallChannel.Read(Paths.InstallRoot!);
         var status = await Repo.GetStatusAsync(fetch: true);
         var target = status.Target;
+        var pending = InstallRecord.Load(Path.Combine(Paths.InstallRoot!, InstallLayout.RecordName))?.Pending;
         Console.WriteLine($"channel {channel}; HEAD {status.Head[..8]}; target {target?.Label} {target?.Commit[..8]}; incoming {status.Incoming.Count}; "
                           + $"patches changed {status.PatchesChanged}; switch back {target?.SwitchBack}; launcher outdated {status.LauncherOutdated}; "
-                          + $"update available {status.UpdateAvailable}; build current {status.BuildCurrent}; fetch error {status.FetchError ?? "none"}");
+                          + $"update available {status.UpdateAvailable}; build current {status.BuildCurrent}; pending {(pending == null ? "none" : pending.Tag + " " + pending.Commit[..8])}; "
+                          + $"fetch error {status.FetchError ?? "none"}");
         foreach (var commit in status.Incoming.Take(5)) Console.WriteLine($"  {commit.Hash} {commit.Date} {commit.Subject}");
     }
 
-    /// What the launcher's "Update and rebuild" does in Installed mode: resolve, prepare (downloads), run build-game.ps1 -Ref,
-    /// finish (the record, the old tools and bundle).
-    static async Task<int> UpdateRun()
+    static string Brief(string line) =>
+        line.StartsWith("==> ") || line.StartsWith("SDK bundle") || line.StartsWith("unpacking") || line.Contains("patches changed") || line.StartsWith("Done in")
+        || line.StartsWith("already") || line.Contains("ancestor") || line.StartsWith("FAILED") || line.StartsWith("note:") || line.Contains("CMake")
+        || line.Contains("Configuring") || line.Contains("Generating") ? $"  {line}" : "";
+
+    /// What the launcher's "Update and rebuild" does in Installed mode: resolve, prepare (downloads, the record, the tools, the move,
+    /// the options), run the build, finish. `killAfter`: seconds after the build starts the process ends the hard way (a stop in
+    /// the middle of an update: the job object ends the build with it).
+    static async Task<int> UpdateRun(int killAfter)
     {
         Check("this run is in Installed mode", Paths.Mode == LaunchMode.Installed);
+        ChildJob.Enabled = true;
         var status = await Repo.GetStatusAsync(fetch: true);
         if (status.Target is not { } target) { Console.WriteLine($"nothing to update to ({status.FetchError ?? "no target"})"); return 1; }
         if (!status.UpdateAvailable) { Console.WriteLine($"already at {target.Label}"); return 0; }
@@ -31,15 +40,33 @@ static partial class Program
         using var session = await UpdateEngine.PrepareAsync(layout, target, line => Console.WriteLine($"[update] {line}"),
                                                            new Progress<string>(text => Console.WriteLine($"[update] {text}")), CancellationToken.None);
         Console.WriteLine($"build-game.ps1 {string.Join(' ', session.Options.Arguments)}");
-        var run = new BuildRun(BuildKind.Build, line =>
+        var run = new BuildRun(BuildKind.Build, line => { if (Brief(line) is { Length: > 0 } text) Console.WriteLine(text); }, session.Options);
+        if (killAfter > 0)
         {
-            if (line.StartsWith("==> ") || line.StartsWith("SDK bundle") || line.StartsWith("unpacking") || line.Contains("patches changed") || line.StartsWith("Done in")
-                || line.StartsWith("already") || line.Contains("is not an ancestor") || line.StartsWith("FAILED") || line.StartsWith("note:") || line.Contains("ancestor"))
-                Console.WriteLine($"  {line}");
-        }, session.Options);
+            await Task.Delay(TimeSpan.FromSeconds(killAfter));
+            Console.WriteLine($"the process ends now, {killAfter} s into the build");
+            Process.GetCurrentProcess().Kill();
+        }
         var exit = await run.Completion;
-        if (exit == 0) UpdateEngine.Finish(layout, AppContext.BaseDirectory, session); else UpdateEngine.KeepOptionsAfterFailure(layout, session);
+        if (exit == 0) UpdateEngine.Finish(layout, AppContext.BaseDirectory, session);
         Console.WriteLine($"build exit code {exit}; the game changed: {session.GameChanged}; log {run.LogFile}");
+        return exit;
+    }
+
+    /// The launcher's plain Rebuild in Installed mode: the folder's lock, the build as the last options say, and the finish of an
+    /// update that was pending.
+    static async Task<int> Rebuild()
+    {
+        Check("this run is in Installed mode", Paths.Mode == LaunchMode.Installed);
+        ChildJob.Enabled = true;
+        var layout = new InstallLayout(Paths.InstallRoot!);
+        await UpdateEngine.RepairPendingAsync(layout);
+        using var folderLock = InstallLock.Acquire(layout.Root);
+        var run = new BuildRun(BuildKind.Build, line => { if (Brief(line) is { Length: > 0 } text) Console.WriteLine(text); });
+        var exit = await run.Completion;
+        if (exit == 0) UpdateEngine.CompletePending(layout, AppContext.BaseDirectory);
+        var record = InstallRecord.Load(layout.RecordFile);
+        Console.WriteLine($"rebuild exit code {exit}; record: {record?.ReleaseTag} {record?.ReleaseCommit?[..8]}; pending {(record?.Pending == null ? "none" : record.Pending.Tag)}; log {run.LogFile}");
         return exit;
     }
 
@@ -60,34 +87,5 @@ static partial class Program
         Check("removing what is not there changes nothing", File.ReadAllText(file) == text);
         GameSettingsFile.Remove(Path.Combine(scratch, "missing.toml"), "game_data_root");
         Check("a file that is not there is left alone", !File.Exists(Path.Combine(scratch, "missing.toml")));
-    }
-
-    /// The swap script with a "new launcher" that exits at once (whoami.exe under the launcher's name): the old folder
-    /// must be put back, started again, and the failed one kept as <folder>.failed.
-    static async Task SwapRollback(string scratch)
-    {
-        SafeFolder.Delete(scratch);
-        var exe = Path.Combine(scratch, "app");
-        var staging = exe + ".new";
-        Directory.CreateDirectory(exe);
-        Directory.CreateDirectory(staging);
-        var whoami = Path.Combine(Environment.SystemDirectory, "whoami.exe");
-        // The old launcher: stays alive a few seconds and leaves a note that it was started again.
-        File.Copy(whoami, Path.Combine(exe, LauncherSwap.ExeName));
-        File.WriteAllText(Path.Combine(exe, "old.txt"), "old");
-        File.Copy(whoami, Path.Combine(staging, LauncherSwap.ExeName));
-        File.WriteAllText(Path.Combine(staging, "new.txt"), "new");
-        var layout = new InstallLayout(Path.Combine(scratch, "install"));
-        // A process to wait for: one that ends in a moment.
-        var waitFor = Process.Start(new ProcessStartInfo("ping.exe", "-n 2 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!;
-        var log = LauncherSwap.StartSwap(layout, staging, exe, waitFor.Id, secondsToWait: 6);
-        for (var i = 0; i < 80 && !(File.Exists(log) && File.ReadAllText(log).Contains("old launcher is back")); i++) await Task.Delay(500);
-        await Task.Delay(1500);
-        var text = File.Exists(log) ? File.ReadAllText(log) : "";
-        Console.WriteLine(text);
-        Check("the script saw the new launcher not start", text.Contains("did not start"));
-        Check("the old folder is back in place", File.Exists(Path.Combine(exe, "old.txt")) && File.Exists(Path.Combine(exe, LauncherSwap.ExeName)));
-        Check("the failed one is kept aside", File.Exists(Path.Combine(exe + ".failed", "new.txt")));
-        Check("nothing is left as .old or .new", !Directory.Exists(exe + ".old") && !Directory.Exists(staging));
     }
 }

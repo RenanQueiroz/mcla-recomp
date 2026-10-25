@@ -31,7 +31,7 @@
 //   remaining <scratch>       what is left to do, for the disk preflight
 //   cleanup2 <scratch>        what an uninstall refuses
 //   update-status | update-run   (Checks3.cs) in Installed mode: what an update would be, and doing it
-//   swap-rollback <scratch>   the launcher swap script with a new launcher that does not start: the old one comes back
+//   rebuild                   (Installed mode) a plain Rebuild: the lock, the last options, the finish of a pending update
 using System.Text.Json;
 using MclaLauncher.Setup;
 
@@ -73,8 +73,8 @@ static partial class Program
                 case "git": await GitInInstalledMode(); break;
                 case "update-status": await UpdateStatus(); break;
                 case "channel": InstallChannel.Write(Paths.InstallRoot!, AppContext.BaseDirectory, args[1]); Console.WriteLine($"channel is now {InstallChannel.Read(Paths.InstallRoot!)}"); break;
-                case "update-run": return await UpdateRun();
-                case "swap-rollback": await SwapRollback(args[1]); break;
+                case "update-run": return await UpdateRun(args.Length > 2 && args[1] == "--kill-after" ? int.Parse(args[2]) : 0);
+                case "rebuild": return await Rebuild();
                 case "settings-remove": SettingsRemove(args[1]); break;
                 case "lock": LockChecks(args[1]); break;
                 case "orphan": Orphan(args[1], args.Length < 3 || args[2] != "nojob"); break;

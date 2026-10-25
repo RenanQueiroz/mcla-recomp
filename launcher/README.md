@@ -186,9 +186,9 @@ the top of every page) whenever one is in use.
 - `launcher\dev\wizard-check` runs the engine with no window: `xdvdfs`, `verdicts`, `copy` (with a cancel and a
   resume), `release`, `names`, `downloads` (a wrong hash, a wrong size, an archive that leaves its folder),
   `archive`, `nonhttps`, `budget`, `mode`, `lock`, `orphan` (a child in the job dies with its parent), `retry`,
-  `remaining`, `git` (Installed mode without git on the PATH), `update-status`, `update-run`, `channel` (Installed mode, from a
-  copy of the harness with the install's `install.json` beside it: what an update would be, doing it, and the channel),
-  `swap-rollback` (the launcher swap with a new launcher that does not start), `cleanup`, `cleanup2`, `uninstall`, and
+  `remaining`, `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
+  copy of the harness with the install's `install.json` beside it: what an update would be, doing it (and ending the process in
+  the middle of it), a plain Rebuild, and the channel), `cleanup`, `cleanup2`, `uninstall`, and
   `install <release folder> <install folder> <game, or "adopt"> [--in-place] [--args "..."]`.
   Everything runs on scratch folders with the game's files only read.
 
@@ -200,33 +200,43 @@ An install made by the setup wizard (Installed mode) doesn't follow `main`; the 
 - At start (and *More > Check for updates*) the launcher reads the latest release's `release.json` from GitHub, fetches
   that release's tag into the checkout and checks it is the commit `release.json` names. The commits between the
   checkout and the tag are the *What's new*; **Update and rebuild** appears when there are any.
-- **Update and rebuild**: the tools and the SDK bundle the release names are downloaded and checked (SHA-256, size)
-  when they differ from the ones in the install (a tool unpacked from the right archive is not fetched again; older
-  tools and bundle zips are removed after a build that worked), the checkout moves to the tag (`git merge --ff-only`,
-  or a checkout when going back from `main`), and `build-game.ps1` runs with `-Toolchain mingw -ToolsDir -SdkBundle
-  -SdkBundleSha256`: `make_pc.ps1` unpacks the bundle when it is another one (the SDK is swapped, not patched and
-  built again), checks it is this checkout's, and Ninja rebuilds only what changed. The shaders are prepared again
-  only when something the game is made of changed (files outside `launcher\`, the documentation and the release's
-  machinery, a new SDK bundle or tool). A release that changes only the launcher or the documentation therefore
-  takes seconds. The player's `mcla.toml`, `settings.json`, saves and shader storage are not touched (they are not
-  in git).
-- The move is made by the launcher, not by `build-game.ps1 -Ref`: the script of the install being updated is the
-  old one, which has no `-Ref`; the new script comes with the checkout. `.\build-game.ps1 -Ref <tag>` (or
-  `-Ref origin/main`) does the same step from a terminal: it fetches that ref and moves there.
-- **The launcher itself.** When the release's launcher (`release.json`'s `launcher.sourceCommit`) is not the one running
-  (its `source-commit.txt`), a bar offers **Update the launcher**: the package is downloaded and checked, unpacked
-  beside the launcher's folder (`<folder>.new`), the launcher quits, and a script (`downloads\swap-launcher.ps1`, log
-  `swap-launcher.log`) renames the folders (`<folder>.old`, then `<folder>.new` becomes `<folder>`), starts the new
-  launcher and waits for it to write a marker (it does so five seconds after it starts). If there is none the old
-  folder is put back (the failed one stays as `<folder>.failed`) and started again. If the launcher's folder can't be
-  written to, the bar says so and points at the releases page. A single-exe package will use the same swap with one
-  file (`Setup\LauncherSwap.cs` keeps the folder-specific part in `StageAsync` and the script's two renames).
+- **Update and rebuild**, in this order, so that a stop, a crash or a power cut at any point leaves something the next start
+  can finish or build:
+  1. Room is checked (the archives, what they unpack to, and the build), then the tools and the SDK bundle the release names
+     are downloaded and checked (SHA-256, size) when they differ from the ones in the install. Nothing in the install has
+     changed yet.
+  2. The new tools are unpacked beside the old ones.
+  3. The update is written into `install.json` (`pending`). If a build tool (CMake, Ninja, the compiler) was replaced, the build
+     folder's `CMakeCache.txt` and `build.ninja` go (a configured build folder names the tools that made it; the next build configures it
+     again), and the folders of the tools replaced are removed: nothing refers to them any more, so no build, now or later, runs
+     with an old one or breaks for lack of it.
+  4. The checkout moves to the tag (`git merge --ff-only`, after putting back the two files codegen rewrites so that nothing is
+     stashed; or a checkout when going back from `main`). A merge that leaves conflicts is a failure.
+  5. `build-options.json` names the new SDK bundle, and `build-game.ps1` runs with `-Toolchain mingw -ToolsDir -SdkBundle
+     -SdkBundleSha256`: `make_pc.ps1` unpacks the bundle when it is another one (the SDK is swapped, not patched and built again),
+     checks it is this checkout's, and Ninja rebuilds only what changed.
+  When the build worked, `pending` is cleared and the record names the release; older bundle zips are removed. A plain
+  **Rebuild** after a stop builds the new version (the options already name its bundle) and finishes the update; a start that
+  finds `pending` with the checkout at its commit repairs the options if the stop came between steps 4 and 5, and drops it if the
+  checkout never moved. Every build the launcher starts for an install takes the folder's lock (`install.lock`) and ends with the
+  launcher (the job object), so no two overlap and none outlives a crashed launcher.
+- The shaders are prepared again only when something the game is made of changed (files outside `launcher\`, the documentation
+  and the release's machinery, a new SDK bundle or tool). A release that changes only the launcher or the documentation takes
+  seconds. The player's `mcla.toml`, `settings.json`, saves and shader storage are not touched (they are not in git).
+- The move is made by the launcher, not by `build-game.ps1 -Ref`: the script of the install being updated is the old one,
+  which has no `-Ref`; the new script comes with the checkout. `.\build-game.ps1 -Ref <tag>` (or `-Ref origin/main`) does
+  the same step from a terminal.
+- **The launcher itself** is not swapped by the launcher: it can't know what else is in its folder (the zip is flat and
+  "unpacked anywhere"). When the release's launcher (`release.json`'s `launcher.sourceCommit`) is not the one running (its
+  `source-commit.txt`), a bar says so and its button opens the release's page. `Setup\LauncherUpdate.cs` is the seam for the
+  installer (`MCLA-Setup.exe`, which replaces a launcher it installed, with a start check): the bar's button will download it,
+  hand over to it and exit, and a launcher started by it writes the file named by `MCLA_READY_FILE` five seconds after it is up
+  (`App.cs`).
 
-*More > Latest changes (main, untested)* (and back, *Follow the releases again*) is kept in `install.json` (`channel`).
-In *main* mode the same bar shows main's new commits; updating moves to `origin/main` and builds with the SDK the
-install has, so it is refused (with the reason) when `main` changes `patches\*.patch`: an install made by the setup has
-the SDK that came with its release and can't build one. Going back to the releases checks the release's tag out
-again.
+*More > Latest changes (main, untested)* (and back, *Follow the releases again*) is kept in `install.json` (`channel`), changed
+under the folder's lock. In *main* mode the same bar shows main's new commits; updating moves to `origin/main` and builds with the
+SDK the install has, so it is refused (with the reason) when `main` changes `patches\*.patch`: an install made by the setup has
+the SDK that came with its release and can't build one. Going back to the releases checks the release's tag out again.
 
 ## The game's settings
 

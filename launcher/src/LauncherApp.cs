@@ -56,6 +56,8 @@ sealed class LauncherApp : Component
         var (buildResult, setBuildResult) = UseState<int?>(null);
         // An install made by the setup wizard (Installed mode) updates from a release (Setup\Updates.cs), and may update itself.
         var installed = Paths.Mode == LaunchMode.Installed;
+        // What an Installed launcher starts to build ends with it (the job object), as the setup's builds do.
+        if (installed) ChildJob.Enabled = true;
         var (updating, setUpdating) = UseState<string?>(null, threadSafe: true);
         var updateCtsRef = UseRef<CancellationTokenSource?>(null);
         var (channel, setChannel) = UseState(installed ? InstallChannel.Read(Paths.InstallRoot!) : InstallChannel.Release);
@@ -197,16 +199,18 @@ sealed class LauncherApp : Component
                 session = await Task.Run(() => UpdateEngine.PrepareAsync(new InstallLayout(Paths.InstallRoot!), target, line => Debug.WriteLine($"update: {line}"),
                                                                          new Progress<string>(text => setUpdating(text + "…")), cts.Token));
             }
-            catch (SetupException ex)
-            {
-                setUpdating(null);
-                setNotice(ex.Plain);
-                return;
-            }
             catch (OperationCanceledException)
             {
                 setUpdating(null);
                 setNotice("The update was stopped. What was downloaded is kept.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                // Whatever it is (a full disk, a scanner holding a file, git too slow): said in the window, and the update is
+                // over (PrepareAsync has let the folder's lock go). From an async void, an uncaught one would end the launcher.
+                setUpdating(null);
+                setNotice(ex is SetupException setup ? setup.Plain : $"The update stopped: {ex.Message}");
                 return;
             }
             setUpdating(null);
@@ -225,6 +229,14 @@ sealed class LauncherApp : Component
                 session?.Dispose();
                 setNotice("Close the game first: the build can't replace mcla.exe while it's running.");
                 return;
+            }
+            // An update holds the folder's lock through its session; a plain build of an install takes it here, so that it never
+            // overlaps a setup or an update (of another window) in the same folder.
+            InstallLock? plainLock = null;
+            if (installed && session == null)
+            {
+                try { plainLock = InstallLock.Acquire(Paths.InstallRoot!); }
+                catch (SetupException ex) { setNotice(ex.Plain); return; }
             }
             setNotice(null);
             setCountdown(null);
@@ -245,6 +257,7 @@ sealed class LauncherApp : Component
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
                 session?.Dispose();
+                plainLock?.Dispose();
                 setNotice($"Couldn't start the build: {ex.Message}");
                 return;
             }
@@ -252,16 +265,20 @@ sealed class LauncherApp : Component
             setBuild(run);
             _ = run.Completion.ContinueWith(task =>
             {
-                if (session != null)
+                if (installed)
                 {
                     var layout = new InstallLayout(Paths.InstallRoot!);
                     try
                     {
-                        if (task.Result == 0 && !run.StopRequested) UpdateEngine.Finish(layout, AppContext.BaseDirectory, session);
-                        else UpdateEngine.KeepOptionsAfterFailure(layout, session);
+                        // A build that worked finishes an update (its session, or the one a closed launcher left pending).
+                        if (task.Result == 0 && !run.StopRequested)
+                        {
+                            if (session != null) UpdateEngine.Finish(layout, AppContext.BaseDirectory, session);
+                            else UpdateEngine.CompletePending(layout, AppContext.BaseDirectory);
+                        }
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Debug.WriteLine($"update: {ex.Message}"); }
-                    finally { session.Dispose(); }
+                    finally { session?.Dispose(); plainLock?.Dispose(); }
                 }
                 setBuildResult(task.Result);
                 _ = CheckAsync(fetch: false);
@@ -712,15 +729,17 @@ sealed class LauncherApp : Component
             if (status is not { LauncherOutdated: true } || busy || preparing) return null;
             if (installed && status.Target?.Release is { Launcher: not null } release)
             {
-                var canSwap = LauncherSwap.CanSwap(AppContext.BaseDirectory);
+                // The seam for the installer's hand-over (phase 6): when LauncherUpdate.InPlace is true this button downloads
+                // MCLA-Setup.exe (SelfUpdate.DownloadAsync), hands over to it (SelfUpdate.HandOver, with the ready file named
+                // by LauncherUpdate.ReadyFileVariable) and exits. Until then the launcher's folder is never swapped by the launcher
+                // itself: it can't know what else is in it.
                 return (InfoBar($"A newer launcher is in {release.Tag}",
-                                canSwap ? "It is downloaded and checked, then the launcher restarts with it (about a minute). If the new one doesn't start, this one comes back."
-                                        : "The folder this launcher is in can't be written to, so it can't replace itself. Download the new launcher from the releases page.") with
+                                "The game doesn't need it to play. It is a separate download for now: the release's page has it. Your install and settings stay as they are.") with
                 {
                     IsOpen = true,
                     IsClosable = false,
-                    ActionButtonContent = canSwap ? "Update the launcher" : "Open the releases page",
-                    OnActionButtonClick = canSwap ? StartLauncherSwap : () => Open(Paths.RepoUrl + "/releases/latest"),
+                    ActionButtonContent = "Open the release's page",
+                    OnActionButtonClick = () => Open(LauncherUpdate.ReleasePage(release)),
                 }).Severity(InfoBarSeverity.Informational);
             }
             return (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with
@@ -732,35 +751,18 @@ sealed class LauncherApp : Component
             }).Severity(InfoBarSeverity.Informational);
         }
 
-        // A wizard install's launcher: the release's package is downloaded and checked, unpacked beside this folder, and a
-        // script swaps the folders once this launcher has quit, starts the new one and puts this one back if it doesn't start.
-        async void StartLauncherSwap()
-        {
-            if (status?.Target is not { Release: { Launcher: { } package }, Source: { } source }) return;
-            setNotice(null);
-            setUpdating("Downloading the new launcher…");
-            var layout = new InstallLayout(Paths.InstallRoot!);
-            try
-            {
-                var staging = await Task.Run(() => LauncherSwap.StageAsync(layout, source, package, AppContext.BaseDirectory,
-                    new Progress<long>(n => setUpdating($"Downloading the new launcher… {GameChecker.FormatSize(n)} of {GameChecker.FormatSize(package.Size)}")),
-                    line => Debug.WriteLine($"launcher update: {line}"), CancellationToken.None));
-                LauncherSwap.StartSwap(layout, staging, AppContext.BaseDirectory, Environment.ProcessId);
-                exitingRef.Current = true;
-                prepRef.Current?.Stop();
-                ReactorApp.Exit();
-            }
-            catch (Exception ex) when (ex is SetupException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
-            {
-                setUpdating(null);
-                setNotice(ex is SetupException setup ? setup.Plain : $"Couldn't update the launcher: {ex.Message}");
-            }
-        }
-
         void SwitchChannel()
         {
             var next = channel == InstallChannel.Main ? InstallChannel.Release : InstallChannel.Main;
-            InstallChannel.Write(Paths.InstallRoot!, AppContext.BaseDirectory, next);
+            try
+            {
+                InstallChannel.Write(Paths.InstallRoot!, AppContext.BaseDirectory, next);
+            }
+            catch (Exception ex)
+            {
+                setNotice(ex is SetupException setup ? setup.Plain : $"Couldn't change what the launcher follows: {ex.Message}");
+                return;
+            }
             setChannel(next);
             setNotice(next == InstallChannel.Main
                 ? "You follow the latest changes (main) now. They are not tested and can be broken. More > Follow the releases again goes back."
