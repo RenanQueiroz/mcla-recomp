@@ -3,7 +3,7 @@
 # newer launcher and holds its MCLA-Setup.exe, and UI Automation clicking the bar's button.
 #
 #   powershell -File bar-e2e.ps1 -Stub <the bare MCLA-Setup.exe> -Launcher <a published launcher folder>
-#              -ReleaseJson <a release.json whose tag is in the git repository> -GitUrl <that repository> [-Way InPlace|Move|Other] [-Keep]
+#              -ReleaseJson <a release.json whose tag is in the git repository> -GitUrl <that repository> [-Way InPlace|Move|Other] [-Session] [-Keep]
 #              [-NewSetup <a real MCLA-Setup.exe> -NewSourceCommit <its launcher's source commit> -NewVersion <its version>]
 #
 # -Launcher is what scripts\ci\publish-launcher.ps1 made: the "old" and the "new" launcher are copies of it that differ in
@@ -13,6 +13,12 @@
 # which), and what must be true afterwards is that this installer's launcher is the one that runs. -ReleaseJson/-GitUrl: a fixture of the wizard's tests (the checkout is made from the repository at the
 # tag, so the install has nothing to update but the launcher). Nothing outside the scratch folder is written: the installer is told
 # where to put things with MCLA_SETUP_DIR and MCLA_SETUP_SHORTCUT_DIR. The launchers it starts are closed through their windows.
+#
+# With -Session (InPlace) a realistic session comes first, in the old launcher: a setting changed, More > Check for updates, the
+# release channel switched to main and back (it writes install.json), a build started and stopped, the window closed and the launcher
+# opened again. Then every file in the launcher's folder that is not in installed-files.txt is listed: the update that follows
+# (the rest of the run) refuses a folder that holds anything the setup did not unpack, so a launcher that wrote there in normal
+# use would never update.
 #
 #   InPlace  the old launcher was installed by Setup: the bar says "Update the launcher", and the new launcher takes its folder.
 #   Move     the old launcher was unpacked from a zip: "Move to the new launcher", and the new one is installed in Setup's folder
@@ -27,6 +33,7 @@ param(
     [string]$NewSourceCommit = '',
     [string]$NewVersion = '0.2.0',
     [string]$Scratch = (Join-Path ([IO.Path]::GetTempPath()) 'mcla-bar-e2e'),
+    [switch]$Session,
     [switch]$Keep
 )
 $ErrorActionPreference = 'Stop'
@@ -55,6 +62,56 @@ function Wait-Ui([int]$procId, [string]$like, [int]$seconds) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) { $e = Find-Ui $procId $like; if ($e) { return $e }; Start-Sleep -Milliseconds 1500 }
     $null
+}
+function Find-Named([int]$procId, [string]$name, [string]$kind) {
+    $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $procId)
+    foreach ($e in [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+        try { if ($e.Current.Name -eq $name -and $e.Current.ControlType.ProgrammaticName -like "*$kind") { return $e } } catch { }
+    }
+    $null
+}
+function Wait-Named([int]$procId, [string]$name, [string]$kind, [int]$seconds) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ((Get-Date) -lt $deadline) { $e = Find-Named $procId $name $kind; if ($e) { return $e }; Start-Sleep -Milliseconds 700 }
+    $null
+}
+# UI Automation elements go stale when the window redraws: a step is looked up again and tried up to three times.
+function Retry([scriptblock]$step) {
+    for ($i = 0; $i -lt 3; $i++) {
+        try { if (& $step) { return $true } } catch { }
+        Start-Sleep -Milliseconds 1200
+    }
+    $false
+}
+function Pattern($element, $type) { $found = $null; if ($element.TryGetCurrentPattern($type::Pattern, [ref]$found)) { $found } else { $null } }
+function Click-Button([int]$procId, [string]$name) {
+    $b = Wait-Named $procId $name 'Button' 15
+    if (-not $b) { return $false }
+    (Pattern $b ([System.Windows.Automation.InvokePattern])).Invoke(); $true
+}
+function Pick-MenuItem([int]$procId, [string]$name) {
+    $more = Wait-Named $procId 'More' 'Button' 15
+    if (-not $more) { return $false }
+    (Pattern $more ([System.Windows.Automation.ExpandCollapsePattern])).Expand()
+    $item = Wait-Named $procId $name 'MenuItem' 6
+    if (-not $item) { try { (Pattern $more ([System.Windows.Automation.ExpandCollapsePattern])).Collapse() } catch { }; return $false }
+    (Pattern $item ([System.Windows.Automation.InvokePattern])).Invoke(); $true
+}
+function Pick-ComboItem([int]$procId, [string]$combo, [string]$item) {
+    $box = Wait-Named $procId $combo 'ComboBox' 15
+    if (-not $box) { return $false }
+    (Pattern $box ([System.Windows.Automation.ExpandCollapsePattern])).Expand()
+    $entry = Wait-Named $procId $item 'ListItem' 6
+    if (-not $entry) { try { (Pattern $box ([System.Windows.Automation.ExpandCollapsePattern])).Collapse() } catch { }; return $false }
+    (Pattern $entry ([System.Windows.Automation.SelectionItemPattern])).Select(); $true
+}
+# What is in a launcher folder that the setup did not unpack: files not in installed-files.txt and not one of Setup's standard names.
+function Folder-Extras([string]$folder) {
+    $owned = @{}
+    foreach ($line in (Get-Content -LiteralPath (Join-Path $folder 'installed-files.txt'))) { if ($line.Trim()) { $owned[$line.Trim().ToLowerInvariant()] = 1 } }
+    foreach ($name in 'installed.txt', 'installed-files.txt', 'install.json', 'settings.json', '.mcla-staging') { $owned[$name] = 1 }
+    @(Get-ChildItem -LiteralPath $folder -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($folder.Length + 1).Replace('\', '/') } |
+        Where-Object { -not $owned.ContainsKey($_.ToLowerInvariant()) })
 }
 function Launchers([string]$folder) {
     @(Get-Process MclaLauncher -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($folder + '\', [StringComparison]::OrdinalIgnoreCase) })
@@ -130,6 +187,33 @@ if ($Way -eq 'Other') {
 }
 $oldProcess = Start-Process -FilePath (Join-Path $oldFolder 'MclaLauncher.exe') -PassThru
 try {
+    if ($Session) {
+        if ($Way -ne 'InPlace') { throw '-Session is for -Way InPlace' }
+        $id = $oldProcess.Id
+        Check ($null -ne (Wait-Ui $id '*A newer launcher*' 90)) 'session: the launcher is up (and sees the newer release)'
+        Check (Retry { Pick-ComboItem $id 'Frame rate' '60 FPS' }) 'session: a setting changed (Frame rate: 60 FPS)'
+        Check (Retry { Pick-MenuItem $id 'Check for updates' }) 'session: More > Check for updates'
+        Start-Sleep -Seconds 4
+        Check (Retry { Pick-MenuItem $id 'Latest changes (main, untested)' }) 'session: More > Latest changes (the channel is written to install.json)'
+        Start-Sleep -Seconds 5
+        Check (Retry { Pick-MenuItem $id 'Follow the releases again' }) 'session: More > Follow the releases again'
+        Start-Sleep -Seconds 4
+        if (Retry { Click-Button $id 'Build the game' }) {
+            "  session: build started"
+            # A scratch install has no tools or game: the build usually fails by itself within seconds. Stopped if it is still running.
+            $stop = Wait-Named $id 'Stop build' 'Button' 3
+            if ($stop) { (Pattern $stop ([System.Windows.Automation.InvokePattern])).Invoke(); "  session: the build was stopped" }
+            else { "  session: the build ended by itself" }
+            Start-Sleep -Seconds 6
+        } else { Check $false 'session: Build the game could be started' }
+        $null = $oldProcess.CloseMainWindow()
+        Check ($oldProcess.WaitForExit(30000)) 'session: the launcher closed'
+        $oldProcess = Start-Process -FilePath (Join-Path $oldFolder 'MclaLauncher.exe') -PassThru
+        Check ($null -ne (Wait-Ui $oldProcess.Id '*A newer launcher*' 90)) 'session: the launcher opened again and sees the newer release'
+        Start-Sleep -Seconds 5
+        $extras = Folder-Extras $oldFolder
+        Check ($extras.Count -eq 0) $(if ($extras.Count -eq 0) { "after the session the launcher's folder holds nothing the setup did not unpack ($((Get-ChildItem -LiteralPath $oldFolder -Recurse -File -Force | Measure-Object).Count) files)" } else { "entries the session added to the launcher's folder: $($extras -join ', ')" })
+    }
     $bar = Wait-Ui $oldProcess.Id '*A newer launcher*' 90
     Check ($null -ne $bar) $(if ($bar) { "the bar is shown: $($bar.Current.Name)" } else { 'the update bar is shown' })
     $wantButton = switch ($Way) { 'InPlace' { 'Update the launcher' } 'Move' { 'Move to the new launcher' } default { 'Open its folder' } }

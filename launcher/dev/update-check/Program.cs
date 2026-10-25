@@ -160,7 +160,7 @@ static class Program
             Check(error is SwapFailedException { OldFolderIsBack: true } && Directory.Exists(target) && Read(target, "installed.txt").Contains(oldVersion) && Directory.Exists(staged),
                   "a staged folder that can't be moved in: the old folder is put back, the staged one stays");
         }
-        Check(!FolderSwap.Leftovers(target, FolderSwap.OldTag).Any() && FolderSwap.Leftovers(target, FolderSwap.NewTag).Count() == 1, "... and what is beside it is the staged folder, with its marker again");
+        Check(!FolderSwap.Leftovers(target, FolderSwap.OldTag).Any() && FolderSwap.Leftovers(target, FolderSwap.NewTag).Count() == 1, "... and what is beside it is the staged folder, with its marker (kept through the renames)");
         FolderSwap.DeleteFolder(staged, TimeSpan.FromSeconds(2));
 
         // killed between the two renames: Recover puts the old folder back (only one that is Setup's)
@@ -207,6 +207,26 @@ static class Program
         Check(foreign.SequenceEqual(["game", "notes.txt"]), $"foreign entries are the names the payload does not have: {string.Join(", ", foreign)}");
         Write(target, "sub/data.bin", "x");
         Write(target, "installed-files.txt", "version.txt\nsub/data.bin\n");
+        // at any depth: a file of the player's in a folder the payload has, an empty folder of theirs, a link; a stray staging marker is not one
+        Write(target, "sub/mine.txt", "the player's");
+        Directory.CreateDirectory(Path.Combine(target, "emptyfolder"));
+        Write(target, ".mcla-staging", "left by a kill");
+        var deep = FolderSwap.ForeignFiles(target, FolderSwap.ReadManifest(target)!, ["install.json"]);
+        Check(deep.SequenceEqual(["emptyfolder/", "game/", "notes.txt", "sub/mine.txt"]), $"foreign files are looked for at any depth, owned folders included: {string.Join(", ", deep)}");
+        // what the launcher itself would say before it quits to hand over
+        var why = SelfUpdate.WhyNotUpdatable(target);
+        Check(why != null && why.Contains("sub/mine.txt"), "the launcher names what would stop an update, before it quits");
+        File.Delete(Path.Combine(target, "sub/mine.txt"));
+        Directory.Delete(Path.Combine(target, "emptyfolder"));
+        File.Delete(Path.Combine(target, ".mcla-staging"));
+        Directory.Delete(Path.Combine(target, "game"));
+        File.Delete(Path.Combine(target, "notes.txt"));
+        Check(SelfUpdate.WhyNotUpdatable(target) == null, "... and says nothing when the folder is only Setup's");
+        Write(target, "install.json", "{\"installRoot\":\"" + Path.Combine(target, "game").Replace("\\", "\\\\") + "\"}");
+        Check(SelfUpdate.WhyNotUpdatable(target)?.Contains("inside the launcher's folder") == true, "... or an install inside the launcher's folder");
+        File.Delete(Path.Combine(target, "install.json"));
+        Directory.CreateDirectory(Path.Combine(target, "game"));
+        Write(target, "notes.txt", "a player's file");
         var left = FolderSwap.DeleteOwned(target, FolderSwap.ReadManifest(target)!, TimeSpan.FromSeconds(2));
         Check(left.SequenceEqual(["game", "notes.txt"]) && Directory.Exists(target) && !Directory.Exists(Path.Combine(target, "sub")) && !File.Exists(Path.Combine(target, "version.txt")),
               "removing the launcher takes only the files Setup unpacked (and the folders then empty); the player's entries and the folder stay");
@@ -611,11 +631,21 @@ static class Program
         Run(v1, $"--silent --dir \"{app8}\" --no-launch --no-shortcuts", out code);
         Write(app8, "install.json", "{\"installRoot\":\"" + Path.Combine(app8, "game").Replace("\\", "\\\\") + "\",\"state\":\"ready\"}");
         Write(app8, @"game\default.xex", "the player's game");
-        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{app8}\" --no-launch --no-shortcuts", out code);
+        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{app8}\" --no-shortcuts --launch-args \"-n 5 127.0.0.1\"", out code);
         var rootRefusedUpdate = code;
+        Thread.Sleep(700);
+        Check(FolderSwap.ProcessesUnder(app8).Count > 0, "a refused update (an install inside the folder) leaves the launcher running: it is started again");
+        WaitFree(app8);
         Run(v1, $"--uninstall --silent --dir \"{app8}\"", out code);
         Check(rootRefusedUpdate == 1 && code == 1 && Read(app8, @"game\default.xex") == "the player's game" && File.Exists(Path.Combine(app8, "MclaLauncher.exe")),
               "an update or an uninstall of a folder that holds the install its install.json names is refused, nothing touched");
+
+        // a player's file inside a folder that the payload also has is foreign too (it would go with the old folder)
+        var app12 = Path.Combine(root, "Programs12", "MCLA");
+        Run(v1, $"--silent --dir \"{app12}\" --no-launch --no-shortcuts", out code);
+        Write(app12, @"sub\mine.txt", "the player's file");
+        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{app12}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1 && Read(app12, @"sub\mine.txt") == "the player's file" && Read(app12, "version.txt") == "1.0.0", "a file of the player's inside a folder of the payload also stops an update, and is kept");
 
         // a junction as --dir, a drive's root, the user's own folder, and --update with nothing there
         var linked = Path.Combine(root, "linked");
