@@ -453,6 +453,12 @@ try {
         if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
         [bool](& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     }
+    # Whether a path is the folder or inside it (-ToolsDir, which may be empty).
+    function InFolder([string]$path, [string]$folder) {
+        if (-not $path -or -not $folder -or -not (Test-Path -LiteralPath $path)) { return $false }
+        $folder = $folder.TrimEnd('\')
+        ($path.TrimEnd('\') -eq $folder) -or $path.StartsWith($folder + '\', [StringComparison]::OrdinalIgnoreCase)
+    }
     function HasPython {
         if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $false }
         $ErrorActionPreference = "Continue"
@@ -522,14 +528,16 @@ try {
         $extractsGame = -not $Until -and -not (Test-Path -LiteralPath "$root\game\default.xex")
         if (($buildsSdk -or $extractsGame) -and -not (HasPython)) { $list += "Python" }
         if ($mingw) {
-            # In -ToolsDir, or unpacked into tools\ (env.ps1 found it).
-            if (-not $env:MCLA_CC -or -not (Test-Path -LiteralPath $env:MCLA_CC)) { $list += "llvm-mingw" }
+            # The pinned release unpacked into tools\ counts, and so does one in
+            # -ToolsDir (the user's choice). Another llvm-mingw in tools\ does not: after
+            # an update that pins a newer release, the old one is not used instead.
+            if ($env:MCLA_MINGW_ROOT -ne "$root\tools\$mingwName" -and -not (InFolder $env:MCLA_MINGW_ROOT $ToolsDir)) { $list += "llvm-mingw" }
         } else {
             if (-not (HasBuildTools)) { $list += "Visual Studio Build Tools" }
             # Only the project's own Clang counts: another one on the path may not
             # find the Microsoft headers (issue #9). One in -ToolsDir is the user's choice.
             if (-not (Test-Path -LiteralPath "$root\tools\$llvmName\bin\clang.exe") -and
-                -not ($ToolsDir -and $env:MCLA_CC -and (Test-Path -LiteralPath $env:MCLA_CC))) { $list += "Clang" }
+                -not (InFolder $env:MCLA_CC $ToolsDir)) { $list += "Clang" }
         }
         # Optional: FSR 3.1's Vulkan runtime is built only with it (and only
         # when the SDK is built here with msvc: llvm-mingw cannot build FSR).
