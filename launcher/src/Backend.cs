@@ -9,13 +9,13 @@ using System.Text.RegularExpressions;
 namespace MclaLauncher;
 
 /// How this launcher was started, decided once from where its exe is (see Paths):
-///   Classic    the exe is in launcherpp\ of a fork checkout (build-game.ps1 is found above it): the user's own
+///   Classic    the exe is in launcher\app\ of a fork checkout (build-game.ps1 is found above it): the user's own
 ///              install, and development builds. The launcher as it has always been.
 ///   Installed  the exe has an install.json beside it that names an install the setup wizard made.
 ///   Wizard     neither: the first run, or a setup that did not finish. The setup wizard.
 enum LaunchMode { Classic, Installed, Wizard }
 
-/// The launcher lives in launcher\ of the fork's checkout (published into launcherpp\); the repository is its
+/// The launcher lives in launcher\ of the fork's checkout (published into launcher\app\); the repository is its
 /// parent folder. An install made by the setup wizard has the same checkout (mcla-recomp\ in the install folder),
 /// with the exe elsewhere: install.json beside the exe says where.
 static class Paths
