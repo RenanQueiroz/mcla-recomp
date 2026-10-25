@@ -807,8 +807,11 @@ during a build:
   `tmp_shader_salt` setting that makes the translated shaders differ for the
   driver's cache (a cold driver cache without emptying it), and log lines for
   every pipeline created and every frame that left draws out, waited or did
-  pipeline work on the GPU command thread. Applies on top of the three patches.
-  `devrun.py --cache-root <folder>` runs with a shader storage of its own.
+  pipeline work on the GPU command thread (`coverage.py` sums these per run).
+  Applies to the SDK as it is now, without the log lines of each pipeline's
+  creation on the creation threads and of the Vulkan preload's creation time (their
+  context moved). `devrun.py --cache-root <folder>` runs with a shader storage of
+  its own.
 - `shader-prepare-2026-10-17.md`: shader preparation (`--mcla_prepare_shaders`,
   `src/shader_prepare.cpp`): how the pack's shaders are rebuilt, the pack's
   contents, the preparation's time and memory, and the race benchmark with
@@ -931,7 +934,24 @@ in front. A real controller keeps working alongside it.
   a race (from the pipe's `cars` command) as a route for `follow`;
   `route.py from-log <run folder> <file>` does the same from a run whose script
   had `watch 15` on (no pipe, uncapped). `follow` drives the triggers and the left
-  stick only: buttons a script holds meanwhile (`down x`, `press lb`) stay.
+  stick only: buttons a script holds meanwhile (`down x`, `press lb`) stay. A car knocked
+  off the route is brought back in steps, each logged and counted (`recoveries=` in
+  the `follow` summary, with `best=` for how far along it got): four kinds of longer
+  reverse, then a forward burst toward the route; after 30 m off, the nearest point by
+  distance, behind or ahead; no progress for 20 s counts as stuck. (Putting the car
+  back by writing its position and velocity was tried and the car drove on: its state
+  isn't in a copy of those floats; `findvec <addr>` looks for copies. The game has no
+  reset either: the pause menu has Restart Race, Next Race and Quit Race.)
+  A tip or dialog over a race ("SLIP STREAM TURBO ... CONTINUE (A)") stops the whole
+  world; `follow` presses A for it, and `autocontinue on|off` does the same for a script
+  that doesn't follow a route (it is the same thing: no car's position changed for a
+  quarter of a second once one had moved; the pause menu stops the world too).
+- `devrun.py` writes only inside its dev root: `--cache-root`, `--stdout` and
+  `--record` must be absolute and inside `MCLA_DEV_ROOT` (or `mcla-dev` in
+  `%LOCALAPPDATA%`), and the same goes for `coverage.py`'s `--out`, `--route-out` and
+  `grow --out` (a pack may go to the repository's `shaderpack\` too); a path that lost
+  its backslashes on the way ("C:mcvshp-devx") is named as that. Jobs files use forward
+  slashes and are not read as POSIX shell lines.
 - `dev\scripts\arcade-race.pad`, `roam-soak.pad` and the `explore-*.pad` tours
   (the pause menu, Modes > Arcade and Goal Attack and their race lists, the race
   options, Settings, the controls) are templates and tours for
@@ -941,12 +961,17 @@ in front. A real controller keeps working alongside it.
 - `dev\shaderpack\coverage.py` plays a script on a new shader storage with the
   shader pack imported at the start and reports what the pack did not cover (the
   pipelines and shaders the game created while playing, each a draw left out while
-  it compiled) and the frames over 50 ms; `matrix.py` writes the jobs files for
-  the arcade's 38 races (a probe per race that makes its route, then two
-  variants of every race on each render target path, and a hold-out variant),
-  `coverage.py batch` runs them under the shared GPU lock, `coverage.py grow`
-  builds the grown pack from the soaks' storages, and `test_pack.py` tests the
-  tools that need no game.
+  it compiled), the frames over 50 ms, and what a player would see of them, from the
+  dev build's counters (`shader-stutter-timers.sdk.patch`): draws left out, draws
+  whose pipeline was made on the spot, the frame budget waited, pipeline work on the
+  GPU command thread, Vulkan presents skipped. A race that stalled is a failed job
+  (a probe route under 2,000 m, a route covered under 80%) and a rerun redoes it.
+  `matrix.py` writes the jobs files for the arcade's 38 races (a probe per race that
+  makes its route, then variants of every race on each render target path with the
+  traffic off, a subset with it on, and a hold-out variant), `coverage.py batch`
+  runs them under the shared GPU lock (`--salt-base` for a driver cache that is cold
+  for each job), `coverage.py grow` builds the grown pack from the soaks' storages,
+  and `test_pack.py` tests the tools that need no game.
 
 The game ignores buttons during its own transitions (the title screen's camera
 cuts, a menu closing), so scripts press until a condition holds rather than
