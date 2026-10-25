@@ -4,6 +4,8 @@
 #
 #   .\build-game.ps1                build (or finish building) what is checked out
 #   .\build-game.ps1 -Update        fast-forward to the fork's latest commit, then build
+#   .\build-game.ps1 -Ref REF       (with -Update implied) move to a release tag, or to origin/main, instead of
+#                                   following the branch: what the launcher runs for an install made by the setup wizard
 #   .\build-game.ps1 -ResetSdk      re-patch the ReXGlue SDK and rebuild it, then build
 #   .\build-game.ps1 -InstallTools  let make_pc.ps1 install missing tools without asking
 #   .\build-game.ps1 -Iso PATH      disc image, only needed until game\ is extracted;
@@ -20,11 +22,12 @@
 #
 # The real work is done by scripts\make_pc.ps1; this wrapper only covers what
 # that script leaves to the user.
-param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "",
+param([switch]$Update, [string]$Ref = "", [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = "",
       [ValidateSet("", "msvc", "mingw")][string]$Toolchain = "", [string]$ToolsDir = "",
       [string]$SdkBundle = "", [string]$SdkBundleSha256 = "")
 
 $ErrorActionPreference = "Stop"
+if ($Ref) { $Update = $true }
 # Git needs core.longpaths for the SDK's deep submodule files (resetting the
 # SDK cleans them); set for every git started from here, as make_pc.ps1 does.
 $env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
@@ -79,7 +82,39 @@ try {
     if ($Toolchain -ne "msvc") { "toolchain: $Toolchain" }
 
     # -----------------------------------------------------------------------
-    if ($Update) {
+    if ($Update -and $Ref) {
+        # An install made by the setup wizard has no branch to follow: it sits on a release tag (or on origin/main
+        # when its player asked for the latest changes). Fetch exactly that ref and move there.
+        Step "update from the fork: $Ref"
+        if ($Ref -notmatch '^(origin/[A-Za-z0-9._/-]+|[A-Za-z0-9][A-Za-z0-9._-]{0,62})$') { throw "-Ref is a tag name or origin/<branch>, not '$Ref'" }
+        $old = Invoke-Git -C $repo rev-parse HEAD
+        $refspec = if ($Ref.StartsWith("origin/")) { "+refs/heads/$($Ref.Substring(7)):refs/remotes/origin/$($Ref.Substring(7))" } else { "+refs/tags/${Ref}:refs/tags/${Ref}" }
+        Invoke-Git -C $repo fetch --quiet --no-tags origin $refspec
+        $target = Invoke-Git -C $repo rev-parse --verify "$Ref^{commit}"
+        if ($old -eq $target) {
+            "already at $Ref ($($old.Substring(0, 7)))"
+        } else {
+            # Looked at before HEAD moves.
+            $changed = @(Invoke-Git -C $repo diff --name-only $old $target "--" "patches/*.patch")
+            & git.exe -C $repo merge-base --is-ancestor $old $target
+            if ($LASTEXITCODE -eq 0) {
+                # Forward: codegen's rewritten files are carried across (autostash), as for a branch.
+                Invoke-Git -c user.name=mcla -c user.email=mcla@localhost -C $repo merge --ff-only --autostash $target
+            } else {
+                # Back to a release from main, or to another line: a plain checkout. What it discards is
+                # what codegen rewrites (mcla_manifest.toml, generated\rexglue.cmake) and builds again.
+                "$($old.Substring(0, 7)) is not an ancestor of $($target.Substring(0, 7)): checking it out"
+                Invoke-Git -c advice.detachedHead=false -C $repo checkout --quiet --force --detach $target
+            }
+            Invoke-Git -C $repo log --oneline -20 "$old..HEAD"
+            if ($changed) {
+                "the SDK patches changed: $($changed -join ', ')"
+                # With a prebuilt SDK (-SdkBundle) the bundle of that release is the new SDK; make_pc.ps1
+                # checks that it is this checkout's. Otherwise it is patched and built again.
+                $ResetSdk = $true
+            }
+        }
+    } elseif ($Update) {
         Step "update from the fork"
         $old = Invoke-Git -C $repo rev-parse HEAD
         Invoke-Git -C $repo fetch --quiet origin
