@@ -410,10 +410,10 @@ index ba34aca..190e30a 100644
    // UI overlay painting.
 diff --git a/include/rex/ui/low_latency.h b/include/rex/ui/low_latency.h
 new file mode 100644
-index 0000000..ce412b7
+index 0000000..3f79328
 --- /dev/null
 +++ b/include/rex/ui/low_latency.h
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,152 @@
 +#pragma once
 +/**
 + * Low latency (rexglue-low-latency.patch): the GPU vendor's latency reducer for
@@ -488,11 +488,9 @@ index 0000000..ce412b7
 +  // Why SetMode failed (the settings' letters).
 +  virtual const char* FailureReason() const { return "NOT SUPPORTED"; }
 +  // Null while the backend can work; else why it can't any more (the settings' letters): a
-+  // swapchain the driver made without the latency mode. Read every frame.
++  // swapchain the driver made without the latency mode. Read every frame. It is for good (the
++  // core does not ask again; waits that take too long are the core's own and are tried again).
 +  virtual const char* Failed() const { return nullptr; }
-+  // Asked some seconds after the core gave the reducer up (Failed, or sleeps that took too long):
-+  // whether the backend can work again, and has cleared what Failed reported. The default is no.
-+  virtual bool Rearm() { return false; }
 +  // Called once per frame, before the frame's input is read: the driver waits
 +  // here for the best moment to start (it is the latency reduction). Whether it did (and holds
 +  // the frame rate to the minimum interval): false where it could not (no swapchain yet, a call
@@ -1132,10 +1130,10 @@ index c4870dd..6652376 100644
          d3d12/d3d12_provider.cpp
 diff --git a/src/ui/d3d12/d3d12_low_latency.cpp b/src/ui/d3d12/d3d12_low_latency.cpp
 new file mode 100644
-index 0000000..10bc2a1
+index 0000000..47d5a15
 --- /dev/null
 +++ b/src/ui/d3d12/d3d12_low_latency.cpp
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,542 @@
 +/**
 + * Direct3D 12 low latency (rexglue-low-latency.patch): NVIDIA Reflex through NVAPI and AMD
 + * Anti-Lag 2 through the driver extension. See include/rex/ui/low_latency.h.
@@ -1356,8 +1354,10 @@ index 0000000..10bc2a1
 +    return true;
 +  }
 +
-+  // NvAPI_D3D_Sleep waits for the moment the driver picks and can't be cancelled; the core times
-+  // it, and gives the reducer up (for a while) when it takes too long, three times in a row.
++  // NvAPI_D3D_Sleep waits for the moment the driver picks and can't be cancelled, so it has no
++  // bound as Vulkan's wait has: the core times it when it returns, and gives the reducer up (for
++  // a while) when it takes too long, three times in eight. A call that never returns is not
++  // covered.
 +  bool Sleep(uint64_t) override { return sleep_(device_.Get()) == kNvApiOk; }
 +
 +  void Marker(LatencyMarker marker, uint64_t frame_id) override {
@@ -1812,10 +1812,10 @@ index d7ca5d1..82c318a 100644
    if (generate) {
 diff --git a/src/ui/low_latency.cpp b/src/ui/low_latency.cpp
 new file mode 100644
-index 0000000..933d8d4
+index 0000000..b6c0f6b
 --- /dev/null
 +++ b/src/ui/low_latency.cpp
-@@ -0,0 +1,663 @@
+@@ -0,0 +1,696 @@
 +/**
 + * Low latency: the frame bookkeeping, the policy and the cvars; the vendors' calls are the
 + * backends' (d3d12/d3d12_low_latency.cpp, vulkan/vulkan_low_latency.cpp).
@@ -1894,8 +1894,8 @@ index 0000000..933d8d4
 +    "with no frame, written-off frames), 32 makes the driver refuse the mode twice "
 +    "and 64 always (to test the retry and the fall back to the game's limiter), 128 "
 +    "makes every wait before a frame 300 ms longer (to test giving the reducer up and "
-+    "trying again)")
-+    .range(0, 255)
++    "trying again), 256 with 128 only two of every three (long, long, short)")
++    .range(0, 511)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +namespace rex {
@@ -1969,12 +1969,16 @@ index 0000000..933d8d4
 +  int64_t retry_after_ns = 0;
 +  // A reducer given up on because its waits took too long (a window that isn't presenting, a
 +  // driver that blocks) is tried again after a pause that doubles with each failure: 5 s, 10 s,
-+  // 20 s, 40 s, at most a minute. For 5 s after a new start one long wait is enough to give up
-+  // again; the pause starts again at 5 s after 30 s without one.
++  // 20 s, 40 s, at most a minute. Three long waits among the last eight give it up; for 5 s
++  // after a new start one is enough; the pause starts again at 5 s after 30 s without a
++  // give-up.
 +  int64_t rearm_at_ns = 0;  // 0: not coming back
 +  int64_t rearmed_at_ns = 0;
 +  uint32_t give_ups = 0;
-+  uint32_t long_waits = 0;  // in a row
++  uint32_t long_wait_history = 0;  // bit set: the wait (the latest in bit 0) was a long one
++  // The warning for a long wait is given at most every 5 s, with the count of the ones since.
++  int64_t long_wait_logged_ns = 0;
++  uint32_t long_waits_unlogged = 0;
 +};
 +Applied g_applied;                         // the update thread's
 +std::string g_failed_why;                  // (g_mutex)
@@ -2139,7 +2143,9 @@ index 0000000..933d8d4
 +// again after a pause (Applied).
 +void GiveUp(LowLatencyBackend& backend, const char* why, int64_t now_ns, bool retry) {
 +  g_applied.failed = true;
-+  g_applied.long_waits = 0;
++  g_applied.long_wait_history = 0;
++  g_applied.refusals = 0;
++  g_applied.retry_after_ns = 0;
 +  g_applied.rearm_at_ns = 0;
 +  {
 +    std::lock_guard lock(g_mutex);
@@ -2206,6 +2212,8 @@ index 0000000..933d8d4
 +      run_start = 0;
 +    } else if (!run_start) {
 +      run_start = now_ns;
++      // (A merge's own two passes count against it, so a second one within 32 passes is
++      // written off after the half second, not at once.)
 +      run_idle = std::popcount(g_pass_idle_history) >= 31;
 +    }
 +    if (pending_seen) {
@@ -2247,17 +2255,25 @@ index 0000000..933d8d4
 +  if (epoch != epoch_seen) {
 +    epoch_seen = epoch;
 +    g_applied = Applied();
++    // (A give-up that was under way on the old backend's last pass can have written its reason
++    // after Attach cleared it.)
++    std::lock_guard lock(g_mutex);
++    g_failed_why.clear();
 +  }
 +  const Policy policy = Evaluate(*backend);
 +  const int32_t debug = REXCVAR_GET(low_latency_debug);
-+  // A reducer given up on for its long waits (or by the backend, if it can recover) is tried
-+  // again after its pause.
++  // A reducer given up on for its long waits is tried again after its pause, unless the backend
++  // has given up in the meantime (that one is for good, and the status says so).
 +  if (g_applied.failed && g_applied.rearm_at_ns && now_ns >= g_applied.rearm_at_ns) {
 +    g_applied.rearm_at_ns = 0;
-+    if (!backend->Failed() || backend->Rearm()) {
++    if (const char* why = backend->Failed()) {
++      GiveUp(*backend, why, now_ns, false);
++    } else {
 +      g_applied.failed = false;
 +      g_applied.rearmed_at_ns = now_ns;
-+      g_applied.long_waits = 0;
++      g_applied.long_wait_history = 0;
++      g_applied.refusals = 0;
++      g_applied.retry_after_ns = 0;
 +      {
 +        std::lock_guard lock(g_mutex);
 +        g_failed_why.clear();
@@ -2273,7 +2289,7 @@ index 0000000..933d8d4
 +  // unavailable, as for a refused mode.
 +  if (!g_applied.failed) {
 +    if (const char* why = backend->Failed()) {
-+      GiveUp(*backend, why, now_ns, true);
++      GiveUp(*backend, why, now_ns, false);
 +    }
 +  }
 +  // The policy came back to what the driver has while a refusal was waiting to be asked again
@@ -2318,6 +2334,9 @@ index 0000000..933d8d4
 +  // Working: asked for, and the driver has the mode (not while a refusal is waiting to be tried
 +  // again).
 +  const bool working = policy.on && g_applied.on && !g_applied.failed;
++  if (!working) {
++    g_applied.long_wait_history = 0;  // (the long waits of an earlier time don't count)
++  }
 +  g_active.store(working, std::memory_order_relaxed);
 +  g_forced.store(working && policy.forced, std::memory_order_relaxed);
 +  g_explicit_attribution.store(!(debug & 4), std::memory_order_relaxed);
@@ -2330,29 +2349,43 @@ index 0000000..933d8d4
 +    const auto sleep_start = std::chrono::steady_clock::now();
 +    held = backend->Sleep(id);
 +    if (debug & 128) {
-+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
++      static uint32_t test_wait = 0;
++      if (!(debug & 256) || ++test_wait % 3 != 0) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(300));
++      }
 +    }
 +    const int64_t sleep_us = std::chrono::duration_cast<std::chrono::microseconds>(
 +                                 std::chrono::steady_clock::now() - sleep_start)
 +                                 .count();
 +    sleep_us_total += uint64_t(sleep_us);
 +    ++sleep_count;
-+    // The driver waits for the moment it picks and the call can't be cancelled. A wait over a
-+    // quarter of a second (or four frame intervals of the frame-rate limit), three in a row, is
-+    // not pacing: the window isn't presenting, or the driver blocks. The reducer is given up,
-+    // and the game's own limiter holds the frame rate until it is tried again.
++    // The driver waits for the moment it picks. A wait over a quarter of a second (or four
++    // frame intervals of the frame-rate limit), three of the last eight, is not pacing: the
++    // window isn't presenting, or the driver blocks. The reducer is given up, and the game's
++    // own limiter holds the frame rate until it is tried again. (Measured when the call
++    // returns: Vulkan's wait is bounded, so it does; Reflex's NvAPI_D3D_Sleep can't be
++    // cancelled, and one that never returns is not covered.)
 +    const int64_t limit_us = std::max<int64_t>(250'000, 4 * int64_t(g_applied.interval_us));
-+    if (sleep_us > limit_us) {
++    const bool long_wait = sleep_us > limit_us;
++    g_applied.long_wait_history = (g_applied.long_wait_history << 1) | (long_wait ? 1u : 0u);
++    if (long_wait) {
 +      held = false;
-+      REXLOG_WARN("Low latency: {}'s wait before the frame took {} ms", backend->Name(),
-+                  sleep_us / 1000);
++      ++g_applied.long_waits_unlogged;
++      if (now_ns - g_applied.long_wait_logged_ns >= 5'000'000'000) {
++        REXLOG_WARN(
++            "Low latency: {}'s wait before the frame took {} ms{}", backend->Name(),
++            sleep_us / 1000,
++            g_applied.long_waits_unlogged > 1
++                ? fmt::format(" ({} long waits since the last line)", g_applied.long_waits_unlogged)
++                : std::string());
++        g_applied.long_wait_logged_ns = now_ns;
++        g_applied.long_waits_unlogged = 0;
++      }
 +      const bool new_start =
 +          g_applied.rearmed_at_ns && now_ns - g_applied.rearmed_at_ns < 5'000'000'000;
-+      if (++g_applied.long_waits >= (new_start ? 1u : 3u)) {
++      if (new_start || std::popcount(g_applied.long_wait_history & 0xFFu) >= 3) {
 +        GiveUp(*backend, "SLEEP TOO LONG", now_ns, true);
 +      }
-+    } else {
-+      g_applied.long_waits = 0;
 +    }
 +  }
 +  // The driver holds the frame rate only if it was told the interval and slept this frame; else
