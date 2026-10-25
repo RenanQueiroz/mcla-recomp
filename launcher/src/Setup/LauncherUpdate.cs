@@ -51,6 +51,8 @@ static class LauncherUpdate
     public static async Task<string> FetchInstallerAsync(ReleaseInfo release, ReleaseSource source, Action<long, long>? progress, CancellationToken ct)
     {
         var installer = release.Installer ?? throw new SetupException("This release has no installer for the launcher.");
+        // What the installer would refuse is said here, while this launcher is still open (it quits as soon as the installer starts).
+        if (SelfUpdate.InstalledBySetup && SelfUpdate.WhyNotUpdatable() is { } why) throw new SetupException(why);
         var asset = new UpdateAsset(installer.Asset, source.LocalFolder == null ? source.AssetUrl(installer.Asset) : "", installer.Sha256, installer.Size);
         // Beside the folder the new launcher will be in, where its clean-up (App.cs) looks for it afterwards.
         var folder = SelfUpdate.DownloadFolder(SelfUpdate.InstalledBySetup ? null : SetupFolder);

@@ -222,6 +222,29 @@ static class SelfUpdate
         return Process.Start(psi) ?? throw new UpdateException("Windows would not start the installer");
     }
 
+    /// Why the installer would refuse to replace this launcher's folder, in plain words, or null when it would not. Looked at before the
+    /// launcher quits to hand over, so that the reason is in the bar and the launcher keeps running: the folder has to be Setup's
+    /// (installed.txt), must not hold the install its install.json names, and must hold nothing the setup did not unpack.
+    public static string? WhyNotUpdatable(string? appFolder = null)
+    {
+        var folder = (appFolder ?? AppFolder).TrimEnd('\\', '/');
+        try
+        {
+            if (!File.Exists(Path.Combine(folder, FolderSwap.OwnerMarker)))
+                return $"This launcher was not put in {folder} by the setup, so the setup will not replace it.";
+            if (FolderSwap.InstallRootInside(folder) is { } inside)
+                return $"Your install ({inside}) is inside the launcher's folder, and an update would delete it along with the old launcher. Move the install, or the launcher's folder, first.";
+            if (FolderSwap.ReadManifest(folder) is { } manifest)
+            {
+                var foreign = FolderSwap.ForeignFiles(folder, manifest, ["install.json", "settings.json"]);
+                if (foreign.Count > 0)
+                    return $"The launcher's folder holds things the setup did not put there ({string.Join(", ", foreign.Take(5))}{(foreign.Count > 5 ? ", ..." : "")}), and an update would delete them. Move them out first.";
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return null;
+    }
+
     static void MakeDownloadFolder(string folder)
     {
         Directory.CreateDirectory(folder);
