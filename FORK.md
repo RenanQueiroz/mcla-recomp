@@ -79,6 +79,13 @@ kinds of changes on top of upstream's `main`:
     are neither saved by the overlay's Save nor read from a config file), and
     the content header file written with zeros in its padding, the same bytes
     from every compiler.
+- **Fixes taken from upstream ReXGlue's open pull requests**, not the fork's
+  own work: `patches/rexglue-upstream-*.patch` (the storage flush and the
+  `"a+"` rewind, #529; host floating-point exceptions kept masked, #382 and
+  #459; Wine, the shared memory name and RenderDoc, #517, #514 and #522; two
+  small fixes, #503 and #490). Each is credited to its pull request and author,
+  with its licence, in `patches/README.md` and `THIRD-PARTY-NOTICES.md`; they
+  go away from the list as upstream merges them.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
   edits the game's settings in `mcla.toml` (shared with the pause menu) and
