@@ -153,8 +153,11 @@ digits, spaces, dots, dashes and underscores (the wizard says so before it start
 - Also refused: a network location or mapped network drive, a drive that is not NTFS or ReFS (Git refuses folders
   without owners), a drive's root, `C:\Windows` and `C:\Program Files` (no administrator rights are asked for),
   the folder of the launcher that is running and the one the installer puts the launcher in (`%LOCALAPPDATA%\Programs\MCLA`),
-  whether the chosen folder is one of them, inside one, or has one inside (compared as full paths, ignoring case, after junctions
-  and symbolic links are resolved: the launcher's folder is replaced when it updates and removed with it),
+  whether the chosen folder is one of them, inside one, or has one inside, and a folder inside one that holds a launcher
+  (`installed.txt` or `MclaLauncher.exe` beside it). The folders are compared as full paths, ignoring case, in the form Windows opens
+  them (`GetFinalPathNameByHandle`: junctions and symbolic links at any level, chains of them, links to a drive root, `subst` drives
+  and 8.3 names are resolved, on both sides): the launcher's folder is replaced when it updates and removed with it. A launcher
+  unpacked into the root of a drive is asked to move into a folder of its own, rather than every folder of the drive being refused,
   a game folder inside the install or the install inside the game's folder; a folder in OneDrive is warned
   about. Free space needed: the game's size (when copied) and 3 GB, less what the folder holds already.
 
@@ -229,7 +232,8 @@ An install made by the setup wizard (Installed mode) doesn't follow `main`; the 
      changed.
   When the build worked, `pending` is cleared and the record names the release; older bundle zips are removed. A stop leaves a
   checkout, a bundle and tools that belong together (before the move: all old). What goes wrong after the move (a file of an old
-  tool held open, say) does not stop the update: it is tried again when the build is over, or at the next start. A start that finds `pending` (when no update, build or
+  tool held open, say) does not stop the update: it is tried again when the build is over, or at the next start (the build that
+  went on in between was made with the old tools; the next one configures the folder again). A start that finds `pending` (when no update, build or
   setup is running in the folder) looks at it: if the checkout never moved, the record is dropped and the unused new tools removed;
   if it did, steps 5 and 6 are finished, and when what was built is still current (a release that changed only the launcher or the
   documentation) the update is complete; otherwise the Rebuild that is offered completes it. Every build the launcher starts for an

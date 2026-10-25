@@ -223,48 +223,66 @@ static class PathBudget
         return null;
     }
 
-    /// The folder of the launcher that is running, and the one the installer puts the launcher in (%LOCALAPPDATA%\Programs\MCLA), are
-    /// replaced when the launcher updates and removed with it: the install folder may not be one of them, inside one, or contain one.
-    /// Compared as full paths, ignoring case, after links (junctions, symbolic links) in either path are resolved.
-    public static string? LauncherFolderProblem(string full)
+    /// The install folder may not be the folder of the running launcher or the one the installer puts the launcher in
+    /// (%LOCALAPPDATA%\Programs\MCLA), inside one, or have one inside it, nor be inside a folder that holds a launcher (installed.txt or
+    /// MclaLauncher.exe beside it): the launcher's folder is replaced when the launcher updates and removed with it. Folders are compared
+    /// as full paths, ignoring case, in the form Windows opens them (FinalPath): junctions and symbolic links at any level, chains of
+    /// them, a link to a drive root, substituted drives (subst) and 8.3 names are all resolved, on both sides. launcherFolder is the
+    /// running launcher's folder (the program's own, unless the checks say another).
+    public static string? LauncherFolderProblem(string full, string? launcherFolder = null)
     {
-        var launchers = new List<(string Folder, string What)>
+        string running;
+        try { running = Path.GetFullPath(launcherFolder ?? AppContext.BaseDirectory); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { running = ""; }
+        var runningReal = running.Length > 0 ? FinalPath.Resolve(running) : "";
+        // A launcher unpacked into the root of a drive can't be told from the drive: it is asked to move, rather than every folder
+        // of the drive being refused.
+        foreach (var where in new[] { running, runningReal })
+            if (where.Length > 0 && IsDriveRoot(where))
+                return $"This launcher is in the root of drive {Path.GetPathRoot(where)!.TrimEnd('\\')} (not in a folder of its own). Put the launcher in a folder, for example "
+                     + $"{Path.GetPathRoot(where)!.TrimEnd('\\')}\\MCLA-launcher, and start it from there: the game can't be set up beside it.";
+
+        var launchers = new List<(string Folder, string Real, string What)>();
+        if (running.Length > 0) launchers.Add((running, runningReal, "the folder this launcher is running from"));
+        try
         {
-            (AppContext.BaseDirectory, "the folder this launcher is running from"),
-            (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA"), "the folder the installer puts the launcher in"),
-        };
-        var real = RealPath(full);
-        foreach (var (folder, what) in launchers)
-        {
-            if (string.IsNullOrWhiteSpace(folder)) continue;
-            string other, otherReal;
-            try { other = Path.GetFullPath(folder); otherReal = RealPath(other); }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { continue; }
-            if (IsInside(full, other) || IsInside(other, full) || IsInside(real, otherReal) || IsInside(otherReal, real))
-                return $"That folder overlaps {what} ({other.TrimEnd('\\')}): it is that folder, inside it, or has it inside. The launcher's folder is replaced when the launcher updates "
-                     + "and removed with it, so the game can't live there. Choose another folder, for example C:\\MCLA.";
+            var installer = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA"));
+            launchers.Add((installer, FinalPath.Resolve(installer), "the folder the installer puts the launcher in"));
         }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
+
+        var real = FinalPath.Resolve(full);
+        foreach (var (folder, folderReal, what) in launchers)
+            if (IsInside(full, folder) || IsInside(folder, full) || IsInside(real, folderReal) || IsInside(folderReal, real))
+                return $"That folder overlaps {what} ({folderReal.TrimEnd('\\')}): it is that folder, inside it, or has it inside. The launcher's folder is replaced when "
+                     + $"the launcher updates and removed with it, so the game can't live there. Choose another folder, for example {Example(launchers)}.";
+
+        // Inside a folder that holds a launcher (another copy, or one the installer put elsewhere).
+        foreach (var start in new[] { real, full })
+            for (var dir = start; !string.IsNullOrEmpty(dir) && !IsDriveRoot(dir); dir = Path.GetDirectoryName(dir.TrimEnd('\\')))
+                if (File.Exists(Path.Combine(dir, "installed.txt")) || File.Exists(Path.Combine(dir, "MclaLauncher.exe")))
+                    return $"That folder is, or is inside, a folder that holds a launcher ({dir.TrimEnd('\\')}). The launcher's folder is replaced when the launcher updates "
+                         + $"and removed with it, so the game can't live there. Choose another folder, for example {Example(launchers)}.";
         return null;
     }
 
-    /// The path with every junction and symbolic link in it replaced by what it points to (the part that does not exist yet is kept as it is).
-    internal static string RealPath(string full)
+    static bool IsDriveRoot(string path)
     {
-        try
-        {
-            var root = Path.GetPathRoot(full)!;
-            var current = root;
-            foreach (var part in full[root.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
-            {
-                current = Path.Combine(current, part);
-                var info = new DirectoryInfo(current);
-                if (info.Exists && info.Attributes.HasFlag(FileAttributes.ReparsePoint) && info.ResolveLinkTarget(returnFinalTarget: true) is { } target)
-                    current = target.FullName.TrimEnd('\\');
-            }
-            return current;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return full; }
+        var root = Path.GetPathRoot(path);
+        return !string.IsNullOrEmpty(root) && string.Equals(root.TrimEnd('\\'), path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
     }
+
+    /// A folder to suggest that does not overlap the launchers' (C:\MCLA, unless the launcher is there).
+    static string Example(List<(string Folder, string Real, string What)> launchers)
+    {
+        foreach (var candidate in new[] { @"C:\MCLA", @"C:\MCLA-game", @"D:\MCLA-game" })
+            if (!launchers.Any(l => IsInside(candidate, l.Folder) || IsInside(l.Folder, candidate) || IsInside(candidate, l.Real) || IsInside(l.Real, candidate)))
+                return candidate;
+        return @"C:\MCLA-game";
+    }
+
+    /// The path in the form Windows opens it (links and substituted drives resolved); see FinalPath.
+    internal static string RealPath(string full) => FinalPath.Resolve(full);
 
     /// The first character of the path (after the drive) that the build can't take, shown for the message; null when all are fine.
     /// Allowed: A-Z a-z 0-9, space, dot, dash, underscore and the separators. The SDK's code generator opens its files by

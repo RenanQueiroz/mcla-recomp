@@ -317,10 +317,16 @@ static class UpdateEngine
 
     /// The last steps of an update, once the checkout is at its commit: each unpacked tool becomes the tool in use (the record of
     /// tools\ names it), its archive goes, and the folders of the tools it replaced are removed. Safe to run again.
-    static void ActivateTools(InstallLayout layout, IReadOnlyList<PendingTool> tools, Action<string> log, CancellationToken ct)
+    internal static void ActivateTools(InstallLayout layout, IReadOnlyList<PendingTool> tools, Action<string> log, CancellationToken ct)
     {
         foreach (var tool in tools)
         {
+            // install.json is a file anyone can edit: what it names is a tool and plain folder and file names, nothing else.
+            if (!ReleaseInfo.RequiredTools.Contains(tool.Name) || !ToolInstaller.IsPlainName(tool.Folder) || !ToolInstaller.IsPlainName(tool.Archive))
+            {
+                log($"the record of the update names something that is not a tool of this program ({tool.Name}); it was skipped");
+                continue;
+            }
             // (The record names the folder and the archive's SHA-256: both are checked, so that a repackaged tool that unpacks into
             // a folder of the same name is switched too.)
             if (!ToolInstaller.IsInstalled(layout.Tools, tool.Name, tool.Sha256)
@@ -345,6 +351,7 @@ static class UpdateEngine
     /// configures again when there is no build.ninja.
     static void RemoveSupersededTools(InstallLayout layout, Action<string> log, CancellationToken ct)
     {
+        ToolInstaller.RestoreAside(layout.Tools);
         var folders = ToolInstaller.Superseded(layout.Tools);
         if (folders.Count == 0) return;
         if (BuildFolderUses(layout, folders))

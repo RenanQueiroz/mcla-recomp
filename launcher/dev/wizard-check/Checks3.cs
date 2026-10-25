@@ -122,6 +122,74 @@ static partial class Program
                 if (Directory.Exists(link)) Directory.Delete(link);   // the link only, never what it points to
         }
         Check("the launcher's folder is still there after the junctions went", Directory.Exists(here) && Directory.Exists(parent));
+
+        // R1: a chain of junctions, a junction to a drive root, a substituted drive (on either side).
+        var chain1 = Path.Combine(scratch, "jchain1");
+        var chain2 = Path.Combine(scratch, "jchain2");
+        var toRoot = Path.Combine(scratch, "jroot");
+        var driveRoot = Path.GetPathRoot(programs)!;
+        Junction(chain2, programs);
+        Junction(chain1, chain2);
+        Junction(toRoot, driveRoot);
+        char letter = '\0';
+        foreach (var c in "ZYXWVUTSRQPONMLKJIHGFED")
+            if (!Directory.Exists(c + @":\") && !DriveInfo.GetDrives().Any(d => d.Name[0] == c)) { letter = c; break; }
+        void Subst(string drive, string? target)
+        {
+            var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", target == null ? $"/c subst {drive}: /D" : $"/c subst {drive}: \"{target}\"")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!;
+            p.StandardOutput.ReadToEnd();
+            p.WaitForExit();
+        }
+        var substMade = false;
+        try
+        {
+            Check("a junction to a junction to Programs: the folder below it is refused", Refused(Path.Combine(chain1, "MCLA", "game")));
+            Check("a junction to a drive root: the way to Programs below it is refused", Refused(Path.Combine(toRoot, programs[driveRoot.Length..], "MCLA", "game")),
+                  Path.Combine(toRoot, programs[driveRoot.Length..], "MCLA", "game"));
+            Check("a junction to a drive root: a folder that is not around the launcher is not refused for it", PathBudget.LauncherFolderProblem(Path.Combine(toRoot, "mcv", "p4", "other-game")) == null);
+            if (letter == '\0') Check("a free drive letter for subst", false);
+            else
+            {
+                Subst(letter.ToString(), programs);
+                substMade = Directory.Exists(letter + @":\");
+                Check($"subst {letter}: made", substMade);
+                Check("a substituted drive that stands for Programs: MCLA below it is refused", Refused(letter + @":\MCLA\game"));
+                Check("and a folder on it that is not around the launcher's is not refused for it", PathBudget.LauncherFolderProblem(letter + @":\Other\game") == null);
+                Subst(letter.ToString(), null);
+                substMade = false;
+                // The launcher started from a substituted drive, the install folder typed with the real letters (and the other way round).
+                Subst(letter.ToString(), parent);
+                substMade = Directory.Exists(letter + @":\");
+                var launcherThroughSubst = letter + @":\" + Path.GetFileName(here);
+                Check("a launcher started through a substituted drive: the real path of its folder is refused", PathBudget.LauncherFolderProblem(Path.Combine(here, "game"), launcherThroughSubst) != null);
+                Check("and so is the path through the substituted drive, with the launcher's real path", PathBudget.LauncherFolderProblem(Path.Combine(launcherThroughSubst, "game")) != null);
+                Subst(letter.ToString(), null);
+                substMade = false;
+            }
+        }
+        finally
+        {
+            if (substMade) Subst(letter.ToString(), null);
+            foreach (var link in new[] { chain1, chain2, toRoot })
+                if (Directory.Exists(link)) Directory.Delete(link);
+        }
+        Check("the substituted drive is gone", letter == '\0' || !Directory.Exists(letter + @":\"));
+
+        // R2: a launcher in a drive root is asked to move (not every folder refused); the example is not the launcher's own folder;
+        // a folder that holds a launcher (installed.txt or MclaLauncher.exe) is not an install folder either.
+        var rootText = PathBudget.LauncherFolderProblem(Path.Combine(scratch, "fine"), driveRoot);
+        Check("a launcher in a drive root is asked to move", rootText != null && rootText.Contains("root of drive"), rootText ?? "accepted");
+        var mcla = PathBudget.LauncherFolderProblem(@"C:\MCLA\game", @"C:\MCLA");
+        Check("the example is not the launcher's own folder", mcla != null && mcla.Contains(@"for example C:\MCLA-game") && !mcla.Contains(@"for example C:\MCLA."), mcla ?? "accepted");
+        var other = Path.Combine(scratch, "other");
+        Directory.CreateDirectory(Path.Combine(other, "game"));
+        File.WriteAllText(Path.Combine(other, "MclaLauncher.exe"), "x");
+        Check("below a folder that holds a launcher is refused", PathBudget.LauncherFolderProblem(Path.Combine(other, "game", "deeper")) is { } t1 && t1.Contains("holds a launcher"));
+        Check("a folder beside it is not", PathBudget.LauncherFolderProblem(other + "-game") == null);
+        File.Delete(Path.Combine(other, "MclaLauncher.exe"));
+        File.WriteAllText(Path.Combine(other, "installed.txt"), "x");
+        Check("installed.txt marks a launcher's folder too", PathBudget.LauncherFolderProblem(Path.Combine(other, "game")) is { } t2 && t2.Contains("holds a launcher"));
         SafeFolder.Delete(scratch);
     }
 
@@ -137,7 +205,7 @@ static partial class Program
         foreach (var f in folders)
         {
             Directory.CreateDirectory(Path.Combine(tools, f));
-            File.WriteAllText(Path.Combine(tools, f, ".mcla-checked"), "sha-" + f + "\n");
+            File.WriteAllText(Path.Combine(tools, f, ".mcla-checked"), "sha\n");
         }
         Directory.CreateDirectory(Path.Combine(tools, "unrelated-folder"));   // no marker: never ours
         var record = Path.Combine(tools, ".mcla-tools.txt");
@@ -158,6 +226,23 @@ static partial class Program
         // A whole record: the one it replaced is superseded, the others are not.
         File.WriteAllText(record, "llvm-mingw\t" + folders[0] + "\tsha\ncmake\t" + folders[1] + "\tsha\nninja\t" + folders[3] + "\tsha\nmingit\t" + folders[4] + "\tsha\n");
         Check("a whole record supersedes only the replaced ninja", Names(ToolInstaller.Superseded(tools)) == "ninja-1.13.2", Names(ToolInstaller.Superseded(tools)));
+        // V1: the folder the record names must be there, with its marker, for another folder of the tool to be superseded.
+        File.WriteAllText(record, "llvm-mingw\t" + folders[0] + "\tsha\ncmake\t" + folders[1] + "\tsha\nninja\tninja-9.9.9\tsha\nmingit\t" + folders[4] + "\tsha\n");
+        Check("a record that names a folder that is not there supersedes nothing of that tool", ToolInstaller.Superseded(tools).Count == 0, Names(ToolInstaller.Superseded(tools)));
+        File.WriteAllText(record, "llvm-mingw\t" + folders[0] + "\tsha\ncmake\t" + folders[1] + "\tsha\nninja\t" + folders[3] + "\tshaOther\nmingit\t" + folders[4] + "\tsha\n");
+        Mark(folders[3], "sha");
+        Check("a record whose folder holds another archive's marker supersedes nothing of that tool", ToolInstaller.Superseded(tools).Count == 0, Names(ToolInstaller.Superseded(tools)));
+        File.WriteAllText(record, "llvm-mingw\t" + folders[0] + "\tsha\ncmake\t" + folders[1] + "\tsha\nninja\t" + folders[3] + "\tsha\nmingit\t" + folders[4] + "\tsha\n");
+        Directory.Delete(Path.Combine(tools, folders[3]), true);
+        Check("the same when the recorded folder is gone, though another ninja folder is there", ToolInstaller.Superseded(tools).Count == 0, Names(ToolInstaller.Superseded(tools)));
+        Directory.CreateDirectory(Path.Combine(tools, folders[3]));
+        Mark(folders[3], "sha");
+        // V2: a folder set aside by an activation that was cut short is the only copy while the recorded folder is missing.
+        Directory.Move(Path.Combine(tools, folders[3]), Path.Combine(tools, ".u-old-" + folders[3]));
+        Check("a set-aside folder that is the only copy of the recorded one is not listed", ToolInstaller.Superseded(tools).Count == 0 || Names(ToolInstaller.Superseded(tools)) == "ninja-1.13.2", Names(ToolInstaller.Superseded(tools)));
+        ToolInstaller.RestoreAside(tools);
+        Check("and goes back to its place", Directory.Exists(Path.Combine(tools, folders[3])) && !Directory.Exists(Path.Combine(tools, ".u-old-" + folders[3])));
+        Mark(folders[3], "shaC");
         // A temporary folder of an unpacking that was cut short goes whatever the record says; the unmarked folder never.
         Directory.CreateDirectory(Path.Combine(tools, ".u-ninja"));
         File.Delete(record);
@@ -166,6 +251,8 @@ static partial class Program
 
         // The record is replaced whole (a leftover temporary file does not matter) and keeps the other tools.
         File.WriteAllText(record + ".tmp", "leftover from a stop");
+        void Mark(string folder, string sha) => File.WriteAllText(Path.Combine(tools, folder, ".mcla-checked"), sha + "\n");
+        Mark(folders[2], "shaA"); Mark(folders[3], "shaC"); Mark(folders[4], "shaB");
         ToolInstaller.Activate(tools, "ninja", folders[2], "shaA");
         ToolInstaller.Activate(tools, "mingit", folders[4], "shaB");
         var lines = File.ReadAllLines(record);
@@ -202,6 +289,39 @@ static partial class Program
               File.ReadAllText(Path.Combine(tools, "ninja-1.14.0", "ninja.exe")) == "y" && Directory.Exists(Path.Combine(tools, ".u-old-ninja-1.14.0")));
         ToolInstaller.RemoveStaged(tools);
         Check("nothing is left staged", !Directory.Exists(Path.Combine(tools, ToolInstaller.StagingFolder)));
+
+        // V2: if the staged folder can't be moved in, the folder that was in use goes back (it may be the only copy).
+        var t2 = Path.Combine(scratch, "tools2");
+        Directory.CreateDirectory(Path.Combine(t2, "ninja-5"));
+        File.WriteAllText(Path.Combine(t2, "ninja-5", ".mcla-checked"), "old\n");
+        File.WriteAllText(Path.Combine(t2, "ninja-5", "ninja.exe"), "old");
+        File.WriteAllText(Path.Combine(t2, ".mcla-tools.txt"), "ninja\tninja-5\told\n");
+        Directory.CreateDirectory(Path.Combine(t2, ".staged", "ninja-5"));
+        File.WriteAllText(Path.Combine(t2, ".staged", "ninja-5", ".mcla-checked"), "new\n");
+        File.WriteAllText(Path.Combine(t2, ".staged", "ninja-5", "ninja.exe"), "new");
+        using (var held = new FileStream(Path.Combine(t2, ".staged", "ninja-5", "ninja.exe"), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var failed = false;
+            try { ToolInstaller.Activate(t2, "ninja", "ninja-5", "new"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { failed = true; }
+            Check("activation fails while the staged folder is held open", failed);
+        }
+        Check("the folder that was in use is back and the record is as it was", File.ReadAllText(Path.Combine(t2, "ninja-5", "ninja.exe")) == "old"
+              && !Directory.Exists(Path.Combine(t2, ".u-old-ninja-5")) && File.ReadAllText(Path.Combine(t2, ".mcla-tools.txt")).StartsWith("ninja\tninja-5\told"));
+        ToolInstaller.Activate(t2, "ninja", "ninja-5", "new");
+        Check("and the next try works", File.ReadAllText(Path.Combine(t2, "ninja-5", "ninja.exe")) == "new" && File.ReadAllText(Path.Combine(t2, ".mcla-tools.txt")).StartsWith("ninja\tninja-5\tnew"));
+
+        // V3: what install.json names is a tool and plain names.
+        var l3 = new InstallLayout(Path.Combine(scratch, "install3"));
+        Directory.CreateDirectory(l3.Tools);
+        var outside = Path.Combine(scratch, "outside-tools");
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, ".mcla-checked"), "x\n");
+        var logged = new List<string>();
+        UpdateEngine.ActivateTools(l3, [new PendingTool("ninja", @"..\..\outside-tools", "x", "a.zip"), new PendingTool("notatool", "f", "x", "a.zip"), new PendingTool("ninja", "ok-1", "x", @"..\a.zip")],
+                                   logged.Add, CancellationToken.None);
+        Check("a record that names a folder outside tools\\, an unknown tool, or an archive with a path is skipped",
+              logged.Count(l => l.Contains("skipped")) == 3 && File.Exists(Path.Combine(outside, ".mcla-checked")) && !File.Exists(Path.Combine(l3.Tools, ".mcla-tools.txt")), string.Join(" | ", logged));
 
         // The settings restore (a re-run of the setup) removes what it restored and nothing else in kept\.
         var layout = new InstallLayout(Path.Combine(scratch, "install"));

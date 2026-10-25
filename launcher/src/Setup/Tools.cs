@@ -128,8 +128,10 @@ static class ToolInstaller
     /// within the folder; a folder of the same name that was there is set aside as a temporary one), then the record is written.
     public static void Activate(string tools, string name, string folder, string sha256)
     {
+        if (!IsPlainName(folder)) throw new SetupException("The record of the update names a folder that is not a plain name; it was not used.", folder);
         var staged = Path.Combine(tools, StagingFolder, folder);
         var final = Path.Combine(tools, folder);
+        string? aside = null;
         if (Directory.Exists(staged))
         {
             if (Directory.Exists(final))
@@ -137,32 +139,66 @@ static class ToolInstaller
                 if (IsUnpacked(tools, folder, sha256)) SafeFolder.Delete(staged);   // already there (a record that was lost)
                 else
                 {
-                    var aside = Path.Combine(tools, ".u-old-" + folder);
+                    aside = Path.Combine(tools, AsidePrefix + folder);
                     SafeFolder.Delete(aside);
                     Retry.Io(() => Directory.Move(final, aside));
                 }
             }
-            if (Directory.Exists(staged)) Retry.Io(() => Directory.Move(staged, final));
+            try
+            {
+                if (Directory.Exists(staged)) Retry.Io(() => Directory.Move(staged, final));
+            }
+            catch
+            {
+                // The folder that was in use goes back (it may be the only copy of the tool); the new one stays staged for another try.
+                try { if (aside != null && !Directory.Exists(final) && Directory.Exists(aside)) Directory.Move(aside, final); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                throw;
+            }
         }
         Record(tools, name, folder, sha256);
     }
+
+    const string AsidePrefix = ".u-old-";
+
+    /// A tool folder that was set aside by Activate (.u-old-<folder>) and whose place is empty while the record names it: the
+    /// activation was cut short between its two renames, and the set-aside folder is the only copy. It goes back to its place.
+    public static void RestoreAside(string tools)
+    {
+        if (!Directory.Exists(tools) || ReadRecord(tools) is not { } recorded) return;
+        foreach (var dir in new DirectoryInfo(tools).EnumerateDirectories(AsidePrefix + "*"))
+        {
+            var folder = dir.Name[AsidePrefix.Length..];
+            var final = Path.Combine(tools, folder);
+            if (folder.Length > 0 && !dir.Attributes.HasFlag(FileAttributes.ReparsePoint) && !Directory.Exists(final)
+                && recorded.Values.Any(v => string.Equals(v.Folder, folder, StringComparison.OrdinalIgnoreCase)))
+            {
+                try { Retry.Io(() => Directory.Move(dir.FullName, final)); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    /// A name that is one folder or file name, nothing more: what install.json may name inside tools\ and downloads\.
+    public static bool IsPlainName(string? name) =>
+        !string.IsNullOrEmpty(name) && name != "." && name != ".." && name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && Path.GetFileName(name) == name;
 
     /// Removes what is left in tools\.staged (tools an update unpacked and did not switch to).
     public static void RemoveStaged(string tools) => SafeFolder.Delete(Path.Combine(tools, StagingFolder));
 
     /// The folder the record names for each tool; null when there is no record (or it can't be read). A line that is cut short
     /// or damaged names nothing.
-    static Dictionary<string, string>? ReadRecord(string tools)
+    static Dictionary<string, (string Folder, string Sha256)>? ReadRecord(string tools)
     {
         try
         {
             var file = Path.Combine(tools, RecordName);
             if (!File.Exists(file)) return null;
-            var named = new Dictionary<string, string>(StringComparer.Ordinal);
+            var named = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
             foreach (var line in File.ReadAllLines(file))
             {
                 var parts = line.Split('\t');
-                if (parts.Length == 3 && parts[0].Length > 0 && parts[1].Length > 0 && parts[2].Length > 0) named[parts[0]] = parts[1];
+                if (parts.Length == 3 && parts[0].Length > 0 && IsPlainName(parts[1]) && parts[2].Length > 0) named[parts[0]] = (parts[1], parts[2]);
             }
             return named;
         }
@@ -172,7 +208,9 @@ static class ToolInstaller
     /// Folders in tools\ that this program unpacked (they carry the marker) and that the record replaced with another folder of the
     /// same tool (told by the folder's name: llvm-mingw-*, cmake-*, ninja-*, mingit-*), and the temporary folders of an unpacking
     /// that was cut short. The record is what says which folder is in use: where it is missing or damaged, or does not name the tool
-    /// at all, nothing is superseded, so the tools in use are never deleted on account of a record that is lost.
+    /// at all, or names a folder that is not there whole (missing, no marker, another archive's marker), nothing of that tool is
+    /// superseded, so the tools in use are never deleted on account of a record that is lost or wrong. A set-aside folder that is
+    /// the only copy of a recorded tool is not listed either (RestoreAside puts it back).
     public static List<string> Superseded(string tools)
     {
         var result = new List<string>();
@@ -181,11 +219,20 @@ static class ToolInstaller
         foreach (var dir in new DirectoryInfo(tools).EnumerateDirectories())
         {
             if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+            if (dir.Name.StartsWith(AsidePrefix, StringComparison.Ordinal))
+            {
+                var original = dir.Name[AsidePrefix.Length..];
+                var onlyCopy = recorded != null && !Directory.Exists(Path.Combine(tools, original))
+                               && recorded.Values.Any(v => string.Equals(v.Folder, original, StringComparison.OrdinalIgnoreCase));
+                if (!onlyCopy) result.Add(dir.FullName);
+                continue;
+            }
             if (dir.Name.StartsWith(".u-", StringComparison.Ordinal)) { result.Add(dir.FullName); continue; }
             if (recorded == null || !File.Exists(Path.Combine(dir.FullName, Marker))) continue;
             foreach (var tool in ReleaseInfo.RequiredTools)
                 if (dir.Name.StartsWith(tool + "-", StringComparison.OrdinalIgnoreCase)
-                    && recorded.TryGetValue(tool, out var inUse) && !string.Equals(inUse, dir.Name, StringComparison.OrdinalIgnoreCase))
+                    && recorded.TryGetValue(tool, out var inUse) && !string.Equals(inUse.Folder, dir.Name, StringComparison.OrdinalIgnoreCase)
+                    && IsUnpacked(tools, inUse.Folder, inUse.Sha256))
                     result.Add(dir.FullName);
         }
         return result;
