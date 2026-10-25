@@ -1723,6 +1723,7 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
 // in between leaves a storage that is valid (a shader nothing uses any more) and the next start
 // finishes. Nothing is added or moved: what stays keeps its order. Returns whether a file changed.
 bool RetireStale(const Import& im) {
+  const auto started = Clock::now();
   const Ledger& ledger = g_state.ledger;
   const Journal& j = g_state.journal;
   if (!ledger.present || ledger.pack != im.pack.hash || j.phase != "done" || j.disabled)
@@ -1826,8 +1827,9 @@ bool RetireStale(const Import& im) {
   if (!outs.empty()) {
     REXLOG_INFO(
         "shader pack: retired {} pipeline descriptions and {} shaders that earlier imports added "
-        "and the pack no longer has",
-        descriptions_removed, shaders_removed);
+        "and the pack no longer has ({} ms)",
+        descriptions_removed, shaders_removed,
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count());
   }
   if (g_state.mode == Mode::kPrepare)
     Line(fmt::format("retire {} {}", shaders_removed, descriptions_removed));
