@@ -258,10 +258,21 @@ fsr=${MCLA_PS5_FSR:-1}
 case $fsr in 0) fsr_cmake=OFF ;; 1) fsr_cmake=ON ;; *) fail "MCLA_PS5_FSR must be 0 or 1" ;; esac
 # Frame generation (rexglue-frame-generation.patch): FidelityFX's optical flow and frame
 # interpolation too, in the same static libraries (untested on the console).
+# If FidelityFX fails to build with it (a component compiled on no console before), the build
+# is made again without it so that FSR anti-aliasing is kept, and that is remembered in the
+# build folder (.framegen-failed) until MCLA_PS5_FRAMEGEN=1 is given.
 framegen=${MCLA_PS5_FRAMEGEN:-1}
 case $framegen in 0) framegen_cmake=OFF ;; 1) framegen_cmake=ON ;; *) fail "MCLA_PS5_FRAMEGEN must be 0 or 1" ;; esac
+if [ "${MCLA_PS5_FRAMEGEN:-}" = 1 ]; then
+    rm -f "$rex_build/.framegen-failed"
+elif [ -z "${MCLA_PS5_FRAMEGEN:-}" ] && [ -f "$rex_build/.framegen-failed" ]; then
+    echo "note: frame generation is left out: FidelityFX did not build with it earlier (MCLA_PS5_FRAMEGEN=1 tries again)"
+    framegen=0 framegen_cmake=OFF
+fi
+# (The frame generation switch only exists where FSR is built; the cache has no entry for it
+# without FSR.)
 if [ ! -f "$rex_build/build.ninja" ] || ! grep -q "^REXGLUE_ENABLE_FSR:BOOL=$fsr_cmake\$" "$rex_build/CMakeCache.txt" \
-        || ! grep -q "^REXGLUE_FSR_FRAMEGEN:BOOL=$framegen_cmake\$" "$rex_build/CMakeCache.txt"; then
+        || { [ "$fsr" = 1 ] && ! grep -q "^REXGLUE_FSR_FRAMEGEN:BOOL=$framegen_cmake\$" "$rex_build/CMakeCache.txt"; }; then
     # -flto=thin: 5-8% more draws a second on the console.
     logged ps5-configure cmake -S "$rex_src" -B "$rex_build" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$sdk/toolchain/prospero.cmake" \
@@ -269,9 +280,23 @@ if [ ! -f "$rex_build/build.ninja" ] || ! grep -q "^REXGLUE_ENABLE_FSR:BOOL=$fsr
         -DCMAKE_C_FLAGS="-march=znver2 -flto=thin" \
         -DCMAKE_CXX_FLAGS="-march=znver2 -fexperimental-library -flto=thin" \
         -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=$fsr_cmake \
-        -DREXGLUE_FSR_FRAMEGEN=$framegen_cmake
+        $([ "$fsr" = 0 ] || echo "-DREXGLUE_FSR_FRAMEGEN=$framegen_cmake")
 fi
 logged ps5-runtime ninja -C "$rex_build" -j "$jobs" rexruntime rexgpu-xenos
+# FidelityFX built with frame generation, and failed (its runtime's own build leaves the marker
+# soft_step.cmake writes): once more without frame generation, which is a smaller part of it and
+# the one nothing else needs, so that FSR anti-aliasing is not lost to it.
+if [ "$fsr" = 1 ] && [ "$framegen" = 1 ] && [ -f "$rex_build/_deps/ffx-vk-p/failed" ]; then
+    echo "warning: FidelityFX did not build with frame generation ($logs/ps5-runtime.log); building it again without (the same as MCLA_PS5_FRAMEGEN=0), so that FSR anti-aliasing is kept" >&2
+    framegen=0 framegen_cmake=OFF
+    logged ps5-configure-nofg cmake "$rex_build" -DREXGLUE_FSR_FRAMEGEN=OFF
+    logged ps5-runtime-nofg ninja -C "$rex_build" -j "$jobs" rexruntime rexgpu-xenos
+    if [ -f "$rex_src/out/ps5-amd64/libamd_fidelityfx_vk.a" ]; then
+        touch "$rex_build/.framegen-failed"
+    else
+        echo "warning: FidelityFX did not build without frame generation either, so it is not frame generation's code" >&2
+    fi
+fi
 # FidelityFX's static libraries, next to the runtime's (the game links every
 # archive there): none without FSR; and none if they refer to a Vulkan function
 # that neither the GPU plugin (src/graphics/vulkan/temporal_aa_static.cpp, as a
@@ -282,7 +307,7 @@ if [ "$fsr" = 0 ]; then
     [ -z "$fsr_archives" ] || rm -f $fsr_archives
     echo "FSR: left out (MCLA_PS5_FSR=0)"
 elif [ ! -f "$rex_src/out/ps5-amd64/libamd_fidelityfx_vk.a" ]; then
-    echo "note: FSR 3.1 was not built (fetching FidelityFX needs the network, or its build failed: $logs/ps5-runtime.log); the game offers MSAA and off"
+    echo "note: FSR 3.1 was not built (fetching FidelityFX needs the network, or its build failed: $logs/ps5-runtime.log); the game offers MSAA and off. If frame generation's code is what failed to compile, MCLA_PS5_FRAMEGEN=0 leaves it out" >&2
 else
     nm=$(command -v llvm-nm || true)
     [ -n "$nm" ] || fail "llvm-nm is missing (pacman -S llvm)"

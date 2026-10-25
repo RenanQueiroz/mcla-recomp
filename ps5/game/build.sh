@@ -47,7 +47,7 @@ if [ "${MCLA_PS5_FSR:-1}" != 0 ] && [ -f "$libs/libamd_fidelityfx_vk.a" ]; then
 fi
 fsr_fallback() {
     tail -20 "$1" >&2
-    echo "warning: linking FidelityFX (FSR 3.1) failed (log: $1); linking again without it, so the game won't offer FSR" >&2
+    echo "warning: linking FidelityFX (FSR 3.1) failed (log: $1); linking again without it, so the game won't offer FSR. If the errors are in frame generation's code (ffx_frameinterpolation, ffx_opticalflow, the provider), build the runtime again with MCLA_PS5_FRAMEGEN=0 (ps5/make_ps5.sh) to keep FSR anti-aliasing" >&2
 }
 
 # A local copy of the sources: the repository is on a Windows drive here, which
