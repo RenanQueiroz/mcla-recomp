@@ -214,6 +214,7 @@ rexglue-low-latency.patch src/ui/low_latency.cpp LowLatency::OnFrameStart
 rexglue-frame-generation-nonwindows.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp frame_generation_pacing
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
+rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW
 LATER
 
 # ---------------------------------------------------------------------------

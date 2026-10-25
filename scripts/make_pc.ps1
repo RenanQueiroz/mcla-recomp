@@ -433,6 +433,7 @@ $laterPatches = @(
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }
+    @{ Patch = "rexglue-upstream-linux-wine.patch"; File = "src\core\dynlib_win.cpp"; Adds = "GetModuleHandleExW" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

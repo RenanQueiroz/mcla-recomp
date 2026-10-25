@@ -49,6 +49,7 @@ git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
+git apply ../../patches/rexglue-upstream-linux-wine.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -1433,6 +1434,23 @@ With frame generation on (FSR 3.1; 3x uncapped, and the Half display cap, 116 re
 |---|---|---|
 | `setcsr` keeps the exceptions masked | `include/rex/ppc/context.h` | all platforms (x86-64 and ARM64 hosts) |
 | Host threads initialise the host FP state | `src/system/xthread.cpp` | all platforms |
+
+## rexglue-upstream-linux-wine.patch
+
+**Why.** Three small changes for running the SDK under Wine/Proton and on Linux, found by upstream's Linux and Steam Deck users. None changes anything on native Windows.
+- **Wine and the guest memory section** (`src/core/memory_win.cpp`). The guest's 4 GB are one section created `SEC_RESERVE` and committed per range. Wine asks the wineserver for the section's committed range on every `VirtualProtect` and `VirtualQuery` of a view of it (`get_committed_size` in `dlls/ntdll/unix/virtual.c`), and the GPU write watches protect guest pages hundreds of times a frame, so each of those was a round trip to the server. A `SEC_COMMIT` section is answered locally. Wine backs both kinds with the same sparse file, and `MEM_COMMIT` on a view of a committed section only sets the protection. The one difference: guest pages nobody committed are readable and writable instead of faulting, as they already are on Linux and macOS, where the views are mapped read-write up front. The pull request measured MCLA (Proton): 14.3 to 11.3 microseconds of CPU per draw and 17 to 23.8 frames a second.
+- **The shared memory name** (`src/core/memory_posix.cpp`). Linux creates the guest memory as a named POSIX shared memory object (`/dev/shm`, 4.8 GB for this game) and removed the name only on a clean exit, so a killed or crashed run left it behind. The views are mapped from the descriptor and never opened again by name, so the name is dropped (`shm_unlink`) right after the object is created, and the object lives exactly as long as the process. The PS5 branch (anonymous `SHM_ANON`) is not touched.
+- **RenderDoc** (`src/ui/renderdoc_api.cpp`, `src/core/dynlib_*.cpp`). The renderer *loaded* `renderdoc.dll` / `librenderdoc.so` to see whether RenderDoc was attached, and loading it makes RenderDoc hook the graphics API and slow every draw even when no capture is wanted (the pull request measured `librenderdoc.so` at about 27% of the GPU command thread on a Steam Deck). It now only attaches to the library when it is already in the process (RenderDoc injected itself, as when the game is started from RenderDoc): `DynamicLibrary::Attach`, `GetModuleHandleExW` on Windows and `dlopen` with `RTLD_NOLOAD` on POSIX.
+
+**What it changes beyond the pull requests.** The POSIX `Attach` is compiled only where `RTLD_NOLOAD` is defined (glibc, FreeBSD); elsewhere it reports that nothing is loaded, as the PS5 toolchain's `dlfcn.h` was not available to check. The `dynlib_*.cpp` hunks are placed beside the fork's `CheckLoadable` (`rexglue-low-latency.patch`), where the pull request's context no longer applied; the code is the same.
+
+**From upstream.** Three pull requests to rexglue-sdk, open when this was taken (2026-10-25), not merged: [#517](https://github.com/rexglue/rexglue-sdk/pull/517), "perf(memory): commit the guest memory section up front under Wine", and [#514](https://github.com/rexglue/rexglue-sdk/pull/514), "fix(memory): unlink the shared memory name right after creating it", both by MoonFuji (Kadri Mohammed Mouncef); and [#522](https://github.com/rexglue/rexglue-sdk/pull/522), "fix(ui): attach to RenderDoc only when it is already loaded, never load it", by Meesz. The code is theirs; not this fork's work. Licence: BSD 3-Clause, the SDK's own (`LICENSE` of rexglue-sdk, repeated in `THIRD-PARTY-NOTICES.md`).
+
+| Change | Files | Affects |
+|---|---|---|
+| The guest memory section committed up front under Wine | `src/core/memory_win.cpp` | Windows build under Wine/Proton (native Windows takes no new branch) |
+| The shared memory name dropped after creation | `src/core/memory_posix.cpp` | Linux (not the PS5) |
+| `DynamicLibrary::Attach`; RenderDoc only attached | `include/rex/platform/dynlib.h`, `src/core/dynlib_win.cpp`, `src/core/dynlib_posix.cpp`, `src/ui/renderdoc_api.cpp` | all platforms |
 
 ## rexglue-mingw.patch
 

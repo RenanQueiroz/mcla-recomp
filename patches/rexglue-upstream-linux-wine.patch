@@ -1,0 +1,128 @@
+diff --git a/include/rex/platform/dynlib.h b/include/rex/platform/dynlib.h
+index 66fe249..9349d42 100644
+--- a/include/rex/platform/dynlib.h
++++ b/include/rex/platform/dynlib.h
+@@ -32,6 +32,10 @@ class DynamicLibrary {
+   DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
+ 
+   bool Load(const std::filesystem::path& path, SymbolResolution mode = SymbolResolution::kLazy);
++  // Gets a handle to a library that is already loaded into the process and never
++  // loads it; returns false if it is not loaded. The handle is released by
++  // Close(), like one from Load().
++  bool Attach(const std::filesystem::path& path, SymbolResolution mode = SymbolResolution::kLazy);
+   void Close();
+   explicit operator bool() const { return handle_ != nullptr; }
+ 
+diff --git a/src/core/dynlib_posix.cpp b/src/core/dynlib_posix.cpp
+index b44459b..17d1b91 100644
+--- a/src/core/dynlib_posix.cpp
++++ b/src/core/dynlib_posix.cpp
+@@ -34,6 +34,20 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution mo
+   return handle_ != nullptr;
+ }
+ 
++bool DynamicLibrary::Attach(const std::filesystem::path& path, SymbolResolution mode) {
++  Close();
++#ifdef RTLD_NOLOAD
++  // RTLD_NOLOAD only succeeds if the library is already loaded (and then bumps its refcount).
++  int flags = ((mode == SymbolResolution::kImmediate) ? RTLD_NOW : RTLD_LAZY) | RTLD_NOLOAD;
++  handle_ = dlopen(path.c_str(), flags);
++#else
++  // No way to tell whether it is loaded without loading it: report that it is not.
++  (void)path;
++  (void)mode;
++#endif
++  return handle_ != nullptr;
++}
++
+ LibraryCheck CheckLoadable(const std::filesystem::path& path, std::string* error) {
+   static std::mutex mutex;
+   static std::map<std::filesystem::path, DynamicLibrary*>* loaded =
+diff --git a/src/core/dynlib_win.cpp b/src/core/dynlib_win.cpp
+index 1929a64..f72a8fc 100644
+--- a/src/core/dynlib_win.cpp
++++ b/src/core/dynlib_win.cpp
+@@ -34,6 +34,17 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution /*
+   return handle_ != nullptr;
+ }
+ 
++bool DynamicLibrary::Attach(const std::filesystem::path& path, SymbolResolution /*mode*/) {
++  // Flag 0 increments the module refcount, so FreeLibrary in Close() stays balanced.
++  Close();
++  HMODULE module = nullptr;
++  if (!GetModuleHandleExW(0, path.c_str(), &module)) {
++    return false;
++  }
++  handle_ = static_cast<void*>(module);
++  return true;
++}
++
+ LibraryCheck CheckLoadable(const std::filesystem::path& path, std::string* error) {
+   static std::mutex mutex;
+   static std::map<std::filesystem::path, HMODULE>* loaded =
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index 6788d30..87734e2 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -561,6 +561,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+     shm_unlink(full_path.c_str());
+     return kFileMappingHandleInvalid;
+   }
++  // Views are mapped from the descriptor, never reopened by name, so drop the
++  // name now: the object then lives exactly as long as the process, and a
++  // killed or crashed run cannot leave gigabytes behind in /dev/shm.
++  shm_unlink(full_path.c_str());
+   return static_cast<FileMappingHandle>(ret);
+ #endif  // REX_PLATFORM_PS5
+ #endif
+diff --git a/src/core/memory_win.cpp b/src/core/memory_win.cpp
+index 9a668e9..689ebbd 100644
+--- a/src/core/memory_win.cpp
++++ b/src/core/memory_win.cpp
+@@ -170,8 +170,26 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+   return true;
+ }
+ 
++// Wine answers every VirtualProtect and VirtualQuery on a view of a SEC_RESERVE
++// section by asking the wineserver for the committed range
++// (get_committed_size in dlls/ntdll/unix/virtual.c). The GPU write watches
++// protect guest pages hundreds of times a frame, so under Wine a reserved
++// section turns each of those into a server round trip. A SEC_COMMIT section is
++// answered locally. Wine backs both kinds with the same sparse file, and
++// MEM_COMMIT on a view of a committed section only sets the protection. The one
++// difference is that guest pages nobody committed are readable and writable
++// instead of faulting, as they already are on Linux and macOS, where the views
++// are mapped read-write up front.
++static bool RunningUnderWine() {
++  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
++  return ntdll && GetProcAddress(ntdll, "wine_get_version");
++}
++
+ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
+                                           PageAccess access, bool commit) {
++  if (!commit && RunningUnderWine()) {
++    commit = true;
++  }
+   DWORD protect = ToWin32ProtectFlags(access) | (commit ? SEC_COMMIT : SEC_RESERVE);
+   auto full_path = "Local" / path;
+ #ifdef REX_BASE_MEMORY_WIN_USE_DESKTOP_FUNCTIONS
+diff --git a/src/ui/renderdoc_api.cpp b/src/ui/renderdoc_api.cpp
+index e1a5287..0aeed21 100644
+--- a/src/ui/renderdoc_api.cpp
++++ b/src/ui/renderdoc_api.cpp
+@@ -25,10 +25,11 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
+ 
+   pRENDERDOC_GetAPI get_api = nullptr;
+ 
+-  // Try to load the RenderDoc library. If RenderDoc is attached, the library
+-  // should already be loaded into the process and this will increment the
+-  // reference count. If not attached, the load will fail and we return nullptr.
+-  if (!renderdoc_api->library_.Load(platform::lib_names::kRenderDoc)) {
++  // Only attach to the RenderDoc library if it is already loaded into the
++  // process (RenderDoc injected itself, e.g. when launched from RenderDoc).
++  // Never load it ourselves: merely loading it makes RenderDoc hook the
++  // graphics API and slows rendering even when no capture is wanted.
++  if (!renderdoc_api->library_.Attach(platform::lib_names::kRenderDoc)) {
+     return nullptr;
+   }
+   get_api = renderdoc_api->library_.GetSymbol<pRENDERDOC_GetAPI>("RENDERDOC_GetAPI");
