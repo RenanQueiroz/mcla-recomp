@@ -410,10 +410,10 @@ index ba34aca..190e30a 100644
    // UI overlay painting.
 diff --git a/include/rex/ui/low_latency.h b/include/rex/ui/low_latency.h
 new file mode 100644
-index 0000000..14f5570
+index 0000000..ce412b7
 --- /dev/null
 +++ b/include/rex/ui/low_latency.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,154 @@
 +#pragma once
 +/**
 + * Low latency (rexglue-low-latency.patch): the GPU vendor's latency reducer for
@@ -488,8 +488,11 @@ index 0000000..14f5570
 +  // Why SetMode failed (the settings' letters).
 +  virtual const char* FailureReason() const { return "NOT SUPPORTED"; }
 +  // Null while the backend can work; else why it can't any more (the settings' letters): a
-+  // swapchain the driver made without the latency mode, a sleep that blocks. Read every frame.
++  // swapchain the driver made without the latency mode. Read every frame.
 +  virtual const char* Failed() const { return nullptr; }
++  // Asked some seconds after the core gave the reducer up (Failed, or sleeps that took too long):
++  // whether the backend can work again, and has cleared what Failed reported. The default is no.
++  virtual bool Rearm() { return false; }
 +  // Called once per frame, before the frame's input is read: the driver waits
 +  // here for the best moment to start (it is the latency reduction). Whether it did (and holds
 +  // the frame rate to the minimum interval): false where it could not (no swapchain yet, a call
@@ -1129,10 +1132,10 @@ index c4870dd..6652376 100644
          d3d12/d3d12_provider.cpp
 diff --git a/src/ui/d3d12/d3d12_low_latency.cpp b/src/ui/d3d12/d3d12_low_latency.cpp
 new file mode 100644
-index 0000000..6c16115
+index 0000000..10bc2a1
 --- /dev/null
 +++ b/src/ui/d3d12/d3d12_low_latency.cpp
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,540 @@
 +/**
 + * Direct3D 12 low latency (rexglue-low-latency.patch): NVIDIA Reflex through NVAPI and AMD
 + * Anti-Lag 2 through the driver extension. See include/rex/ui/low_latency.h.
@@ -1353,29 +1356,9 @@ index 0000000..6c16115
 +    return true;
 +  }
 +
-+  // NvAPI_D3D_Sleep waits for the moment the driver picks and can't be cancelled; one that takes
-+  // over 250 ms (the interval of a 4 FPS cap), three in a row, is a driver that blocks it: the
-+  // reducer is given up (Failed), and the game's own limiter holds the frame rate.
-+  bool Sleep(uint64_t) override {
-+    const auto start = std::chrono::steady_clock::now();
-+    const bool ok = sleep_(device_.Get()) == kNvApiOk;
-+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-+                                std::chrono::steady_clock::now() - start)
-+                                .count();
-+    if (elapsed_ms > 250) {
-+      REXLOG_WARN("Low latency: NvAPI_D3D_Sleep took {} ms", elapsed_ms);
-+      if (++overlong_sleeps_ >= 3) {
-+        too_long_.store(true, std::memory_order_release);
-+      }
-+      return false;
-+    }
-+    overlong_sleeps_ = 0;
-+    return ok;
-+  }
-+
-+  const char* Failed() const override {
-+    return too_long_.load(std::memory_order_acquire) ? "SLEEP TOO LONG" : nullptr;
-+  }
++  // NvAPI_D3D_Sleep waits for the moment the driver picks and can't be cancelled; the core times
++  // it, and gives the reducer up (for a while) when it takes too long, three times in a row.
++  bool Sleep(uint64_t) override { return sleep_(device_.Get()) == kNvApiOk; }
 +
 +  void Marker(LatencyMarker marker, uint64_t frame_id) override {
 +    NvLatencyMarkerType type;
@@ -1517,8 +1500,6 @@ index 0000000..6c16115
 +  PfnSetLatencyMarker set_latency_marker_ = nullptr;
 +  PfnGetLatency get_latency_ = nullptr;
 +  PfnGetSleepStatus get_sleep_status_ = nullptr;
-+  uint32_t overlong_sleeps_ = 0;  // the update thread's
-+  std::atomic<bool> too_long_{false};
 +};
 +
 +// --- AMD Anti-Lag 2 --------------------------------------------------------------------------
@@ -1831,10 +1812,10 @@ index d7ca5d1..82c318a 100644
    if (generate) {
 diff --git a/src/ui/low_latency.cpp b/src/ui/low_latency.cpp
 new file mode 100644
-index 0000000..4142ebb
+index 0000000..933d8d4
 --- /dev/null
 +++ b/src/ui/low_latency.cpp
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,663 @@
 +/**
 + * Low latency: the frame bookkeeping, the policy and the cvars; the vendors' calls are the
 + * backends' (d3d12/d3d12_low_latency.cpp, vulkan/vulkan_low_latency.cpp).
@@ -1843,6 +1824,7 @@ index 0000000..4142ebb
 +
 +#include <array>
 +#include <atomic>
++#include <bit>
 +#include <chrono>
 +#include <functional>
 +#include <mutex>
@@ -1910,8 +1892,10 @@ index 0000000..4142ebb
 +    "from each one's simulation start, to the report, 16 logs every 300 frames "
 +    "how the frames' ids were paired (timer passes with no swap between, swaps "
 +    "with no frame, written-off frames), 32 makes the driver refuse the mode twice "
-+    "and 64 always (to test the retry and the fall back to the game's limiter)")
-+    .range(0, 127)
++    "and 64 always (to test the retry and the fall back to the game's limiter), 128 "
++    "makes every wait before a frame 300 ms longer (to test giving the reducer up and "
++    "trying again)")
++    .range(0, 255)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +namespace rex {
@@ -1933,6 +1917,10 @@ index 0000000..4142ebb
 +// A frame that has no swap for this long was lost (the render thread stalled, or the update ran
 +// without a frame): the count of such frames is written off, so ids don't stay shifted.
 +constexpr int64_t kStaleFrameNs = 250'000'000;
++// A frame still waiting at every timer pass for this long is written off too (see
++// OnFrameStart): an update thread that is a frame ahead of the swaps (the usual state while the
++// game is CPU-bound) looks the same, so that takes longer to call a loss.
++constexpr int64_t kLeadHeldNs = 500'000'000;
 +std::atomic<int64_t> g_last_swap_ns{0};
 +std::atomic<uint64_t> g_swaps_executed{0};  // the GPU command thread's swap packets
 +std::atomic<uint32_t> g_frame_limit{0};
@@ -1954,6 +1942,13 @@ index 0000000..4142ebb
 +// The swaps written when the previous timer pass started, and the thread that makes the passes
 +// (the one the game's hook found); the swaps' thread, to check it is another one.
 +uint64_t g_swaps_at_previous_pass = ~uint64_t(0);
++// The update thread's, for telling a lost frame from a lead: bit 0 of the history is set when
++// the latest pass found no frame waiting; the first pass of the run of passes that have found
++// one waiting (0: none now), and whether the 32 passes before it found one waiting at most once.
++uint32_t g_pass_idle_history = ~uint32_t(0);
++int64_t g_pending_since_ns = 0;
++bool g_pending_run_idle = false;
++std::atomic<uint64_t> g_stat_held{0};  // of the written-off frames, those after a held lead
 +std::atomic<size_t> g_frame_thread_hash{0};
 +std::atomic<uint32_t> g_swaps_on_frame_thread{0};
 +
@@ -1968,10 +1963,18 @@ index 0000000..4142ebb
 +  bool on = false;
 +  bool boost = false;
 +  uint32_t interval_us = 0;
-+  bool failed = false;  // the driver refused the mode: no calls, the game's own limiter
++  bool failed = false;  // given up for now: no calls, the game's own limiter
 +  // A refused mode is asked for again a second later, twice more, before it counts as refused.
 +  uint32_t refusals = 0;
 +  int64_t retry_after_ns = 0;
++  // A reducer given up on because its waits took too long (a window that isn't presenting, a
++  // driver that blocks) is tried again after a pause that doubles with each failure: 5 s, 10 s,
++  // 20 s, 40 s, at most a minute. For 5 s after a new start one long wait is enough to give up
++  // again; the pause starts again at 5 s after 30 s without one.
++  int64_t rearm_at_ns = 0;  // 0: not coming back
++  int64_t rearmed_at_ns = 0;
++  uint32_t give_ups = 0;
++  uint32_t long_waits = 0;  // in a row
 +};
 +Applied g_applied;                         // the update thread's
 +std::string g_failed_why;                  // (g_mutex)
@@ -2129,6 +2132,37 @@ index 0000000..4142ebb
 +  return want_nvidia || want_amd;
 +}
 +
++namespace {
++
++// Gives the reducer up for now: the driver is told to leave the mode (once, as well as it can),
++// the status says why, and the game's own limiter holds the frame rate. With retry, it is asked
++// again after a pause (Applied).
++void GiveUp(LowLatencyBackend& backend, const char* why, int64_t now_ns, bool retry) {
++  g_applied.failed = true;
++  g_applied.long_waits = 0;
++  g_applied.rearm_at_ns = 0;
++  {
++    std::lock_guard lock(g_mutex);
++    g_failed_why = why;
++  }
++  if (g_applied.on) {
++    backend.SetMode(false, false, 0);
++    g_applied.on = false;
++  }
++  if (retry) {
++    const int64_t pause_s =
++        std::min<int64_t>(60, int64_t(5) << std::min<uint32_t>(g_applied.give_ups, 4));
++    ++g_applied.give_ups;
++    g_applied.rearm_at_ns = now_ns + pause_s * 1'000'000'000;
++    REXLOG_WARN("Low latency: {} can't work ({}); asking again in {} s", backend.Name(), why,
++                pause_s);
++  } else {
++    REXLOG_WARN("Low latency: {} can't work ({})", backend.Name(), why);
++  }
++}
++
++}  // namespace
++
 +void LowLatency::OnFrameStart() {
 +  const size_t thread_hash = std::hash<std::thread::id>()(std::this_thread::get_id());
 +  if (!g_frame_thread_hash.load(std::memory_order_relaxed)) {
@@ -2144,33 +2178,59 @@ index 0000000..4142ebb
 +    }
 +  }
 +  // The frame's id: the swap packets written so far, the frames started that have no swap yet,
-+  // and this one. Frames still pending after a swap that came since the previous pass, or that
-+  // have had no swap for a quarter of a second, were lost (an update the render thread merged
-+  // into the next one, or a stall): written off, so that the ids don't stay shifted by one.
++  // and this one. A frame that was lost (an update the render thread merged into the next one,
++  // or a stall) is written off, so that the ids don't stay shifted by one. A frame with no swap
++  // for a quarter of a second was lost. A frame still waiting after a swap that came since the
++  // previous pass may be, but is also what an update thread a frame ahead of the swaps looks
++  // like (the usual state when the game is CPU-bound: 85% of the passes at native resolution,
++  // uncapped; frames and swaps were one to one), and writing that off shifted the ids instead
++  // (11% of the frames lost their markers, and most had another's id): it is written off at
++  // once only where frames are normally not waiting (all but one of the 32 passes before the
++  // wait began found none: the GPU-bound and capped runs, where it is a merge), and after half a
++  // second of waiting at every pass otherwise.
 +  const int64_t now_ns = SteadyNs();
 +  uint64_t counts = g_frame_counts.load(std::memory_order_relaxed);
 +  uint64_t base;
-+  bool healed, stale, no_swap_between;
++  bool healed, stale, lead_held, no_swap_between, pending_seen;
++  int64_t run_start;
++  bool run_idle;
 +  do {
 +    base = counts;
-+    healed = stale = false;
++    healed = stale = lead_held = false;
 +    const uint64_t swaps = base >> 32;
-+    no_swap_between = (base & kPendingMask) && swaps == g_swaps_at_previous_pass;
-+    if (base & kPendingMask) {
++    pending_seen = (base & kPendingMask) != 0;
++    no_swap_between = pending_seen && swaps == g_swaps_at_previous_pass;
++    run_start = g_pending_since_ns;
++    run_idle = g_pending_run_idle;
++    if (!pending_seen) {
++      run_start = 0;
++    } else if (!run_start) {
++      run_start = now_ns;
++      run_idle = std::popcount(g_pass_idle_history) >= 31;
++    }
++    if (pending_seen) {
 +      if (now_ns - g_last_swap_ns.load(std::memory_order_relaxed) > kStaleFrameNs) {
 +        base &= ~kPendingMask;
 +        stale = true;
-+      } else if (g_swaps_at_previous_pass != ~uint64_t(0) && swaps != g_swaps_at_previous_pass) {
++      } else if (g_swaps_at_previous_pass != ~uint64_t(0) && swaps != g_swaps_at_previous_pass &&
++                 run_idle) {
 +        base &= ~kPendingMask;
 +        healed = true;
++      } else if (now_ns - run_start >= kLeadHeldNs) {
++        base &= ~kPendingMask;
++        healed = lead_held = true;
 +      }
 +    }
 +  } while (!g_frame_counts.compare_exchange_weak(counts, base + 1, std::memory_order_acq_rel,
 +                                                 std::memory_order_relaxed));
++  g_pass_idle_history = (g_pass_idle_history << 1) | (pending_seen ? 0u : 1u);
++  g_pending_since_ns = (healed || stale) ? 0 : run_start;
++  g_pending_run_idle = run_idle;
 +  g_swaps_at_previous_pass = base >> 32;
 +  g_last_frame_start_ns.store(now_ns, std::memory_order_relaxed);
 +  g_stat_stale.fetch_add(stale ? 1 : 0, std::memory_order_relaxed);
 +  g_stat_healed.fetch_add(healed ? 1 : 0, std::memory_order_relaxed);
++  g_stat_held.fetch_add(lead_held ? 1 : 0, std::memory_order_relaxed);
 +  g_stat_passes_without_swap.fetch_add(no_swap_between ? 1 : 0, std::memory_order_relaxed);
 +  const uint64_t id = (base >> 32) + (base & kPendingMask) + 1;
 +  // An id that is already started (the pending frames written off: its swap is the next one's):
@@ -2190,17 +2250,39 @@ index 0000000..4142ebb
 +  }
 +  const Policy policy = Evaluate(*backend);
 +  const int32_t debug = REXCVAR_GET(low_latency_debug);
-+  // The backend itself can have given up (a swapchain made without the latency mode, a sleep
-+  // that blocks): unavailable, as for a refused mode.
-+  if (!g_applied.failed) {
-+    if (const char* why = backend->Failed()) {
-+      g_applied.failed = true;
++  // A reducer given up on for its long waits (or by the backend, if it can recover) is tried
++  // again after its pause.
++  if (g_applied.failed && g_applied.rearm_at_ns && now_ns >= g_applied.rearm_at_ns) {
++    g_applied.rearm_at_ns = 0;
++    if (!backend->Failed() || backend->Rearm()) {
++      g_applied.failed = false;
++      g_applied.rearmed_at_ns = now_ns;
++      g_applied.long_waits = 0;
 +      {
 +        std::lock_guard lock(g_mutex);
-+        g_failed_why = why;
++        g_failed_why.clear();
 +      }
-+      REXLOG_WARN("Low latency: {} can't work ({})", backend->Name(), why);
++      REXLOG_INFO("Low latency: {} tries again", backend->Name());
 +    }
++  }
++  if (g_applied.give_ups && !g_applied.failed &&
++      now_ns - g_applied.rearmed_at_ns > 30'000'000'000) {
++    g_applied.give_ups = 0;
++  }
++  // The backend itself can have given up (a swapchain made without the latency mode):
++  // unavailable, as for a refused mode.
++  if (!g_applied.failed) {
++    if (const char* why = backend->Failed()) {
++      GiveUp(*backend, why, now_ns, true);
++    }
++  }
++  // The policy came back to what the driver has while a refusal was waiting to be asked again
++  // (the row was turned off): nothing to ask, and the next refusal counts from one.
++  if (g_applied.refusals && g_applied.on == policy.on &&
++      (!policy.on ||
++       (g_applied.boost == policy.boost && g_applied.interval_us == policy.interval_us))) {
++    g_applied.refusals = 0;
++    g_applied.retry_after_ns = 0;
 +  }
 +  // The driver hears of the mode only once the policy has turned the reducer on (and of every
 +  // change after that). A refusal is asked again a second later, twice, before it counts.
@@ -2228,13 +2310,9 @@ index 0000000..4142ebb
 +    } else {
 +      // Refused three times: the reducer is unavailable (the menu says why) and the game's own
 +      // limiter holds the frame rate.
-+      g_applied.failed = true;
-+      {
-+        std::lock_guard lock(g_mutex);
-+        g_failed_why = backend->FailureReason();
-+      }
 +      REXLOG_WARN("Low latency: {} refused the mode ({})", backend->Name(),
 +                  backend->FailureReason());
++      GiveUp(*backend, backend->FailureReason(), now_ns, false);
 +    }
 +  }
 +  // Working: asked for, and the driver has the mode (not while a refusal is waiting to be tried
@@ -2251,10 +2329,31 @@ index 0000000..4142ebb
 +  if (working) {
 +    const auto sleep_start = std::chrono::steady_clock::now();
 +    held = backend->Sleep(id);
-+    sleep_us_total += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-+                                   std::chrono::steady_clock::now() - sleep_start)
-+                                   .count());
++    if (debug & 128) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(300));
++    }
++    const int64_t sleep_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                                 std::chrono::steady_clock::now() - sleep_start)
++                                 .count();
++    sleep_us_total += uint64_t(sleep_us);
 +    ++sleep_count;
++    // The driver waits for the moment it picks and the call can't be cancelled. A wait over a
++    // quarter of a second (or four frame intervals of the frame-rate limit), three in a row, is
++    // not pacing: the window isn't presenting, or the driver blocks. The reducer is given up,
++    // and the game's own limiter holds the frame rate until it is tried again.
++    const int64_t limit_us = std::max<int64_t>(250'000, 4 * int64_t(g_applied.interval_us));
++    if (sleep_us > limit_us) {
++      held = false;
++      REXLOG_WARN("Low latency: {}'s wait before the frame took {} ms", backend->Name(),
++                  sleep_us / 1000);
++      const bool new_start =
++          g_applied.rearmed_at_ns && now_ns - g_applied.rearmed_at_ns < 5'000'000'000;
++      if (++g_applied.long_waits >= (new_start ? 1u : 3u)) {
++        GiveUp(*backend, "SLEEP TOO LONG", now_ns, true);
++      }
++    } else {
++      g_applied.long_waits = 0;
++    }
 +  }
 +  // The driver holds the frame rate only if it was told the interval and slept this frame; else
 +  // the game's own limiter does.
@@ -2266,10 +2365,11 @@ index 0000000..4142ebb
 +  if ((debug & 16) && id % 300 == 0) {
 +    REXLOG_INFO(
 +        "Low latency: frame ids so far: {} timer passes with no swap since the previous one, {} "
-+        "pending frames written off after a swap, {} after a stall, {} swaps in play with no "
-+        "frame, {} ids started twice",
++        "pending frames written off after a swap ({} of them after waiting half a second), {} "
++        "after a stall, {} swaps in play with no frame, {} ids started twice",
 +        g_stat_passes_without_swap.load(std::memory_order_relaxed),
-+        g_stat_healed.load(std::memory_order_relaxed), g_stat_stale.load(std::memory_order_relaxed),
++        g_stat_healed.load(std::memory_order_relaxed), g_stat_held.load(std::memory_order_relaxed),
++        g_stat_stale.load(std::memory_order_relaxed),
 +        g_stat_swaps_without_frame.load(std::memory_order_relaxed),
 +        g_stat_duplicate_ids.load(std::memory_order_relaxed));
 +  }
@@ -2304,8 +2404,11 @@ index 0000000..4142ebb
 +  }
 +  // The thread that makes the timer passes must not be the one that swaps (the update thread
 +  // and the render thread are two).
++  // (Only while timer passes are being made: a loading screen's loop can swap on that thread
++  // with none.)
 +  if (std::hash<std::thread::id>()(std::this_thread::get_id()) ==
 +          g_frame_thread_hash.load(std::memory_order_relaxed) &&
++      now_ns - g_last_frame_start_ns.load(std::memory_order_relaxed) < 100'000'000 &&
 +      g_swaps_on_frame_thread.fetch_add(1, std::memory_order_relaxed) == 20) {
 +    REXLOG_WARN(
 +        "Low latency: the thread that makes the timer passes also swaps; the update "
@@ -2554,10 +2657,10 @@ index aa08879..ffc7d03 100644
  #undef XE_UI_VULKAN_FUNCTION
 diff --git a/src/ui/vulkan/vulkan_low_latency.cpp b/src/ui/vulkan/vulkan_low_latency.cpp
 new file mode 100644
-index 0000000..79dd422
+index 0000000..60c0702
 --- /dev/null
 +++ b/src/ui/vulkan/vulkan_low_latency.cpp
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,400 @@
 +/**
 + * Vulkan low latency (rexglue-low-latency.patch). See include/rex/ui/low_latency.h and
 + * include/rex/ui/vulkan/vulkan_low_latency.h.
@@ -2750,6 +2853,7 @@ index 0000000..79dd422
 +  const VulkanDevice::Functions& dfn = device_->functions();
 +  if (nvidia_) {
 +    uint64_t value;
++    uint32_t interval_us = 0;
 +    // The driver call is made under the swapchain's lock (the UI thread retires it under the
 +    // exclusive one); the wait for its signal is not, so a swapchain change never queues the
 +    // markers of other threads behind a sleep.
@@ -2761,6 +2865,7 @@ index 0000000..79dd422
 +        return false;
 +      }
 +      value = sleep_value_.fetch_add(1, std::memory_order_relaxed) + 1;
++      interval_us = mode_interval_us_;
 +      VkLatencySleepInfoNV info = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV};
 +      info.signalSemaphore = sleep_semaphore_;
 +      info.value = value;
@@ -2768,17 +2873,20 @@ index 0000000..79dd422
 +        return false;
 +      }
 +    }
-+    // Bounded: a driver that never signals it must not hold the game.
++    // Bounded: a driver that never signals it must not hold the game. The bound is a little
++    // over what LowLatency::OnFrameStart takes for a wait that is too long (a quarter of a
++    // second, or four frame intervals), so that one that times out counts as that.
++    const uint64_t timeout_ns = (std::max<uint64_t>(250'000, 4ull * interval_us) + 20'000) * 1000;
 +    VkSemaphoreWaitInfo wait_info = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
 +    wait_info.semaphoreCount = 1;
 +    wait_info.pSemaphores = &sleep_semaphore_;
 +    wait_info.pValues = &value;
-+    const VkResult result = dfn.vkWaitSemaphores(device_->device(), &wait_info, 200'000'000);
++    const VkResult result = dfn.vkWaitSemaphores(device_->device(), &wait_info, timeout_ns);
 +    if (result != VK_SUCCESS) {
 +      if (!sleep_wait_failure_logged_) {
 +        sleep_wait_failure_logged_ = true;
-+        REXLOG_WARN("Low latency: the driver's sleep wasn't signalled in 200 ms ({})",
-+                    int32_t(result));
++        REXLOG_WARN("Low latency: the driver's sleep wasn't signalled in {} ms ({})",
++                    timeout_ns / 1'000'000, int32_t(result));
 +      }
 +      return false;
 +    }

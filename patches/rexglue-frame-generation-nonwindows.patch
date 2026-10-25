@@ -1,8 +1,8 @@
 diff --git a/cmake/fidelityfx/CMakeLists.txt b/cmake/fidelityfx/CMakeLists.txt
-index fef4722..4aa6626 100644
+index fef4722..7a14e89 100644
 --- a/cmake/fidelityfx/CMakeLists.txt
 +++ b/cmake/fidelityfx/CMakeLists.txt
-@@ -12,18 +12,23 @@
+@@ -12,18 +12,25 @@
  #                               (the PS5)
  #   REXGLUE_FSR_WRAPPER_HASH    this folder's files' hash (only to make a changed wrapper
  #                               configure and build the runtime again)
@@ -25,6 +25,8 @@ index fef4722..4aa6626 100644
 +# platform (Linux and the PS5 too, untested there: rexglue-frame-generation-
 +# nonwindows.patch). REXGLUE_FSR_FRAMEGEN=OFF leaves them out (upscaling only,
 +# so that FSR anti-aliasing can't be lost to code that fails to build somewhere).
++# (Not defined when this file is used on its own: scripts/ci/build-fidelityfx.ps1 builds the
++# release DLLs so. The default has to stay ON, or those lose frame generation.)
 +if(NOT DEFINED REXGLUE_FSR_FRAMEGEN)
 +    set(REXGLUE_FSR_FRAMEGEN ON)
 +endif()
@@ -32,8 +34,19 @@ index fef4722..4aa6626 100644
      set(FFX_API_ENABLE_FRAMEGEN_PROVIDER ON CACHE BOOL "" FORCE)
  else()
      set(FFX_API_ENABLE_FRAMEGEN_PROVIDER OFF CACHE BOOL "" FORCE)
+diff --git a/cmake/fidelityfx/soft_step.cmake b/cmake/fidelityfx/soft_step.cmake
+index b9f78c9..6b80891 100644
+--- a/cmake/fidelityfx/soft_step.cmake
++++ b/cmake/fidelityfx/soft_step.cmake
+@@ -22,5 +22,5 @@ endif()
+ execute_process(COMMAND ${command} RESULT_VARIABLE result)
+ if(NOT result EQUAL 0)
+     file(WRITE "${STEP_SKIP}" "${result}\n")
+-    message(WARNING "FSR: a FidelityFX runtime failed to build (${result}); it is left out, and FSR is unavailable for its graphics API")
++    message(WARNING "FSR: a FidelityFX runtime failed to build (${result}); it is left out, and FSR is unavailable for its graphics API. ${STEP_HINT}")
+ endif()
 diff --git a/cmake/rexglue_fsr.cmake b/cmake/rexglue_fsr.cmake
-index e3c8932..bbbed20 100644
+index e3c8932..1cfbbf6 100644
 --- a/cmake/rexglue_fsr.cmake
 +++ b/cmake/rexglue_fsr.cmake
 @@ -30,6 +30,7 @@ if(NOT REXGLUE_ENABLE_FSR)
@@ -54,6 +67,30 @@ index e3c8932..bbbed20 100644
      if(api STREQUAL "vk" AND REXGLUE_FSR_VK_PREBUILT)
          list(APPEND args "-DREXGLUE_FSR_SHADERS_DIR=${REXGLUE_FSR_SHADERS_DIR}"
               "-DREXGLUE_FSR_SHADERS_HASH=${_rexglue_fsr_shaders_hash}")
+@@ -311,7 +313,11 @@ foreach(api IN LISTS _rexglue_fsr_apis)
+     endif()
+     # A runtime that fails to configure or build is left out with a warning
+     # (soft_step.cmake), and the SDK builds on without it.
+-    set(soft "${CMAKE_COMMAND}" "-DSTEP_SKIP=${wrapper_dir}/failed" -P "${wrapper_dir}/soft_step.cmake")
++    set(step_hint "")
++    if(REXGLUE_FSR_FRAMEGEN)
++        set(step_hint "If the errors are in frame generation's code (ffx_frameinterpolation, ffx_opticalflow, the provider), configure again with -DREXGLUE_FSR_FRAMEGEN=OFF to keep FSR anti-aliasing.")
++    endif()
++    set(soft "${CMAKE_COMMAND}" "-DSTEP_SKIP=${wrapper_dir}/failed" "-DSTEP_HINT=${step_hint}" -P "${wrapper_dir}/soft_step.cmake")
+     # Built again when its library isn't there (an earlier attempt failed).
+     set(stamp_dir "${binary_dir}-stamp")
+     if(NOT EXISTS "${library}")
+@@ -322,8 +328,8 @@ foreach(api IN LISTS _rexglue_fsr_apis)
+         BINARY_DIR "${binary_dir}"
+         STAMP_DIR "${stamp_dir}"
+         TMP_DIR "${binary_dir}-tmp"
+-        CONFIGURE_COMMAND "${CMAKE_COMMAND}" "-DSTEP_SKIP=${wrapper_dir}/failed" -DSTEP_FIRST=1
+-            -P "${wrapper_dir}/soft_step.cmake" --
++        CONFIGURE_COMMAND "${CMAKE_COMMAND}" "-DSTEP_SKIP=${wrapper_dir}/failed" "-DSTEP_HINT=${step_hint}"
++            -DSTEP_FIRST=1 -P "${wrapper_dir}/soft_step.cmake" --
+             "${CMAKE_COMMAND}" -S "${wrapper_dir}" -B "${binary_dir}" -G Ninja
+             -DCMAKE_BUILD_TYPE=Release
+             "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index 6652376..a84f2fe 100644
 --- a/src/ui/CMakeLists.txt
@@ -158,10 +195,10 @@ index ffc7d03..4918661 100644
        REXLOG_INFO("Vulkan device: frame generation isn't available: {}", unavailable_why);
        frame_generation_wanted = false;
 diff --git a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
-index 46141b2..9f898e2 100644
+index 46141b2..71aa480 100644
 --- a/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
 +++ b/src/ui/vulkan/vulkan_presenter_frame_generation.cpp
-@@ -37,6 +37,16 @@ REXCVAR_DEFINE_STRING(frame_generation_dump_path, "", "GPU",
+@@ -37,6 +37,17 @@ REXCVAR_DEFINE_STRING(frame_generation_dump_path, "", "GPU",
                        "Development: the folder frame_generation_dump writes into");
  REXCVAR_DECLARE(int32_t, frame_generation_debug);
  REXCVAR_DECLARE(bool, frame_generation_timing);
@@ -173,12 +210,13 @@ index 46141b2..9f898e2 100644
 +                      "display's refresh, with the back-pressure that holds the game to half of "
 +                      "it (a fixed refresh display: the PS5's, 59.94 Hz); auto: display on the "
 +                      "PS5, timed elsewhere. display needs the tear-free swapchain "
-+                      "(frame_generation_present = auto)")
++                      "(frame_generation_present = auto). The PS5's pacing is untested on a "
++                      "console")
 +    .allowed({"auto", "timed", "display"});
  
  namespace rex {
  namespace ui {
-@@ -1043,6 +1053,21 @@ void VulkanPresenter::FramePacerPresent(const FramePacerFrame& frame) {
+@@ -1043,6 +1054,21 @@ void VulkanPresenter::FramePacerPresent(const FramePacerFrame& frame) {
        const double gap = mean * 0.5 - variation * 0.1 - 100'000.0;
        gap_ns = gap > 0.0 ? uint64_t(gap) : 0;
      }
