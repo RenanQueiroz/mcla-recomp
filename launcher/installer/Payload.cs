@@ -210,6 +210,9 @@ static class PayloadWriter
             .Select(p => (Path: p, Relative: Path.GetRelativePath(folder, p).Replace('\\', '/')))
             .OrderBy(f => f.Relative, StringComparer.Ordinal).ToList();
         if (files.Count == 0 || files.Count > PayloadFormat.MaxFiles) throw new InvalidOperationException($"{files.Count} files in {folder}");
+        // Every key is written, with its default when it was not given: a reader that is not this program (the
+        // release's scripts read the header from the file) must not depend on this program's defaults.
+        foreach (var key in new[] { "version", "tag", "commit", "exe" }) meta.Values.TryAdd(key, key switch { "version" => meta.Version, "tag" => meta.Tag, "commit" => meta.Commit, _ => meta.Exe });
         meta.Values["files"] = files.Count.ToString();
         meta.Values["bytes"] = files.Sum(f => new FileInfo(f.Path).Length).ToString();
         if (!files.Any(f => string.Equals(f.Relative, meta.Exe, StringComparison.OrdinalIgnoreCase)))

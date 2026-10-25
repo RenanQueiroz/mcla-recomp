@@ -100,10 +100,13 @@ jobs:
         run: .\scripts\ci\publish-launcher.ps1 -Out "$env:RUNNER_TEMP\launcher"
 
       # MCLA-Setup.exe as a release makes it (the NativeAOT installer program with the launcher folder as its
-      # payload, unpacked again and compared), then used as a player's PC would, on scratch folders.
+      # payload, unpacked again and compared, its header read back from the file by the release's own reader,
+      # scripts/ci/check-installer.py), then used as a player's PC would, on scratch folders.
       - name: Build MCLA-Setup.exe
         shell: powershell
-        run: .\scripts\ci\build-installer.ps1 -LauncherDir "$env:RUNNER_TEMP\launcher" -Out "$env:RUNNER_TEMP\setup" -StubOut "$env:RUNNER_TEMP\stub\MCLA-Setup.exe"
+        env:
+          COMMIT: ${{ github.sha }}
+        run: .\scripts\ci\build-installer.ps1 -LauncherDir "$env:RUNNER_TEMP\launcher" -Out "$env:RUNNER_TEMP\setup" -StubOut "$env:RUNNER_TEMP\stub\MCLA-Setup.exe" -Tag draft-ci -Commit $env:COMMIT
 
       - name: Try MCLA-Setup.exe
         shell: powershell

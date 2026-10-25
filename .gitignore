@@ -55,3 +55,7 @@ keys.*
 /scripts/smoke_run.ps1
 /scripts/sweep_stats.py
 /scripts/thread_profile.ps1
+
+# Python bytecode
+__pycache__/
+*.pyc

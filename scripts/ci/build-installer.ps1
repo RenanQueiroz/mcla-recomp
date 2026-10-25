@@ -79,6 +79,14 @@ try {
         $count++
     }
     if ((Get-ChildItem -LiteralPath $unpacked -Recurse -File).Count -ne $count) { throw "unpacking made files the launcher folder does not have" }
+    # The header as the release's assemble step reads it, from the file (scripts\ci\check-installer.py, the same
+    # reader): every key has to be in the file itself, not filled in by this program's own defaults.
+    $read = @("-I", "$PSScriptRoot\check-installer.py", $exe, "--version", $Version, "--files", "$count")
+    if ($Tag) { $read += @("--tag", $Tag) }
+    if ($Commit) { $read += @("--commit", $Commit) }
+    $readOutput = (& python @read | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "check-installer.py failed:`n$readOutput" }
+    $readOutput.TrimEnd()
     # The program imports only what Windows has.
     $bytes = [IO.File]::ReadAllBytes($stub)
     $text = [Text.Encoding]::ASCII.GetString($bytes)

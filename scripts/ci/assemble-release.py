@@ -138,37 +138,17 @@ if "default.xex" not in {f["path"] for f in game["files"]}:
     sys.exit("assemble-release: scripts/ci/game-files.json lists no default.xex")
 game_field = {k: game[k] for k in ("title", "titleId", "xexVersion", "files")}
 
-# --- MCLA-Setup.exe, read from inside: the installer program, then the payload (launcher\installer\Payload.cs):
-# "MCLAPK1\0", int32 meta length, the meta ("key=value" lines), the Brotli stream of the launcher's files;
-# at the very end "MCLAPAY1" and the payload's length. The header is checked against the release.
+# --- MCLA-Setup.exe, read from inside: the installer program, then the payload (cilib.read_installer_header, the same
+# reader scripts/ci/check-installer.py runs when the exe is built). The header is checked against the release.
 installer_info = describe(installer_exe)
-with installer_exe.open("rb") as f:
-    if f.read(2) != b"MZ":
-        sys.exit("assemble-release: MCLA-Setup.exe is not a Windows program")
-    f.seek(-16, 2)
-    footer = f.read(16)
-    if footer[:8] != b"MCLAPAY1":
-        sys.exit("assemble-release: MCLA-Setup.exe has no payload (no MCLAPAY1 footer)")
-    payload_length = int.from_bytes(footer[8:], "little")
-    start = installer_info["size"] - 16 - payload_length
-    if payload_length < 1_000_000 or start < 100_000:
-        sys.exit("assemble-release: MCLA-Setup.exe's payload length is not believable")
-    f.seek(start)
-    head = f.read(12)
-    if head[:8] != b"MCLAPK1\0":
-        sys.exit("assemble-release: MCLA-Setup.exe's payload has the wrong header")
-    meta_text = f.read(int.from_bytes(head[8:], "little")).decode("utf-8")
-payload_meta = dict(line.split("=", 1) for line in meta_text.splitlines() if "=" in line)
 version = re.match(r"v(\d+\.\d+\.\d+)", a.tag)
-want_version = version.group(1) if version else "0.0.0"
-for key, want in (("tag", a.tag), ("commit", a.commit), ("version", want_version), ("exe", "MclaLauncher.exe")):
-    if payload_meta.get(key) != want:
-        sys.exit(f"assemble-release: MCLA-Setup.exe's payload says {key}={payload_meta.get(key)!r}, not {want!r}")
-if not payload_meta.get("files", "").isdigit() or int(payload_meta["files"]) < 100:
-    sys.exit("assemble-release: MCLA-Setup.exe's payload header does not give the launcher's files")
 with zipfile.ZipFile(launcher_zip) as z:
-    if len(z.namelist()) != int(payload_meta["files"]):
-        sys.exit(f"assemble-release: the launcher zip has {len(z.namelist())} files, the installer's payload {payload_meta['files']}")
+    launcher_zip_files = len(z.namelist())
+try:
+    payload_meta = cilib.check_installer_header(installer_exe, tag=a.tag, commit=a.commit,
+                                                version=version.group(1) if version else "0.0.0", zip_files=launcher_zip_files)
+except ValueError as e:
+    sys.exit(f"assemble-release: MCLA-Setup.exe: {e}")
 
 launcher_packages = json.loads((pathlib.Path(a.launcher_notices) / "packages.json").read_text(encoding="utf-8"))
 with zipfile.ZipFile(launcher_zip) as z:

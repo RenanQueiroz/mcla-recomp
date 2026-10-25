@@ -166,7 +166,7 @@ change `tools.json` and, for llvm-mingw and Clang, the same pins in `scripts/mak
 | `host_stub.py`, `host_check.py`, `host-compile.ps1` | the host-code check (`host-compile.ps1 -SdkDir <SDK install>` runs both) |
 | `install-vulkan-sdk.ps1`, `build-fidelityfx.ps1` | FSR's DLLs |
 | `publish-launcher.ps1`, `launcher-notices.py`, `zipdir.py` | the launcher zip and its notices |
-| `build-installer.ps1`, `smoke-installer.ps1` | `MCLA-Setup.exe` (the NativeAOT installer program plus the launcher folder) and its use on scratch folders |
+| `build-installer.ps1`, `smoke-installer.ps1`, `check-installer.py` | `MCLA-Setup.exe` (the NativeAOT installer program plus the launcher folder), its use on scratch folders, and its payload header read back from the file by the reader `assemble-release.py` uses (`cilib.check_installer_header`), run on every exe that is built, in CI too |
 | `make-source-archive.py`, `make-sdk-bundle.py`, `cilib.py` | the source archive and the SDK bundle zip |
 | `verify-bundle.ps1`, `linktest/` | the look at the unpacked bundle |
 | `assemble-release.py`, `verify_tools.py`, `create-draft-release.ps1` | `release.json` and the rest, and the draft |
