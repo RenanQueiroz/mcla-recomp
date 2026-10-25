@@ -933,7 +933,9 @@ in front. A real controller keeps working alongside it.
 - `dev\route.py record <file>` writes the path the leading opponent drives in
   a race (from the pipe's `cars` command) as a route for `follow`;
   `route.py from-log <run folder> <file>` does the same from a run whose script
-  had `watch 15` on (no pipe, uncapped). `follow` drives the triggers and the left
+  had `watch 15` on (no pipe, uncapped; one reading far off that the next undoes, every
+  car at once, is a glitch of the log and skipped, a jump that stays starts the route
+  over). `follow` drives the triggers and the left
   stick only: buttons a script holds meanwhile (`down x`, `press lb`) stay. A car knocked
   off the route is brought back in steps, each logged and counted (`recoveries=` in
   the `follow` summary, with `best=` for how far along it got): four kinds of longer
@@ -970,8 +972,14 @@ in front. A real controller keeps working alongside it.
   makes its route, then variants of every race on each render target path with the
   traffic off, a subset with it on, and a hold-out variant), `coverage.py batch`
   runs them under the shared GPU lock (`--salt-base` for a driver cache that is cold
-  for each job), `coverage.py grow` builds the grown pack from the soaks' storages,
-  and `test_pack.py` tests the tools that need no game.
+  for each job, `--only <regex>` for a subset of a file that keeps the salts of the
+  whole), `coverage.py revalidate --from-logs` makes the probes' routes again from their
+  logs, `coverage.py grow` builds the grown pack from the soaks' storages,
+  `coverage.py compare <folders> --old <pack> --new <pack>` says what the storages of
+  a hold-out (races played with the old pack in conditions the new pack's soaks did
+  not use) hold beyond each pack, and `test_pack.py` tests the tools that need no
+  game. `measure.py prepare --pack <file> --label <name>` times a preparation from
+  a pack other than the repository's.
 
 The game ignores buttons during its own transitions (the title screen's camera
 cuts, a menu closing), so scripts press until a condition holds rather than
