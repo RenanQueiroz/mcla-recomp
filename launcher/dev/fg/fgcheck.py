@@ -11,7 +11,12 @@ For every generated frame G(k) whose neighbours R(k-1) and R(k) were dumped too:
   mean: G(k)'s mean absolute difference from the neighbours' average, in codes.
 Frames dumped without a generated image (generation skipped) are counted.
 
-    python fgcheck.py <dump folder> [--crops <folder>]
+With --ui-rect x,y,w,h (the pixels of an opaque UI element, in the dumps' pixels: the dev pad's
+testdialog, at 80,80 in fgdump-ui.pad) the UI identity check too: where the UI is opaque, G(k)
+and R(k) are bit for bit the same (the UI is drawn over the generated frame as over the real
+one), for every generated frame with a real neighbour.
+
+    python fgcheck.py <dump folder> [--crops <folder>] [--ui-rect x,y,w,h]
 """
 import argparse
 import re
@@ -83,7 +88,12 @@ def main():
     parser.add_argument("--downscale", type=int, default=1,
                         help="compare at 1/N size (box): the size presented, for frames generated "
                              "at the window's size")
+    parser.add_argument("--ui-rect", help="x,y,w,h of an opaque UI element, in the dumps' pixels: "
+                                          "the generated frames must equal the real ones there")
     args = parser.parse_args()
+    ui_rect = tuple(int(v) for v in args.ui_rect.split(",")) if args.ui_rect else None
+    ui_rows = []
+    ui_failed = False
     frames = {}
     for path in Path(args.folder).glob("fg_dump_*.ppm"):
         m = NAME.match(path.name)
@@ -98,6 +108,13 @@ def main():
     rows = []
     for k in ids:
         f = frames[k]
+        if ui_rect and "generated" in f and "real" in f:
+            x, y, w, h = ui_rect
+            gu = read_ppm(f["generated"])
+            ru = read_ppm(f["real"])
+            if gu.shape == ru.shape and y + h <= gu.shape[0] and x + w <= gu.shape[1]:
+                same = np.all(gu[y:y + h, x:x + w] == ru[y:y + h, x:x + w], axis=2)
+                ui_rows.append((k, float(same.mean()), int((~same).sum())))
         prev = frames.get(k - 1, {})
         prev_real = prev.get("real") or prev.get("real_only")
         if "generated" not in f or "real" not in f or not prev_real:
@@ -134,6 +151,16 @@ def main():
                         out / f"crop_{k}_{name}.png")
             except ImportError:
                 pass
+    if ui_rect:
+        if not ui_rows:
+            print("UI identity: no generated frame with a real one at the same size to check")
+        else:
+            worst = min(r[1] for r in ui_rows)
+            bad = sum(1 for r in ui_rows if r[2])
+            print(f"UI identity ({ui_rect}): {len(ui_rows)} generated frames, "
+                  f"{len(ui_rows) - bad} identical in the rectangle, worst {worst:.4%} of it equal "
+                  f"({max(r[2] for r in ui_rows)} pixels differ at most)")
+            ui_failed = bad > 0
     if not rows:
         print("no generated frame with both neighbours dumped")
         return 1
@@ -144,7 +171,7 @@ def main():
     outside = [r[3] for r in rows]
     print(f"generated frames checked {len(rows)}: still pixels kept min {min(kept):.3%}, "
           f"outside median {np.median(outside):.3%} max {max(outside):.3%}")
-    return 0
+    return 2 if ui_failed else 0
 
 
 if __name__ == "__main__":

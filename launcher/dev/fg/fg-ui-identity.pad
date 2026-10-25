@@ -1,0 +1,33 @@
+# Frame generation: an opaque UI element (the dev pad's test dialog) while frames are dumped, and
+# the same driving; launcher/dev/fg/fgcheck.py <folder> --ui-rect 124,124,412,54 checks that the
+# generated frames are bit for bit the real ones there (a 1920x1080 window: the dialog is at 80,80
+# of the UI, 1.5 times that in pixels; its rectangle inside the border). Vulkan only: the dumps
+# are the presented images, with the UI. Direct3D 12's are the guest output, which AMD's swap
+# chain puts the UI over later.
+# devrun.py run --script <this> --backend vulkan --extra --frame_generation=fsr
+#   --mcla_anti_aliasing=fsr --frame_generation_dump_path=<folder>
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark settle
+wait 3s
+trigger rt 0.6
+wait 3s
+testdialog 14
+wait 2s
+mark dialog
+set frame_generation_dump 10
+wait 3s
+set frame_generation_dump 0
+wait 1s
+stick lx 0.6
+wait 1500ms
+set frame_generation_dump 10
+wait 3s
+set frame_generation_dump 0
+stick lx 0
+release all
+wait 8s
+mark end
