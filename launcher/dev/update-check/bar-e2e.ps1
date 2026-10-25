@@ -100,10 +100,22 @@ function Pick-MenuItem([int]$procId, [string]$name) {
 function Pick-ComboItem([int]$procId, [string]$combo, [string]$item) {
     $box = Wait-Named $procId $combo 'ComboBox' 15
     if (-not $box) { return $false }
+    # The settings are disabled while the launcher is busy (its update check, a build): wait until they are not.
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not $box.Current.IsEnabled -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 800; $box = Find-Named $procId $combo 'ComboBox'; if (-not $box) { return $false } }
     (Pattern $box ([System.Windows.Automation.ExpandCollapsePattern])).Expand()
-    $entry = Wait-Named $procId $item 'ListItem' 6
-    if (-not $entry) { try { (Pattern $box ([System.Windows.Automation.ExpandCollapsePattern])).Collapse() } catch { }; return $false }
-    (Pattern $entry ([System.Windows.Automation.SelectionItemPattern])).Select(); $true
+    $null = Wait-Named $procId $item 'ListItem' 6
+    # The drop-down lists its items twice (one list is not the one that is shown): the first that can be selected is taken.
+    $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $procId)
+    foreach ($entry in [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+        try {
+            if ($entry.Current.Name -ne $item -or $entry.Current.ControlType.ProgrammaticName -notlike '*ListItem') { continue }
+            (Pattern $entry ([System.Windows.Automation.SelectionItemPattern])).Select()
+            return $true
+        } catch { }
+    }
+    try { (Pattern $box ([System.Windows.Automation.ExpandCollapsePattern])).Collapse() } catch { }
+    $false
 }
 # What is in a launcher folder that the setup did not unpack: files not in installed-files.txt and not one of Setup's standard names.
 function Folder-Extras([string]$folder) {
@@ -191,7 +203,9 @@ try {
         if ($Way -ne 'InPlace') { throw '-Session is for -Way InPlace' }
         $id = $oldProcess.Id
         Check ($null -ne (Wait-Ui $id '*A newer launcher*' 90)) 'session: the launcher is up (and sees the newer release)'
-        Check (Retry { Pick-ComboItem $id 'Frame rate' '60 FPS' }) 'session: a setting changed (Frame rate: 60 FPS)'
+        Start-Sleep -Seconds 4   # the window is still settling (its first update check) when the bar appears
+        # A drop-down item that is already the setting's value is not offered as a change: try the other frame rate too.
+        Check ((Retry { Pick-ComboItem $id 'Frame rate' '60 FPS' }) -or (Retry { Pick-ComboItem $id 'Frame rate' '30 FPS' })) 'session: a setting changed (Frame rate)'
         Check (Retry { Pick-MenuItem $id 'Check for updates' }) 'session: More > Check for updates'
         Start-Sleep -Seconds 4
         Check (Retry { Pick-MenuItem $id 'Latest changes (main, untested)' }) 'session: More > Latest changes (the channel is written to install.json)'
