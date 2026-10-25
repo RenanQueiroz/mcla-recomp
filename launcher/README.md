@@ -246,11 +246,18 @@ An install made by the setup wizard (Installed mode) doesn't follow `main`; the 
   which has no `-Ref`; the new script comes with the checkout. `.\build-game.ps1 -Ref <tag>` (or `-Ref origin/main`) does
   the same step from a terminal (an edit of the two codegen files is saved in `kept\codegen-edits` beside an install, else in `out\kept-edits`).
 - **The launcher itself** is not swapped by the launcher: it can't know what else is in its folder (the zip is flat and
-  "unpacked anywhere"). When the release's launcher (`release.json`'s `launcher.sourceCommit`) is not the one running (its
-  `source-commit.txt`), a bar says so and its button opens the release's page. `Setup\LauncherUpdate.cs` is the seam for the
-  installer (`MCLA-Setup.exe`, which replaces a launcher it installed, with a start check): the bar's button will download it,
-  hand over to it and exit, and a launcher started by it writes the file named by `MCLA_READY_FILE` five seconds after it is up
-  (`App.cs`).
+  "unpacked anywhere"); `MCLA-Setup.exe` does it ("The installer", below). When the release's launcher (`release.json`'s
+  `launcher.sourceCommit`) is not the one running (its `source-commit.txt`), a bar says so, and its button depends on how this
+  launcher got where it is (`Setup\LauncherUpdate.cs`):
+  - **Installed by the setup** (`installed.txt` beside the exe): **Update the launcher** downloads the release's `MCLA-Setup.exe`
+    (SHA-256 and size from `release.json`'s `installer`; copied from the folder with a development release source), starts it with
+    `--update --wait-pid` and quits. The installer replaces the folder and starts the new launcher, which writes the file named by
+    `MCLA_READY_FILE` five seconds after it is up (`App.cs`); without that file the old launcher is put back.
+  - **Not installed by the setup** (unpacked from the zip, or an older wizard install): it can't be replaced in place, so **Move to
+    the new launcher** runs the installer as an install with this launcher's `install.json` as the pointer (`--import-pointer`):
+    the new launcher is in `%LOCALAPPDATA%\Programs\MCLA`, with shortcuts, on the same install; the old folder stays for the
+    player to delete. Later updates are the first kind.
+  - A release with no `installer`: the button opens the release's page.
 
 *More > Latest changes (main, untested)* (and back, *Follow the releases again*) is kept in `install.json` (`channel`), changed
 under the folder's lock. In *main* mode the same bar shows main's new commits; updating moves to `origin/main` and builds with the
@@ -294,8 +301,8 @@ something else is **never replaced**, and the installer **refuses** any folder i
 `build-game.ps1` above it), over a drive's root, over a folder that is not a launcher's, or the one it runs from. That
 is what keeps the launcher built from source (Classic) and its desktop shortcut safe from it.
 
-**Updating the launcher** (`SelfUpdate.cs`, a building block; the screens do not call it yet). A running program can't be
-replaced, so another program does it: the launcher downloads the new `MCLA-Setup.exe` (a release asset; its SHA-256 and
+**Updating the launcher** (`SelfUpdate.cs`; the launcher's update bar, `Setup\LauncherUpdate.cs`, calls it). A running program
+can't be replaced, so another program does it: the launcher downloads the new `MCLA-Setup.exe` (a release asset; its SHA-256 and
 size are in `release.json`, `installer`) with `SelfUpdate.DownloadAsync` (https only, exact SHA-256 and size, three
 tries for network trouble, nothing left behind when it fails), starts it with `SelfUpdate.HandOver` and quits. The
 installer waits for that process to end, unpacks the new launcher beside the folder, carries `install.json` and
