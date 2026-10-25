@@ -300,9 +300,10 @@ an installed launcher). `installed.txt` in it says which setup made it (`version
 
 **What the installer may touch.** Never anything it did not make. A folder is the launcher's only when it has `installed.txt`:
 anything else that is not empty is refused (an unpacked zip next to the player's files, a folder the player chose by mistake), for
-install, update and uninstall alike. An update refuses a folder that holds anything the setup did not unpack (the player's install
-put inside it, a disc image, notes: it names them), and any folder whose `install.json` names an install inside it, because the swap
-deletes the old folder; an uninstall removes only the files in `installed-files.txt` (or the payload's, for a folder made before
+install, update and uninstall alike. An update refuses a folder that holds anything the setup did not unpack, at any depth (the player's install
+put inside it, a disc image, notes, a file in one of the launcher's own folders: it names them), and any folder whose `install.json`
+names an install inside it, because the swap deletes the old folder (the launcher looks at the same things before it quits, so
+that the reason is in its bar and it keeps running); an uninstall removes only the files in `installed-files.txt` (or the payload's, for a folder made before
 there was a list) and the folders then empty, and leaves the rest, and the folder with it. The leftovers of a swap are told by an
 exact stamp (`MCLA.old-20261024-231500-1234`) and Setup's marker inside (`installed.txt`; `.mcla-staging` in a folder being
 unpacked; `.mcla-download` in the folder of downloaded installers), so a player's folder with a similar name is never deleted or put
@@ -320,14 +321,15 @@ tries for network trouble, nothing left behind when it fails), starts it with `S
 installer waits for that process to end, unpacks the new launcher beside the folder, carries `install.json` and
 `settings.json` (and any `--keep <name>`) over, and swaps the two folders with two renames (`FolderSwap`: atomic, so
 a crash between them is repaired by the next run; a second rename that fails puts the old folder back, retried for as long as
-that takes, and the staged folder is only deleted when the old one is confirmed back). It then starts the new launcher and waits
+that takes, and the staged folder is only deleted when the old one is confirmed back; its marker stays until it is the launcher's folder, so
+a kill in between leaves a folder the clean-up knows; the message then says where this installer is and where to get it again). It then starts the new launcher and waits
 until it has come up: a window that is still there 3 s later, or, with `--ready-file <path>`, the launcher is given that path in
 `MCLA_READY_FILE` and writes the file from its window's own thread five seconds after the window opened (`App.cs`), and it
 must also have a window (`SelfUpdate.HandOver(..., readyFile)`). The wait is 90 s (a virus scanner can hold the first start of 480
 new files). If the new launcher ends or does not come up, the folders are swapped back (never when the old folder is gone: the
 new one then stays), the old launcher is started again and the installer exits 1 with a message (a first install has nothing to
-go back to: its files stay, and the message says so). If the update fails before the folders change, the old launcher is started
-again too. Only one setup runs at a time. What is left (`MCLA.old-*`, `.failed-*`, `.new-*`, the downloaded installer) is deleted at
+go back to: its files stay, and the message says so). If the update fails or is refused before the folders change, the old launcher is started
+again too (the launcher that quit to hand over would otherwise leave the player with nothing open). Only one setup runs at a time. What is left (`MCLA.old-*`, `.failed-*`, `.new-*`, the downloaded installer) is deleted at
 the end of an update, or by the launcher at a later start (`SelfUpdate.CleanUpWhenSetupIsDone()`, which waits while a Setup runs:
 its mutex `Local\MCLA-Setup`, so the folder a failed update goes back to is never deleted under it). A folder that is held open by
 something else is waited for (60 s) and, if it stays held, nothing is changed. A launcher that was not installed by Setup (unpacked
@@ -354,12 +356,16 @@ pointer to import, an older installer, a damaged file, a held file, an interrupt
 that starts the old launcher again, a payload with more bytes than its header, unreadable shortcuts, refusals, uninstall.
 They use scratch folders under `%TEMP%` and never the desktop or the Start menu.
 
-`dev\update-check\bar-e2e.ps1 -Stub <the bare installer> -Launcher <a published launcher folder> -ReleaseJson <a release.json> -GitUrl <its repository> [-Way InPlace|Move|Other]`
+`dev\update-check\bar-e2e.ps1 -Stub <the bare installer> -Launcher <a published launcher folder> -ReleaseJson <a release.json> -GitUrl <its repository> [-Way InPlace|Move|Other] [-Session]`
 (a desktop session, UI Automation; not in CI) runs the real launcher's update bar end to end with no game: an older launcher installed by
 Setup (or unpacked as a zip), a local release source that names a newer launcher and holds its `MCLA-Setup.exe`, a click on the bar's
 button, and what must be true afterwards (the old launcher quit, the new one runs from the same folder, or from Setup's folder with the
 same pointer, the version, no leftovers, no bar, the download cleaned up). The old and the new launcher are copies of one build that
 differ in `source-commit.txt`, so it tests the mechanism, not a code change.
+`-Session` (InPlace) first runs a realistic session in the old launcher (a setting changed, More > Check for updates, the channel
+switched to main and back, a build started and stopped, the window closed and the launcher opened again) and lists every file in the
+launcher's folder that the setup did not unpack: the update that follows refuses a folder that holds any, so a launcher that wrote
+beside its exe in normal use would never update. None does (485 files: the payload's 482 and Setup's three).
 
 ## The game's settings
 
