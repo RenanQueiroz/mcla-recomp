@@ -2,6 +2,7 @@
 with private data and cache roots (fork-only development tool, Windows). Each prints PASS or FAIL.
 
     python test_storage.py      (MCLA_DEV_ROOT set; MCLA_GAME_DATA for a checkout without the game)
+    python test_storage.py retire    only the retirement tests (R1 to R6)
 
 - a full preparation, then a "player's" storage made of the first part of its files;
 - M1: a storage file held by another program (as a running game's SDK holds it) stops a
@@ -14,7 +15,14 @@ with private data and cache roots (fork-only development tool, Windows). Each pr
   start; two in a row disable the pack (the player's entries kept, also at a normal start); the
   retry option imports again; a crash while rebuilding (=2) counts too;
 - the import at a normal start: an empty storage filled (and the stamp written), nothing missing
-  (and its time), files cut mid-record completed, a file of another version replaced.
+  (and its time), files cut mid-record completed, a file of another version replaced;
+- R1 to R6, retiring what an earlier pack added and the pack in use no longer has: the ledger a
+  start writes (what the import ADDED), the player's own entries never in it, a smaller pack
+  retiring nothing at the start that first sees it and exactly the ledger's entries it lacks at the
+  next (in order, a shader only when no description left uses it), a start that ended between the
+  lists and the shader file finished by the next, a pack that lacks most of what imports added
+  refused (and allowed in a preparation with --mcla_prepare_shaders_retry), no ledger or a
+  damaged one retiring nothing.
 """
 import ctypes
 import json
@@ -140,6 +148,230 @@ class Suite:
     def prefix_kept(before, after):
         return all(n in after and after[n][:len(b)] == b for n, b in before.items())
 
+    # --- Retiring what an earlier pack added (src/shader_prepare.cpp, RetireStale) -----------------
+    @staticmethod
+    def ledger_of(local_folder):
+        """The ledger (<local>/545407F8.ledger) as {pack, versions, shaders, lists}, or None."""
+        path = Path(local_folder) / f"{T}.ledger"
+        if not path.exists():
+            return None
+        d = path.read_bytes()
+        assert d[:8] == b"MCLALDG1" and bp.h64(d[:-8]) == struct.unpack_from("<Q", d, len(d) - 8)[0], "ledger damaged"
+        fmt, title, v0, v1, v2, pack, ns, nl = struct.unpack_from("<IIIIIQII", d, 8)
+        p = 8 + 4 * 5 + 8 + 8
+        shaders = set(struct.unpack_from(f"<{ns}Q", d, p))
+        p += 8 * ns
+        lists = []
+        for _ in range(nl):
+            (n,) = struct.unpack_from("<I", d, p)
+            lists.append(set(struct.unpack_from(f"<{n}Q", d, p + 4)))
+            p += 4 + 8 * n
+        assert p == len(d) - 8
+        return dict(pack=pack, versions=(v0, v1, v2), shaders=shaders, lists=lists)
+
+    @staticmethod
+    def storage_content(files):
+        """{list file name: [records]} and the xsh's {hash: whole record bytes} (in file order) from
+        a snapshot ({file name: bytes})."""
+        lists = {}
+        for name, (size, _) in {"rtv.d3d12.xpso": (72, 0), "rov.d3d12.xpso": (72, 0),
+                                "fbo.vk.xpso": (68, 0), "fsi.vk.xpso": (68, 0)}.items():
+            d = files.get(f"{T}.{name}", b"")
+            lists[name] = [d[p:p + size] for p in range(12, len(d) - size + 1, size)] if d else []
+        d = files.get(f"{T}.xsh", b"")
+        shaders, p = {}, 8
+        while d and p + 12 <= len(d):
+            hh, w = struct.unpack_from("<QI", d, p)
+            n = 12 + (w & 0x7FFFFFFF) * 4
+            shaders[hh] = d[p:p + n]
+            p += n
+        return lists, shaders
+
+    def retire_tests(self):
+        check, run, line, snapshot, journal = self.check, self.run, self.line, self.snapshot, self.journal
+        shareable, local, fresh = self.shareable, self.local, self.fresh
+        quit_pad = self.quit
+        pk = bp.read_pack(PACK)
+        names = list(bp.LISTS)  # rtv, rov, fbo, fsi: the order of the game's lists (and the ledger's)
+        pack_dir = self.work / "retire-packs"
+        pack_dir.mkdir(exist_ok=True)
+        pack_hash = lambda f: struct.unpack_from("<Q", Path(f).read_bytes(), len(Path(f).read_bytes()) - 8)[0]
+        key = lambda r: struct.unpack_from("<Q", r)[0]
+        uses = lambda r: (struct.unpack_from("<Q", r, 8)[0], struct.unpack_from("<Q", r, 24)[0])
+
+        def make_pack(name, drop_descriptions, drop_shaders):
+            """The pack without these descriptions ({list name: {key}}) and shaders, and without any
+            description that uses a dropped shader."""
+            lists = {}
+            for n, (hdr, size, recs) in pk["lists"].items():
+                kept = [r for r in recs if key(r) not in drop_descriptions.get(n, set())
+                        and not (set(uses(r)) & drop_shaders)]
+                if kept:
+                    lists[n] = (hdr, size, kept)
+            shaders = [s for s in pk["shaders"] if s["hash"] not in drop_shaders]
+            f = pack_dir / f"{name}.shaderpack"
+            bp.write_pack(f, pk["versions"], pk["key_fp"], pk["types_fp"], shaders, lists)
+            return f
+
+        # What goes: the last 60 rtv and 30 fbo descriptions, and three vertex shaders (a, b, c)
+        # with every description that uses them.
+        rtv = pk["lists"]["rtv.d3d12.xpso"][2]
+        vs_used = []
+        for r in rtv[100:]:
+            v = uses(r)[0]
+            if v not in vs_used:
+                vs_used.append(v)
+        s_a, s_b, s_c = vs_used[:3]
+        drop_s = {s_a, s_b, s_c}
+        drop_d = {"rtv.d3d12.xpso": {key(r) for r in rtv[-60:]},
+                  "fbo.vk.xpso": {key(r) for r in pk["lists"]["fbo.vk.xpso"][2][-30:]}}
+        p1 = PACK
+        p2 = make_pack("p2", drop_d, drop_s)
+        h1, h2 = pack_hash(p1), pack_hash(p2)
+        # Any shader's whole record, from a full import (a start on an empty storage).
+        src = fresh("r-src")
+        code, lines, log, _ = run("r-src", src, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p1}"])
+        src_lists, src_shaders = self.storage_content(snapshot(src))
+        led = self.ledger_of(local(src))
+        check("R1 a start with a pack on an empty storage writes the ledger",
+              code == 0 and led and led["pack"] == h1 and led["shaders"] == {s["hash"] for s in pk["shaders"]}
+              and all(len(led["lists"][i]) == len(pk["lists"][n][2]) for i, n in enumerate(names))
+              and "phase done" in journal(src),
+              f"pack {led and format(led['pack'], '016X')}, {led and len(led['shaders'])} shaders, "
+              f"{led and [len(x) for x in led['lists']]} descriptions")
+
+        # The player's own: a description that uses a dropped shader, with that shader in the
+        # storage (own a), and one whose shader only the import brings (own b).
+        own_a = next(r for r in rtv[:100] + rtv if uses(r)[0] == s_a and key(r) not in drop_d["rtv.d3d12.xpso"])
+        own_b = next(r for r in rtv[:100] + rtv if uses(r)[0] == s_b and key(r) not in drop_d["rtv.d3d12.xpso"])
+
+        def seeded(name):
+            c = fresh(name)
+            shareable(c).mkdir(parents=True)
+            (shareable(c) / f"{T}.xsh").write_bytes(b"XESH" + struct.pack(">I", pk["versions"][0]) + src_shaders[s_a])
+            hdr = pk["lists"]["rtv.d3d12.xpso"][0]
+            (shareable(c) / f"{T}.rtv.d3d12.xpso").write_bytes(hdr + own_a + own_b)
+            return c
+
+        def removed_expected(before_files, ledger, pack_file):
+            """The records the retirement must remove, from the ledger and the pack."""
+            pkx = bp.read_pack(pack_file)
+            p_shaders = {s["hash"] for s in pkx["shaders"]}
+            p_desc = {n: {key(r) for r in v[2]} for n, v in pkx["lists"].items()}
+            lists, shaders = self.storage_content(before_files)
+            gone_d = {n: {key(r) for r in lists[n] if key(r) in ledger["lists"][i]
+                          and key(r) not in p_desc.get(n, set())} for i, n in enumerate(names)}
+            kept_uses = set()
+            for n in names:
+                for r in lists[n]:
+                    if key(r) not in gone_d[n]:
+                        kept_uses |= {u for u in uses(r) if u}
+            gone_s = {h for h in shaders if h in ledger["shaders"] and h not in p_shaders and h not in kept_uses}
+            return gone_d, gone_s
+
+        c = seeded("r2")
+        code, lines, log, _ = run("r2a", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p1}"])
+        led1 = self.ledger_of(local(c))
+        snap1 = snapshot(c)
+        check("R2 the player's own entries (a description with its shader, and one whose shader the import "
+              "brings) are not in the ledger",
+              led1 and key(own_a) not in led1["lists"][0] and key(own_b) not in led1["lists"][0]
+              and s_a not in led1["shaders"] and s_b in led1["shaders"], "")
+        # The start that first sees the smaller pack changes nothing, and the ledger becomes its.
+        code, lines, log, _ = run("r2b", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        snap2 = snapshot(c)
+        led2 = self.ledger_of(local(c))
+        check("R2 the start that first sees the smaller pack retires nothing",
+              self.prefix_kept(snap1, snap2) and "retired" not in log and led2 and led2["pack"] == h2
+              and "phase done" in journal(c), f"ledger now pack {led2 and format(led2['pack'], '016X')}")
+        # The next one retires what the pack dropped: exactly the ledger's entries that it lacks.
+        gone_d, gone_s = removed_expected(snap2, led2, p2)
+        code, lines, log, _ = run("r2c", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        snap3 = snapshot(c)
+        lists2, shaders2 = self.storage_content(snap2)
+        lists3, shaders3 = self.storage_content(snap3)
+        ok = True
+        for n in names:
+            want = [r for r in lists2[n] if key(r) not in gone_d[n]]
+            ok &= lists3[n][:len(want)] == want  # what stays keeps its order (the game may append new ones)
+        want_s = [h for h in shaders2 if h not in gone_s]
+        ok &= list(shaders3)[:len(want_s)] == want_s
+        removed_d = sum(len(v) for v in gone_d.values())
+        check("R2 the next start retires what the pack dropped, in order, and nothing else",
+              ok and removed_d >= 90 and len(gone_s) >= 1 and f"retired {removed_d} pipeline descriptions and {len(gone_s)} shaders" in log,
+              f"{removed_d} descriptions and {len(gone_s)} shaders retired")
+        check("R2 the player's own description and its shader stay, and so does a dropped shader something uses",
+              any(key(r) == key(own_a) for r in lists3["rtv.d3d12.xpso"]) and s_a in shaders3
+              and any(key(r) == key(own_b) for r in lists3["rtv.d3d12.xpso"]) and s_b in shaders3,
+              f"own a {key(own_a):016X} with {s_a:016X}, own b {key(own_b):016X} with {s_b:016X}")
+        check("R2 a dropped shader nothing uses went (c)", s_c not in shaders3 and s_c in shaders2, f"{s_c:016X}")
+        led3 = self.ledger_of(local(c))
+        check("R2 the ledger lost what was retired",
+              led3 and all(not (led3["lists"][i] & gone_d[n]) for i, n in enumerate(names)) and not (led3["shaders"] & gone_s)
+              and s_b in led3["shaders"], "")
+        code, lines, log, _ = run("r2d", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        check("R2 and then nothing more", "retired" not in log and self.prefix_kept(snap3, snapshot(c)), "")
+
+        # A start that ended between the lists and the shader file: the lists were replaced, the
+        # shader file was not. The next start finishes.
+        c = seeded("r6")
+        run("r6a", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p1}"])
+        run("r6b", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        before = snapshot(c)
+        ledger6 = self.ledger_of(local(c))
+        gone_d, gone_s = removed_expected(before, ledger6, p2)
+        lists6, shaders6 = self.storage_content(before)
+        for n in ("rtv.d3d12.xpso", "fbo.vk.xpso"):
+            f = shareable(c) / f"{T}.{n}"
+            d = f.read_bytes()
+            f.write_bytes(d[:12] + b"".join(r for r in lists6[n] if key(r) not in gone_d[n]))
+        code, lines, log, _ = run("r6c", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        after = snapshot(c)
+        lists7, shaders7 = self.storage_content(after)
+        check("R6 a start that ended after the lists and before the shader file is finished by the next",
+              all(s not in shaders7 for s in gone_s) and len(shaders7) <= len(shaders6) - len(gone_s) + 20
+              and not any(key(r) in gone_d[n] for n in names for r in lists7[n]), f"{len(gone_s)} shaders went")
+
+        # More than half of what imports added: refused (a start), allowed in a preparation with --retry.
+        keep = {s["hash"] for s in pk["shaders"][:100]}
+        p3 = make_pack("p3", {}, {s["hash"] for s in pk["shaders"]} - keep)
+        c = fresh("r3")
+        run("r3a", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p1}"])
+        run("r3b", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p3}"])
+        snap = snapshot(c)
+        code, lines, log, _ = run("r3c", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p3}"])
+        check("R3 a pack that lacks most of what imports added retires nothing",
+              self.prefix_kept(snap, snapshot(c)) and "nothing is retired" in log, "the log says why")
+        code, lines, log, _ = run("r3d", c, prepare=True, extra=[f"--mcla_shader_pack={p3}", "--mcla_prepare_shaders_retry=true"])
+        small = snapshot(c)
+        check("R3 --mcla_prepare_shaders_retry in a preparation retires them, and says so",
+              code == 0 and line(lines, "retire ") and len(small[f"{T}.xsh"]) < len(snap[f"{T}.xsh"]) // 2,
+              line(lines, "retire "))
+
+        # No ledger (a storage an earlier build imported into), or a damaged one: nothing is retired.
+        c = fresh("r4")
+        shareable(c).mkdir(parents=True)
+        for name, data in snap1.items():
+            (shareable(c) / name).write_bytes(data)
+        run("r4a", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        code, lines, log, _ = run("r4b", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        led4 = self.ledger_of(local(c))
+        check("R4 no ledger: nothing retired, a ledger is made for the pack in use",
+              self.prefix_kept(snap1, snapshot(c)) and "retired" not in log and led4 and led4["pack"] == h2
+              and not led4["shaders"], "")
+        c = fresh("r5")
+        run("r5a", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p1}"])
+        lf = local(c) / f"{T}.ledger"
+        d = bytearray(lf.read_bytes())
+        d[40] ^= 0xFF
+        lf.write_bytes(bytes(d))
+        snap = snapshot(c)
+        run("r5b", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        code, lines, log, _ = run("r5c", c, prepare=False, script=quit_pad, extra=[f"--mcla_shader_pack={p2}"])
+        led5 = self.ledger_of(local(c))
+        check("R5 a damaged ledger is ignored and made again; nothing retired",
+              self.prefix_kept(snap, snapshot(c)) and "retired" not in log and led5 and led5["pack"] == h2, "")
+
     def main(self):
         check, run, line, snapshot, journal = self.check, self.run, self.line, self.snapshot, self.journal
         shareable, local, fresh, prefix_kept = self.shareable, self.local, self.fresh, self.prefix_kept
@@ -148,7 +380,8 @@ class Suite:
         # A full storage from a preparation, then a "player's": the first part of two files.
         full = fresh("full")
         code, lines, log, _ = run("full", full)
-        check("full preparation", code == 0 and line(lines, "merge 723"), line(lines, "merge"))
+        check("full preparation", code == 0 and line(lines, f"merge {len(bp.read_pack(PACK)['shaders'])} "),
+              line(lines, "merge"))
         seed = fresh("seed")
         shareable(seed).mkdir(parents=True)
         xsh = (shareable(full) / f"{T}.xsh").read_bytes()
@@ -286,13 +519,25 @@ class Suite:
         check("start: a file of another version replaced",
               len(snapshot(c)[f"{T}.xsh"]) == len(xsh) and "another version" in log, "")
 
+        self.retire_tests()
+
         failed = self.results.count(False)
         print("ALL PASS" if not failed else f"{failed} FAILED")
         return 1 if failed else 0
 
 
+def retire_only():
+    suite = Suite()
+    suite.retire_tests()
+    failed = suite.results.count(False)
+    print("ALL PASS" if not failed else f"{failed} FAILED")
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].startswith("--hold-"):
         hold(sys.argv[1:])
+    elif sys.argv[1:] == ["retire"]:
+        sys.exit(retire_only())
     else:
         sys.exit(Suite().main())

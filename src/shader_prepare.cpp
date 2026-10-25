@@ -1231,6 +1231,80 @@ void WriteJournal(const std::filesystem::path& path, const Journal& journal) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The ledger of what imports put in the storage (<local>/545407F8.ledger), binary:
+//   "MCLALDG1", u32 format 1, u32 title, u32 versions[3] (shader, D3D12, Vulkan), u64 pack,
+//   u32 shader count, u32 list count (4), the shader hashes, then per list (in kLists order) a u32
+//   count and the description hashes, then the XXH3 of everything before it.
+// "pack" is the pack whose import last got through the creation of the stored pipelines, and the
+// entries are the shaders and descriptions an import ADDED: ones the storage did not have. What a
+// storage held before an import, and what the game wrote itself, is never in it. It is how a later
+// pack can retire what an earlier one added (RetireStale): without it, or when it is damaged or for
+// other storage versions, nothing is ever retired.
+
+struct Ledger {
+  bool present = false;  // a valid ledger for these storage versions was read (or made)
+  uint32_t versions[3] = {};
+  uint64_t pack = 0;
+  std::set<uint64_t> shaders;
+  std::set<uint64_t> lists[kListCount];
+};
+constexpr char kLedgerMagic[8] = {'M', 'C', 'L', 'A', 'L', 'D', 'G', '1'};
+constexpr uint32_t kLedgerMaxEntries = 1u << 22;
+
+std::vector<uint8_t> SerializeLedger(const Ledger& ledger) {
+  std::vector<uint8_t> out(kLedgerMagic, kLedgerMagic + 8);
+  PutLe32(out, 1);
+  PutLe32(out, kTitleId);
+  for (uint32_t v : ledger.versions) PutLe32(out, v);
+  PutLe64(out, ledger.pack);
+  PutLe32(out, uint32_t(ledger.shaders.size()));
+  PutLe32(out, uint32_t(kListCount));
+  for (uint64_t h : ledger.shaders) PutLe64(out, h);
+  for (const auto& list : ledger.lists) {
+    PutLe32(out, uint32_t(list.size()));
+    for (uint64_t h : list) PutLe64(out, h);
+  }
+  PutLe64(out, Hash(out.data(), out.size()));
+  return out;
+}
+
+// False for anything that isn't a whole, valid ledger of this build's format.
+bool ParseLedger(const std::vector<uint8_t>& d, Ledger& ledger) {
+  ledger = Ledger{};
+  constexpr size_t kFixed = 8 + 4 + 4 + 12 + 8 + 4 + 4;
+  if (d.size() < kFixed + 4 * kListCount + 8 || std::memcmp(d.data(), kLedgerMagic, 8) != 0) return false;
+  const size_t end = d.size() - 8;
+  if (Hash(d.data(), end) != Le64(d.data() + end)) return false;
+  size_t p = 8;
+  if (Le32(d.data() + p) != 1 || Le32(d.data() + p + 4) != kTitleId) return false;
+  p += 8;
+  for (uint32_t& v : ledger.versions) {
+    v = Le32(d.data() + p);
+    p += 4;
+  }
+  ledger.pack = Le64(d.data() + p);
+  p += 8;
+  const uint32_t shader_count = Le32(d.data() + p), list_count = Le32(d.data() + p + 4);
+  p += 8;
+  if (list_count != kListCount) return false;
+  auto read_set = [&](std::set<uint64_t>& set, uint32_t n) {
+    if (n > kLedgerMaxEntries || p + uint64_t(n) * 8 > end) return false;
+    for (uint32_t i = 0; i < n; ++i, p += 8) set.insert(Le64(d.data() + p));
+    return true;
+  };
+  if (!read_set(ledger.shaders, shader_count)) return false;
+  for (auto& list : ledger.lists) {
+    if (p + 4 > end) return false;
+    const uint32_t n = Le32(d.data() + p);
+    p += 4;
+    if (!read_set(list, n)) return false;
+  }
+  if (p != end) return false;
+  ledger.present = true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The process's state between the module launch and the end of the preload.
 
 enum class Mode { kOff, kAuto, kPrepare };
@@ -1246,8 +1320,55 @@ struct State {
   std::string import_state = "off";  // for the stamp: on, off, disabled, unavailable
   Clock::time_point preload_start;
   long long rebuild_ms = 0;
+  // The ledger as read (and kept up to date by this process), and what this process's import
+  // added, which goes into it once the stored pipelines were created.
+  Ledger ledger;
+  bool ledger_unreadable = false;  // exists but can't be read now: never replaced
+  std::set<uint64_t> added_shaders;
+  std::set<uint64_t> added_descriptions[kListCount];
 };
 State g_state;
+
+const uint32_t* CurrentVersions() {
+  static const uint32_t versions[3] = {ss::kShaderStorageVersion, ss::kD3D12PipelineStorageVersion,
+                                       ss::kVulkanPipelineStorageVersion};
+  return versions;
+}
+
+void WriteLedger() {
+  mcla::shader_storage::WriteFileAtomically(g_state.folders.Local("ledger"),
+                                            SerializeLedger(g_state.ledger));
+}
+
+// Reads the ledger at the start. An absent, damaged or other-version ledger is "none" (nothing is
+// retired, and the next import makes a new one); one that can't be read now is left alone.
+void LoadLedger() {
+  g_state.ledger = Ledger{};
+  g_state.ledger_unreadable = false;
+  std::vector<uint8_t> d;
+  try {
+    if (!mcla::shader_storage::ReadWholeFile(g_state.folders.Local("ledger"), d)) return;
+  } catch (const Failure& failure) {
+    g_state.ledger_unreadable = true;
+    REXLOG_WARN("shader pack: the ledger of what imports added can't be read ({}); nothing is "
+                "retired this time",
+                failure.message);
+    return;
+  }
+  Ledger ledger;
+  if (!ParseLedger(d, ledger)) {
+    REXLOG_WARN("shader pack: the ledger of what imports added is damaged; it is ignored and made "
+                "again (nothing is retired until a pack's import has gone through)");
+    return;
+  }
+  const uint32_t* now = CurrentVersions();
+  if (std::memcmp(ledger.versions, now, sizeof(ledger.versions)) != 0) {
+    // The SDK emptied files of other versions at its start: what the ledger lists is gone.
+    REXLOG_INFO("shader pack: the ledger is for other storage versions; ignored");
+    return;
+  }
+  g_state.ledger = std::move(ledger);
+}
 
 // Whether a file is still exactly what the import left: as long as the journal says it was after
 // it and, where the journal has the XXH3 of the added part, with that part in it. A file the game
@@ -1482,6 +1603,9 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
   };
   std::vector<Out> outs;
   size_t shaders_added = 0, pipelines_added = 0;
+  // What this import adds, for the ledger (kept once the files were replaced).
+  std::set<uint64_t> added_shaders;
+  std::set<uint64_t> added_descriptions[kListCount];
   std::unordered_set<uint64_t> available = im.shaders.header_ok ? im.shaders.keys
                                                                 : std::unordered_set<uint64_t>{};
   {
@@ -1495,6 +1619,7 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
       PutLe64(out, r.hash);
       PutLe32(out, uint32_t(r.ucode.size() / 4) | (r.pixel ? 0x80000000u : 0));
       out.insert(out.end(), r.ucode.begin(), r.ucode.end());
+      added_shaders.insert(r.hash);
       ++shaders_added;
     }
     if (shaders_added) {
@@ -1519,6 +1644,7 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
       if (!available.count(vs) || (ps && !available.count(ps))) continue;
       if (!keys.insert(Le64(r.data())).second) continue;
       out.insert(out.end(), r.begin(), r.end());
+      added_descriptions[l.spec].insert(Le64(r.data()));
       ++added;
     }
     if (added) {
@@ -1564,6 +1690,11 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
       throw;
     }
     g_state.merged = true;
+    g_state.added_shaders.insert(added_shaders.begin(), added_shaders.end());
+    for (size_t k = 0; k < kListCount; ++k) {
+      g_state.added_descriptions[k].insert(added_descriptions[k].begin(),
+                                           added_descriptions[k].end());
+    }
     if (REXCVAR_GET(mcla_shader_pack_test_crash) == 1) {
       REXLOG_WARN("shader pack: test crash after the import");
       Quit(99);
@@ -1573,6 +1704,134 @@ void MergeImport(Import& im, const std::vector<Rebuilt>& rebuilt) {
     Line("merge " + std::to_string(shaders_added) + " " + std::to_string(pipelines_added));
   REXLOG_INFO("shader pack: {} shaders and {} pipelines added to {}", shaders_added,
               pipelines_added, g_state.folders.shareable.string());
+}
+
+// Retires what earlier imports added and the pack now in use no longer has: entries the ledger
+// lists (put in the storage by an import, never ones the storage already had or the game wrote)
+// that are not in this pack. It runs only when
+// - the ledger is valid and is that of this very pack (the import of this pack went through the
+//   creation of the stored pipelines at an earlier start: a pack never retires anything at the
+//   start that imports it, so a pack whose import is rolled back or disabled retires nothing, and
+//   the rollback of an import never meets a removal),
+// - the journal says the last import is done (no failed start since),
+// and refuses, keeping everything, when more than half of what imports added would go (a pack
+// that lacks most of the earlier one is a mistake, or a pack of something else; the preparation
+// run of More > Prepare shaders, --mcla_prepare_shaders_retry, may do it).
+// A description goes when it is in the ledger and not in the pack; a shader when it is too, and no
+// description left in any of the four lists uses it (the player's own descriptions keep theirs).
+// Pipeline lists are replaced first and the shader file last, each atomically, so a start that ends
+// in between leaves a storage that is valid (a shader nothing uses any more) and the next start
+// finishes. Nothing is added or moved: what stays keeps its order. Returns whether a file changed.
+bool RetireStale(const Import& im) {
+  const Ledger& ledger = g_state.ledger;
+  const Journal& j = g_state.journal;
+  if (!ledger.present || ledger.pack != im.pack.hash || j.phase != "done" || j.disabled)
+    return false;
+  std::unordered_set<uint64_t> pack_shaders;
+  for (const PackShader& s : im.pack.shaders) pack_shaders.insert(s.hash);
+  std::unordered_set<uint64_t> pack_descriptions[kListCount];
+  for (const PackList& l : im.pack.lists)
+    for (const auto& r : l.records) pack_descriptions[l.spec].insert(Le64(r.data()));
+  std::set<uint64_t> retire_shaders;
+  std::set<uint64_t> retire_descriptions[kListCount];
+  size_t listed = ledger.shaders.size(), retiring = 0;
+  for (uint64_t h : ledger.shaders)
+    if (!pack_shaders.count(h)) retire_shaders.insert(h);
+  retiring += retire_shaders.size();
+  for (size_t k = 0; k < kListCount; ++k) {
+    listed += ledger.lists[k].size();
+    for (uint64_t h : ledger.lists[k])
+      if (!pack_descriptions[k].count(h)) retire_descriptions[k].insert(h);
+    retiring += retire_descriptions[k].size();
+  }
+  if (!retiring) return false;
+  const bool allowed = rex::cvar::GetFlagByName("mcla_prepare_shaders_retry") == "true" &&
+                       g_state.mode == Mode::kPrepare;
+  if (retiring * 2 > listed && !allowed) {
+    REXLOG_WARN(
+        "shader pack: the pack in use lacks {} of the {} entries earlier imports added (more than "
+        "half): nothing is retired. More > Prepare shaders in the launcher (or "
+        "--mcla_prepare_shaders_retry) retires them anyway.",
+        retiring, listed);
+    if (g_state.mode == Mode::kPrepare) Line(fmt::format("retire-refused {} {}", retiring, listed));
+    return false;
+  }
+
+  // The lists without what goes, and what they still use.
+  struct Out {
+    std::string name;
+    std::vector<uint8_t> data;
+  };
+  std::vector<Out> outs;
+  std::unordered_set<uint64_t> used;
+  size_t descriptions_removed = 0, shaders_removed = 0;
+  for (size_t k = 0; k < kListCount; ++k) {
+    const StoredFile& f = im.lists[k];
+    if (!f.header_ok) continue;
+    const size_t rs = kLists[k].record_size;
+    std::vector<uint8_t> data(f.valid.begin(), f.valid.begin() + 12);
+    size_t removed = 0;
+    for (size_t p = 12; p + rs <= f.valid.size(); p += rs) {
+      const uint8_t* r = f.valid.data() + p;
+      if (retire_descriptions[k].count(Le64(r))) {
+        ++removed;
+        continue;
+      }
+      used.insert(Le64(r + 8));
+      if (const uint64_t ps = Le64(r + 24)) used.insert(ps);
+      data.insert(data.end(), r, r + rs);
+    }
+    if (removed) {
+      descriptions_removed += removed;
+      outs.push_back({kLists[k].name, std::move(data)});
+    }
+  }
+  // The shader file last, without the shaders that go and nothing uses.
+  if (im.shaders.header_ok && !retire_shaders.empty()) {
+    std::vector<uint8_t> data(im.shaders.valid.begin(), im.shaders.valid.begin() + 8);
+    size_t removed = 0;
+    for (size_t p = 8; p + 12 <= im.shaders.valid.size();) {
+      const uint8_t* r = im.shaders.valid.data() + p;
+      const size_t bytes = 12 + size_t(Le32(r + 8) & 0x7FFFFFFF) * 4;
+      if (retire_shaders.count(Le64(r)) && !used.count(Le64(r))) {
+        ++removed;
+      } else {
+        data.insert(data.end(), r, r + bytes);
+      }
+      p += bytes;
+    }
+    if (removed) {
+      shaders_removed = removed;
+      outs.push_back({"xsh", std::move(data)});
+    }
+  }
+  try {
+    for (const Out& o : outs)
+      mcla::shader_storage::WriteFileAtomically(g_state.folders.File(o.name), o.data);
+    // What is gone (or was never there) is no longer the ledger's; a shader that stays because
+    // something uses it stays listed.
+    Ledger next = ledger;
+    for (size_t k = 0; k < kListCount; ++k)
+      for (uint64_t h : retire_descriptions[k]) next.lists[k].erase(h);
+    for (uint64_t h : retire_shaders)
+      if (!used.count(h)) next.shaders.erase(h);
+    g_state.ledger = std::move(next);
+    WriteLedger();
+  } catch (const Failure& failure) {
+    // Whatever was replaced is valid as it is, and the next start does the rest.
+    REXLOG_WARN("shader pack: retiring stale entries stopped ({}); the next start goes on",
+                failure.message);
+    return !outs.empty();
+  }
+  if (!outs.empty()) {
+    REXLOG_INFO(
+        "shader pack: retired {} pipeline descriptions and {} shaders that earlier imports added "
+        "and the pack no longer has",
+        descriptions_removed, shaders_removed);
+  }
+  if (g_state.mode == Mode::kPrepare)
+    Line(fmt::format("retire {} {}", shaders_removed, descriptions_removed));
+  return !outs.empty();
 }
 
 // The import at a start or in a preparation run. Throws Failure.
@@ -1598,6 +1857,9 @@ void RunImport(rex::Runtime* runtime) {
     return;
   }
   g_state.import_state = "on";
+  // Retiring comes before anything is added, and the plan is made again from the files as they
+  // are then. (Not in the development check, which changes nothing.)
+  if (!check_only && RetireStale(im)) im = PlanImport(runtime, check_only);
   if (g_state.mode == Mode::kPrepare) Line("start " + std::to_string(im.missing_shaders.size()));
   if (im.missing_shaders.empty() && !im.missing_records) {
     g_state.rebuild_ms =
@@ -1724,6 +1986,27 @@ void WriteStamp(rex::Runtime* runtime, const std::string& report) {
                                             std::vector<uint8_t>(json.begin(), json.end()));
 }
 
+// Once the stored pipelines were created: the ledger gets this pack and what its import added (the
+// shaders and descriptions the storage did not have). Written only when it changes.
+void RecordLedger() {
+  if (g_state.import_state != "on" || !g_state.pack_hash || g_state.ledger_unreadable) return;
+  Ledger next = g_state.ledger.present ? g_state.ledger : Ledger{};
+  bool changed = !g_state.ledger.present || next.pack != g_state.pack_hash;
+  std::memcpy(next.versions, CurrentVersions(), sizeof(next.versions));
+  next.present = true;
+  next.pack = g_state.pack_hash;
+  for (uint64_t h : g_state.added_shaders) changed |= next.shaders.insert(h).second;
+  for (size_t k = 0; k < kListCount; ++k)
+    for (uint64_t h : g_state.added_descriptions[k]) changed |= next.lists[k].insert(h).second;
+  if (!changed) return;
+  try {
+    g_state.ledger = std::move(next);
+    WriteLedger();
+  } catch (const Failure& failure) {
+    REXLOG_WARN("shader pack: can't write the ledger of what imports added: {}", failure.message);
+  }
+}
+
 bool KeepWaitingForPreparation(const std::string& holder) {
 #ifdef _WIN32
   // This runs on the window's thread, which isn't pumping messages while it waits (up to two
@@ -1825,9 +2108,10 @@ void MclaShaderStorageBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* windo
     std::vector<std::string> storage_names = StorageFileNames();
     for (std::string& name : storage_names) name = title + name;
     mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.shareable, storage_names);
-    mcla::shader_storage::RemoveStaleTemporaries(g_state.folders.local,
-                                                 {title + "import", title + "stamp.json"});
+    mcla::shader_storage::RemoveStaleTemporaries(
+        g_state.folders.local, {title + "import", title + "stamp.json", title + "ledger"});
     ReadJournal(g_state.folders.Local("import"), g_state.journal);
+    LoadLedger();
     RecoverInterruptedImport();
     if (prepare && rex::cvar::GetFlagByName("mcla_prepare_shaders_retry") == "true") {
       // Asked for (More > Prepare shaders): a disabled import is tried again, and so are the
@@ -1864,8 +2148,12 @@ void MclaShaderStorageAfterPreload(rex::Runtime* runtime) {
     // The import, or an earlier one this start loaded, got through the creation of the stored
     // pipelines: no failed starts in a row any more.
     Journal& j = g_state.journal;
+    // (A pack that added nothing, because the storage had all of it already or it only drops
+    // entries, is as done as one that did: its journal has no phase yet, and a later start may
+    // retire what it dropped.)
     if (g_state.merged ||
-        (j.failures && !j.disabled && j.pack == g_state.pack_hash && g_state.import_state == "on")) {
+        (j.failures && !j.disabled && j.pack == g_state.pack_hash && g_state.import_state == "on") ||
+        (g_state.import_state == "on" && j.pack == g_state.pack_hash && j.phase.empty())) {
       j.phase = "done";
       j.failures = 0;
       j.files.clear();
@@ -1874,6 +2162,7 @@ void MclaShaderStorageAfterPreload(rex::Runtime* runtime) {
   } catch (const Failure& failure) {
     REXLOG_WARN("shader pack: can't record the finished import: {}", failure.message);
   }
+  RecordLedger();
   // In a preparation run the storage is closed first (a driver pipeline cache saved, the files
   // flushed), as the process ends without the graphics shutdown.
   std::string report;

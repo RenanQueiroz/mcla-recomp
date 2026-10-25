@@ -25,6 +25,15 @@ AES decryption uses Windows' bcrypt).
       [--check]   then run the player side on it (mcla.exe through devrun.py, with private data
                   and cache roots) and keep only the shaders it rebuilds; the final pack is
                   checked again and must be accepted whole.
+      [--previous <pack>] [--drop <file>] [--report <file>]
+                  the pack this one replaces. Players' storages retire what an older pack added and
+                  the pack in use lacks (src/shader_prepare.cpp, RetireStale), so a pack may only
+                  lack an entry of the previous one for a reason this tool can state: its shader
+                  has no source in the game's files, or the check could not rebuild it (a
+                  description goes with its shader), or --drop names it with a reason ("<hash>
+                  <why>" per line: a shader, or a description of any list). Any other absence
+                  (a storage that was not given, for one) REFUSES the pack. --report writes what
+                  went and why.
 
 A vertex shader's source program is found by comparing its microcode with the game's programs
 of the same size: the binding changes only vertex-fetch fields, export registers and unused
@@ -33,6 +42,7 @@ developer's machine; the pack only names the program by its fingerprint.
 """
 import argparse
 import ctypes
+import json
 import os
 import re
 import struct
@@ -274,6 +284,57 @@ def read_pack(path):
                 shaders=shaders, lists=lists, size=len(d))
 
 
+def manifest(pk):
+    """({shader hash}, {list name: {description hash}}) of a pack as read_pack gives it."""
+    return ({s["hash"] for s in pk["shaders"]},
+            {name: {struct.unpack_from("<Q", r)[0] for r in recs} for name, (h, size, recs) in pk["lists"].items()})
+
+
+def retired_entries(previous, current, shader_reasons, drops):
+    """What `previous` (a read pack) has and `current` has not, with the reason for each:
+    ({shader hash: reason}, {(list, description hash): reason}, [what nothing explains]).
+    shader_reasons: {shader hash: why it can't be in the pack} (no source, not rebuilt); drops:
+    {hash: why}, a shader or a description named by --drop. A description is explained by its own
+    drop, or by a missing shader it uses (the vertex or the pixel one)."""
+    p_shaders, p_lists = manifest(previous)
+    c_shaders, c_lists = manifest(current)
+    gone_shaders = p_shaders - c_shaders
+    reasons_s, reasons_d, unexplained = {}, {}, []
+    for h in sorted(gone_shaders):
+        why = shader_reasons.get(h) or drops.get(h)
+        if why:
+            reasons_s[h] = why
+        else:
+            unexplained.append(("shader", h))
+    uses = {}
+    for name, (header, size, recs) in previous["lists"].items():
+        for r in recs:
+            uses[(name, struct.unpack_from("<Q", r)[0])] = (struct.unpack_from("<Q", r, 8)[0],
+                                                          struct.unpack_from("<Q", r, 24)[0])
+    for name, keys in p_lists.items():
+        for k in sorted(keys - c_lists.get(name, set())):
+            vs, ps = uses[(name, k)]
+            why = drops.get(k) or next((reasons_s[x] + f" (shader {x:016X})" for x in (vs, ps) if x in reasons_s), None)
+            if why:
+                reasons_d[(name, k)] = why
+            else:
+                unexplained.append((name, k))
+    return reasons_s, reasons_d, unexplained
+
+
+def read_drops(path):
+    drops = {}
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        h, _, why = line.partition(" ")
+        if not re.fullmatch(r"[0-9A-Fa-f]{16}", h) or not why.strip():
+            raise SystemExit(f"{path}:{n}: expected '<16 hex digits> <reason>'")
+        drops[int(h, 16)] = why.strip()
+    return drops
+
+
 def xex_range(image, s):
     off = s["source"] - IMAGE_BASE
     return image[off:off + 4 * s["dwords"]]
@@ -338,7 +399,12 @@ def main():
     ap.add_argument("--sdk", type=Path, default=REPO / "third_party" / "rexglue-sdk")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--devrun-cache", type=Path, help="private shader storage folder for the check runs")
+    ap.add_argument("--previous", type=Path, help="the pack this one replaces (see above)")
+    ap.add_argument("--drop", type=Path, help="entries of the previous pack to drop: '<hash> <reason>' lines")
+    ap.add_argument("--report", type=Path, help="write the retired entries and why (JSON)")
     a = ap.parse_args()
+    previous = read_pack(a.previous) if a.previous else None
+    drops = read_drops(a.drop) if a.drop else {}
 
     versions = storage_versions(a.sdk)
     image = decrypted_image(a.game / "default.xex", a.sdk)
@@ -392,6 +458,7 @@ def main():
         ps = sorted(p for p in pairs.get(hh, ()) if p == 0 or p in progs)
         entries.append(dict(hash=hh, kind=0, pixel=0, dwords=len(u) // 4, source=best[1], ps=ps or [0]))
     print(f"{len(entries)} shaders have a source in the game's files; {len(shaders) - len(entries)} don't")
+    shader_reasons = {h: "no source in the game's files" for h in set(shaders) - {e["hash"] for e in entries}}
 
     def keep_lists(known):
         out = {}
@@ -425,7 +492,47 @@ def main():
         if round_ == rounds - 1:
             a.out.unlink()
             raise SystemExit("REFUSED: the check still fails for " + ", ".join(f"{e['hash']:016X}" for e in failed[:10]))
+        for e in entries:
+            if not ok.get(e["hash"]):
+                shader_reasons[e["hash"]] = "mcla.exe could not rebuild it"
         entries = [e for e in entries if ok.get(e["hash"])]
+    if previous:
+        report_retired(a, previous, shader_reasons, drops)
+
+
+def report_retired(a, previous, shader_reasons, drops):
+    """Compares the pack just made with the previous one: what it retires, with the reasons, and a
+    refusal for any entry that is gone for no stated reason."""
+    current = read_pack(a.out)
+    p_shaders, p_lists = manifest(previous)
+    c_shaders, c_lists = manifest(current)
+    # An entry that --drop names must really be in the previous pack, and gone from the new one.
+    in_previous = set(p_shaders).union(*p_lists.values())
+    in_current = set(c_shaders).union(*c_lists.values())
+    stray = sorted(h for h in drops if h not in in_previous)
+    kept_by_drop = sorted(h for h in drops if h in in_current)
+    reasons_s, reasons_d, unexplained = retired_entries(previous, current, shader_reasons, drops)
+    print(f"retired against the previous pack: {len(reasons_s)} shaders, {len(reasons_d)} descriptions; "
+          f"{len(unexplained)} gone with no reason")
+    if a.report:
+        a.report.write_text(json.dumps({
+            "shaders": {f"{h:016X}": why for h, why in reasons_s.items()},
+            "descriptions": {f"{n} {k:016X}": why for (n, k), why in reasons_d.items()},
+            "unexplained": [f"{n} {k:016X}" for n, k in unexplained]}, indent=1), encoding="utf-8")
+    problems = []
+    if unexplained:
+        problems.append(f"{len(unexplained)} entries of the previous pack are gone and nothing explains it "
+                        f"(a storage not given? --drop <hash> <reason> to retire on purpose), first: "
+                        + ", ".join(f"{n} {k:016X}" for n, k in unexplained[:5]))
+    if stray:
+        problems.append("--drop names entries the previous pack doesn't have: "
+                        + ", ".join(f"{h:016X}" for h in stray[:5]))
+    if kept_by_drop:
+        problems.append("--drop names entries the new pack still has: "
+                        + ", ".join(f"{h:016X}" for h in kept_by_drop[:5]))
+    if problems:
+        a.out.unlink()
+        raise SystemExit("REFUSED: " + "; ".join(problems))
 
 
 def check(a, pack):
