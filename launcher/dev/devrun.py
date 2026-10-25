@@ -32,6 +32,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -64,6 +65,26 @@ RUNS = DEV / "runs"
 PRESENTMON = os.environ.get("MCLA_PRESENTMON") or next(iter(sorted(
     (Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WinGet" / "Packages").glob(
         "Intel.PresentMon.Console_*/presentmon*.exe"))), None)
+
+
+def dev_output(value, what):
+    """A path the run writes to (--cache-root, --stdout, --record): absolute, and inside the dev root
+    (MCLA_DEV_ROOT, or mcla-dev in %LOCALAPPDATA%). Anything else ends the command before it starts: a
+    relative path would land wherever the command was started from (the owner's folders among
+    them), and a Windows path that lost its backslashes on the way (a shell, a jobs file) is
+    relative to the current directory of a drive."""
+    text = str(value)
+    if re.match(r"^[A-Za-z]:[^/" + chr(92) * 2 + "]", text):
+        raise SystemExit(f"{what}: {text!r} looks like a Windows path that lost its backslashes")
+    path = Path(text)
+    if not path.is_absolute():
+        raise SystemExit(f"{what}: {text!r} is not an absolute path (runs write only inside {DEV})")
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(DEV.resolve())
+    except ValueError:
+        raise SystemExit(f"{what}: {text!r} is outside the dev root {DEV} (set MCLA_DEV_ROOT to move it)")
+    return resolved
 
 
 def real_files():
@@ -1056,6 +1077,13 @@ def main():
     p.add_argument("--seconds", type=int, default=10)
     p.add_argument("--gpu-threshold", type=float, default=GPU_THRESHOLD, metavar="PERCENT")
     a = parser.parse_args()
+    # What a run writes goes inside the dev root, and nowhere else.
+    if a.cmd in ("run", "bench"):
+        for name, what in (("cache_root", "--cache-root"), ("stdout", "--stdout"), ("record", "--record")):
+            if getattr(a, name, None):
+                setattr(a, name, str(dev_output(getattr(a, name), what)))
+    elif a.cmd == "record":
+        a.file = str(dev_output(a.file, "record <file>"))
     if a.cmd == "prepare":
         prepare(a.refresh)
     elif a.cmd == "run":

@@ -538,9 +538,12 @@ def report_retired(a, previous, shader_reasons, drops):
 def check(a, pack):
     """The player side on this pack: mcla.exe --mcla_prepare_shaders with a report and no storage
     change, through devrun.py (private save copy and cache, real data checked)."""
-    report = Path(tempfile.gettempdir()) / f"shaderpack-check-{os.getpid()}.txt"
+    # devrun refuses to write outside its dev root, and so do the check's own files.
+    dev = Path(os.environ.get("MCLA_DEV_ROOT") or Path(os.environ["LOCALAPPDATA"]) / "mcla-dev")
+    dev.mkdir(parents=True, exist_ok=True)
+    report = dev / f"shaderpack-check-{os.getpid()}.txt"
     report.unlink(missing_ok=True)
-    cache = a.devrun_cache or Path(tempfile.gettempdir()) / f"shaderpack-check-cache-{os.getpid()}"
+    cache = a.devrun_cache or dev / f"shaderpack-check-cache-{os.getpid()}"
     cmd = [sys.executable, str(REPO / "launcher" / "dev" / "devrun.py"), "run", "--cache-root", str(cache),
            "--timeout", "900", "--no-gpu-guard", "--extra", "--mcla_prepare_shaders=true",
            f"--mcla_shader_pack={pack.resolve()}", f"--mcla_prepare_shaders_check={report}"]
