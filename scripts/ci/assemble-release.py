@@ -1,21 +1,22 @@
 r"""Writes the files of a draft release that are not built, from the built ones:
 
   python assemble-release.py --tag TAG --commit SHA --repository OWNER/NAME --assets <folder>
-         --launcher-zip <zip> --sdk-bundle-zip <zip> --sdk-source-archive <tar.xz>
+         --launcher-zip <zip> --installer <MCLA-Setup.exe> --sdk-bundle-zip <zip> --sdk-source-archive <tar.xz>
          --launcher-notices <folder> --expect-bundle-sha256 <hash> --out <folder> [--run-url URL]
 
   release.json     the one file the wizard reads: what the release holds, with the SHA-256 and size
                    of each asset, the SDK bundle's commit/patches/toolchain, the tools to download
                    (URL and SHA-256 each), the shader pack, and "game": the fingerprints of the supported game (names, sizes,
-                   SHA-256 of its files, title id and version; never content). "installer" is null for now.
+                   SHA-256 of its files, title id and version; never content). "installer" is MCLA-Setup.exe: its name,
+                   SHA-256 and size, and what its payload header says (version, tag, commit, the launcher's files).
                    "commit" is the commit the release was built from: the tag, once it exists, has to
                    point at it (the wizard checks that).
   NOTICES.txt      the licences and notices of what the release's assets hold
-  SHA256SUMS       the SHA-256 of every asset (the three archives, release.json, NOTICES.txt)
+  SHA256SUMS       the SHA-256 of every asset (MCLA-Setup.exe, the three archives, release.json, NOTICES.txt)
   release-notes.md the text of the draft release
 
---assets is the folder that holds the three archives (they are not copied); --out is where the four
-files above are written. The archives are read, not trusted: the SDK bundle's manifest and FidelityFX
+--assets is the folder that holds MCLA-Setup.exe and the three archives (they are not copied); --out is
+where the four files above are written. The archives are read, not trusted: the SDK bundle's manifest and FidelityFX
 record are read from inside it and the checks of the build are repeated here (the bundle is the one
 the verify job tested; its name matches its manifest; the FidelityFX DLLs have no C runtime import;
 the source archive is of the same SDK commit and patches).
@@ -37,6 +38,7 @@ ap.add_argument("--commit", required=True)
 ap.add_argument("--repository", required=True)
 ap.add_argument("--assets", required=True)
 ap.add_argument("--launcher-zip", required=True)
+ap.add_argument("--installer", required=True)
 ap.add_argument("--sdk-bundle-zip", required=True)
 ap.add_argument("--sdk-source-archive", required=True)
 ap.add_argument("--launcher-notices", required=True)
@@ -50,9 +52,10 @@ assets = pathlib.Path(a.assets)
 out = pathlib.Path(a.out)
 out.mkdir(parents=True, exist_ok=True)
 launcher_zip = assets / a.launcher_zip
+installer_exe = assets / a.installer
 bundle_zip = assets / a.sdk_bundle_zip
 source_archive = assets / a.sdk_source_archive
-for f in (launcher_zip, bundle_zip, source_archive):
+for f in (launcher_zip, installer_exe, bundle_zip, source_archive):
     if not f.is_file():
         sys.exit(f"assemble-release: {f} is not there")
 if not re.fullmatch(r"[0-9a-f]{40}", a.commit):
@@ -135,6 +138,38 @@ if "default.xex" not in {f["path"] for f in game["files"]}:
     sys.exit("assemble-release: scripts/ci/game-files.json lists no default.xex")
 game_field = {k: game[k] for k in ("title", "titleId", "xexVersion", "files")}
 
+# --- MCLA-Setup.exe, read from inside: the installer program, then the payload (launcher\installer\Payload.cs):
+# "MCLAPK1\0", int32 meta length, the meta ("key=value" lines), the Brotli stream of the launcher's files;
+# at the very end "MCLAPAY1" and the payload's length. The header is checked against the release.
+installer_info = describe(installer_exe)
+with installer_exe.open("rb") as f:
+    if f.read(2) != b"MZ":
+        sys.exit("assemble-release: MCLA-Setup.exe is not a Windows program")
+    f.seek(-16, 2)
+    footer = f.read(16)
+    if footer[:8] != b"MCLAPAY1":
+        sys.exit("assemble-release: MCLA-Setup.exe has no payload (no MCLAPAY1 footer)")
+    payload_length = int.from_bytes(footer[8:], "little")
+    start = installer_info["size"] - 16 - payload_length
+    if payload_length < 1_000_000 or start < 100_000:
+        sys.exit("assemble-release: MCLA-Setup.exe's payload length is not believable")
+    f.seek(start)
+    head = f.read(12)
+    if head[:8] != b"MCLAPK1\0":
+        sys.exit("assemble-release: MCLA-Setup.exe's payload has the wrong header")
+    meta_text = f.read(int.from_bytes(head[8:], "little")).decode("utf-8")
+payload_meta = dict(line.split("=", 1) for line in meta_text.splitlines() if "=" in line)
+version = re.match(r"v(\d+\.\d+\.\d+)", a.tag)
+want_version = version.group(1) if version else "0.0.0"
+for key, want in (("tag", a.tag), ("commit", a.commit), ("version", want_version), ("exe", "MclaLauncher.exe")):
+    if payload_meta.get(key) != want:
+        sys.exit(f"assemble-release: MCLA-Setup.exe's payload says {key}={payload_meta.get(key)!r}, not {want!r}")
+if not payload_meta.get("files", "").isdigit() or int(payload_meta["files"]) < 100:
+    sys.exit("assemble-release: MCLA-Setup.exe's payload header does not give the launcher's files")
+with zipfile.ZipFile(launcher_zip) as z:
+    if len(z.namelist()) != int(payload_meta["files"]):
+        sys.exit(f"assemble-release: the launcher zip has {len(z.namelist())} files, the installer's payload {payload_meta['files']}")
+
 launcher_packages = json.loads((pathlib.Path(a.launcher_notices) / "packages.json").read_text(encoding="utf-8"))
 with zipfile.ZipFile(launcher_zip) as z:
     source_commit = z.read("source-commit.txt").decode("ascii").strip()
@@ -153,9 +188,17 @@ release = {
         "sourceCommit": source_commit,
         "runtime": ".NET 10 and the Windows App SDK runtime, self-contained (nothing to install)",
         "packages": launcher_packages,
-        "packagesNote": "NuGet packages float by design (Microsoft.UI.Reactor *-*, Microsoft.WindowsAppSDK 2.*): these are the versions this release resolved",
+        "packagesNote": "NuGet packages float by design (Microsoft.UI.Reactor *-*, Microsoft.WindowsAppSDK.WinUI 2.*): these are the versions this release resolved",
     },
-    "installer": None,
+    "installer": {
+        **installer_info,
+        "version": payload_meta["version"],
+        "launcherFiles": int(payload_meta["files"]),
+        "launcherBytes": int(payload_meta["bytes"]),
+        "usage": "MCLA-Setup.exe installs the launcher for the current user (no administrator rights) into %LOCALAPPDATA%\\Programs\\MCLA, makes shortcuts and starts it. "
+                 "To update a launcher that it installed: download this asset, check its SHA-256, run it with: --update --wait-pid <the launcher's process id> --dir <the launcher's folder>",
+        "unsigned": True,
+    },
     "sdkBundle": {
         **bundle,
         "sdkCommit": manifest["sdkCommit"],
@@ -187,7 +230,8 @@ notices = [
     "",
     "This release holds no game data. It holds:",
     "",
-    f"  {launcher_zip.name}: the launcher, MIT (launcher/LICENSE), with the .NET runtime and the",
+    "  MCLA-Setup.exe: the installer program (MIT, launcher/installer) with the launcher folder inside it, the",
+    f"  same files as {launcher_zip.name}: the launcher, MIT (launcher/LICENSE), with the .NET runtime and the",
     "  Windows App SDK runtime it needs. Its folder has the same notices in notices/.",
     f"  {bundle_zip.name}: the ReXGlue SDK built with the fork's patches, with llvm-mingw's C++ runtime and",
     "  AMD's FidelityFX (FSR 3.1) runtimes. Its NOTICE.txt, SOURCE.txt and licenses/ are in it and below.",
@@ -212,7 +256,7 @@ notices += ["=" * 78, "Code ported from other projects into the fork (THIRD-PART
 
 # --- release.json, then the sums
 (out / "release.json").write_text(json.dumps(release, indent=2) + "\n", encoding="utf-8", newline="\n")
-files = [launcher_zip, bundle_zip, source_archive, out / "release.json", out / "NOTICES.txt"]
+files = [installer_exe, launcher_zip, bundle_zip, source_archive, out / "release.json", out / "NOTICES.txt"]
 (out / "SHA256SUMS").write_text("".join(f"{cilib.sha256_file(f)} *{f.name}\n" for f in files), encoding="ascii", newline="\n")
 
 
@@ -226,19 +270,21 @@ Release `{a.tag}`, built from commit `{a.commit}`{(' by ' + a.run_url) if a.run_
 
 | Asset | Size | SHA-256 |
 |---|---|---|
+| `MCLA-Setup.exe` | {mb(release['installer']['size'])} | `{release['installer']['sha256']}` |
 | `{launcher_zip.name}` | {mb(release['launcher']['size'])} | `{release['launcher']['sha256']}` |
 | `{bundle_zip.name}` | {mb(release['sdkBundle']['size'])} | `{release['sdkBundle']['sha256']}` |
 | `{source_archive.name}` | {mb(release['sdkSource']['size'])} | `{release['sdkSource']['sha256']}` |
 | `release.json` | {(out / 'release.json').stat().st_size / 1e3:.1f} KB | `{cilib.sha256_file(out / 'release.json')}` |
 | `NOTICES.txt` | {(out / 'NOTICES.txt').stat().st_size / 1e3:.1f} KB | `{cilib.sha256_file(out / 'NOTICES.txt')}` |
-| `SHA256SUMS` | | the sums of the five above |
+| `SHA256SUMS` | | the sums of the six above |
 
 `release.json` is what the launcher's installer reads; `NOTICES.txt` has the licences and notices of everything in the assets. Every asset has a build-provenance attestation (`gh attestation verify <file> -R {a.repository}`).
 
-- **Launcher**: unzip and run `MclaLauncher.exe`; .NET and the Windows App SDK are inside. Unsigned.
+- **MCLA-Setup.exe**: the one file a player downloads. Run it: it installs the launcher for the current user (no administrator rights asked for) in `%LOCALAPPDATA%\\Programs\\MCLA`, makes a Start menu and a desktop shortcut and starts it; the launcher's setup wizard then builds the game from the player's own disc image. **Unsigned**, so Windows SmartScreen may warn (the README says how to go on). The launcher updates itself by downloading this asset (SHA-256 in `release.json`) and running it with `--update`.
+- **Launcher zip**: the same launcher folder as a zip, for anyone who wants it without the installer: unzip and run `MclaLauncher.exe`; .NET and the Windows App SDK are inside. Unsigned.
 - **SDK bundle**: the ReXGlue SDK ({manifest['sdkCommit'][:8]}) with the fork's {len(manifest['patches'])} patches (digest `{digest[:12]}`), built with llvm-mingw {m.group(3)}, and FSR's two runtimes (FidelityFX `{ffx['fidelityFxCommit'][:8]}`, built with the C runtime linked in, so no Visual C++ Redistributable is needed). `scripts/make_pc.ps1 -Toolchain mingw -SdkBundle <this zip> -SdkBundleSha256 <the hash>` uses it.
 - **Source archive**: the corresponding source of the bundle's GPL and LGPL parts (the SDK tree at the pinned commits with the patches applied, and the fork at this commit).
-- `MCLA-Setup.exe` is not in this release yet (`installer` is `null` in `release.json`); `game` holds the fingerprints of the supported game (names, sizes and SHA-256 of its files: no content) for the launcher's setup wizard.
+- `game` in `release.json` holds the fingerprints of the supported game (names, sizes and SHA-256 of its files: no content) for the launcher's setup wizard.
 - No game data is in any asset. The game is built on the player's PC, from their own disc.
 
 When publishing: leave the Target as it is (`{a.commit[:8]}`), so that the tag is made on the commit this was built from. The tag must point at `{a.commit}`, which `release.json` names; the launcher's installer checks that.

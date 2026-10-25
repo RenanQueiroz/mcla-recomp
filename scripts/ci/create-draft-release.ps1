@@ -32,7 +32,7 @@ function ReleasesOfTag {
 }
 
 # What is to be uploaded exists, before anything is deleted.
-$names = @("MCLA-Launcher-$Tag-win-x64.zip") +
+$names = @("MCLA-Setup.exe", "MCLA-Launcher-$Tag-win-x64.zip") +
          @(Get-ChildItem -LiteralPath $Folder -File -Filter "rexglue-sdk-*.zip" | ForEach-Object { $_.Name }) +
          @(Get-ChildItem -LiteralPath $Folder -File -Filter "rexglue-sdk-source-*.tar.xz" | ForEach-Object { $_.Name }) +
          @("release.json", "NOTICES.txt", "SHA256SUMS")

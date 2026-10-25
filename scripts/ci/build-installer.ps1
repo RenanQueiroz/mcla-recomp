@@ -2,19 +2,21 @@
 # launcher folder appended to it as its payload (see launcher\installer\Payload.cs).
 #
 #   powershell -File scripts\ci\build-installer.ps1 -LauncherDir <published folder> -Out <folder>
-#              [-Version 1.2.3] [-Tag v1.2.3] [-Commit <40 hex>] [-Quality 9]
+#              [-Version 1.2.3] [-Tag v1.2.3] [-Commit <40 hex>] [-Quality 9] [-StubOut <file>]
 #
 # -LauncherDir is what scripts\ci\publish-launcher.ps1 made (the launcher, self-contained, with its notices).
-# Writes <Out>\MCLA-Setup.exe, then checks what it made: the program is a NativeAOT executable that imports
-# nothing but Windows' own libraries, its header says the version, tag and commit given, and unpacking it gives
-# back every file of the launcher folder, byte for byte.
+# Writes <Out>\MCLA-Setup.exe, then checks what it made: the program is one native NativeAOT file with no .NET
+# runtime in it, its header says the version, tag and commit given, and unpacking it gives back every file of the
+# launcher folder, byte for byte. -StubOut keeps a copy of the bare installer program (no payload), which the
+# tests in launcher\dev\update-check build their own payloads behind.
 param(
     [Parameter(Mandatory)][string]$LauncherDir,
     [Parameter(Mandatory)][string]$Out,
     [string]$Version = "0.0.0",
     [string]$Tag = "",
     [string]$Commit = "",
-    [int]$Quality = 9
+    [int]$Quality = 9,
+    [string]$StubOut = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +44,10 @@ try {
     $extra = @(Get-ChildItem -LiteralPath $stubDir -File | Where-Object { $_.Name -ne "MCLA-Setup.exe" -and $_.Extension -notin ".pdb" })
     if ($extra) { throw "the installer program is not one native file: $($extra.Name -join ', ')" }
     "installer program: {0:N2} MB" -f ((Get-Item $stub).Length / 1MB)
+    if ($StubOut) {
+        New-Item -ItemType Directory -Force (Split-Path -Parent ([IO.Path]::GetFullPath($StubOut))) | Out-Null
+        Copy-Item -LiteralPath $stub -Destination $StubOut -Force
+    }
 
     New-Item -ItemType Directory -Force $Out | Out-Null
     $exe = Join-Path (Resolve-Path -LiteralPath $Out).ProviderPath "MCLA-Setup.exe"

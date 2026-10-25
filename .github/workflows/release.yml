@@ -9,8 +9,9 @@ name: Release (draft only)
 #   or a push to a branch named draft-release/<anything>, which makes a test draft named
 #   draft-<commit> (a v* tag is refused there), which is how this workflow is tried.
 #
-# Nothing of the game is involved: the assets are the launcher, the SDK bundle (with FSR's two
-# DLLs), the corresponding source of the bundle and files made from them. See scripts/ci/README.md.
+# Nothing of the game is involved: the assets are MCLA-Setup.exe (the installer, with the launcher
+# inside), the launcher as a zip, the SDK bundle (with FSR's two DLLs), the corresponding source of
+# the bundle and files made from them. See scripts/ci/README.md.
 
 on:
   workflow_dispatch:
@@ -202,13 +203,38 @@ jobs:
           persist-credentials: false
 
       # Its NuGet packages float, as in a build on any PC (Microsoft.UI.Reactor *-*, Windows App
-      # SDK 2.*): the versions this build resolves are recorded in release.json.
+      # SDK's WinUI component 2.*): the versions this build resolves are recorded in release.json.
       - name: Publish and zip the launcher
         shell: powershell
         env:
           TAG: ${{ needs.plan.outputs.tag }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: .\scripts\ci\publish-launcher.ps1 -Out "$env:RUNNER_TEMP\launcher" -Zip "$env:RUNNER_TEMP\launcher-zip\MCLA-Launcher-$env:TAG-win-x64.zip" -Version $env:VERSION
+
+      # MCLA-Setup.exe, the one file a player downloads: the installer program (NativeAOT, 2.5 MB) with the
+      # published launcher folder appended to it. Checked by unpacking it again and comparing every file.
+      - name: Build MCLA-Setup.exe
+        shell: powershell
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: .\scripts\ci\build-installer.ps1 -LauncherDir "$env:RUNNER_TEMP\launcher" -Out "$env:RUNNER_TEMP\setup" -Version $env:VERSION -Tag $env:TAG -Commit $env:COMMIT
+
+      # Used as a player's PC would (on scratch folders, without starting the launcher): install, install
+      # over it, remove.
+      - name: Try MCLA-Setup.exe
+        shell: powershell
+        run: .\scripts\ci\smoke-installer.ps1 -Exe "$env:RUNNER_TEMP\setup\MCLA-Setup.exe"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: setup-exe
+          path: ${{ runner.temp }}/setup/MCLA-Setup.exe
+          if-no-files-found: error
+          retention-days: 3
+          # Already compressed
+          compression-level: 0
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -355,6 +381,11 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: setup-exe
+          path: ${{ runner.temp }}/files
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
           name: sdk-source
           path: ${{ runner.temp }}/files
 
@@ -377,7 +408,7 @@ jobs:
           $files = "$env:RUNNER_TEMP\files"
           $source = (Get-ChildItem $files -Filter "rexglue-sdk-source-*.tar.xz").Name
           python -I scripts\ci\assemble-release.py --tag $env:TAG --commit $env:COMMIT --repository $env:REPOSITORY `
-              --assets $files --launcher-zip "MCLA-Launcher-$env:TAG-win-x64.zip" --sdk-bundle-zip $env:BUNDLE_NAME `
+              --assets $files --launcher-zip "MCLA-Launcher-$env:TAG-win-x64.zip" --installer MCLA-Setup.exe --sdk-bundle-zip $env:BUNDLE_NAME `
               --sdk-source-archive $source --expect-bundle-sha256 $env:BUNDLE_SHA256 `
               --launcher-notices "$env:RUNNER_TEMP\launcher-notices" --out $files --run-url $env:RUN_URL
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -414,6 +445,7 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
+            release-files/*.exe
             release-files/*.zip
             release-files/*.tar.xz
             release-files/release.json

@@ -98,3 +98,21 @@ jobs:
       - name: Publish the launcher, with its notices
         shell: powershell
         run: .\scripts\ci\publish-launcher.ps1 -Out "$env:RUNNER_TEMP\launcher"
+
+      # MCLA-Setup.exe as a release makes it (the NativeAOT installer program with the launcher folder as its
+      # payload, unpacked again and compared), then used as a player's PC would, on scratch folders.
+      - name: Build MCLA-Setup.exe
+        shell: powershell
+        run: .\scripts\ci\build-installer.ps1 -LauncherDir "$env:RUNNER_TEMP\launcher" -Out "$env:RUNNER_TEMP\setup" -StubOut "$env:RUNNER_TEMP\stub\MCLA-Setup.exe"
+
+      - name: Try MCLA-Setup.exe
+        shell: powershell
+        run: .\scripts\ci\smoke-installer.ps1 -Exe "$env:RUNNER_TEMP\setup\MCLA-Setup.exe"
+
+      # The self-update pieces: the folder swap, the verified download, and the real installer with fake
+      # launchers (update that waits for the old one, the way back, a damaged file, a held file, ...).
+      - name: Self-update checks
+        shell: powershell
+        run: |
+          dotnet run --project launcher\dev\update-check -c Release -- all "$env:RUNNER_TEMP\stub\MCLA-Setup.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
