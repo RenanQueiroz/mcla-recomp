@@ -67,8 +67,19 @@ Run by hand (Actions, "Release (draft only)", with the tag name) from `main`, or
     made is a draft. Only this job has `contents: write`, and only this step uses the token.
 
 Assets of a draft: `MCLA-Launcher-<tag>-win-x64.zip`, the SDK bundle zip, the source archive,
-`release.json`, `NOTICES.txt`, `SHA256SUMS`. `MCLA-Setup.exe` is not built yet (it comes with the
-setup wizard): `installer` and `game` are `null` in `release.json`.
+`release.json`, `NOTICES.txt`, `SHA256SUMS`. `MCLA-Setup.exe` is not built yet (the wizard is part of
+the launcher for now; a single setup exe is a later phase): `installer` is `null` in `release.json`.
+
+### The game's fingerprints (`release.json.game`)
+
+The setup wizard checks the player's own game against a list in the release, never against a copy:
+`game-files.json` has the 13 files of the Complete Edition's disc (path, size, SHA-256; the title id
+`545407F8`, `default.xex` version 0.0.0.8) and nothing else of it. `assemble-release.py` copies it into
+`release.json` (`game`). It is made once, from a disc image or an extracted folder the maintainer has,
+by `make-game-files.py <iso or folder>` (read-only; the output has hashes and sizes only, so it is the
+one file about the game that belongs in the repository). `check_pins.py` checks only its shape (title id,
+version, plain names, 64-digit hashes, `default.xex` listed): a changed list is a change of what the wizard
+accepts, so it is reviewed like code.
 
 ### The corresponding source
 
@@ -101,7 +112,14 @@ patches in the same order.
    and needs "loaded amd_fidelityfx_*.dll", "FSR 3.1 ready" and "frame generation: ready" in each log
    (four PASS lines). The GPU must be otherwise idle.
 4. Read `NOTICES.txt`; check the launcher starts from the unzipped folder on a PC without .NET.
-5. Publish in the GitHub UI **without changing the Target**; look that the tag points at
+5. **The setup wizard, end to end, from the draft** (needs the game's disc image and about 10 GB):
+   `launcher\dev\wizard-check` runs the wizard's engine without a window, with a release source that is a
+   folder (`release.json` and the assets of the draft, plus a `dev-source.json` naming a clone of the fork
+   that has the tag; a draft has no tag yet): `wizard-check.exe install <folder> <install folder> <iso>`.
+   It must end with all six steps done, and print the longest path of the install, which must not be
+   longer than `PathBudget.LongestBelowRoot` (when `tools.json` changes a tool's version, this is where a
+   longer path shows up). Then start the built game through `devrun.py` (see `launcher\README.md`).
+6. Publish in the GitHub UI **without changing the Target**; look that the tag points at
    `release.json.commit`.
 
 ## Pins
@@ -139,4 +157,5 @@ change `tools.json` and, for llvm-mingw and Clang, the same pins in `scripts/mak
 | `verify-bundle.ps1`, `linktest/` | the look at the unpacked bundle |
 | `assemble-release.py`, `verify_tools.py`, `create-draft-release.ps1` | `release.json` and the rest, and the draft |
 | `smoke-release-dlls.ps1` | the in-game check of a draft's FidelityFX DLLs (checklist step 3) |
+| `make-game-files.py`, `game-files.json` | the fingerprints of the game's files (`release.json.game`) |
 | `tools.json`, `licenses/` | the pins; licence texts that packages do not carry |

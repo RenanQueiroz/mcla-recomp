@@ -7,7 +7,10 @@
 - every patch make_pc.ps1 applies is in FORK.md's order of `git apply` lines, in the same order;
 - the workflows pin every action by commit SHA, never use pull_request_target, default to read-only permissions;
 - no tracked file looks like game data (a disc image, a .xex, an .rpf, a .bik, a key...) or is
-  over 8 MB.
+  over 8 MB;
+- scripts/ci/game-files.json (the fingerprints the setup wizard checks the player's game against) has the
+  shape the wizard reads: the title id, a version, and files with a plain relative name, a size and a
+  64-digit SHA-256, default.xex among them. (Only the shape: what it lists is a decision of the maintainer.)
 """
 import json
 import pathlib
@@ -100,6 +103,23 @@ for t in tracked:
                 compile((root / t).read_text(encoding="utf-8"), t, "exec")
         except (SyntaxError, Warning) as e:
             errors.append(f"{t}: {e}")
+
+game_files = json.loads((root / "scripts" / "ci" / "game-files.json").read_text(encoding="utf-8"))
+if game_files.get("titleId") != "545407F8":
+    errors.append("game-files.json: titleId is not 545407F8")
+if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", str(game_files.get("xexVersion", ""))):
+    errors.append("game-files.json: xexVersion is not a four-part version")
+listed = game_files.get("files") or []
+if not listed:
+    errors.append("game-files.json has no files")
+for entry in listed:
+    name = str(entry.get("path", ""))
+    if (not name or ".." in name or ":" in name or name.startswith(("/", "\\"))
+            or not isinstance(entry.get("size"), int) or entry["size"] < 0
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", "")))):
+        errors.append(f"game-files.json: a bad entry: {entry!r}")
+if "default.xex" not in [str(e.get("path", "")).lower() for e in listed]:
+    errors.append("game-files.json does not list default.xex")
 
 for e in errors:
     print("ERROR:", e)
