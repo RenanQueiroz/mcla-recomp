@@ -89,18 +89,27 @@ static class Program
         var root = Dir("swap");
         var target = Path.Combine(root, "MCLA");
 
+        // a launcher folder is Setup's when it holds installed.txt; the staged folders of the tests are made like Setup makes them
+        string Stage(string version, string? extraName = null)
+        {
+            var staged = FolderSwap.CreateStaging(target);
+            Write(staged, "version.txt", version);
+            Write(staged, "installed.txt", "version=" + version);
+            if (extraName != null) Write(staged, extraName, version);
+            return staged;
+        }
+
         // a first install is one rename
-        var staged = FolderSwap.NewStagingPath(target);
-        Write(staged, "version.txt", "1");
+        var staged = Stage("1");
         var s1 = FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(2));
         Check(Read(target, "version.txt") == "1" && s1.Previous == null && !Directory.Exists(staged), "first install: the staged folder is the target, nothing before it");
+        Check(!File.Exists(Path.Combine(target, FolderSwap.StagingMarker)), "the staging marker does not go into the installed folder");
         FolderSwap.Commit(s1);
 
         // a replacement keeps what the user's setup wrote (the pointer), and commit removes the old folder
         Write(target, "install.json", "{\"installRoot\":\"C:\\\\MCLA\"}");
         Write(target, "app.dll", "old");
-        staged = FolderSwap.NewStagingPath(target);
-        Write(staged, "version.txt", "2");
+        staged = Stage("2");
         Write(staged, "app.dll", "new");
         FolderSwap.CopyKept(target, staged, ["install.json", "missing.json", @"..\escape.txt", @"C:\Windows\win.ini"]);
         var s2 = FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(2));
@@ -108,45 +117,128 @@ static class Program
         Check(Read(target, "install.json").Contains("installRoot"), "replace: install.json was carried over");
         Check(s2.Previous != null && Read(s2.Previous, "version.txt") == "1", "replace: the old folder is beside it until commit");
         Check(!File.Exists(Path.Combine(root, "escape.txt")) && !File.Exists(Path.Combine(target, "win.ini")), "carry-over refuses '..' and rooted names");
+        Check(FolderSwap.Leftovers(target).Count() == 1, "replace: the old folder is a leftover Setup knows (exact stamp, installed.txt inside)");
         FolderSwap.Commit(s2);
         Check(!FolderSwap.Leftovers(target).Any(), "commit removes the old folder");
 
         // the way back
-        staged = FolderSwap.NewStagingPath(target);
-        Write(staged, "version.txt", "3");
+        staged = Stage("3");
         var s3 = FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(2));
         var restored = FolderSwap.RollBack(s3);
         Check(restored && Read(target, "version.txt") == "2", "rollback: version 2 is back");
         Check(!FolderSwap.Leftovers(target).Any(), "rollback: no .failed or .old folder is left");
 
+        // the way back with the old folder gone (something deleted it): nothing is moved, the player keeps a folder (H1)
+        staged = Stage("3b");
+        var s3b = FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(2));
+        FolderSwap.DeleteFolder(s3b.Previous!, TimeSpan.FromSeconds(2));
+        var gone = Catch(() => FolderSwap.RollBack(s3b));
+        Check(gone is SwapFailedException { OldFolderIsBack: false } && Read(target, "version.txt") == "3b" && !FolderSwap.Leftovers(target).Any(d => d.Contains(FolderSwap.FailedTag)),
+              "rollback with the previous folder gone: refused, the new folder stays where it is");
+        staged = Stage("2again");
+        FolderSwap.Commit(FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(2)));
+
         // a held file stops the swap before anything changes
-        staged = FolderSwap.NewStagingPath(target);
-        Write(staged, "version.txt", "4");
+        staged = Stage("4");
         using (var held = new FileStream(Path.Combine(target, "version.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
         {
             var watch = Stopwatch.StartNew();
             Exception? error = null;
             try { FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(1.5)); } catch (Exception ex) { error = ex; }
-            Check(error is IOException && watch.Elapsed.TotalSeconds >= 1.4, $"locked: gives up after the timeout ({watch.Elapsed.TotalSeconds:N1} s) with an IOException");
-            Check(Directory.Exists(target) && File.Exists(Path.Combine(target, "version.txt")) && !FolderSwap.Leftovers(target).Any(d => d.Contains(FolderSwap.OldTag)), "locked: the installed folder is where it was, with no .old beside it");
+            Check(error is IOException && error is not SwapFailedException && watch.Elapsed.TotalSeconds >= 1.4, $"locked: gives up after the timeout ({watch.Elapsed.TotalSeconds:N1} s) with an IOException");
+            Check(Directory.Exists(target) && File.Exists(Path.Combine(target, "version.txt")) && !FolderSwap.Leftovers(target, FolderSwap.OldTag).Any(), "locked: the installed folder is where it was, with no .old beside it");
         }
-        Check(Directory.Exists(staged) && Read(target, "version.txt") == "2", "locked: the staged folder is still there for a retry");
+        Check(Directory.Exists(staged), "locked: the staged folder is still there for a retry");
         FolderSwap.DeleteFolder(staged, TimeSpan.FromSeconds(2));
 
-        // killed between the two renames: Recover puts the old folder back
-        Directory.Move(target, target + ".old-20260101-000000-1");
-        Check(!Directory.Exists(target), "setup of the crash case: no target");
-        Check(FolderSwap.Recover(target) && Read(target, "version.txt") == "2", "recover: the previous folder came back");
-        Check(!FolderSwap.Recover(target), "recover: nothing to do when the folder is there");
+        // the second rename fails (the staged folder is held): the old folder is put back, the staged one is left for the caller (M5)
+        staged = Stage("5");
+        var oldVersion = File.ReadAllText(Path.Combine(target, "version.txt")).Trim();
+        using (var heldStaged = new FileStream(Path.Combine(staged, "version.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var error = Catch(() => FolderSwap.Apply(target, staged, TimeSpan.FromSeconds(1)));
+            Check(error is SwapFailedException { OldFolderIsBack: true } && Directory.Exists(target) && Read(target, "installed.txt").Contains(oldVersion) && Directory.Exists(staged),
+                  "a staged folder that can't be moved in: the old folder is put back, the staged one stays");
+        }
+        Check(!FolderSwap.Leftovers(target, FolderSwap.OldTag).Any() && FolderSwap.Leftovers(target, FolderSwap.NewTag).Count() == 1, "... and what is beside it is the staged folder, with its marker again");
+        FolderSwap.DeleteFolder(staged, TimeSpan.FromSeconds(2));
 
-        // clean-up removes only the swap's leftovers
-        Directory.CreateDirectory(target + ".old-1");
-        Directory.CreateDirectory(target + ".new-2");
-        Directory.CreateDirectory(target + ".failed-3");
+        // killed between the two renames: Recover puts the old folder back (only one that is Setup's)
+        var crashed = target + ".old-20260101-000000-1";
+        Directory.Move(target, crashed);
+        Check(!Directory.Exists(target), "setup of the crash case: no target");
+        Check(FolderSwap.Recover(target) && File.Exists(Path.Combine(target, "installed.txt")), "recover: the previous folder came back");
+        Check(!FolderSwap.Recover(target), "recover: nothing to do when the folder is there");
+        Directory.Move(target, target + "-moved");
+        Directory.CreateDirectory(target + ".old-backup");                      // a player's folder with a similar name
+        Write(target + ".old-20260101-000000-2", "notes.txt", "mine");          // an exact stamp, but no installed.txt: not Setup's
+        Check(!FolderSwap.Recover(target) && !Directory.Exists(target), "recover: a similar name, or an exact stamp without Setup's marker, is not restored as the launcher");
+        Directory.Move(target + "-moved", target);
+        FolderSwap.DeleteFolder(target + ".old-backup", TimeSpan.FromSeconds(2));
+        FolderSwap.DeleteFolder(target + ".old-20260101-000000-2", TimeSpan.FromSeconds(2));
+
+        // clean-up removes only the swap's leftovers: exact stamp, Setup's marker inside
+        Write(target + ".old-20261001-120000-11", "installed.txt", "x");
+        Write(target + ".failed-20261001-120000-12", "installed.txt", "x");
+        Write(target + ".new-20261001-120000-13", FolderSwap.StagingMarker, "x");
+        Write(target + ".old-20261001-120000-14", "notes.txt", "a player's folder, an exact stamp");
+        Write(target + ".old-backup", "installed.txt", "x");                       // a similar name
+        Write(target + ".new-1", FolderSwap.StagingMarker, "x");                    // not a stamp
         Directory.CreateDirectory(target + ".keep");
         Directory.CreateDirectory(target + "2");
         var removed = FolderSwap.CleanLeftovers(target);
-        Check(removed == 3 && Directory.Exists(target + ".keep") && Directory.Exists(target + "2") && Directory.Exists(target), "clean-up: removed 3 leftovers and nothing else");
+        Check(removed == 3 && Directory.Exists(target + ".old-20261001-120000-14") && Directory.Exists(target + ".old-backup") && Directory.Exists(target + ".new-1")
+              && Directory.Exists(target + ".keep") && Directory.Exists(target + "2") && Directory.Exists(target), "clean-up: removed the 3 leftovers that are Setup's and nothing else");
+        foreach (var other in new[] { ".old-20261001-120000-14", ".old-backup", ".new-1", ".keep" }) FolderSwap.DeleteFolder(target + other, TimeSpan.FromSeconds(2));
+        FolderSwap.DeleteFolder(target + "2", TimeSpan.FromSeconds(2));
+
+        // what a launcher folder holds
+        Write(target, "install.json", "{\"installRoot\":\"" + Path.Combine(target, "game").Replace("\\", "\\\\") + "\"}");
+        Check(FolderSwap.InstallRootInside(target)?.EndsWith("game") == true, "an install.json that points inside the launcher's folder is found");
+        Write(target, "install.json", "{\"installRoot\":\"" + (target + "2").Replace("\\", "\\\\") + "\"}");
+        Check(FolderSwap.InstallRootInside(target) == null, "an install.json that points elsewhere (even to a folder with the same start) is not");
+        Write(target, "install.json", "not json at all");
+        Check(FolderSwap.InstallRootInside(target) == null, "an install.json that is not JSON is not a reason to refuse");
+        File.Delete(Path.Combine(target, "install.json"));
+        Write(target, "notes.txt", "a player's file");
+        Directory.CreateDirectory(Path.Combine(target, "game"));
+        var owned = FolderSwap.TopLevelNames(["version.txt", "sub/data.bin"]);
+        var foreign = FolderSwap.ForeignEntries(target, owned);
+        Check(foreign.SequenceEqual(["game", "notes.txt"]), $"foreign entries are the names the payload does not have: {string.Join(", ", foreign)}");
+        Write(target, "sub/data.bin", "x");
+        Write(target, "installed-files.txt", "version.txt\nsub/data.bin\n");
+        var left = FolderSwap.DeleteOwned(target, FolderSwap.ReadManifest(target)!, TimeSpan.FromSeconds(2));
+        Check(left.SequenceEqual(["game", "notes.txt"]) && Directory.Exists(target) && !Directory.Exists(Path.Combine(target, "sub")) && !File.Exists(Path.Combine(target, "version.txt")),
+              "removing the launcher takes only the files Setup unpacked (and the folders then empty); the player's entries and the folder stay");
+        File.Delete(Path.Combine(target, "notes.txt"));
+        Directory.Delete(Path.Combine(target, "game"));
+        Write(target, "version.txt", "2");
+        Write(target, "installed.txt", "version=2");
+
+        // the launcher's clean-up waits while a Setup runs (its mutex exists): the previous folder is for the way back (H1)
+        Write(target + ".old-20261001-120000-21", "installed.txt", "x");
+        bool whileRunning, afterwards;
+        using (new Mutex(true, @"Local\MCLA-Setup"))
+        {
+            Check(SelfUpdate.SetupIsRunning(), "a running Setup is seen (its mutex)");
+            whileRunning = SelfUpdate.CleanUp(target);
+            Check(!whileRunning && Directory.Exists(target + ".old-20261001-120000-21"), "the launcher's clean-up does nothing while a Setup is running");
+        }
+        afterwards = SelfUpdate.CleanUp(target);
+        Check(afterwards && !Directory.Exists(target + ".old-20261001-120000-21"), "... and removes the leftovers once it is not");
+        var downloads = SelfUpdate.DownloadFolder(target);
+        Write(downloads, "MCLA-Setup.exe", "somebody's file");
+        SelfUpdate.CleanUp(target);
+        Check(File.Exists(Path.Combine(downloads, "MCLA-Setup.exe")), "a download folder without Setup's marker is not removed");
+        File.WriteAllText(Path.Combine(downloads, FolderSwap.DownloadMarker), "x");
+        SelfUpdate.CleanUp(target);
+        Check(!Directory.Exists(downloads), "one with the marker is");
+
+        // a link is seen
+        var link = Path.Combine(root, "link");
+        Run("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"", out _);
+        Check(Directory.Exists(link) && FolderSwap.IsLink(link) && !FolderSwap.IsLink(target), "a junction is recognised as a link");
+        Directory.Delete(link);
 
         // processes: a program running from the folder keeps it busy
         var ping = Path.Combine(target, "ping.exe");
@@ -162,6 +254,11 @@ static class Program
             Check(FolderSwap.WaitForProcess(p.Id, TimeSpan.FromSeconds(1)), "processes: waiting for a finished process returns at once");
         }
         Check(FolderSwap.WaitForProcess(int.MaxValue / 2, TimeSpan.FromSeconds(1)), "processes: a process that never existed is not waited for");
+    }
+
+    static Exception? Catch(Action action)
+    {
+        try { action(); return null; } catch (Exception ex) { return ex; }
     }
 
     // ---- the verified download -----------------------------------------------------------------------------------------
@@ -251,7 +348,7 @@ static class Program
             var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true));
             Check(error is UpdateException e && e.Message.Contains("damaged"), "a wrong SHA-256 is refused");
             Check(server.Requests == 1, "a wrong SHA-256 is not retried");
-            Check(Directory.GetFiles(folder).Length == 0, "nothing is left behind after a wrong SHA-256");
+            Check(NothingLeft(folder), "nothing is left behind after a wrong SHA-256");
         }
 
         folder = Dir("download-size");
@@ -260,7 +357,7 @@ static class Program
             var longer = data.Concat(new byte[10]).ToArray();
             server.Handler = (ctx, n) => Serve(ctx, longer);
             var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true));
-            Check(error is UpdateException && server.Requests == 1 && Directory.GetFiles(folder).Length == 0, "a file of another size than the release says is refused at once, nothing left");
+            Check(error is UpdateException && server.Requests == 1 && NothingLeft(folder), "a file of another size than the release says is refused at once, nothing left");
         }
 
         folder = Dir("download-short");
@@ -268,7 +365,7 @@ static class Program
         {
             server.Handler = (ctx, n) => Serve(ctx, data, sendOnly: data.Length / 2);
             var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true, retryDelay: Quick));
-            Check(error != null && server.Requests == 3 && Directory.GetFiles(folder).Length == 0, $"a file cut short is tried 3 times, then refused, nothing left ({error?.GetType().Name})");
+            Check(error != null && server.Requests == 3 && NothingLeft(folder), $"a file cut short is tried 3 times, then refused, nothing left ({error?.GetType().Name})");
         }
 
         folder = Dir("download-retry");
@@ -289,7 +386,7 @@ static class Program
             server.Handler = (ctx, n) => Serve(ctx, data, sendOnly: 100000, stallAfter: true);
             var watch = Stopwatch.StartNew();
             var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, default, allowLoopbackHttp: true, stall: TimeSpan.FromMilliseconds(500), retryDelay: Quick));
-            Check(error != null && server.Requests == 3 && Directory.GetFiles(folder).Length == 0, $"a stalled download is given up after the stall limit, 3 tries, nothing left ({watch.Elapsed.TotalSeconds:N0} s)");
+            Check(error != null && server.Requests == 3 && NothingLeft(folder), $"a stalled download is given up after the stall limit, 3 tries, nothing left ({watch.Elapsed.TotalSeconds:N0} s)");
         }
 
         folder = Dir("download-cancel");
@@ -298,7 +395,7 @@ static class Program
             server.Handler = (ctx, n) => Serve(ctx, data, sendOnly: 100000, stallAfter: true);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
             var error = await Catch(() => SelfUpdate.DownloadAsync(good with { Url = server.Url }, folder, null, cts.Token, allowLoopbackHttp: true));
-            Check(error is OperationCanceledException && Directory.GetFiles(folder).Length == 0, "cancelling stops it and leaves no .part");
+            Check(error is OperationCanceledException && NothingLeft(folder), "cancelling stops it and leaves no .part");
         }
 
         folder = Dir("download-refused");
@@ -320,7 +417,7 @@ static class Program
         wrongData[5] ^= 1;
         File.WriteAllBytes(Path.Combine(local, "wrong.exe"), wrongData);
         folder = Dir("download-copy-bad");
-        Check(await Catch(() => SelfUpdate.CopyVerifiedAsync(Path.Combine(local, "wrong.exe"), good, folder, default)) is UpdateException && Directory.GetFiles(folder).Length == 0, "a copy with the wrong SHA-256 is refused and nothing is left");
+        Check(await Catch(() => SelfUpdate.CopyVerifiedAsync(Path.Combine(local, "wrong.exe"), good, folder, default)) is UpdateException && NothingLeft(folder), "a copy with the wrong SHA-256 is refused and nothing is left");
         Check(await Catch(() => SelfUpdate.CopyVerifiedAsync(Path.Combine(local, "missing.exe"), good, folder, default)) is UpdateException, "a file missing from the local release source is refused");
     }
 
@@ -466,7 +563,7 @@ static class Program
         // (cmd.exe stands in: it writes the file, or just stays up); no file in time, no good
         var app5 = Path.Combine(root, "Programs5", "MCLA");
         var readyFile = Path.Combine(root, "ready.txt");
-        var withReady = $"--silent --dir \"{app5}\" --shortcut-dir \"{Path.Combine(root, "lnk5")}\" --ready-file \"{readyFile}\" --health-timeout 4";
+        var withReady = $"--silent --dir \"{app5}\" --shortcut-dir \"{Path.Combine(root, "lnk5")}\" --ready-file \"{readyFile}\" --health alive:1 --health-timeout 4";
         var writes = Compose(stub, "ready", "5.0.0", "cmd.exe");
         output = Run(writes, $"{withReady} --launch-args \"/c echo ready>%MCLA_READY_FILE% & ping -n 4 127.0.0.1 >nul\"", out code);
         Check(code == 0 && !File.Exists(readyFile) && Read(app5, "version.txt") == "5.0.0", $"a launcher that writes the ready file passes the start check (and the installer removes the file){(code == 0 ? "" : "\n" + output)}");
@@ -484,6 +581,87 @@ static class Program
         Write(app6, "install.json", "{\"installRoot\":\"D:\\\\mine\"}");
         Run(v2, $"--silent --dir \"{app6}\" --no-launch --no-shortcuts --import-pointer \"{pointer}\"", out code);
         Check(code == 0 && Read(app6, "install.json").Contains("mine") && !Read(app6, "install.json").Contains("elsewhere"), "--import-pointer does not replace the pointer the folder has");
+
+        // ---- what the installer may replace or remove (the review's H2, M1, L1, L3) ----------------------------------------------
+        // a folder that has the launcher's program but was not made by Setup (no installed.txt): the unpacked zip next to the player's files
+        var zipFolder = Dir("zip-next-to-files");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "ping.exe"), Path.Combine(zipFolder, "MclaLauncher.exe"));
+        Write(zipFolder, "disc-image-notes.txt", "mine");
+        var before = Directory.GetFiles(zipFolder).Length;
+        Run(v1, $"--silent --dir \"{zipFolder}\" --no-launch --no-shortcuts", out code);
+        var installRefused = code;
+        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{zipFolder}\" --no-launch --no-shortcuts", out code);
+        var updateRefused = code;
+        Run(v1, $"--uninstall --silent --dir \"{zipFolder}\"", out code);
+        Check(installRefused == 1 && updateRefused == 1 && code == 1 && Directory.GetFiles(zipFolder).Length == before && Read(zipFolder, "disc-image-notes.txt") == "mine",
+              "a folder with MclaLauncher.exe and other files but no installed.txt is refused by install, update and uninstall, and left as it was");
+
+        // an install the player put inside the launcher's folder (and anything else the payload does not have) is never deleted
+        var app7 = Path.Combine(root, "Programs7", "MCLA");
+        Run(v1, $"--silent --dir \"{app7}\" --no-launch --no-shortcuts", out code);
+        Check(code == 0 && File.Exists(Path.Combine(app7, "installed-files.txt")) && Read(app7, "installed-files.txt").Contains("version.txt"), "an install writes the list of the files it unpacked (installed-files.txt)");
+        Write(app7, @"game\default.xex", "the player's game");
+        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{app7}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1 && Read(app7, "version.txt") == "1.0.0" && Read(app7, @"game\default.xex") == "the player's game" && !FolderSwap.Leftovers(app7).Any(),
+              "an update of a folder that holds something the setup did not unpack is refused, and nothing is touched");
+        Run(v1, $"--uninstall --silent --dir \"{app7}\"", out code);
+        Check(code == 0 && Read(app7, @"game\default.xex") == "the player's game" && !File.Exists(Path.Combine(app7, "MclaLauncher.exe")) && !File.Exists(Path.Combine(app7, "installed.txt")),
+              "uninstall removes only the files the setup unpacked: the player's game stays, and so does its folder");
+        var app8 = Path.Combine(root, "Programs8", "MCLA");
+        Run(v1, $"--silent --dir \"{app8}\" --no-launch --no-shortcuts", out code);
+        Write(app8, "install.json", "{\"installRoot\":\"" + Path.Combine(app8, "game").Replace("\\", "\\\\") + "\",\"state\":\"ready\"}");
+        Write(app8, @"game\default.xex", "the player's game");
+        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{app8}\" --no-launch --no-shortcuts", out code);
+        var rootRefusedUpdate = code;
+        Run(v1, $"--uninstall --silent --dir \"{app8}\"", out code);
+        Check(rootRefusedUpdate == 1 && code == 1 && Read(app8, @"game\default.xex") == "the player's game" && File.Exists(Path.Combine(app8, "MclaLauncher.exe")),
+              "an update or an uninstall of a folder that holds the install its install.json names is refused, nothing touched");
+
+        // a junction as --dir, a drive's root, the user's own folder, and --update with nothing there
+        var linked = Path.Combine(root, "linked");
+        Run("cmd.exe", $"/c mklink /J \"{linked}\" \"{app7}\"", out _);
+        var linkFilesBefore = Directory.GetFileSystemEntries(app7).Length;
+        Run(v1, $"--silent --dir \"{linked}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1 && Directory.GetFileSystemEntries(app7).Length == linkFilesBefore, "a junction as --dir is refused and what it points at is not touched");
+        if (Directory.Exists(linked)) Directory.Delete(linked);
+        var driveRoot = Path.GetPathRoot(root)!;
+        var rootArgument = driveRoot + @"\"; // two backslashes before the closing quote make one, so the quote is not swallowed
+        Run(v1, $"--silent --dir \"{rootArgument}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1, $"a drive's root ({driveRoot}) is refused");
+        Run(v1, $"--silent --dir \"{Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1, "the user's profile folder is refused");
+        Run(v2, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{Path.Combine(root, "nothing-here")}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1 && !Directory.Exists(Path.Combine(root, "nothing-here")), "--update with no launcher in the folder fails and makes nothing");
+
+        // an update that fails before the folders change leaves the old launcher running (the person had nothing open)
+        var app9 = Path.Combine(root, "Programs9", "MCLA");
+        Run(v1, $"--silent --dir \"{app9}\" --no-launch --no-shortcuts", out code);
+        output = Run(damaged, $"--update --wait-pid {int.MaxValue / 2} --silent --dir \"{app9}\" --no-shortcuts --launch-args \"-n 8 127.0.0.1\"", out code);
+        Thread.Sleep(700);
+        Check(code == 1 && FolderSwap.ProcessesUnder(app9).Count > 0 && Read(app9, "version.txt") == "1.0.0", "a failed update (a damaged installer) starts the old launcher again");
+        WaitFree(app9);
+
+        // a payload that holds more bytes than its header says is refused (the header is not covered by the checksums of the files)
+        var inflated = Path.Combine(Scratch, "MCLA-Setup-inflated.exe");
+        File.Copy(v1, inflated, true);
+        var exeBytes = File.ReadAllBytes(inflated);
+        var at = IndexOf(exeBytes, Encoding.ASCII.GetBytes("\nbytes="));
+        exeBytes[at + 7] = (byte)'1'; // the first digit of the byte count: 2,0xx,xxx becomes 1,0xx,xxx
+        exeBytes[at + 8] = (byte)'0';
+        File.WriteAllBytes(inflated, exeBytes);
+        var app11 = Path.Combine(root, "Programs11", "MCLA");
+        output = Run(inflated, $"--silent --dir \"{app11}\" --no-launch --no-shortcuts", out code);
+        Check(code == 1 && !Directory.Exists(app11) && !Directory.GetDirectories(Path.GetDirectoryName(app11)!, "MCLA.*").Any(), "a payload with more bytes than its header says is refused, and nothing is left");
+
+        // a shortcut file of the name that cannot be read, or whose program is not there, is not replaced either
+        var odd = Dir("odd-lnk");
+        Directory.CreateDirectory(Path.Combine(odd, "start-menu"));
+        File.WriteAllBytes(Path.Combine(odd, "start-menu", "Midnight Club Los Angeles.lnk"), [1, 2, 3, 4]);
+        Directory.CreateDirectory(Path.Combine(odd, "desktop"));
+        MakeLink(Path.Combine(odd, "desktop", "Midnight Club Los Angeles.lnk"), @"C:\mcla-no-such-folder\MclaLauncher.exe");
+        Run(v1, $"--silent --dir \"{Path.Combine(root, "Programs10", "MCLA")}\" --shortcut-dir \"{odd}\" --no-launch", out code);
+        Check(code == 0 && File.ReadAllBytes(Path.Combine(odd, "start-menu", "Midnight Club Los Angeles.lnk")).SequenceEqual(new byte[] { 1, 2, 3, 4 }) && LinkTarget(Path.Combine(odd, "desktop", "Midnight Club Los Angeles.lnk")).Contains("mcla-no-such-folder"),
+              "a shortcut that can't be read, or whose program is gone, is left alone");
 
         // refusals: another program's folder, and a fork checkout
         var foreign = Dir("foreign");
@@ -511,6 +689,16 @@ static class Program
         Run(v1, $"--uninstall --silent --dir \"{foreign}\"", out code);
         Check(code == 1 && Read(foreign, "notes.txt") == "mine", "uninstall refuses a folder that is not the launcher's");
         WaitFree(app);
+    }
+
+    /// Nothing of a download is left in the folder but Setup's marker of it.
+    static bool NothingLeft(string folder) => Directory.GetFiles(folder).All(f => Path.GetFileName(f) == FolderSwap.DownloadMarker);
+
+    static int IndexOf(byte[] data, byte[] pattern)
+    {
+        for (var i = data.Length - pattern.Length; i >= 0; i--)
+            if (data.AsSpan(i, pattern.Length).SequenceEqual(pattern)) return i;
+        throw new InvalidOperationException("pattern not found");
     }
 
     static void WaitFree(string folder)

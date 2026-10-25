@@ -3,7 +3,7 @@
 # newer launcher and holds its MCLA-Setup.exe, and UI Automation clicking the bar's button.
 #
 #   powershell -File bar-e2e.ps1 -Stub <the bare MCLA-Setup.exe> -Launcher <a published launcher folder>
-#              -ReleaseJson <a release.json whose tag is in the git repository> -GitUrl <that repository> [-Way InPlace|Move] [-Keep]
+#              -ReleaseJson <a release.json whose tag is in the git repository> -GitUrl <that repository> [-Way InPlace|Move|Other] [-Keep]
 #              [-NewSetup <a real MCLA-Setup.exe> -NewSourceCommit <its launcher's source commit> -NewVersion <its version>]
 #
 # -Launcher is what scripts\ci\publish-launcher.ps1 made: the "old" and the "new" launcher are copies of it that differ in
@@ -22,7 +22,7 @@ param(
     [Parameter(Mandatory)][string]$Launcher,
     [Parameter(Mandatory)][string]$ReleaseJson,
     [Parameter(Mandatory)][string]$GitUrl,
-    [ValidateSet('InPlace', 'Move')][string]$Way = 'InPlace',
+    [ValidateSet('InPlace', 'Move', 'Other')][string]$Way = 'InPlace',
     [string]$NewSetup = '',
     [string]$NewSourceCommit = '',
     [string]$NewVersion = '0.2.0',
@@ -123,14 +123,26 @@ $env:MCLA_SETUP_DIR = $programs
 $env:MCLA_SETUP_SHORTCUT_DIR = $lnk
 
 "way: $Way; old launcher in $oldFolder; release $($release.tag), its launcher is $($newCommit.Substring(0, 8))"
+if ($Way -eq 'Other') {
+    # A zip launcher while Setup's folder already holds a launcher of its own: the bar offers its folder, never a move.
+    $code = Run $setupOld @('--silent', '--no-launch', '--dir', "`"$programs`"", '--shortcut-dir', "`"$lnk`"")
+    if ($code -ne 0) { throw "installing the launcher in Setup's folder failed ($code)" }
+}
 $oldProcess = Start-Process -FilePath (Join-Path $oldFolder 'MclaLauncher.exe') -PassThru
 try {
     $bar = Wait-Ui $oldProcess.Id '*A newer launcher*' 90
     Check ($null -ne $bar) $(if ($bar) { "the bar is shown: $($bar.Current.Name)" } else { 'the update bar is shown' })
-    $wantButton = if ($Way -eq 'InPlace') { 'Update the launcher' } else { 'Move to the new launcher' }
+    $wantButton = switch ($Way) { 'InPlace' { 'Update the launcher' } 'Move' { 'Move to the new launcher' } default { 'Open its folder' } }
     $button = Wait-Ui $oldProcess.Id $wantButton 10
     Check ($null -ne $button) "the button says '$wantButton'"
     if (-not $button) { throw 'no button to click' }
+    if ($Way -eq 'Other') {
+        # Not clicked (it opens a folder window). Nothing may have been started or changed.
+        Check ($bar.Current.Name -like '*already in*') 'the bar says a launcher installed by the setup is already there'
+        Start-Sleep -Seconds 3
+        Check ((-not $oldProcess.HasExited) -and (-not (Get-Process 'MCLA-Setup' -ErrorAction SilentlyContinue)) -and ((Get-Content -LiteralPath (Join-Path $programs 'source-commit.txt') -Raw).Trim() -eq $oldCommit)) 'no installer was started and the launcher in Setup''s folder is as it was'
+        throw 'done'
+    }
     $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     "clicked at $(Get-Date -Format T)"
 
@@ -169,6 +181,7 @@ try {
         Check (-not (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'MCLA.download'))) 'nothing was downloaded into the temp folder'
     }
 }
+catch { if ($_.Exception.Message -ne 'done') { $failures++; "  FAIL $($_.Exception.Message)" } }
 finally {
     foreach ($folder in @($oldFolder, $programs)) {
         foreach ($proc in Launchers $folder) { $null = $proc.CloseMainWindow(); $proc.WaitForExit(8000) | Out-Null }
