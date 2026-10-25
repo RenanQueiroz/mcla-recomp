@@ -48,6 +48,7 @@ git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
+git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -1419,6 +1420,19 @@ With frame generation on (FSR 3.1; 3x uncapped, and the Half display cap, 116 re
 |---|---|---|
 | `"a+"` streams rewound | `src/core/filesystem_posix.cpp` | Linux, the PS5 (and macOS) |
 | The writer thread flushes before it waits | `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | D3D12, Vulkan (all platforms) |
+
+## rexglue-upstream-host-fp-state.patch
+
+**Why.** The host threads that run guest code (the audio worker, deferred procedure calls) never called `FPSCRRegister::InitHost()`: only guest threads (`XThread`) do. Their context starts with `fpscr.csr == 0`, and on x86-64 an MXCSR with the exception mask bits clear means every floating-point exception is *unmasked*. Recompiled guest code writes the control word through `storeFromGuest`, `enableFlushMode` and the like, which passed the word on as it was, so the first inexact result in a vector conversion (`vcfsx`) in the audio worker raised `SIGFPE` on Linux (Kameo, upstream issue #381: 4 of 4 runs crashed within 90 seconds) and `STATUS_FLOAT_INEXACT_RESULT` on Windows (the second pull request). This game has not been seen to do it; the patch is insurance against a crash class whose cause is the same in every title.
+
+**What it changes.** `XHostThread::Execute` calls `fpscr.InitHost()` before the thread's function, as `XThread` does; and `FPSCRRegister::setcsr` runs the value through `InitHostExceptions` (the per-architecture polarity: x86 sets the mask bits, ARM clears the enable bits) before writing it, so no later write can unmask them again. The cost is an OR on each control word write. The pull requests' unit tests are not taken.
+
+**From upstream.** Two pull requests to rexglue-sdk, both open when this was taken (2026-10-25) and not merged: [#382](https://github.com/rexglue/rexglue-sdk/pull/382), "fix(ppc): keep host FP exceptions masked in FPSCRRegister::setcsr", by Azkali (The Great Wizard Azkali), and [#459](https://github.com/rexglue/rexglue-sdk/pull/459), "Initialize host FPSCR state before XHostThread callbacks", by WillianPepal (Willian Palmeira). The code is theirs, taken as it is; not this fork's work. Licence: BSD 3-Clause, the SDK's own (`LICENSE` of rexglue-sdk, repeated in `THIRD-PARTY-NOTICES.md`).
+
+| Change | Files | Affects |
+|---|---|---|
+| `setcsr` keeps the exceptions masked | `include/rex/ppc/context.h` | all platforms (x86-64 and ARM64 hosts) |
+| Host threads initialise the host FP state | `src/system/xthread.cpp` | all platforms |
 
 ## rexglue-mingw.patch
 
