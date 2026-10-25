@@ -12,16 +12,22 @@ namespace MclaLauncher.Setup;
 ///   downloads\      what is being downloaded (the SDK bundle, kept until the build has used it)
 ///   game-incoming\  the game while it is copied, moved into mcla-recomp\game when complete
 ///   logs\           the setup's logs
+///   kept\           the player's settings of an older checkout, while a newer release replaces it (put back after the build)
+///   install.lock    held open while a setup runs here
 ///   mcla-recomp\    a git checkout of the fork at the release tag; the build's scripts, game\, generated\, out\
 sealed record InstallLayout(string Root)
 {
     public const string RepoFolder = "mcla-recomp";
     public const string RecordName = "install.json";
+    public const string KeptFolder = "kept";
+    /// What the setup makes directly in the install folder (what a removal may touch); recorded in install.json.
+    public static readonly string[] OwnedNames = [RepoFolder, "tools", "downloads", "game-incoming", KeptFolder, "logs", InstallLock.FileName, RecordName];
 
     public string Repo => Path.Combine(Root, RepoFolder);
     public string Tools => Path.Combine(Root, "tools");
     public string Downloads => Path.Combine(Root, "downloads");
     public string Staging => Path.Combine(Root, "game-incoming");
+    public string Kept => Path.Combine(Root, KeptFolder);
     public string LogsDir => Path.Combine(Root, "logs");
     public string RecordFile => Path.Combine(Root, RecordName);
     public string GameDir => Path.Combine(Repo, "game");
@@ -68,8 +74,10 @@ sealed record InstallRecord
     public string? GameDataRoot { get; init; }
     public DateTime CreatedUtc { get; init; } = DateTime.UtcNow;
     public DateTime? FinishedUtc { get; init; }
-    /// The steps that are done, by name (GameCopy, Tools, Source, Build, Shaders).
+    /// The steps that are done, by name (Game, Tools, Source, Build, Shaders).
     public List<string> StepsDone { get; init; } = [];
+    /// The names in the install folder that this setup made: all a removal may delete there, nothing else.
+    public List<string> Owned { get; init; } = [.. InstallLayout.OwnedNames];
 
     public bool Ready => State == "ready";
 
@@ -169,6 +177,10 @@ static class PathBudget
         if (!Path.IsPathRooted(path.Trim()) || full.StartsWith(@"\\", StringComparison.Ordinal))
             return "Choose a folder on a drive of this PC (a network location won't do: the build writes thousands of small files).";
         var root = Path.GetPathRoot(full)!;
+        if (UnsafeCharacter(full) is { } bad)
+            return $"The path has a character the build can't take ({bad}): its tools read it as a plain ANSI string, and Windows' command line gives some characters a meaning of their own. "
+                 + "Use only letters without accents, digits, spaces, dots, dashes and underscores in the whole path, for example C:\\MCLA.";
+        if (DriveProblem(root) is { } drive) return drive;
         if (string.Equals(full.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
             return "Choose a folder, not the whole drive.";
         if (full.TrimEnd('\\').Length > MaxRootLength)
@@ -184,6 +196,7 @@ static class PathBudget
         {
             if (InstallRecord.Load(Path.Combine(full, InstallLayout.RecordName)) is { InstallRoot.Length: > 0 })
             {
+                if (InstallLock.IsHeld(full)) return "A setup is running in that folder right now (in another window of this program). Wait for it to finish, or choose another folder.";
                 resumes = true;
                 return null;
             }
@@ -193,6 +206,37 @@ static class PathBudget
             if (!empty)
                 return "That folder already has other things in it. Choose a new or empty folder: the setup puts its files there and nothing else.";
         }
+        return null;
+    }
+
+    /// The first character of the path (after the drive) that the build can't take, shown for the message; null when all are fine.
+    /// Allowed: A-Z a-z 0-9, space, dot, dash, underscore and the separators. The SDK's code generator opens its files by
+    /// a path that is not Unicode (an accented folder fails with "File could not be opened for reading"), and the commands
+    /// CMake and Ninja run through cmd.exe break at & ^ % ! and the like; a semicolon would split a PATH entry.
+    public static string? UnsafeCharacter(string path)
+    {
+        var full = Path.GetFullPath(path.Trim());
+        var rest = Path.GetPathRoot(full) is { } r ? full[r.Length..] : full;
+        foreach (var c in rest)
+            if (!(c is >= 'A' and <= 'Z' || c is >= 'a' and <= 'z' || c is >= '0' and <= '9' || c is ' ' or '.' or '_' or '-' or '\\'))
+                return c < ' ' ? $"U+{(int)c:X4}" : c.ToString();
+        return null;
+    }
+
+    /// The build and git need a local NTFS (or ReFS) drive: a mapped network drive is as slow as a share, and exFAT and
+    /// FAT32 have no owners, which Git for Windows refuses ("dubious ownership"). Null when the drive is fine or can't be told.
+    static string? DriveProblem(string root)
+    {
+        try
+        {
+            var drive = new DriveInfo(root);
+            if (drive.DriveType == DriveType.Network)
+                return "Choose a folder on a drive of this PC (a mapped network drive won't do: the build writes thousands of small files).";
+            if (!drive.IsReady) return $"The drive {root.TrimEnd('\\')} isn't ready.";
+            if (!drive.DriveFormat.Equals("NTFS", StringComparison.OrdinalIgnoreCase) && !drive.DriveFormat.Equals("ReFS", StringComparison.OrdinalIgnoreCase))
+                return $"The drive {root.TrimEnd('\\')} is formatted as {drive.DriveFormat}. The build needs an NTFS drive (Git refuses folders on other formats). Choose a folder on another drive, for example C:\\MCLA.";
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException) { }
         return null;
     }
 
@@ -234,4 +278,30 @@ static class PathBudget
     /// What an install needs besides the disc image: the game (copied), the tools unpacked, the checkout, the
     /// SDK, the build and the shader storage, with room to spare while the downloads and the unpacked tools exist.
     public static long RequiredBytes(long gameBytes, bool copiesGame) => (copiesGame ? gameBytes : 0) + 3L * (1L << 30);
+
+    /// What a setup in a folder that already holds part of it still needs: the game's bytes not yet in game-incoming\
+    /// or the checkout's game\ (when it is copied), 1.5 GB for the tools until they are unpacked, and 1.5 GB for the
+    /// checkout, the build and the shaders until the game is built. A fresh folder comes to RequiredBytes.
+    public static long RemainingBytes(InstallLayout layout, InstallRecord record, long gameBytes, bool copiesGame, bool toolsDone, bool built)
+    {
+        const long Gb15 = 3L << 29;
+        long game = 0;
+        if (copiesGame && !record.StepsDone.Contains("Game"))
+            game = Math.Max(0, gameBytes - Math.Min(gameBytes, DirectoryBytes(layout.Staging) + DirectoryBytes(layout.GameDir)));
+        return game + (toolsDone ? 0 : Gb15) + (built ? 0 : Gb15);
+    }
+
+    /// The size of the files in a folder, not following links (0 when it isn't there).
+    public static long DirectoryBytes(string folder)
+    {
+        long sum = 0;
+        try
+        {
+            if (!Directory.Exists(folder)) return 0;
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+            foreach (var file in new DirectoryInfo(folder).EnumerateFiles("*", options)) sum += file.Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return sum;
+    }
 }

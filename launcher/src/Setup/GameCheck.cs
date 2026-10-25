@@ -8,7 +8,12 @@ using System.Security.Cryptography;
 
 namespace MclaLauncher.Setup;
 
-sealed record GameFileInfo(string Path, long Size, string Sha256);
+sealed record GameFileInfo(string Path, long Size, string Sha256)
+{
+    /// Filler of the disc's file system that an extraction may leave out; the build and the game never read it.
+    /// Present, it must be the right one; absent, nothing is missing.
+    public bool Optional => string.Equals(Path, "root_directory_padding.pad", StringComparison.OrdinalIgnoreCase);
+}
 
 sealed record GameFingerprint(string Title, string TitleId, string XexVersion, IReadOnlyList<GameFileInfo> Files)
 {
@@ -34,7 +39,7 @@ sealed record XexInfo(uint TitleId, uint Version)
             uint key = BinaryPrimitives.ReadUInt32BigEndian(head[(int)(0x18 + i * 8)..]);
             uint value = BinaryPrimitives.ReadUInt32BigEndian(head[(int)(0x1C + i * 8)..]);
             if (key != 0x00040006) continue;
-            if (value + 16 > head.Length) return null;
+            if ((ulong)value + 16 > (ulong)head.Length) return null;
             return new XexInfo(BinaryPrimitives.ReadUInt32BigEndian(head[(int)(value + 12)..]),
                                BinaryPrimitives.ReadUInt32BigEndian(head[(int)(value + 4)..]));
         }
@@ -89,7 +94,9 @@ sealed class FolderSource : GameSource
         // The game's files all live in the folder itself (a disc has no folders of its own but the console's
         // update); the folder's subfolders are not read, so that a wrong choice such as a whole drive costs
         // nothing, and files that are not the game's are left alone.
-        var options = new EnumerationOptions { RecurseSubdirectories = false, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        // Files that are reparse points (OneDrive's online-only files, links, de-duplicated files) are read like any
+        // other; only a folder link is not followed (and nothing here recurses).
+        var options = new EnumerationOptions { RecurseSubdirectories = false, IgnoreInaccessible = true, AttributesToSkip = 0 };
         foreach (var file in new DirectoryInfo(root).EnumerateFiles("*", options))
         {
             var relative = System.IO.Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
@@ -116,10 +123,10 @@ enum GameVerdict
     DamagedDump,
 }
 
-sealed record FileCheck(string Path, long Expected, long? Found)
+sealed record FileCheck(string Path, long Expected, long? Found, bool Optional = false)
 {
     public bool Present => Found != null;
-    public bool Ok => Found == Expected;
+    public bool Ok => Found == Expected || (Found == null && Optional);
 }
 
 sealed record GameCheckResult(GameVerdict Verdict, string Headline, string Detail, IReadOnlyList<FileCheck> Files, string? TitleId = null, string? XexVersion = null)
@@ -161,7 +168,7 @@ static class GameChecker
     public static GameCheckResult Inspect(GameSource source, GameFingerprint expected)
     {
         var byName = source.Files.GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-        var checks = expected.Files.Select(f => new FileCheck(f.Path, f.Size, byName.TryGetValue(f.Path, out var found) ? found.Size : null)).ToList();
+        var checks = expected.Files.Select(f => new FileCheck(f.Path, f.Size, byName.TryGetValue(f.Path, out var found) ? found.Size : null, f.Optional)).ToList();
 
         if (!byName.TryGetValue(GameFingerprint.XexName, out var xexFile))
         {
@@ -225,7 +232,7 @@ static class GameChecker
                 checks, info.TitleIdText, info.VersionText);
         }
 
-        var missing = checks.Where(c => !c.Present).Select(c => c.Path).ToList();
+        var missing = checks.Where(c => !c.Present && !c.Optional).Select(c => c.Path).ToList();
         var wrongSize = checks.Where(c => c.Present && !c.Ok).Select(c => c.Path).ToList();
         if (missing.Count > 0 || wrongSize.Count > 0)
         {
@@ -238,7 +245,7 @@ static class GameChecker
         }
 
         return new GameCheckResult(GameVerdict.Ok, expected.Title,
-            $"All {expected.Files.Count} files are there ({FormatSize(expected.TotalSize)}). Each one is checked again while it is copied.",
+            $"All {checks.Count(c => c.Present)} files are there ({FormatSize(checks.Where(c => c.Present).Sum(c => c.Expected))}). Each one is checked again while it is copied.",
             checks, info.TitleIdText, info.VersionText);
     }
 

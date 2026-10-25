@@ -22,16 +22,25 @@ enum RunState { Idle, Running, Failed, Cancelled, Done }
 sealed class WizardApp : Component
 {
     const string Mono = "Cascadia Mono, Consolas";
-    static readonly string DefaultFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCLA");
+    /// Your own space (%LOCALAPPDATA%\MCLA), unless that name has a character the build can't take (an accent in the
+    /// user's name, say): then C:\MCLA (the system drive's root).
+    static readonly string DefaultFolder = ChooseDefaultFolder();
+
+    static string ChooseDefaultFolder()
+    {
+        var own = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCLA");
+        if (PathBudget.UnsafeCharacter(own) == null && own.Length <= PathBudget.MaxRootLength) return own;
+        return Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "MCLA");
+    }
 
     public override Element Render()
     {
         var dev = DevOptions.Current;
         var earlier = UseMemo(() => Paths.InstallRoot is { } root ? InstallRecord.Load(Path.Combine(root, InstallLayout.RecordName)) : null, Array.Empty<object>());
-        var (page, setPage) = UseState(WizardPage.Welcome);
+        var (page, setPage) = UseState(WizardPage.Welcome, threadSafe: true);
         var (installDir, setInstallDir) = UseState(dev.InstallDir ?? earlier?.InstallRoot ?? DefaultFolder);
-        var (gamePath, setGamePath) = UseState<string?>(dev.GamePath ?? earlier?.GameSource);
-        var (inPlace, setInPlace) = UseState(dev.InPlace || earlier?.GameMode == "in-place");
+        var (gamePath, setGamePath) = UseState<string?>(dev.GamePath ?? earlier?.GameSource, threadSafe: true);
+        var (inPlace, setInPlace) = UseState(dev.InPlace || earlier?.GameMode == "in-place", threadSafe: true);
         var (release, setRelease) = UseState<ReleaseInfo?>(null, threadSafe: true);
         var (releaseSource, setReleaseSource) = UseState<ReleaseSource?>(null, threadSafe: true);
         var (releaseError, setReleaseError) = UseState<string?>(null, threadSafe: true);
@@ -46,6 +55,16 @@ sealed class WizardApp : Component
         var ctsRef = UseRef<CancellationTokenSource?>(null);
         var exitingRef = UseRef(false);
         var autoRef = UseRef(dev.Auto);
+        // The game of an earlier setup of the chosen folder, found there: the disc image is not asked for again.
+        var adoptedRef = UseRef<AdoptedGame?>(null);
+
+        long needed = release?.Game is { } g ? PathBudget.RequiredBytes(g.Files.Sum(f => f.Size), !inPlace) : 0;
+        // Only the first page looks at the folder (it reads install.json, which the setup rewrites as it goes).
+        bool resumes = false;
+        string? folderProblem = page == WizardPage.Welcome ? PathBudget.Problem(installDir, out resumes) : null;
+        string? folderWarning = folderProblem == null && page == WizardPage.Welcome ? PathBudget.Warning(installDir) : null;
+        long free = page == WizardPage.Welcome ? PathBudget.FreeBytes(installDir) : 0;
+        bool enoughRoom = resumes || free >= needed;
 
         // ---- the release: GitHub's latest, or the development override ------------------------------
         async Task LoadReleaseAsync()
@@ -73,15 +92,35 @@ sealed class WizardApp : Component
         // ---- the game ----------------------------------------------------------------------------------
         void StartCheck(string path)
         {
+            adoptedRef.Current = null;
             setGamePath(path);
             setCheck(null);
             setChecking(true);
             setPage(WizardPage.Checking);
             var fingerprint = release!.Game!.ToFingerprint();
+            var installRoot = Path.GetFullPath(string.IsNullOrWhiteSpace(installDir) ? DefaultFolder : installDir.Trim());
             _ = Task.Run(() =>
             {
-                var result = GameChecker.Inspect(path, fingerprint, out var source);
-                source?.Dispose();
+                GameCheckResult result;
+                try
+                {
+                    // The install folder and the game's folder must not hold one another: the setup writes (and an
+                    // uninstall deletes) in the first, and only reads the second.
+                    if (PathBudget.IsInside(path, installRoot) || (Directory.Exists(path) && PathBudget.IsInside(installRoot, path)))
+                    {
+                        result = new GameCheckResult(GameVerdict.NotAGame, "The game and the install can't be in each other's folders",
+                            "The install folder is made for the setup's own files, and your game is only read. Choose a game outside the install folder, or another install folder.", []);
+                    }
+                    else
+                    {
+                        result = GameChecker.Inspect(path, fingerprint, out var source);
+                        source?.Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result = new GameCheckResult(GameVerdict.NotAGame, "This isn't a Midnight Club: Los Angeles disc or folder", $"That can't be read: {ex.Message}", []);
+                }
                 setCheck(result);
                 setChecking(false);
             });
@@ -130,10 +169,13 @@ sealed class WizardApp : Component
         // ---- the setup ---------------------------------------------------------------------------------
         void StartSetup()
         {
-            if (release == null || releaseSource == null || gamePath == null || runState == RunState.Running) return;
+            var adopted = adoptedRef.Current;
+            var game = adopted?.Path ?? gamePath;
+            if (release == null || releaseSource == null || game == null || runState == RunState.Running) return;
             var root = Path.GetFullPath(installDir.Trim());
+            var keepInPlace = adopted?.InPlace ?? (inPlace && check?.Ok == true && Directory.Exists(game));
             var engine = new SetupEngine(new SetupContext(new InstallLayout(root), releaseSource, release,
-                new SetupChoices(root, gamePath, inPlace && check?.Ok == true && Directory.Exists(gamePath), dev.GameArguments),
+                new SetupChoices(root, game, keepInPlace, dev.GameArguments),
                 AppContext.BaseDirectory));
             engine.Changed += () => bump(t => t + 1);
             engineRef.Current = engine;
@@ -153,6 +195,26 @@ sealed class WizardApp : Component
                 catch (OperationCanceledException) { setRunState(RunState.Cancelled); }
                 catch (Exception) { setRunState(RunState.Failed); }
                 bump(t => t + 1);
+            });
+        }
+
+        // From the first page: a folder that holds a setup with its game goes straight on (the disc image is not
+        // asked for again); anything else goes on to the game.
+        void NextFromWelcome()
+        {
+            if (release?.Game == null) return;
+            var layout = new InstallLayout(Path.GetFullPath(installDir.Trim()));
+            var fingerprint = release.Game.ToFingerprint();
+            if (!resumes) { adoptedRef.Current = null; setPage(WizardPage.PickGame); return; }
+            // Looks at the folder's game (reads default.xex) off the UI thread.
+            _ = Task.Run(() =>
+            {
+                var adopted = SetupEngine.FindInstalledGame(layout, fingerprint);
+                adoptedRef.Current = adopted;
+                if (adopted == null) { setPage(WizardPage.PickGame); return; }
+                setGamePath(adopted.Path);
+                setInPlace(adopted.InPlace);
+                StartSetup();
             });
         }
 
@@ -240,7 +302,7 @@ sealed class WizardApp : Component
             if (PathBudget.Problem(installDir, out _) != null) return;
             autoRef.Current = false;
             // Without a game given it stops at the page where one is chosen.
-            if (dev.GamePath == null) AutoStep(() => setPage(WizardPage.PickGame));
+            if (dev.GamePath == null) AutoStep(NextFromWelcome);
             else AutoStep(() => StartCheck(dev.GamePath));
         }, release);
         UseEffect(() =>
@@ -293,20 +355,21 @@ sealed class WizardApp : Component
         }, Array.Empty<object>());
 
         // ---- layout ------------------------------------------------------------------------------------
-        long needed = release?.Game is { } g ? PathBudget.RequiredBytes(g.Files.Sum(f => f.Size), !inPlace) : 0;
-        // Only the first page looks at the folder (it reads install.json, which the setup rewrites as it goes).
-        bool resumes = false;
-        string? folderProblem = page == WizardPage.Welcome ? PathBudget.Problem(installDir, out resumes) : null;
-        string? folderWarning = folderProblem == null && page == WizardPage.Welcome ? PathBudget.Warning(installDir) : null;
-        long free = page == WizardPage.Welcome ? PathBudget.FreeBytes(installDir) : 0;
-        bool enoughRoom = resumes || free >= needed;
-
         static Element Info(string title, string? message, InfoBarSeverity severity) =>
             (InfoBar(title, message) with { IsOpen = true, IsClosable = false }).Severity(severity);
 
         Element DevBanner() => dev.Any
-            ? Info("Development options are in use", dev.Banner(), InfoBarSeverity.Warning)
+            ? Info("Development options are in use", dev.Banner(), InfoBarSeverity.Warning).Margin(0, 0, 0, 12)
             : Empty();
+
+        string ResumeText(InstallLayout layout)
+        {
+            var earlierRecord = InstallRecord.Load(layout.RecordFile);
+            if (release != null && earlierRecord?.ReleaseCommit != null && earlierRecord.ReleaseCommit != release.Commit)
+                return $"This folder was set up from release {earlierRecord.ReleaseTag}. Going on replaces it with {release.Tag}: the game is built again (a few minutes). "
+                     + "Your game settings, the launcher's settings, your saves and the shader cache are kept, and your game is not asked for again.";
+            return "It continues where it stopped; what was done is kept, and a game that is already in it is not asked for again.";
+        }
 
         Element Welcome()
         {
@@ -328,13 +391,12 @@ sealed class WizardApp : Component
                         .Foreground(enoughRoom ? Theme.SecondaryText : Theme.Ref("SystemFillColorCriticalBrush"))),
                 folderProblem != null ? Info("This folder won't do", folderProblem, InfoBarSeverity.Error) : Empty(),
                 folderWarning != null ? Info("A better folder exists", folderWarning, InfoBarSeverity.Warning) : Empty(),
-                resumes ? Info("An earlier setup is in this folder", "It continues where it stopped; what was done is kept.", InfoBarSeverity.Informational) : Empty(),
+                resumes ? Info("An earlier setup is in this folder", ResumeText(layout), InfoBarSeverity.Informational) : Empty(),
                 !enoughRoom ? Info("Not enough room", $"There is {GameChecker.FormatSize(free)} free on that drive. Free some space or choose another drive.", InfoBarSeverity.Error) : Empty(),
                 releaseError != null
                     ? (InfoBar("Couldn't find the latest release", releaseError) with { IsOpen = true, IsClosable = false, ActionButtonContent = "Try again", OnActionButtonClick = () => _ = LoadReleaseAsync() }).Severity(InfoBarSeverity.Error)
                     : release == null ? HStack(8, ProgressRing().Width(20).Height(20), TextBlock("Looking up the latest release…").Foreground(Theme.SecondaryText))
-                    : TextBlock($"Release {release.Tag}" + (releaseSource?.IsOverride == true ? "  (from a local release source)" : "")).Foreground(Theme.SecondaryText),
-                DevBanner());
+                    : TextBlock($"Release {release.Tag}" + (releaseSource?.IsOverride == true ? "  (from a local release source)" : "")).Foreground(Theme.SecondaryText));
         }
 
         Element GameZone() =>
@@ -355,22 +417,21 @@ sealed class WizardApp : Component
                 TextBlock("Choose the .iso of your Midnight Club: Los Angeles Complete Edition disc, or the folder its files were extracted into (the one that has default.xex in it). "
                           + "Nothing is changed in your copy: the setup reads it and copies it into the install.").TextWrapping(),
                 GameZone(),
-                gamePath != null ? TextBlock($"Chosen: {gamePath}").Foreground(Theme.SecondaryText).IsTextSelectionEnabled() : Empty(),
-                DevBanner());
+                gamePath != null ? TextBlock($"Chosen: {gamePath}").Foreground(Theme.SecondaryText).IsTextSelectionEnabled() : Empty());
 
         Element Checking()
         {
             if (checking || check == null)
                 return VStack(14, Title("Checking your game"),
-                    HStack(10, ProgressRing().Width(24).Height(24), TextBlock($"Reading {gamePath}…")), DevBanner());
+                    HStack(10, ProgressRing().Width(24).Height(24), TextBlock($"Reading {gamePath}…")));
             var result = check;
             var folder = gamePath != null && Directory.Exists(gamePath);
             return VStack(14,
                 Title("Checking your game"),
                 Info(result.Headline, result.Detail, result.Ok ? InfoBarSeverity.Success : InfoBarSeverity.Error),
                 result.Files.Count > 0
-                    ? Expander(result.Ok ? "The 13 files" : "The files", VStack(2, result.Files.Select(f =>
-                        TextBlock($"{(f.Ok ? "✓" : "✕")}  {f.Path}   {(f.Present ? GameChecker.FormatSize(f.Found!.Value) : "missing")}").FontFamily(Mono).FontSize(12)
+                    ? Expander(result.Ok ? $"The {result.Files.Count(f => f.Present)} files" : "The files", VStack(2, result.Files.Select(f =>
+                        TextBlock($"{(f.Ok ? "✓" : "✕")}  {f.Path}   {(f.Present ? GameChecker.FormatSize(f.Found!.Value) : f.Ok ? "not needed" : "missing")}").FontFamily(Mono).FontSize(12)
                             .Foreground(f.Ok ? Theme.PrimaryText : Theme.Ref("SystemFillColorCriticalBrush")).WithKey(f.Path)).ToArray()), isExpanded: !result.Ok)
                         .HAlign(HorizontalAlignment.Stretch)
                     : Empty(),
@@ -379,8 +440,7 @@ sealed class WizardApp : Component
                         CheckBox(inPlace, setInPlace, "Use the game where it is"),
                         TextBlock("Nothing is copied: the game stays in that folder (it has to stay there), and the game is told where it is. Only default.xex is copied, for the build.")
                             .Foreground(Theme.SecondaryText).TextWrapping())
-                    : Empty(),
-                DevBanner());
+                    : Empty());
         }
 
         Element StepRow(StepStatus step)
@@ -446,8 +506,7 @@ sealed class WizardApp : Component
                 notice != null ? Info("", notice, InfoBarSeverity.Informational) : Empty(),
                 VStack(10, steps.Select(StepRow).ToArray()),
                 Expander("Details", ScrollViewer(TextBlock(DetailsText()).FontFamily(Mono).FontSize(11).IsTextSelectionEnabled().TextWrapping()).MaxHeight(220),
-                         isExpanded: detailsOpen || runState == RunState.Failed, onIsExpandedChanged: setDetailsOpen).HAlign(HorizontalAlignment.Stretch),
-                DevBanner());
+                         isExpanded: detailsOpen || runState == RunState.Failed, onIsExpandedChanged: setDetailsOpen).HAlign(HorizontalAlignment.Stretch));
         }
 
         Element ReadyPage() =>
@@ -455,7 +514,11 @@ sealed class WizardApp : Component
                 Title("Your game is ready"),
                 TextBlock("Midnight Club: Los Angeles is built on this PC. The launcher has Play and the game's settings.").TextWrapping(),
                 Button(HStack(8, Icon(Symbol.Play), TextBlock("Open the launcher")), OpenLauncher).AccentButton().AutomationName("Open the launcher"),
-                DevBanner());
+                engineRef.Current?.PointerSaved == false
+                    ? Info("The launcher can't remember this install",
+                           "The folder this program is in can't be written to, so it can't leave a note of where the install is. The install is fine. Next time, start this program, "
+                           + "choose the same install folder, and it opens the launcher straight away; or keep the program in a folder you can write to.", InfoBarSeverity.Warning)
+                    : Empty());
 
         Element Footer()
         {
@@ -463,7 +526,7 @@ sealed class WizardApp : Component
             switch (page)
             {
                 case WizardPage.Welcome:
-                    buttons.Add(Button("Next", () => setPage(WizardPage.PickGame)).AccentButton()
+                    buttons.Add(Button("Next", NextFromWelcome).AccentButton()
                         .IsEnabled(release != null && folderProblem == null && enoughRoom));
                     break;
                 case WizardPage.PickGame:
@@ -473,7 +536,7 @@ sealed class WizardApp : Component
                 case WizardPage.Checking:
                     buttons.Add(Button(check?.Ok == true ? "Back" : "Choose another", () => setPage(WizardPage.PickGame)));
                     if (check?.Ok == true)
-                        buttons.Add(Button("Start", StartSetup).AccentButton());
+                        buttons.Add(Button("Start", () => StartSetup()).AccentButton());
                     break;
                 case WizardPage.Setup:
                     if (runState == RunState.Running) buttons.Add(Button("Cancel", CancelSetup));
@@ -481,8 +544,8 @@ sealed class WizardApp : Component
                     {
                         if (runState == RunState.Failed) buttons.Add(Button("Copy the log", CopyLog));
                         if (runState == RunState.Failed) buttons.Add(Button("Report it on GitHub", () => Open(Paths.IssuesUrl)));
-                        buttons.Add(Button("Back", () => setPage(WizardPage.Checking)));
-                        buttons.Add(Button("Try again", StartSetup).AccentButton());
+                        buttons.Add(Button("Back", () => setPage(check != null ? WizardPage.Checking : WizardPage.Welcome)));
+                        buttons.Add(Button("Try again", () => StartSetup()).AccentButton());
                     }
                     break;
             }
@@ -517,11 +580,13 @@ sealed class WizardApp : Component
             },
         };
 
+        // The development banner is above the pages, so that it is never below the fold of a small window.
         var root = Grid(
             columns: [GridSize.Star()],
-            rows: [GridSize.Star(), GridSize.Auto],
-            (ScrollViewer(body.Padding(0, 0, 12, 0)) with { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }).Grid(row: 0),
-            Footer().Grid(row: 1),
+            rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            DevBanner().Grid(row: 0),
+            (ScrollViewer(body.Padding(0, 0, 12, 0)) with { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }).Grid(row: 1),
+            Footer().Grid(row: 2),
             exitDialog
         ).Padding(24);
         return dev.ShotsDir != null ? root.Background(Theme.Ref("SolidBackgroundFillColorBaseBrush")) : root;

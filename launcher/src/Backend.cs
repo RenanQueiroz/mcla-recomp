@@ -42,6 +42,10 @@ static class Paths
     public const string UpstreamUrl = "https://github.com/holdmysocks/mcla-recomp";
     /// MinGit's cmd folder in an install made by the wizard (git.exe is not on that PC's PATH); else null.
     public static readonly string? GitDir;
+    /// What to start for "git": MinGit's git.exe from the install (Installed mode), else the first git.exe on this
+    /// process's PATH (CreateProcess looks a bare name up in the PATH of the process that starts it, not in the
+    /// environment it gives the child), else Git for Windows' usual place, else just "git".
+    public static readonly string GitExe;
 
     static Paths()
     {
@@ -56,6 +60,27 @@ static class Paths
         SettingsFile = Path.Combine(LauncherDir, "settings.json");
         LogsDir = Path.Combine(LauncherDir, "logs");
         if (Mode == LaunchMode.Installed) GitDir = new Setup.InstallLayout(InstallRoot!).GitDir;
+        GitExe = FindGit(GitDir, Environment.GetEnvironmentVariable("PATH"));
+    }
+
+    internal static string FindGit(string? gitDir, string? path)
+    {
+        if (gitDir != null && File.Exists(Path.Combine(gitDir, "git.exe"))) return Path.Combine(gitDir, "git.exe");
+        foreach (var entry in (path ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                var candidate = Path.Combine(entry.Trim().Trim('"'), "git.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
+            catch (ArgumentException) { }
+        }
+        foreach (var known in new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 })
+        {
+            var candidate = Path.Combine(Environment.GetFolderPath(known), "Git", "cmd", "git.exe");
+            if (File.Exists(candidate)) return candidate;
+        }
+        return "git";
     }
 
     /// The rule, in order:
@@ -84,11 +109,15 @@ static class Paths
     public static void Prepare(ProcessStartInfo psi)
     {
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0"; // never wait for a password nobody can type
-        if (GitDir != null)
-        {
-            var path = psi.Environment.TryGetValue("PATH", out var current) ? current : Environment.GetEnvironmentVariable("PATH");
-            psi.Environment["PATH"] = GitDir + ";" + path;
-        }
+        AddGitDir(psi);
+    }
+
+    /// MinGit's folder first on the PATH of a program the launcher starts (Installed mode only; nothing otherwise).
+    public static void AddGitDir(ProcessStartInfo psi)
+    {
+        if (GitDir == null) return;
+        var path = psi.Environment.TryGetValue("PATH", out var current) ? current : Environment.GetEnvironmentVariable("PATH");
+        psi.Environment["PATH"] = GitDir + ";" + path;
     }
 }
 
@@ -281,6 +310,7 @@ static class Proc
     /// Runs a program without a window and returns its output; kills it on timeout.
     public static async Task<ProcResult> RunAsync(string file, IEnumerable<string> args, TimeSpan timeout)
     {
+        if (file == "git") file = Paths.GitExe;
         var psi = new ProcessStartInfo(file)
         {
             UseShellExecute = false,
@@ -468,6 +498,7 @@ sealed class BuildRun
         process.OutputDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
         process.ErrorDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
         process.Start();
+        Setup.ChildJob.AssignIfEnabled(process);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         Emit($"build-game.ps1 {string.Join(' ', psi.ArgumentList.Skip(args.Length))}".TrimEnd() + $"  ({DateTime.Now:yyyy-MM-dd HH:mm:ss})");

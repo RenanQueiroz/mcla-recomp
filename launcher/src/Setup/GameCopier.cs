@@ -38,7 +38,10 @@ static class GameCopier
                 continue;
             }
             if (!bySource.TryGetValue(file.Path, out var from))
+            {
+                if (file.Optional) { done += file.Size; continue; }
                 throw new GameFileException($"{file.Path} is missing from your game.", "The game isn't complete.");
+            }
             var partial = target + ".part";
             using (var input = source.Open(from))
             using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
@@ -75,7 +78,7 @@ static class GameCopier
                                                 $"expected sha256 {file.Sha256}, got {hash}");
                 }
             }
-            File.Move(partial, target, overwrite: true);
+            Retry.Io(() => File.Move(partial, target, overwrite: true));
             ledger[file.Path] = file.Sha256;
             WriteLedger(destination, ledger);
             done += file.Size;
@@ -94,7 +97,10 @@ static class GameCopier
         {
             ct.ThrowIfCancellationRequested();
             if (!bySource.TryGetValue(file.Path, out var from))
+            {
+                if (file.Optional) { done += file.Size; continue; }
                 throw new GameFileException($"{file.Path} is missing from your game.");
+            }
             using var input = source.Open(from);
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             long fileDone = 0;
@@ -122,16 +128,21 @@ static class GameCopier
         {
             var from = Path.Combine(staging, file.Path);
             var to = Path.Combine(gameDir, file.Path);
-            if (File.Exists(to) && new FileInfo(to).Length == file.Size) { File.Delete(from); continue; }
+            if (File.Exists(to) && new FileInfo(to).Length == file.Size) { Retry.Io(() => File.Delete(from)); continue; }
+            if (!File.Exists(from) && file.Optional) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(to)!);
-            File.Move(from, to, overwrite: true);
+            Retry.Io(() => File.Move(from, to, overwrite: true));
         }
         TryDeleteTree(staging);
     }
 
     /// All the game's files are in the folder with the sizes the fingerprint says (what a finished copy leaves).
     public static bool IsComplete(string gameDir, GameFingerprint expected) =>
-        expected.Files.All(f => File.Exists(Path.Combine(gameDir, f.Path)) && new FileInfo(Path.Combine(gameDir, f.Path)).Length == f.Size);
+        expected.Files.All(f =>
+        {
+            var path = Path.Combine(gameDir, f.Path);
+            return File.Exists(path) ? new FileInfo(path).Length == f.Size : f.Optional;
+        });
 
     static Dictionary<string, string> ReadLedger(string destination)
     {
@@ -149,7 +160,7 @@ static class GameCopier
     {
         var file = Path.Combine(destination, LedgerName);
         File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(ledger));
-        File.Move(file + ".tmp", file, overwrite: true);
+        Retry.Io(() => File.Move(file + ".tmp", file, overwrite: true));
     }
 
     static void TryDelete(string file)
@@ -168,7 +179,9 @@ static class GameCopier
 /// is removed as the link it is; what it points to is left alone).
 static class SafeFolder
 {
-    public static void Delete(string folder)
+    public static void Delete(string folder) => Retry.Io(() => DeleteOnce(folder));
+
+    static void DeleteOnce(string folder)
     {
         var info = new DirectoryInfo(folder);
         if (!info.Exists) return;
@@ -185,7 +198,7 @@ static class SafeFolder
             }
             else if (entry is DirectoryInfo sub)
             {
-                Delete(sub.FullName);
+                DeleteOnce(sub.FullName);
             }
             else
             {

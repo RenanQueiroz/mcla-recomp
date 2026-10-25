@@ -13,6 +13,9 @@
 //   Shaders  f) mcla.exe --mcla_prepare_shaders
 //
 // Game and Tools run at the same time; Source waits for Tools (it needs MinGit), the build for both.
+//
+// One setup at a time in an install folder (InstallLock); the programs it starts end with the wizard (ChildJob);
+// every step checks what is really on disk before it skips, so a run that was cut short anywhere can be run again.
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Text;
@@ -34,6 +37,9 @@ sealed record SetupChoices(string InstallRoot, string GamePath, bool UseInPlace,
 /// The things the setup needs from outside, apart from the choices.
 sealed record SetupContext(InstallLayout Layout, ReleaseSource Source, ReleaseInfo Release, SetupChoices Choices, string ExeDirectory);
 
+/// A game already installed by an earlier setup: where it came from, and whether it stays where it was.
+sealed record AdoptedGame(string Path, bool InPlace);
+
 sealed class SetupEngine
 {
     static readonly (StepId Id, string Title)[] Titles =
@@ -48,6 +54,7 @@ sealed class SetupEngine
 
     readonly SetupContext ctx;
     readonly object gate = new();
+    readonly object saveGate = new();
     readonly Dictionary<StepId, StepStatus> steps;
     readonly Dictionary<StepId, List<string>> logs = Titles.ToDictionary(t => t.Id, _ => new List<string>());
     readonly Stopwatch clock = Stopwatch.StartNew();
@@ -66,10 +73,38 @@ sealed class SetupEngine
         ctx = context;
         steps = Titles.ToDictionary(t => t.Id, t => new StepStatus(t.Id, t.Title, StepState.Waiting, null, "", null));
         if (ctx.Choices.UseInPlace) steps[StepId.Game] = steps[StepId.Game] with { Title = "Checking your game" };
-        record = InstallRecord.Load(ctx.Layout.RecordFile) is { } existing && existing.InstallRoot == ctx.Layout.Root
-            ? existing
+        record = InstallRecord.Load(ctx.Layout.RecordFile) is { } existing && SamePath(existing.InstallRoot, ctx.Layout.Root)
+            ? existing with { InstallRoot = ctx.Layout.Root }
             : new InstallRecord { InstallRoot = ctx.Layout.Root };
     }
+
+    /// The game of a folder that was set up before: its files are in the checkout (or, for "where it is", the folder the
+    /// record names) and pass the check, so the disc image is not needed again. Null when there is no such game.
+    public static AdoptedGame? FindInstalledGame(InstallLayout layout, GameFingerprint fingerprint)
+    {
+        var existing = InstallRecord.Load(layout.RecordFile);
+        if (existing == null || !existing.StepsDone.Contains("Game")) return null;
+        var inPlace = existing.GameMode == "in-place";
+        var wanted = inPlace ? new GameFingerprint(fingerprint.Title, fingerprint.TitleId, fingerprint.XexVersion, [fingerprint.Xex]) : fingerprint;
+        if (!GameCopier.IsComplete(layout.GameDir, wanted)) return null;
+        try
+        {
+            // default.xex is hashed again: it is what the build was made from.
+            if (!Verified.Is(Path.Combine(layout.GameDir, GameFingerprint.XexName), fingerprint.Xex.Size, fingerprint.Xex.Sha256)) return null;
+            if (inPlace)
+            {
+                if (string.IsNullOrEmpty(existing.GameDataRoot) || !Directory.Exists(existing.GameDataRoot)) return null;
+                var result = GameChecker.Inspect(existing.GameDataRoot, fingerprint, out var source);
+                source?.Dispose();
+                return result.Ok ? new AdoptedGame(existing.GameDataRoot, true) : null;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        return new AdoptedGame(existing.GameSource ?? layout.GameDir, false);
+    }
+
+    /// False when the record beside the launcher's exe could not be written (the exe's folder is read-only).
+    public bool PointerSaved { get; private set; } = true;
 
     /// Raised on any thread when something changed (at most a few times a second).
     public event Action? Changed;
@@ -144,6 +179,22 @@ sealed class SetupEngine
     /// Runs the whole setup. Returns normally when the game is built and ready; throws OperationCanceledException when
     /// cancelled and SetupException (also in Failure) when a step failed; steps that were done are kept for a retry.
     public async Task RunAsync(CancellationToken ct)
+    {
+        lock (gate) { failure = null; failureDetail = null; }
+        ChildJob.Enabled = true;
+        InstallLock installLock;
+        try { installLock = InstallLock.Acquire(ctx.Layout.Root); }
+        catch (SetupException ex)
+        {
+            lock (gate) { failure = ex.Plain; failureDetail = ex.Detail; }
+            foreach (var t in Titles) Set(t.Id, s => s with { State = StepState.Cancelled, Text = "Not started", Remaining = null }, force: true);
+            Changed?.Invoke();
+            throw;
+        }
+        using (installLock) await RunLockedAsync(ct);
+    }
+
+    async Task RunLockedAsync(CancellationToken ct)
     {
         var layout = ctx.Layout;
         Directory.CreateDirectory(layout.LogsDir);
@@ -251,34 +302,69 @@ sealed class SetupEngine
         {
             throw new SetupException($"Can't write into {layout.Root}: {ex.Message} Choose another folder.", ex.ToString());
         }
-        var needed = PathBudget.RequiredBytes(ctx.Release.Game!.Files.Sum(f => f.Size), !ctx.Choices.UseInPlace);
+        // What is in the folder already counts as done: only what is still left to do needs room (the game's bytes not
+        // yet copied, the tools until they are unpacked, the build until it is made), with the same margin as a fresh start.
+        var release = ctx.Release;
+        bool toolsDone = ReleaseInfo.RequiredTools.All(name => ToolInstaller.IsInstalled(layout.Tools, name, release.Tools[name].Sha256));
+        bool built = BuiltAlready();
+        var needed = PathBudget.RemainingBytes(layout, record, release.Game!.Files.Sum(f => f.Size), !ctx.Choices.UseInPlace, toolsDone, built);
         var have = PathBudget.FreeBytes(layout.Root);
-        // What is in the folder already counts as done: only demand room for what is missing, with the same margin.
-        if (have < needed && !GameCopier.IsComplete(layout.GameDir, ctx.Release.Game.ToFingerprint()))
-            throw new SetupException($"There is not enough room on that drive: the setup needs about {GameChecker.FormatSize(needed)} and {GameChecker.FormatSize(have)} is free. Free some space or choose another drive.",
+        if (have < needed)
+            throw new SetupException($"There is not enough room on that drive: the setup needs about {GameChecker.FormatSize(needed)} more and {GameChecker.FormatSize(have)} is free. Free some space or choose another drive.",
                                      $"needed {needed}, free {have}");
-        record = record with
+        var mode = ctx.Choices.UseInPlace ? "in-place" : "copy";
+        var done = record.StepsDone.ToList();
+        // Another release than the one this folder was made from: its checkout, build and shaders are the old ones.
+        if (record.ReleaseCommit != null && record.ReleaseCommit != release.Commit)
         {
-            ReleaseTag = ctx.Release.Tag,
-            ReleaseCommit = ctx.Release.Commit,
-            GameMode = ctx.Choices.UseInPlace ? "in-place" : "copy",
-            GameSource = ctx.Choices.GamePath,
-            GameDataRoot = ctx.Choices.UseInPlace ? ctx.Choices.GamePath : null,
-            State = "setting-up",
-        };
+            Log(StepId.Game, $"this folder was set up from {record.ReleaseTag}; it is replaced by {release.Tag} (settings are kept)");
+            done.RemoveAll(s => s is "Source" or "Build" or "Shaders");
+        }
+        // Another game or another way of keeping it than before: the game is looked at again.
+        if (record.GameSource != null && (record.GameMode != mode || !SamePath(record.GameSource, ctx.Choices.GamePath)))
+            done.Remove("Game");
+        lock (gate)
+        {
+            record = record with
+            {
+                ReleaseTag = release.Tag,
+                ReleaseCommit = release.Commit,
+                GameMode = mode,
+                GameSource = ctx.Choices.GamePath,
+                GameDataRoot = ctx.Choices.UseInPlace ? ctx.Choices.GamePath : null,
+                State = "setting-up",
+                StepsDone = done,
+                FinishedUtc = null,
+            };
+        }
         Save();
     }
 
+    /// The same place, whatever the slashes and the case ("C:/x/" and "c:\X").
+    internal static bool SamePath(string? a, string? b)
+    {
+        if (a == null || b == null) return false;
+        try { return string.Equals(Path.GetFullPath(a.Trim()).TrimEnd('\\'), Path.GetFullPath(b.Trim()).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return string.Equals(a.Trim().TrimEnd('\\', '/'), b.Trim().TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// The record is written outside the lock the window's reads take (a locked file may make a save wait a moment),
+    /// and always as it is by then, so that two steps finishing together cannot leave the older one on disk.
     void Save()
     {
-        lock (gate)
+        lock (saveGate)
         {
-            record.Save(ctx.Layout.RecordFile);
+            InstallRecord latest;
+            lock (gate) latest = record;
+            latest.Save(ctx.Layout.RecordFile);
             // The pointer beside the exe: how the launcher finds the install next time. A folder that can't be
-            // written (the exe is somewhere read-only) is not fatal here: the wizard then starts again, and the
-            // folder it is given (the one with this install's install.json) is a finished setup that opens at once.
-            try { record.Save(InstallRecord.PointerFile(ctx.ExeDirectory)); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            // written (the exe is somewhere read-only) is not fatal here, but the Ready page says so: the wizard
+            // starts again next time, and the install folder it is given opens at once as a finished setup.
+            try { latest.Save(InstallRecord.PointerFile(ctx.ExeDirectory)); PointerSaved = true; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { PointerSaved = false; }
         }
     }
 
@@ -355,6 +441,15 @@ sealed class SetupEngine
         bundleZip = Path.Combine(layout.Downloads, bundle.Asset);
         long total = all.Sum(t => t.Tool.Size) + bundle.Size;
         var received = new long[all.Count + 1];
+        // A tool that is unpacked from the right archive (its marker says so) is not fetched or unpacked again:
+        // a retry after a failed clone or build needs no network for it.
+        var unpackedAlready = all.Select(t => ToolInstaller.IsInstalled(layout.Tools, t.Name, t.Tool.Sha256)).ToArray();
+        for (int i = 0; i < all.Count; i++)
+            if (unpackedAlready[i])
+            {
+                received[i] = all[i].Tool.Size;
+                Log(StepId.Tools, $"{all[i].Name}: already unpacked");
+            }
         void Report()
         {
             long sum = received.Sum();
@@ -366,6 +461,7 @@ sealed class SetupEngine
         var downloads = new List<Task>();
         for (int i = 0; i < all.Count; i++)
         {
+            if (unpackedAlready[i]) continue;
             int index = i;
             var (name, tool) = all[i];
             var file = Path.Combine(layout.Downloads, Path.GetFileName(new Uri(tool.Url).AbsolutePath));
@@ -380,8 +476,10 @@ sealed class SetupEngine
         Progress(StepId.Tools, 1, "Unpacking…");
 
         int done = 0;
-        foreach (var (name, tool) in all)
+        for (int i = 0; i < all.Count; i++)
         {
+            var (name, tool) = all[i];
+            if (unpackedAlready[i]) { done++; continue; }
             var file = Path.Combine(layout.Downloads, Path.GetFileName(new Uri(tool.Url).AbsolutePath));
             CheckDepth(file, layout.Tools);
             await ToolInstaller.InstallAsync(layout.Tools, name, tool.Version, file, tool.Sha256, line => Log(StepId.Tools, line),
@@ -392,6 +490,7 @@ sealed class SetupEngine
         // The tools' zips are not needed again.
         foreach (var (_, tool) in all)
             try { File.Delete(Path.Combine(layout.Downloads, Path.GetFileName(new Uri(tool.Url).AbsolutePath))); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        // (what is unpacked stays recorded in tools\.mcla-tools.txt, with the archive's SHA-256)
         Progress(StepId.Tools, 1, "Done");
         MarkDone("Tools");
     }
@@ -403,7 +502,7 @@ sealed class SetupEngine
         {
             var name = Path.GetFileName(new Uri(tool.Url).AbsolutePath);
             foreach (var candidate in new[] { Path.Combine(folder, name), Path.Combine(folder, "tools", name) })
-                if (File.Exists(candidate)) return ReleaseSource.DownloadAsync(candidate, destination, progress, ct);
+                if (File.Exists(candidate)) return ReleaseSource.DownloadAsync(candidate, destination, progress, ct, allowLocalFile: true);
         }
         if (!tool.Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             throw new SetupException("The release names a download that isn't https; it was not used.", tool.Url);
@@ -440,20 +539,33 @@ sealed class SetupEngine
             return code == 0 ? lines.FirstOrDefault()?.Trim() : null;
         }
 
-        if (Directory.Exists(Path.Combine(layout.Repo, ".git")) && await Head() == release.Commit && File.Exists(layout.BuildScript))
+        // Every tracked file of the working tree is there (git ls-files --deleted lists none). A clone that was killed
+        // while it wrote the files has the right HEAD and a partial tree: that is not "there already".
+        async Task<bool> TreeIsWhole()
+        {
+            var lines = new List<string>();
+            var code = await ChildProcess.RunAsync(gitExe, ["-C", layout.Repo, "ls-files", "--deleted"], null, git, lines.Add, ct);
+            return code == 0 && lines.Count == 0;
+        }
+
+        if (record.StepsDone.Contains("Source") && Directory.Exists(Path.Combine(layout.Repo, ".git")) && await Head() == release.Commit
+            && File.Exists(layout.BuildScript) && await TreeIsWhole())
         {
             Log(StepId.Source, "the checkout is there already");
             Set(StepId.Source, s => s with { State = StepState.Skipped, Text = "Already done", Fraction = 1 }, force: true);
             await VerifyCheckout(gitExe, git, ct);
             return;
         }
+        UnmarkDone("Source", "Build", "Shaders");
 
         if (Directory.Exists(layout.Repo))
         {
+            // The player's settings in it are put aside first and come back after the build (RestoreSettings).
+            KeepSettings();
             // An unfinished or older checkout: removed, after the game in it is put aside (it is the player's 6 GB).
             if (Directory.Exists(layout.GameDir) && !Directory.Exists(layout.Staging))
             {
-                Directory.Move(layout.GameDir, layout.Staging);
+                Retry.Io(() => Directory.Move(layout.GameDir, layout.Staging));
                 Log(StepId.Source, "the game is put aside while the checkout is made again");
             }
             Log(StepId.Source, $"removing {layout.Repo} (not a complete checkout of {release.Tag})");
@@ -478,7 +590,65 @@ sealed class SetupEngine
             throw new SetupException($"Couldn't get the source for {release.Tag} from {ctx.Source.GitUrl}. Check the internet connection and try again.", $"git clone exited with {ok}");
         await ChildProcess.RunAsync(gitExe, ["-C", layout.Repo, "config", "core.longpaths", "true"], null, git, _ => { }, ct);
         await VerifyCheckout(gitExe, git, ct);
+        if (!await TreeIsWhole())
+            throw new SetupException("The checkout is not complete after the clone. Try again.", "git ls-files --deleted lists files");
         MarkDone("Source");
+    }
+
+    /// The player's game settings (mcla.toml next to mcla.exe) and the launcher's settings.json of the checkout that is
+    /// about to be replaced, copied to kept\ (never over what is already there from an earlier, cut-short run).
+    void KeepSettings()
+    {
+        var layout = ctx.Layout;
+        foreach (var (from, name) in SettingsFiles())
+        {
+            var to = Path.Combine(layout.Kept, name);
+            if (!File.Exists(from) || File.Exists(to)) continue;
+            Directory.CreateDirectory(layout.Kept);
+            Retry.Io(() => File.Copy(from, to, overwrite: false));
+            Log(StepId.Source, $"{name} is kept while the checkout is replaced");
+        }
+    }
+
+    /// Puts the player's settings back into the new checkout, over the new files, and empties kept\.
+    void RestoreSettings()
+    {
+        var layout = ctx.Layout;
+        if (!Directory.Exists(layout.Kept)) return;
+        foreach (var (to, name) in SettingsFiles())
+        {
+            var from = Path.Combine(layout.Kept, name);
+            if (!File.Exists(from)) continue;
+            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+            Retry.Io(() => File.Copy(from, to, overwrite: true));
+            Log(StepId.Shaders, $"{name} is back");
+        }
+        SafeFolder.Delete(layout.Kept);
+    }
+
+    IEnumerable<(string Path, string Name)> SettingsFiles() =>
+    [
+        (Path.Combine(ctx.Layout.BuildDir, "mcla.toml"), "mcla.toml"),
+        (Path.Combine(ctx.Layout.LauncherDir, "settings.json"), "settings.json"),
+    ];
+
+    void UnmarkDone(params string[] steps)
+    {
+        bool changed;
+        lock (gate)
+        {
+            changed = record.StepsDone.Any(steps.Contains);
+            if (changed) record = record with { StepsDone = record.StepsDone.Where(s => !steps.Contains(s)).ToList() };
+        }
+        if (changed) Save();
+    }
+
+    bool BuiltAlready()
+    {
+        var layout = ctx.Layout;
+        var file = Path.Combine(layout.LauncherDir, "built-commit.txt");
+        try { return File.Exists(layout.GameExe) && File.Exists(file) && File.ReadAllText(file).Trim() == ctx.Release.Commit; }
+        catch (IOException) { return false; }
     }
 
     /// git rev-parse <tag> is the release's commit, HEAD is it, and the shader pack is the release's: what is built is
@@ -516,8 +686,7 @@ sealed class SetupEngine
     async Task BuildStepsAsync(CancellationToken ct)
     {
         var layout = ctx.Layout;
-        if (File.Exists(layout.GameExe) && File.Exists(Path.Combine(layout.LauncherDir, "built-commit.txt"))
-            && File.ReadAllText(Path.Combine(layout.LauncherDir, "built-commit.txt")).Trim() == ctx.Release.Commit)
+        if (BuiltAlready())
         {
             Log(StepId.Translate, "the game is built already");
             Set(StepId.Translate, s => s with { State = StepState.Skipped, Text = "Already done", Fraction = 1 }, force: true);
@@ -572,6 +741,7 @@ sealed class SetupEngine
     async Task ShadersStepAsync(CancellationToken ct)
     {
         var layout = ctx.Layout;
+        RestoreSettings();
         WriteInitialSettings();
         if (ctx.Choices.UseInPlace) WriteGameDataRoot();
         if (!File.Exists(Path.Combine(layout.Repo, "shaderpack", "545407F8.shaderpack")) || !File.Exists(layout.GameExe))
@@ -621,7 +791,10 @@ sealed class SetupEngine
     {
         var file = GameSettingsFile.PathIn(ctx.Layout.BuildDir);
         Directory.CreateDirectory(ctx.Layout.BuildDir);
-        GameSettingsFile.Set(file, new Dictionary<string, object> { ["game_data_root"] = ctx.Choices.GamePath.TrimEnd('\\') });
+        // No trailing backslash, except on a drive's root ("E:" alone would be that drive's current folder).
+        var folder = ctx.Choices.GamePath.TrimEnd('\\');
+        if (folder.Length == 2 && folder[1] == ':') folder += "\\";
+        GameSettingsFile.Set(file, new Dictionary<string, object> { ["game_data_root"] = folder });
         Log(StepId.Shaders, $"game_data_root = {ctx.Choices.GamePath} in {file}");
     }
 

@@ -27,6 +27,7 @@ static class ChildProcess
         if (gitDir != null) psi.Environment["PATH"] = gitDir + ";" + (psi.Environment.TryGetValue("PATH", out var p) ? p : Environment.GetEnvironmentVariable("PATH"));
 
         using var process = Process.Start(psi) ?? throw new SetupException($"Couldn't start {Path.GetFileName(file)}.");
+        ChildJob.AssignIfEnabled(process);
         using var registration = ct.Register(() =>
         {
             try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }

@@ -19,14 +19,23 @@
 //       the removal of an install: only what the setup made, never through a link, never the game's own folder
 //   uninstall <install root> [<exe folder>]
 //       InstallCleanup.Uninstall on a real install
-//   install <release folder> <install root> <game: .iso or folder> [--in-place] [--args "<game options>"] [--exe-dir <folder>]
-//       the whole setup (SetupEngine), its steps printed as they change
+//   install <release folder> <install root> <game: .iso, folder or "adopt"> [--in-place] [--args "<game options>"] [--exe-dir <folder>]
+//       the whole setup (SetupEngine), its steps printed as they change; "adopt" takes the game the folder was set up with
+//   git                       (Checks2.cs) git found and run in Installed mode, from a copy of this program with a pointer beside it
+//   lock <scratch>            one setup at a time in a folder
+//   orphan <pid file>         a child in the job outlives its parent? (it must not)
+//   retry <scratch>           renames retried while a scanner holds the file
+//   archive <scratch>         odd names in archives, the record of an unpacked tool
+//   names <release folder>    release.json that names what can't be used
+//   nonhttps <scratch>        what DownloadAsync refuses
+//   remaining <scratch>       what is left to do, for the disk preflight
+//   cleanup2 <scratch>        what an uninstall refuses
 using System.Text.Json;
 using MclaLauncher.Setup;
 
 namespace MclaLauncher;
 
-static class Program
+static partial class Program
 {
     static int failures;
 
@@ -59,6 +68,15 @@ static class Program
                 case "mode": Mode(args[1]); break;
                 case "uninstall": { var r = InstallCleanup.Uninstall(args[1], args.Length > 2 ? args[2] : null); Console.WriteLine($"{r.Summary}\nremoved: {string.Join(", ", r.Removed)}\nkept: {string.Join(", ", r.Kept)}"); break; }
                 case "install": return await Install(args[1..]);
+                case "git": await GitInInstalledMode(); break;
+                case "lock": LockChecks(args[1]); break;
+                case "orphan": Orphan(args[1], args.Length < 3 || args[2] != "nojob"); break;
+                case "retry": RetryChecks(args[1]); break;
+                case "archive": await ArchiveChecks(args[1]); break;
+                case "names": ReleaseNameChecks(args[1]); break;
+                case "nonhttps": await NonHttpsChecks(args[1]); break;
+                case "remaining": RemainingChecks(args[1]); break;
+                case "cleanup2": CleanupChecks(args[1]); break;
                 default: Console.WriteLine($"unknown command {args[0]}"); return 2;
             }
         }
@@ -287,7 +305,7 @@ static class Program
         File.WriteAllBytes(source, data);
         var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(data));
         var log = new List<string>();
-        Task Fetch(string dest, IProgress<long> progress, CancellationToken ct) => ReleaseSource.DownloadAsync(source, dest, progress, ct);
+        Task Fetch(string dest, IProgress<long> progress, CancellationToken ct) => ReleaseSource.DownloadAsync(source, dest, progress, ct, allowLocalFile: true);
         var target = Path.Combine(scratch, "got.bin");
         await Verified.FetchAsync("a file", target, data.Length, sha, Fetch, new Progress<long>(_ => { }), log.Add, CancellationToken.None);
         Check("a right file is kept", File.Exists(target) && !File.Exists(target + ".part"));
@@ -298,7 +316,7 @@ static class Program
         catch (SetupException ex) { Check("a wrong hash is refused", true, ex.Plain); Check("and nothing is left", !File.Exists(target) && !File.Exists(target + ".part")); }
         try { await Verified.FetchAsync("a file", target, data.Length + 1, sha, Fetch, new Progress<long>(_ => { }), log.Add, CancellationToken.None); Check("a wrong size is refused", false); }
         catch (Exception ex) { Check("a wrong size is refused", true, ex.Message); }
-        try { await Verified.FetchAsync("a file", target, 10, sha, (d, p, c) => ReleaseSource.DownloadAsync(Path.Combine(scratch, "missing.bin"), d, p, c), new Progress<long>(_ => { }), log.Add, CancellationToken.None); Check("a missing file is reported", false); }
+        try { await Verified.FetchAsync("a file", target, 10, sha, (d, p, c) => ReleaseSource.DownloadAsync(Path.Combine(scratch, "missing.bin"), d, p, c, allowLocalFile: true), new Progress<long>(_ => { }), log.Add, CancellationToken.None); Check("a missing file is reported", false); }
         catch (SetupException ex) { Check("a missing file is reported", true, ex.Plain); }
 
         // A zip that tries to write outside its folder, and the unpacking of a normal one.
@@ -354,6 +372,15 @@ static class Program
             Check($"\"{(path.Length > 50 ? path[..47] + "..." : path)}\"", (text != null) == problem, text ?? "fine");
         }
         Case(@"C:\MCLA", false);
+        Case(@"C:\My Games v1.2_x-y", false);
+        Case(@"C:\Jogos " + "\u00e9", true);
+        Case(@"C:\Tom's", true);
+        Case(@"C:\Tom & Co", true);
+        Case(@"C:\100%", true);
+        Case(@"C:\a;b", true);
+        Case(@"C:\a^b", true);
+        Case(@"C:\a!b", true);
+        Case(@"C:\" + "\u0414\u043e\u043c", true);
         Case(@"C:\Users\someone\AppData\Local\MCLA", false);
         Case("C:\\" + new string('a', PathBudget.MaxRootLength - 3), false);
         Case("C:\\" + new string('a', PathBudget.MaxRootLength - 2), true);
@@ -458,7 +485,7 @@ static class Program
 
     static async Task<int> Install(string[] args)
     {
-        string releaseFolder = args[0], root = args[1], game = args[2];
+        string releaseFolder = args[0], root = Path.GetFullPath(args[1]), game = args[2];
         bool inPlace = args.Contains("--in-place");
         string gameArgs = args.SkipWhile(a => a != "--args").Skip(1).FirstOrDefault() ?? "";
         string exeDir = args.SkipWhile(a => a != "--exe-dir").Skip(1).FirstOrDefault() ?? root + "-exe";
@@ -467,6 +494,14 @@ static class Program
         var release = await source.LoadAsync(CancellationToken.None);
         var problem = PathBudget.Problem(root, out var resumes);
         if (problem != null) { Console.WriteLine(problem); return 1; }
+        if (game == "adopt")
+        {
+            var adopted = SetupEngine.FindInstalledGame(new InstallLayout(root), release.Game!.ToFingerprint());
+            if (adopted == null) { Console.WriteLine("no game to adopt in that folder"); return 1; }
+            Console.WriteLine($"adopting the game of the folder: {adopted.Path} (in place: {adopted.InPlace})");
+            game = adopted.Path;
+            inPlace = adopted.InPlace;
+        }
         Console.WriteLine($"release {release.Tag} from {source.Describe}; install {root}{(resumes ? " (resuming)" : "")}");
         var engine = new SetupEngine(new SetupContext(new InstallLayout(root), source, release, new SetupChoices(root, game, inPlace, gameArgs), exeDir));
         var last = new Dictionary<StepId, string>();
@@ -490,7 +525,7 @@ static class Program
         }
         catch (OperationCanceledException) { Console.WriteLine("cancelled"); return 3; }
         catch (SetupException ex) { Console.WriteLine($"FAILED: {ex.Plain}\n{ex.Detail}\nlog: {engine.LogFilePath}"); return 1; }
-        Console.WriteLine($"done. record: {engine.Record.State}; log {engine.LogFilePath}");
+        Console.WriteLine($"done. record: {engine.Record.State}; pointer saved: {engine.PointerSaved}; log {engine.LogFilePath}");
         foreach (var step in engine.Steps) Console.WriteLine($"  {step.State,-9} {step.Title}: {step.Text}");
         // The longest path the install holds, from the install folder: PathBudget.LongestBelowRoot must cover it.
         var full = Path.GetFullPath(root).TrimEnd('\\');
