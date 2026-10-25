@@ -47,6 +47,7 @@ git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
+git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -1401,6 +1402,23 @@ With frame generation on (FSR 3.1; 3x uncapped, and the Half display cap, 116 re
 | Frame generation's components in the runtime on every platform; the option | `cmake/fidelityfx/CMakeLists.txt`, `cmake/rexglue_fsr.cmake` | Linux, the PS5 (Windows unchanged) |
 | The device's runtime check off Windows; `rexui` knows what the runtime is | `src/ui/vulkan/vulkan_device.cpp`, `src/ui/CMakeLists.txt` | Linux, the PS5 |
 | The pacer on a fixed-refresh display | `src/ui/vulkan/vulkan_presenter_frame_generation.cpp` | the PS5 (and a PC with `frame_generation_pacing=display`) |
+
+## rexglue-upstream-storage-flush.patch
+
+**Why.** Two faults in how the shader and pipeline storage (the `.xsh` and `.xpso` files under the cache root) reach the disk.
+- **A flush that waited for the next request.** `StorageWriteThread` (the D3D12 and the Vulkan pipeline cache each have one) moves a pending flush request into a local flag and runs the `fflush` at the top of its next pass. When both queues were empty it waited first, so what it had written in the last burst before it went idle stayed in the C library's buffer until the next storage request. A game that is killed or crashes then loses its last pipelines (a clean exit closes the files and loses nothing).
+- **`"a+"` streams that start at the end of the file.** The storage opens its four files with `"a+b"` and reads the header at once. glibc and Windows' C runtime start an `"a+"` stream at offset 0; BSD libc starts it at the end. There `fread` returned 0, the header check failed and the loader emptied the file and wrote a new header, so nothing was ever kept (upstream saw it on macOS: a 44,430-byte Vulkan storage file came back as its 12-byte header at the next start). The PS5's libc is FreeBSD's, so on the console this is probably happening now, and hidden by the shader pack import (the pack is added again at every start); not observed, as nothing here runs on the console.
+
+**What it changes.**
+- `rex::filesystem::OpenFile` (the POSIX one: Linux and the PS5) rewinds a stream opened with both `a` and `+`. Writes on an append stream go to the end whatever the position, so only where reads start changes. Windows has its own `OpenFile` and is not touched.
+- The condition that makes the writer thread wait also requires that no flush is pending (`!flush_shaders && !flush_pipelines`), so the thread goes round once more and flushes first. In the Vulkan pipeline cache the fork's `rexglue-vulkan-pipeline-cache-file.patch` had already added `!save_vk_pipeline_cache` to the same condition, which the pull request's hunk (written for the SDK without it) does not apply to; the two are merged by hand.
+
+**From upstream.** Pull request [#529](https://github.com/rexglue/rexglue-sdk/pull/529) to rexglue-sdk, "fix(graphics): keep shader and pipeline storage across runs", by wolfiesch (Wolfie), open when this was taken (2026-10-25), not merged. The code is the pull request's, apart from the merge described above; it is not this fork's work. Licence: BSD 3-Clause, the SDK's own (`LICENSE` of rexglue-sdk, repeated in `THIRD-PARTY-NOTICES.md`).
+
+| Change | Files | Affects |
+|---|---|---|
+| `"a+"` streams rewound | `src/core/filesystem_posix.cpp` | Linux, the PS5 (and macOS) |
+| The writer thread flushes before it waits | `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/vulkan/pipeline_cache.cpp` | D3D12, Vulkan (all platforms) |
 
 ## rexglue-mingw.patch
 

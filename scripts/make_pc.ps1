@@ -430,6 +430,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-content-header-padding.patch"; File = "src\system\xam\content_manager.cpp"; Adds = "Written as zeros." }
     @{ Patch = "rexglue-low-latency.patch"; File = "src\ui\low_latency.cpp"; Adds = "LowLatency::OnFrameStart" }
     @{ Patch = "rexglue-frame-generation-nonwindows.patch"; File = "src\ui\vulkan\vulkan_presenter_frame_generation.cpp"; Adds = "frame_generation_pacing" }
+    # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
+    @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

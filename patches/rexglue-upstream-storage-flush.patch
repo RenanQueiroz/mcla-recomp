@@ -1,0 +1,51 @@
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index 540fc57..d3de48a 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -124,7 +124,14 @@ std::filesystem::path GetUserFolder() {
+ }
+ 
+ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
+-  return fopen(path.c_str(), std::string(mode).c_str());
++  FILE* file = fopen(path.c_str(), std::string(mode).c_str());
++  // Callers of "a+" read existing contents first (as on Windows and glibc), but BSD libc
++  // (macOS) starts an "a+" stream at the end of the file. Writes still append either way.
++  if (file && mode.find('a') != std::string_view::npos &&
++      mode.find('+') != std::string_view::npos) {
++    rewind(file);
++  }
++  return file;
+ }
+ 
+ bool Seek(FILE* file, int64_t offset, int origin) {
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index 1e6dde4..c5136c8 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -3169,7 +3169,9 @@ void PipelineCache::StorageWriteThread() {
+         storage_write_flush_pipelines_ = false;
+         flush_pipelines = true;
+       }
+-      if (!shader && !write_pipeline) {
++      // A flush taken from the request flags runs at the top of the loop; waiting first would
++      // leave the written data in the stdio buffer until the next storage request.
++      if (!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {
+         storage_write_request_cond_.wait(lock);
+         continue;
+       }
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 5c4deaf..b3873f1 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -4084,7 +4084,10 @@ void VulkanPipelineCache::StorageWriteThread() {
+         storage_write_flush_pipelines_ = false;
+         flush_pipelines = true;
+       }
+-      if (!shader && !write_pipeline && !save_vk_pipeline_cache) {
++      // A flush taken from the request flags runs at the top of the loop; waiting first would
++      // leave the written data in the stdio buffer until the next storage request.
++      if (!shader && !write_pipeline && !save_vk_pipeline_cache && !flush_shaders &&
++          !flush_pipelines) {
+         storage_write_request_cond_.wait(lock);
+         continue;
+       }

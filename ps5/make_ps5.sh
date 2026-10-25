@@ -212,6 +212,7 @@ rexglue-shader-storage-prepare.patch src/graphics/shader_storage_progress.h Shad
 rexglue-content-header-padding.patch src/system/xam/content_manager.cpp Written as zeros.
 rexglue-low-latency.patch src/ui/low_latency.cpp LowLatency::OnFrameStart
 rexglue-frame-generation-nonwindows.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp frame_generation_pacing
+rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 LATER
 
 # ---------------------------------------------------------------------------

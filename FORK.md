@@ -231,6 +231,7 @@ git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
+git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
