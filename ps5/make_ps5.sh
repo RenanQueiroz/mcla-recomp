@@ -417,8 +417,9 @@ put() {
     echo "  uploading $target ($local_size bytes)"
     # Some consoles' FTP servers write over an existing file without cutting
     # it short, so a smaller new file kept the old file's size and its tail.
-    # Remove the old copy first.
-    if [ -n "$remote_size" ]; then
+    # Remove the old copy first. (Not one of the same size, which "always"
+    # uploads again: written over in place, it is exactly the new file.)
+    if [ -n "$remote_size" ] && [ "$remote_size" != "$local_size" ]; then
         curl -s --max-time 30 -Q "DELE $target" "$ftp/" > /dev/null 2>&1 || true
         [ -z "$(remote_size_of "$target")" ] || fail "could not replace $target on the console (is the game running? close it and run this again)"
     fi
