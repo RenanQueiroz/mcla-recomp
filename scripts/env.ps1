@@ -57,11 +57,18 @@ function FindMingwBin([string[]]$candidates) {
 $paths = @()
 if ($Toolchain -eq "mingw") {
     # llvm-mingw: in -ToolsDir (a folder named llvm-mingw-* first, then the folder
-    # itself), else unpacked into tools\ by make_pc.ps1.
+    # itself), else the pinned release unpacked into tools\ by make_pc.ps1 (the one
+    # scripts\ci\tools.json names, whatever else is in tools\), else any other
+    # llvm-mingw-* there.
     $candidates = @(ToolFolders $ToolsDir "llvm-mingw-*" | ForEach-Object { "$_\bin" })
     if ($ToolsDir) { $candidates += "$ToolsDir\bin"; $candidates += $ToolsDir }
     $bin = FindMingwBin $candidates
-    if (-not $bin) { $bin = FindMingwBin @(ToolFolders "$root\tools" "llvm-mingw-*" | ForEach-Object { "$_\bin" }) }
+    if (-not $bin) {
+        $pinned = Get-PinnedToolVersion $root "llvm-mingw"
+        $own = @()
+        if ($pinned) { $own = @(ToolFolders "$root\tools" "llvm-mingw-$pinned-*") }
+        $bin = FindMingwBin @(($own + @(ToolFolders "$root\tools" "llvm-mingw-*")) | ForEach-Object { "$_\bin" })
+    }
     if ($bin) {
         $mingwRoot = Split-Path $bin -Parent
         # The target's runtime DLLs (libc++, libunwind), for the programs the
@@ -78,7 +85,13 @@ if ($Toolchain -eq "mingw") {
     if ($ToolsDir) {
         $bin = FirstWith (@(ToolFolders $ToolsDir "clang+llvm-*" | ForEach-Object { "$_\bin" }) + @("$ToolsDir\bin", $ToolsDir)) "clang.exe"
     }
-    $llvm = Get-ChildItem -LiteralPath "$root\tools" -Directory -Filter "clang+llvm-*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    # The project's own Clang is the release make_pc.ps1 installs (the one
+    # scripts\ci\tools.json names), whatever other LLVM release is in tools\;
+    # another one only when that is not there.
+    $llvm = $null
+    $pinned = Get-PinnedToolVersion $root "clang-msvc"
+    if ($pinned) { $llvm = Get-ChildItem -LiteralPath "$root\tools" -Directory -Filter "clang+llvm-$pinned-*" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if (-not $llvm) { $llvm = Get-ChildItem -LiteralPath "$root\tools" -Directory -Filter "clang+llvm-*" -ErrorAction SilentlyContinue | Select-Object -First 1 }
     if ($bin) { $paths += $bin }
     elseif ($llvm) { $paths += "$($llvm.FullName)\bin" }
     # The compilers CMake is given by full path, so that another Clang on the path

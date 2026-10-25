@@ -453,6 +453,12 @@ try {
         if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
         [bool](& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     }
+    function HasPython {
+        if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $false }
+        $ErrorActionPreference = "Continue"
+        $version = try { python --version 2>&1 | Out-String } catch { "" }
+        ($LASTEXITCODE -eq 0) -and ($version -match "^Python 3")
+    }
     function RefreshPath {
         $env:PATH = [Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
                     [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -507,14 +513,14 @@ try {
         if (-not $SdkBundle -and -not (Get-Command git -ErrorAction SilentlyContinue)) { $list += "Git" }
         if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { $list += "CMake" }
         if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $list += "Ninja" }
-        # The Microsoft Store's placeholder python.exe is not Python.
-        $python = Get-Command python -ErrorAction SilentlyContinue
+        # Python counts if it runs: Windows' placeholder python.exe (it only
+        # points at the Microsoft Store) fails, while Python installed from the
+        # Store works from the same folder (issue #13).
         # (Python builds the SDK, where glslang's build_info.py runs, and extracts the
         # game; -Until stops before the game and, at sdk-source, before the build.)
         $buildsSdk = -not $SdkBundle -and $Until -ne "tools" -and $Until -ne "sdk-source"
         $extractsGame = -not $Until -and -not (Test-Path -LiteralPath "$root\game\default.xex")
-        if (($buildsSdk -or $extractsGame) -and
-            (-not $python -or $python.Source -like "*WindowsApps*")) { $list += "Python" }
+        if (($buildsSdk -or $extractsGame) -and -not (HasPython)) { $list += "Python" }
         if ($mingw) {
             # In -ToolsDir, or unpacked into tools\ (env.ps1 found it).
             if (-not $env:MCLA_CC -or -not (Test-Path -LiteralPath $env:MCLA_CC)) { $list += "llvm-mingw" }
@@ -636,6 +642,14 @@ try {
         }
         $missing = @($missing | Where-Object { $_ -ne "Vulkan SDK" })
         if ($missing) { Fail "still missing after installing: $($missing -join ', '). A new PowerShell window may be needed; then run this again" }
+    }
+    # The compilers CMake is given are by full path (env.ps1 sets them): from the
+    # project's own Clang folder whatever else is in tools\ (or the one -ToolsDir
+    # names), and the build stops here if that folder lacks one of them.
+    foreach ($compiler in $env:MCLA_CC, $env:MCLA_CXX) {
+        if (-not $compiler -or -not (Test-Path -LiteralPath $compiler)) {
+            Fail "the compiler is incomplete: $(if ($compiler) { $compiler } else { 'clang or clang++' }) is missing. Delete its folder in tools\ (or fix the one -ToolsDir names) and run this again"
+        }
     }
     "clang: $env:MCLA_CC ($((& $env:MCLA_CC --version | Select-Object -First 1)))"
     if ($mingw) {

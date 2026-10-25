@@ -38,6 +38,18 @@ function Save-BuildOptions([string]$root, [string]$toolchain, [string]$toolsDir,
     [System.IO.File]::WriteAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($file), (($record | ConvertTo-Json) + "`r`n"), (New-Object System.Text.UTF8Encoding $true))
 }
 
+# The version a tool is pinned to in scripts\ci\tools.json ("clang-msvc",
+# "llvm-mingw"), which scripts\ci\check_pins.py keeps the same as the one
+# make_pc.ps1 downloads. The folder of tools\ that make_pc.ps1 unpacks it into has
+# that version in its name, and is the project's own compiler, whatever other
+# release is in tools\. "" when the file cannot be read.
+function Get-PinnedToolVersion([string]$root, [string]$tool) {
+    try {
+        $pins = Get-Content -LiteralPath (Join-Path $root "scripts\ci\tools.json") -Raw | ConvertFrom-Json
+        [string]$pins.$tool.version
+    } catch { "" }
+}
+
 # The version in a tool folder's name (cmake-4.4.4-windows-x86_64,
 # llvm-mingw-20250709-ucrt-x86_64, clang+llvm-20.1.8-...), to sort 20 after 9.
 function Get-VersionKey([string]$name) {
