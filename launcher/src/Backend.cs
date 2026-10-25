@@ -379,7 +379,7 @@ static class Repo
         Setup.UpdateTarget? target = null;
         // An update that began and was not built (the launcher closed, a crash): the options are made to name its SDK bundle.
         try { await Setup.UpdateEngine.RepairPendingAsync(new Setup.InstallLayout(Paths.InstallRoot!)); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or TimeoutException) { }
+        catch (Exception) { }   // best effort: the status below is what the window needs
         try
         {
             target = await Setup.UpdateResolver.ResolveAsync(Paths.Repo, Setup.InstallChannel.Read(Paths.InstallRoot!), fetch, CancellationToken.None);
