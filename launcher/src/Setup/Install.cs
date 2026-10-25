@@ -231,39 +231,74 @@ static class PathBudget
     /// running launcher's folder (the program's own, unless the checks say another).
     public static string? LauncherFolderProblem(string full, string? launcherFolder = null)
     {
-        string running;
-        try { running = Path.GetFullPath(launcherFolder ?? AppContext.BaseDirectory); }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { running = ""; }
-        var runningReal = running.Length > 0 ? FinalPath.Resolve(running) : "";
-        // A launcher unpacked into the root of a drive can't be told from the drive: it is asked to move, rather than every folder
-        // of the drive being refused.
-        foreach (var where in new[] { running, runningReal })
-            if (where.Length > 0 && IsDriveRoot(where))
-                return $"This launcher is in the root of drive {Path.GetPathRoot(where)!.TrimEnd('\\')} (not in a folder of its own). Put the launcher in a folder, for example "
-                     + $"{Path.GetPathRoot(where)!.TrimEnd('\\')}\\MCLA-launcher, and start it from there: the game can't be set up beside it.";
-
-        var launchers = new List<(string Folder, string Real, string What)>();
-        if (running.Length > 0) launchers.Add((running, runningReal, "the folder this launcher is running from"));
-        try
-        {
-            var installer = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA"));
-            launchers.Add((installer, FinalPath.Resolve(installer), "the folder the installer puts the launcher in"));
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
-
+        var launchers = launcherFolder == null ? OwnLaunchers.Value : LaunchersOf(launcherFolder);
         var real = FinalPath.Resolve(full);
+        // A launcher unpacked into the root of a drive can't be told from the drive: it is asked to move, rather than every folder
+        // of the drive being refused. Only for a folder on that drive: the other drives are not in its way.
+        foreach (var (folder, folderReal, _) in launchers)
+            foreach (var where in new[] { folder, folderReal })
+                if (where.Length > 0 && IsDriveRoot(where)
+                    && (SameDrive(where, real) || SameDrive(where, full)))
+                    return $"This launcher is in the root of drive {Path.GetPathRoot(where)!.TrimEnd('\\')} (not in a folder of its own). Put the launcher in a folder, for example "
+                         + $"{Path.GetPathRoot(where)!.TrimEnd('\\')}\\MCLA-launcher, and start it from there: the game can't be set up beside it.";
+
         foreach (var (folder, folderReal, what) in launchers)
-            if (IsInside(full, folder) || IsInside(folder, full) || IsInside(real, folderReal) || IsInside(folderReal, real))
+            if (!IsDriveRoot(folder) && !IsDriveRoot(folderReal) && (IsInside(full, folder) || IsInside(folder, full) || IsInside(real, folderReal) || IsInside(folderReal, real)))
                 return $"That folder overlaps {what} ({folderReal.TrimEnd('\\')}): it is that folder, inside it, or has it inside. The launcher's folder is replaced when "
                      + $"the launcher updates and removed with it, so the game can't live there. Choose another folder, for example {Example(launchers)}.";
 
         // Inside a folder that holds a launcher (another copy, or one the installer put elsewhere).
         foreach (var start in new[] { real, full })
             for (var dir = start; !string.IsNullOrEmpty(dir) && !IsDriveRoot(dir); dir = Path.GetDirectoryName(dir.TrimEnd('\\')))
-                if (File.Exists(Path.Combine(dir, "installed.txt")) || File.Exists(Path.Combine(dir, "MclaLauncher.exe")))
+                if (HoldsLauncher(dir))
                     return $"That folder is, or is inside, a folder that holds a launcher ({dir.TrimEnd('\\')}). The launcher's folder is replaced when the launcher updates "
                          + $"and removed with it, so the game can't live there. Choose another folder, for example {Example(launchers)}.";
         return null;
+    }
+
+    /// The launcher's folders (the running one's and the installer's default) with the form Windows opens them in, worked out once:
+    /// the wizard asks for a verdict on every keystroke.
+    static readonly Lazy<List<(string Folder, string Real, string What)>> OwnLaunchers = new(() => LaunchersOf(null));
+
+    static List<(string Folder, string Real, string What)> LaunchersOf(string? runningFolder)
+    {
+        var launchers = new List<(string Folder, string Real, string What)>();
+        try
+        {
+            var running = Path.GetFullPath(runningFolder ?? AppContext.BaseDirectory);
+            launchers.Add((running, FinalPath.Resolve(running), "the folder this launcher is running from"));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
+        try
+        {
+            var installer = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA"));
+            launchers.Add((installer, FinalPath.Resolve(installer), "the folder the installer puts the launcher in"));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
+        return launchers;
+    }
+
+    static bool SameDrive(string a, string b) =>
+        string.Equals(Path.GetPathRoot(a)?.TrimEnd('\\'), Path.GetPathRoot(b)?.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+
+    /// A folder Setup made for a launcher: MclaLauncher.exe, or an installed.txt with the keys Setup writes (version= and tag=;
+    /// some other program's installed.txt does not make a folder a launcher's).
+    static bool HoldsLauncher(string dir)
+    {
+        try
+        {
+            if (File.Exists(Path.Combine(dir, "MclaLauncher.exe"))) return true;
+            var marker = Path.Combine(dir, "installed.txt");
+            if (!File.Exists(marker)) return false;
+            bool version = false, tag = false;
+            foreach (var line in File.ReadLines(marker).Take(50))
+            {
+                if (line.StartsWith("version=", StringComparison.Ordinal)) version = true;
+                else if (line.StartsWith("tag=", StringComparison.Ordinal)) tag = true;
+            }
+            return version && tag;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
     static bool IsDriveRoot(string path)

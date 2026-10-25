@@ -189,7 +189,21 @@ static partial class Program
         Check("a folder beside it is not", PathBudget.LauncherFolderProblem(other + "-game") == null);
         File.Delete(Path.Combine(other, "MclaLauncher.exe"));
         File.WriteAllText(Path.Combine(other, "installed.txt"), "x");
-        Check("installed.txt marks a launcher's folder too", PathBudget.LauncherFolderProblem(Path.Combine(other, "game")) is { } t2 && t2.Contains("holds a launcher"));
+        Check("an installed.txt without Setup's keys (another program's) does not make a launcher's folder", PathBudget.LauncherFolderProblem(Path.Combine(other, "game")) == null);
+        File.WriteAllText(Path.Combine(other, "installed.txt"), "version=2\ntag=draft-x\ncommit=abc\n");
+        Check("installed.txt with version= and tag= marks a launcher's folder", PathBudget.LauncherFolderProblem(Path.Combine(other, "game")) is { } t2 && t2.Contains("holds a launcher"));
+        File.WriteAllText(Path.Combine(other, "installed.txt"), "version=2\n");
+        Check("... and with only one of the two it does not", PathBudget.LauncherFolderProblem(Path.Combine(other, "game")) == null);
+
+        // A launcher in a drive root asks to move, for folders of its own drive only; the other drives are not in its way.
+        var otherLetter = driveRoot[0] == 'Q' ? 'R' : 'Q';
+        Check("a launcher in a drive root leaves the other drives alone", PathBudget.LauncherFolderProblem(otherLetter + @":\mcla-game", driveRoot) == null);
+        Check("... and a folder of its own drive is asked to be elsewhere", PathBudget.LauncherFolderProblem(Path.Combine(driveRoot, "mcla-game"), driveRoot) is { } t3 && t3.Contains("root of drive"));
+
+        // The launcher's own folders are worked out once: the wizard asks on every keystroke.
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        for (var i = 0; i < 200; i++) PathBudget.LauncherFolderProblem(Path.Combine(scratch, "fine" + i));
+        Check($"200 verdicts take {timer.ElapsedMilliseconds} ms", timer.ElapsedMilliseconds < 3000);
         SafeFolder.Delete(scratch);
     }
 
@@ -247,6 +261,15 @@ static partial class Program
         Directory.CreateDirectory(Path.Combine(tools, ".u-ninja"));
         File.Delete(record);
         Check("a temporary folder is listed even without a record, the unmarked one never", Names(ToolInstaller.Superseded(tools)) == ".u-ninja", Names(ToolInstaller.Superseded(tools)));
+        // With no record, a folder set aside (.u-old-*) may be the only copy of a tool: it is not listed; other .u-* names are not Setup's temporary ones.
+        Directory.CreateDirectory(Path.Combine(tools, ".u-old-ninja-1.13.3"));
+        Directory.CreateDirectory(Path.Combine(tools, ".u-something"));
+        Check("with no record only the temporary folders of an unpacking are listed", Names(ToolInstaller.Superseded(tools)) == ".u-ninja", Names(ToolInstaller.Superseded(tools)));
+        File.WriteAllText(record, "");
+        Check("... also when the record is empty (no whole line in it)", Names(ToolInstaller.Superseded(tools)) == ".u-ninja", Names(ToolInstaller.Superseded(tools)));
+        File.Delete(record);
+        SafeFolder.Delete(Path.Combine(tools, ".u-old-ninja-1.13.3"));
+        SafeFolder.Delete(Path.Combine(tools, ".u-something"));
         SafeFolder.Delete(Path.Combine(tools, ".u-ninja"));
 
         // The record is replaced whole (a leftover temporary file does not matter) and keeps the other tools.

@@ -200,7 +200,7 @@ static class ToolInstaller
                 var parts = line.Split('\t');
                 if (parts.Length == 3 && parts[0].Length > 0 && IsPlainName(parts[1]) && parts[2].Length > 0) named[parts[0]] = (parts[1], parts[2]);
             }
-            return named;
+            return named.Count == 0 ? null : named;   // a file with no whole line in it is as good as none
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
     }
@@ -221,13 +221,20 @@ static class ToolInstaller
             if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
             if (dir.Name.StartsWith(AsidePrefix, StringComparison.Ordinal))
             {
+                // A folder set aside by an activation can be the only copy of a tool: with no record to say it is not, it stays.
+                if (recorded == null) continue;
                 var original = dir.Name[AsidePrefix.Length..];
-                var onlyCopy = recorded != null && !Directory.Exists(Path.Combine(tools, original))
+                var onlyCopy = !Directory.Exists(Path.Combine(tools, original))
                                && recorded.Values.Any(v => string.Equals(v.Folder, original, StringComparison.OrdinalIgnoreCase));
                 if (!onlyCopy) result.Add(dir.FullName);
                 continue;
             }
-            if (dir.Name.StartsWith(".u-", StringComparison.Ordinal)) { result.Add(dir.FullName); continue; }
+            // The temporary folder of an unpacking (.u-<tool>) is never in use.
+            if (dir.Name.StartsWith(".u-", StringComparison.Ordinal))
+            {
+                if (ReleaseInfo.RequiredTools.Contains(dir.Name[3..], StringComparer.Ordinal)) result.Add(dir.FullName);
+                continue;
+            }
             if (recorded == null || !File.Exists(Path.Combine(dir.FullName, Marker))) continue;
             foreach (var tool in ReleaseInfo.RequiredTools)
                 if (dir.Name.StartsWith(tool + "-", StringComparison.OrdinalIgnoreCase)
