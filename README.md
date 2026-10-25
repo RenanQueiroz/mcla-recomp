@@ -19,10 +19,6 @@ Everything this fork adds was built and measured on **Windows only**, with an **
 
 On the test machine, with the launcher's settings: at native resolution the game's own thread sets the pace, at about 6.8 ms a frame (about 145 FPS uncapped in free roam). At 3× (4K) a 120 FPS cap holds in free roam and while driving in the city, with 93% of frames within 1 ms of the target on D3D12 and 97% on Vulkan (99% on both standing in the city by day since single-tile rendering). Races at 3× run at a median of 8.1 to 8.5 ms a frame on D3D12 and 9.3 to 9.6 ms on Vulkan in the race benchmark (`launcher/dev/scripts/race.pad`, uncapped, the release build, two runs each); with the scene in two tiles 9.7 to 10.1 and 10.9 to 11.1 ms, where the runs of 2026-10-15 gave 9.3 and 10.8 (the benchmark's runs spread by up to 8%). Method and per-change figures: [patches/README.md](patches/README.md) and `launcher/dev/single-tile-edram-2026-10-16.md`.
 
-Car reflections are fixed on every renderer (upstream's fix: cars no longer come out white with a glow at night):
-
-![The same spot before and after the fix, at night and at noon](docs/images/reflection-fix-before-after.webp)
-
 ## Which release of the game
 
 Only **Midnight Club: Los Angeles Complete Edition, USA/Europe, for Xbox 360** (title id `545407F8`), as a disc image (`.iso`). The fixes in `config/` are addresses in that release's executable; another region or revision would need them checked again.
