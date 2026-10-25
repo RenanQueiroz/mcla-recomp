@@ -58,9 +58,14 @@ function Restore-CodegenFiles {
         # Line endings alone are not an edit (codegen writes LF, and git may be set to check out CRLF).
         & git.exe -C $repo diff --ignore-cr-at-eol --quiet HEAD -- $file 2>$null
         if ($LASTEXITCODE -eq 1) {
-            New-Item -ItemType Directory -Force -Path $saveTo | Out-Null
             $copy = Join-Path $saveTo (($file -replace '[\\/]', '_') + "." + (Get-Date -Format "yyyyMMdd-HHmmss"))
-            Copy-Item -LiteralPath (Join-Path $repo ($file -replace '/', '\')) -Destination $copy
+            try {
+                New-Item -ItemType Directory -Force -Path $saveTo -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath (Join-Path $repo ($file -replace '/', '\')) -Destination $copy -ErrorAction Stop
+            } catch {
+                # The edit is not discarded when it could not be kept: the update stops here, with the checkout as it was.
+                throw "your changes in $file could not be saved to $copy ($($_.Exception.Message)), so the update was not made"
+            }
             "$file had changes: a copy is in $copy"
         }
         & git.exe -C $repo checkout --quiet -- $file 2>$null

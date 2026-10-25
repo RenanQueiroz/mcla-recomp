@@ -31,6 +31,8 @@
 //   remaining <scratch>       what is left to do, for the disk preflight
 //   cleanup2 <scratch>        what an uninstall refuses
 //   update-status | update-run   (Checks3.cs) in Installed mode: what an update would be, and doing it
+//   tools-record <scratch>    the tools record: lost, cut short or whole, nothing in use is superseded; staged tools; kept\\ is not emptied
+//   launcher-folder <scratch> the install folder may not be, be inside, or contain the launcher's folder or the installer's default one
 //   rebuild                   (Installed mode) a plain Rebuild: the lock, the last options, the finish of a pending update
 using System.Text.Json;
 using MclaLauncher.Setup;
@@ -76,6 +78,8 @@ static partial class Program
                 case "update-run": return await UpdateRun(args.Length > 2 && args[1] == "--kill-after" ? int.Parse(args[2]) : 0);
                 case "rebuild": return await Rebuild();
                 case "settings-remove": SettingsRemove(args[1]); break;
+                case "tools-record": await ToolsRecord(args[1]); break;
+                case "launcher-folder": LauncherFolder(args[1]); break;
                 case "lock": LockChecks(args[1]); break;
                 case "orphan": Orphan(args[1], args.Length < 3 || args[2] != "nojob"); break;
                 case "retry": RetryChecks(args[1]); break;

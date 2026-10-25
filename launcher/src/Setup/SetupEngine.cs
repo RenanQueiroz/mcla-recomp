@@ -613,20 +613,23 @@ sealed class SetupEngine
         }
     }
 
-    /// Puts the player's settings back into the new checkout, over the new files, and empties kept\.
-    void RestoreSettings()
+    /// Puts the player's settings back into the new checkout, over the new files, and removes what it restored from kept\ (and kept\
+    /// itself when nothing else is in it: an update keeps the player's edits of the recompiler's files there, in kept\codegen-edits).
+    void RestoreSettings() => RestoreKept(ctx.Layout, SettingsFiles(), name => Log(StepId.Shaders, $"{name} is back"));
+
+    internal static void RestoreKept(InstallLayout layout, IEnumerable<(string Path, string Name)> files, Action<string> restored)
     {
-        var layout = ctx.Layout;
         if (!Directory.Exists(layout.Kept)) return;
-        foreach (var (to, name) in SettingsFiles())
+        foreach (var (to, name) in files)
         {
             var from = Path.Combine(layout.Kept, name);
             if (!File.Exists(from)) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(to)!);
             Retry.Io(() => File.Copy(from, to, overwrite: true));
-            Log(StepId.Shaders, $"{name} is back");
+            Retry.Io(() => File.Delete(from));
+            restored(name);
         }
-        SafeFolder.Delete(layout.Kept);
+        if (!Directory.EnumerateFileSystemEntries(layout.Kept).Any()) SafeFolder.Delete(layout.Kept);
     }
 
     IEnumerable<(string Path, string Name)> SettingsFiles() =>

@@ -152,6 +152,9 @@ digits, spaces, dots, dashes and underscores (the wizard says so before it start
   them. A user name with an accent therefore gets `C:\MCLA` as the suggested folder instead of `%LOCALAPPDATA%`.
 - Also refused: a network location or mapped network drive, a drive that is not NTFS or ReFS (Git refuses folders
   without owners), a drive's root, `C:\Windows` and `C:\Program Files` (no administrator rights are asked for),
+  the folder of the launcher that is running and the one the installer puts the launcher in (`%LOCALAPPDATA%\Programs\MCLA`),
+  whether the chosen folder is one of them, inside one, or has one inside (compared as full paths, ignoring case, after junctions
+  and symbolic links are resolved: the launcher's folder is replaced when it updates and removed with it),
   a game folder inside the install or the install inside the game's folder; a folder in OneDrive is warned
   about. Free space needed: the game's size (when copied) and 3 GB, less what the folder holds already.
 
@@ -205,15 +208,19 @@ An install made by the setup wizard (Installed mode) doesn't follow `main`; the 
   1. Room is checked (the archives, what they unpack to, and the build), then the tools and the SDK bundle the release names
      are downloaded and checked (SHA-256, size) when they differ from the ones in the install. Nothing in the install has
      changed yet.
-  2. The new tools are unpacked beside the old ones, but the record of `tools\` still names the old ones: until the checkout has
-     moved, a build must use the tools the old checkout and its SDK were built with.
+  2. The new tools are unpacked into `tools\.staged`, where no build looks (`env.ps1` takes the newest folder of `tools\` that
+     matches a tool's name), and the record of `tools\` still names the old ones: until the checkout has moved, a build must use
+     the tools the old checkout and its SDK were built with.
   3. The update is written into `install.json` (`pending`, with the unpacked tools). If an earlier update was waiting for its
      build, its record comes back when this one fails before its move.
   4. The checkout moves to the tag (`git merge --ff-only`, or a checkout when going back from `main`). What codegen rewrites
      (`mcla_manifest.toml`, `generated\rexglue.cmake`) is put back first so that nothing is stashed; a change someone made in
      either is saved in `kept\codegen-edits` (and the log says so). A merge that leaves conflicts is a failure.
   5. `build-options.json` names the new SDK bundle.
-  6. The new tools become the tools in use, their archives go, and the folders of the tools they replaced are removed. If the build
+  6. The new tools are moved into `tools\` and recorded as the tools in use (the record, `tools\.mcla-tools.txt`, is written beside
+     and renamed over), their archives go, and the folders of the tools they replaced are removed (renamed to a temporary name
+     first, so that a file held open leaves the folder whole). Only a folder the record replaced with another folder of the same
+     tool is removed: a record that is lost or cut short deletes nothing. If the build
      folder was configured with one of those (its `CMakeCache.txt` names the CMake, Ninja and compiler that made it), its
      `CMakeCache.txt` and `build.ninja` go first and the next build configures it again: no build, now or later, runs with an old
      tool or breaks for lack of it.
@@ -221,7 +228,8 @@ An install made by the setup wizard (Installed mode) doesn't follow `main`; the 
      is another one (the SDK is swapped, not patched and built again), checks it is this checkout's, and Ninja rebuilds only what
      changed.
   When the build worked, `pending` is cleared and the record names the release; older bundle zips are removed. A stop leaves a
-  checkout, a bundle and tools that belong together (before the move: all old). A start that finds `pending` (when no update, build or
+  checkout, a bundle and tools that belong together (before the move: all old). What goes wrong after the move (a file of an old
+  tool held open, say) does not stop the update: it is tried again when the build is over, or at the next start. A start that finds `pending` (when no update, build or
   setup is running in the folder) looks at it: if the checkout never moved, the record is dropped and the unused new tools removed;
   if it did, steps 5 and 6 are finished, and when what was built is still current (a release that changed only the launcher or the
   documentation) the update is complete; otherwise the Rebuild that is offered completes it. Every build the launcher starts for an

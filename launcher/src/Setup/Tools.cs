@@ -82,6 +82,10 @@ static class ToolInstaller
     const string Marker = ".mcla-checked";
     /// tools\.mcla-tools.json's neighbour: one line per unpacked tool, "name<TAB>folder<TAB>sha256 of its zip".
     const string RecordName = ".mcla-tools.txt";
+    /// Where an update unpacks the tools it is going to switch to: a folder the build scripts do not look in (env.ps1 takes the
+    /// newest folder of tools\ that matches a tool's name), so that no build uses a new tool before the update has moved the
+    /// checkout. Activate moves a tool from here into tools\.
+    public const string StagingFolder = ".staged";
     /// What an archive may hold: more is not a tool of this size (llvm-mingw is about 5,500 files and 900 MB unpacked).
     const long MaxUnpackedBytes = 4L << 30;
     const int MaxEntries = 100_000;
@@ -117,27 +121,72 @@ static class ToolInstaller
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
-    /// Makes an unpacked tool the one the record names (the one builds use).
-    public static void Activate(string tools, string name, string folder, string sha256) => Record(tools, name, folder, sha256);
+    /// The tool was unpacked (by an update, not yet in use) into tools\.staged\<folder> from the zip with this SHA-256.
+    public static bool IsStaged(string tools, string folder, string sha256) => IsUnpacked(Path.Combine(tools, StagingFolder), folder, sha256);
 
-    /// Folders in tools\ that were unpacked here (they carry the marker) and that the record no longer names (what a newer tool
-    /// replaced, or what an update unpacked and did not use), and the temporary folders of an unpacking that was cut short.
+    /// Makes an unpacked tool the one the record names (the one builds use): a staged one is moved into tools\ first (a rename
+    /// within the folder; a folder of the same name that was there is set aside as a temporary one), then the record is written.
+    public static void Activate(string tools, string name, string folder, string sha256)
+    {
+        var staged = Path.Combine(tools, StagingFolder, folder);
+        var final = Path.Combine(tools, folder);
+        if (Directory.Exists(staged))
+        {
+            if (Directory.Exists(final))
+            {
+                if (IsUnpacked(tools, folder, sha256)) SafeFolder.Delete(staged);   // already there (a record that was lost)
+                else
+                {
+                    var aside = Path.Combine(tools, ".u-old-" + folder);
+                    SafeFolder.Delete(aside);
+                    Retry.Io(() => Directory.Move(final, aside));
+                }
+            }
+            if (Directory.Exists(staged)) Retry.Io(() => Directory.Move(staged, final));
+        }
+        Record(tools, name, folder, sha256);
+    }
+
+    /// Removes what is left in tools\.staged (tools an update unpacked and did not switch to).
+    public static void RemoveStaged(string tools) => SafeFolder.Delete(Path.Combine(tools, StagingFolder));
+
+    /// The folder the record names for each tool; null when there is no record (or it can't be read). A line that is cut short
+    /// or damaged names nothing.
+    static Dictionary<string, string>? ReadRecord(string tools)
+    {
+        try
+        {
+            var file = Path.Combine(tools, RecordName);
+            if (!File.Exists(file)) return null;
+            var named = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var line in File.ReadAllLines(file))
+            {
+                var parts = line.Split('\t');
+                if (parts.Length == 3 && parts[0].Length > 0 && parts[1].Length > 0 && parts[2].Length > 0) named[parts[0]] = parts[1];
+            }
+            return named;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
+
+    /// Folders in tools\ that this program unpacked (they carry the marker) and that the record replaced with another folder of the
+    /// same tool (told by the folder's name: llvm-mingw-*, cmake-*, ninja-*, mingit-*), and the temporary folders of an unpacking
+    /// that was cut short. The record is what says which folder is in use: where it is missing or damaged, or does not name the tool
+    /// at all, nothing is superseded, so the tools in use are never deleted on account of a record that is lost.
     public static List<string> Superseded(string tools)
     {
         var result = new List<string>();
         if (!Directory.Exists(tools)) return result;
-        var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var file = Path.Combine(tools, RecordName);
-        if (File.Exists(file))
-            foreach (var line in File.ReadAllLines(file))
-            {
-                var parts = line.Split('\t');
-                if (parts.Length == 3) named.Add(parts[1]);
-            }
+        var recorded = ReadRecord(tools);
         foreach (var dir in new DirectoryInfo(tools).EnumerateDirectories())
         {
-            if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint) || named.Contains(dir.Name)) continue;
-            if (dir.Name.StartsWith(".u-", StringComparison.Ordinal) || File.Exists(Path.Combine(dir.FullName, Marker))) result.Add(dir.FullName);
+            if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+            if (dir.Name.StartsWith(".u-", StringComparison.Ordinal)) { result.Add(dir.FullName); continue; }
+            if (recorded == null || !File.Exists(Path.Combine(dir.FullName, Marker))) continue;
+            foreach (var tool in ReleaseInfo.RequiredTools)
+                if (dir.Name.StartsWith(tool + "-", StringComparison.OrdinalIgnoreCase)
+                    && recorded.TryGetValue(tool, out var inUse) && !string.Equals(inUse, dir.Name, StringComparison.OrdinalIgnoreCase))
+                    result.Add(dir.FullName);
         }
         return result;
     }
@@ -162,9 +211,17 @@ static class ToolInstaller
     static void Record(string tools, string name, string folder, string sha256)
     {
         var file = Path.Combine(tools, RecordName);
-        var lines = File.Exists(file) ? File.ReadAllLines(file).Where(l => !l.StartsWith(name + "\t", StringComparison.Ordinal)).ToList() : [];
+        var lines = File.Exists(file)
+            ? File.ReadAllLines(file).Where(l => l.Split('\t').Length == 3 && !l.StartsWith(name + "\t", StringComparison.Ordinal)).ToList()
+            : [];
         lines.Add($"{name}\t{folder}\t{sha256}");
-        Retry.Io(() => File.WriteAllLines(file, lines));
+        // Written beside and renamed over, so that a stop in the middle leaves the old record whole.
+        var temp = file + ".tmp";
+        Retry.Io(() =>
+        {
+            File.WriteAllLines(temp, lines);
+            File.Move(temp, file, overwrite: true);
+        });
     }
 
     static readonly HashSet<string> DeviceNames = new(StringComparer.OrdinalIgnoreCase)
@@ -213,7 +270,9 @@ static class ToolInstaller
         }
         if (topFolder.Contains("..") || Path.IsPathRooted(topFolder) || topFolder.Length == 0)
             throw new SetupException($"{name}'s archive has a name that can't be used.");
-        var final = Path.Combine(tools, topFolder);
+        // An update's tools are unpacked into tools\.staged and moved into place by Activate; a setup's go straight into tools\.
+        var final = record ? Path.Combine(tools, topFolder) : Path.Combine(tools, StagingFolder, topFolder);
+        Directory.CreateDirectory(Path.GetDirectoryName(final)!);
         var marker = Path.Combine(final, Marker);
         if (File.Exists(marker) && File.ReadAllText(marker).Trim() == sha256)
         {

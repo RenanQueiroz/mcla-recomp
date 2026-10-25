@@ -103,13 +103,17 @@ sealed class UpdateSession : IDisposable
     /// Something the game is made of changed (files outside the launcher and the documentation, a new SDK bundle or
     /// tool): only then are the shaders prepared again after the build.
     public bool GameChanged { get; }
+    /// The last steps of the update (switching to the new tools) did not work after the checkout had moved (a file of an old tool held
+    /// open): the build goes on, and they are tried again when it is over, or at the next start (the update stays recorded).
+    public bool ToolSwitchPending { get; }
 
-    internal UpdateSession(InstallLock folderLock, BuildRunOptions options, UpdateTarget target, bool gameChanged)
+    internal UpdateSession(InstallLock folderLock, BuildRunOptions options, UpdateTarget target, bool gameChanged, bool toolSwitchPending = false)
     {
         this.folderLock = folderLock;
         Options = options;
         Target = target;
         GameChanged = gameChanged;
+        ToolSwitchPending = toolSwitchPending;
     }
 
     public void Dispose() => folderLock.Dispose();
@@ -194,16 +198,32 @@ static class UpdateEngine
             recorded = true;
             progress.Report("Moving to the release");
             await MoveToAsync(layout, target, log);
-            WriteOptions(layout, bundle.Asset, bundle.Sha256);
 
-            // 5. The new tools become the tools in use, the build folder forgets the tools it was configured with, and the tools
-            //    replaced go: nothing refers to them any more, so no build, now or later, runs with one of them or breaks for lack
-            //    of it. The next build configures the folder again.
-            progress.Report("Switching to the new tools");
-            ActivateTools(layout, staged, log, ct);
+            // From here the update is recorded and the checkout is at the new version: what goes wrong is not "the update stopped"
+            // but "the rest finishes later" (the next start does it, or the end of this build). A stop asked for says so in words.
+            var toolSwitchPending = false;
+            try
+            {
+                WriteOptions(layout, bundle.Asset, bundle.Sha256);
+
+                // 5. The new tools become the tools in use, the build folder forgets the tools it was configured with, and the tools
+                //    replaced go: nothing refers to them any more, so no build, now or later, runs with one of them or breaks for lack
+                //    of it. The next build configures the folder again.
+                progress.Report("Switching to the new tools");
+                ActivateTools(layout, staged, log, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw new SetupException("The update was stopped after the new version had been put in place. It is recorded: the next start finishes it, and Rebuild builds it.");
+            }
+            catch (Exception ex)
+            {
+                log($"the switch to the new tools is not finished ({ex.Message}); it is tried again when the build is over, or at the next start");
+                toolSwitchPending = true;
+            }
 
             string[] arguments = ["-Toolchain", "mingw", "-ToolsDir", layout.Tools, "-SdkBundle", zip, "-SdkBundleSha256", bundle.Sha256];
-            return new UpdateSession(folderLock, new BuildRunOptions(layout.LauncherDir, layout.LogsDir, arguments, layout.GitDir, IsUpdate: true), target, gameChanged);
+            return new UpdateSession(folderLock, new BuildRunOptions(layout.LauncherDir, layout.LogsDir, arguments, layout.GitDir, IsUpdate: true), target, gameChanged, toolSwitchPending);
         }
         catch
         {
@@ -259,6 +279,7 @@ static class UpdateEngine
             if (head != pending.Commit)
             {
                 (record with { Pending = null }).Save(layout.RecordFile);
+                ToolInstaller.RemoveStaged(layout.Tools);
                 RemoveSupersededTools(layout, _ => { }, CancellationToken.None);
                 return;
             }
@@ -302,7 +323,8 @@ static class UpdateEngine
         {
             // (The record names the folder and the archive's SHA-256: both are checked, so that a repackaged tool that unpacks into
             // a folder of the same name is switched too.)
-            if (!ToolInstaller.IsInstalled(layout.Tools, tool.Name, tool.Sha256) && ToolInstaller.IsUnpacked(layout.Tools, tool.Folder, tool.Sha256))
+            if (!ToolInstaller.IsInstalled(layout.Tools, tool.Name, tool.Sha256)
+                && (ToolInstaller.IsStaged(layout.Tools, tool.Folder, tool.Sha256) || ToolInstaller.IsUnpacked(layout.Tools, tool.Folder, tool.Sha256)))
             {
                 ToolInstaller.Activate(layout.Tools, tool.Name, tool.Folder, tool.Sha256);
                 log($"{tool.Name}: {tool.Folder} is the one in use now");
@@ -313,6 +335,7 @@ static class UpdateEngine
                 if (File.Exists(archive)) Retry.Io(() => File.Delete(archive), ct: ct);
             }
         }
+        ToolInstaller.RemoveStaged(layout.Tools);
         RemoveSupersededTools(layout, log, ct);
     }
 
@@ -376,8 +399,18 @@ static class UpdateEngine
         // Only a direct child of tools\ (never anything else the record might name).
         if (Directory.GetParent(Path.GetFullPath(folder))?.FullName.TrimEnd('\\') is not { } parent
             || !string.Equals(parent, Path.GetFullPath(layout.Tools).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
-        SafeFolder.Delete(folder);
-        log($"{Path.GetFileName(folder)} is replaced and removed");
+        // Renamed first: a file in it held open (an old tool still running) makes the rename fail with the folder whole, marker
+        // included, so that it is tried again later. Once renamed it is a temporary folder (.u-*), which any later cleanup removes
+        // even if the deleting is cut short; deleting it in place could leave it without its marker, and so unrecognised.
+        var name = Path.GetFileName(folder);
+        var aside = Path.Combine(layout.Tools, name.StartsWith(".u-", StringComparison.Ordinal) ? name : ".u-old-" + name);
+        if (!string.Equals(aside, folder, StringComparison.OrdinalIgnoreCase))
+        {
+            SafeFolder.Delete(aside);
+            Retry.Io(() => Directory.Move(folder, aside));
+        }
+        SafeFolder.Delete(aside);
+        log($"{name} is replaced and removed");
     }
 
     static void RemoveOtherBundles(InstallLayout layout, string keep)
@@ -480,6 +513,13 @@ static class UpdateEngine
     public static void Finish(InstallLayout layout, string exeDirectory, UpdateSession session)
     {
         var target = session.Target;
+        if (session.ToolSwitchPending && InstallRecord.Load(layout.RecordFile) is { Pending: { } waiting })
+        {
+            // The build is over, so the file that held an old tool's folder is probably free. If it still is not, the update stays
+            // recorded (the options are written, the build is done): the next start finishes it.
+            try { ActivateTools(layout, waiting.Tools ?? [], _ => { }, CancellationToken.None); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return; }
+        }
         if (InstallRecord.Load(layout.RecordFile) is { } record)
         {
             var updated = record with

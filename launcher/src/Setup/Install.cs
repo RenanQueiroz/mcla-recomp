@@ -190,6 +190,7 @@ static class PathBudget
         if (!Path.IsPathRooted(path.Trim()) || full.StartsWith(@"\\", StringComparison.Ordinal))
             return "Choose a folder on a drive of this PC (a network location won't do: the build writes thousands of small files).";
         var root = Path.GetPathRoot(full)!;
+        if (LauncherFolderProblem(full) is { } inLauncher) return inLauncher;
         if (UnsafeCharacter(full) is { } bad)
             return $"The path has a character the build can't take ({bad}): its tools read it as a plain ANSI string, and Windows' command line gives some characters a meaning of their own. "
                  + "Use only letters without accents, digits, spaces, dots, dashes and underscores in the whole path, for example C:\\MCLA.";
@@ -220,6 +221,49 @@ static class PathBudget
                 return "That folder already has other things in it. Choose a new or empty folder: the setup puts its files there and nothing else.";
         }
         return null;
+    }
+
+    /// The folder of the launcher that is running, and the one the installer puts the launcher in (%LOCALAPPDATA%\Programs\MCLA), are
+    /// replaced when the launcher updates and removed with it: the install folder may not be one of them, inside one, or contain one.
+    /// Compared as full paths, ignoring case, after links (junctions, symbolic links) in either path are resolved.
+    public static string? LauncherFolderProblem(string full)
+    {
+        var launchers = new List<(string Folder, string What)>
+        {
+            (AppContext.BaseDirectory, "the folder this launcher is running from"),
+            (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA"), "the folder the installer puts the launcher in"),
+        };
+        var real = RealPath(full);
+        foreach (var (folder, what) in launchers)
+        {
+            if (string.IsNullOrWhiteSpace(folder)) continue;
+            string other, otherReal;
+            try { other = Path.GetFullPath(folder); otherReal = RealPath(other); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { continue; }
+            if (IsInside(full, other) || IsInside(other, full) || IsInside(real, otherReal) || IsInside(otherReal, real))
+                return $"That folder overlaps {what} ({other.TrimEnd('\\')}): it is that folder, inside it, or has it inside. The launcher's folder is replaced when the launcher updates "
+                     + "and removed with it, so the game can't live there. Choose another folder, for example C:\\MCLA.";
+        }
+        return null;
+    }
+
+    /// The path with every junction and symbolic link in it replaced by what it points to (the part that does not exist yet is kept as it is).
+    internal static string RealPath(string full)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(full)!;
+            var current = root;
+            foreach (var part in full[root.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, part);
+                var info = new DirectoryInfo(current);
+                if (info.Exists && info.Attributes.HasFlag(FileAttributes.ReparsePoint) && info.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+                    current = target.FullName.TrimEnd('\\');
+            }
+            return current;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return full; }
     }
 
     /// The first character of the path (after the drive) that the build can't take, shown for the message; null when all are fine.
