@@ -110,6 +110,15 @@ def test_templates():
         except SystemExit:
             ok = True
         check("template: a variable with no value is refused", ok)
+        # {REMAINING}: the race's frames less what the buttons took since "mark race".
+        t.write_text("#@default RACEFRAMES=1000\nmark race\nwait 100f\npress lb 10f\nwait 20ms 5f\n"
+                     "@repeat 2: press a 40f ; wait 60f\nwait {REMAINING}f\nmark race_end\n")
+        cv.script_copy(t, d / "shots", out)
+        waits = [ln for ln in out.read_text().splitlines() if ln.startswith("wait ") and ln.endswith("f")]
+        check("template: {REMAINING} is the race's frames less the waits and presses since its start",
+              waits[-1] == f"wait {1000 - 100 - 10 - 2 * (40 + 60)}f", waits[-1])
+        cv.script_copy(t, d / "shots", out, {"RACEFRAMES": "100"})
+        check("template: {REMAINING} is never negative", "wait 0f" in out.read_text())
 
 
 def test_created_in_play():
@@ -122,7 +131,37 @@ def test_created_in_play():
           set(new_shaders) == {5} and new_lists["rtv.d3d12.xpso"] == [r2, r3] and not new_lists["fbo.vk.xpso"], "")
 
 
-for test in (test_retired_entries, test_read_drops, test_templates, test_created_in_play):
+def test_matrix():
+    import shlex
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        subprocess.run([sys.executable, str(HERE / "matrix.py"), str(d), "--ordered", "3", "--circuit", "2",
+                        "--landmark", "1"], check=True, capture_output=True)
+        parser = cv.make_parser()
+        lines = [ln for f in sorted(d.glob("*.txt")) for ln in f.read_text().splitlines() if ln and ln[0] != "#"]
+        tags = []
+        for ln in lines:
+            a = parser.parse_args(["soak", *shlex.split(ln), "--out", str(d)])
+            tags.append(a.tag)
+            template = HERE.parent / "scripts" / a.script
+            out = d / "x.pad"
+            cv.script_copy(template, d / "shots", out, dict(v.split("=", 1) for v in a.var))
+        check("matrix: every generated job parses and its script template expands",
+              len(lines) == 6 + 12 + 12 + 3 + 3 + 4 + 2 and len(set(tags)) == len(tags), f"{len(lines)} jobs, {len(set(tags))} tags")
+
+
+def test_route_frames():
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "r.route"
+        f.write_text("# route\n0,0,10\n10,0,10\n20,0,10\n")
+        # 20 m at 10 m/s is 2 s: 120 frames, a quarter more, and 600
+        check("route_frames: the time a route takes, a quarter more, and 10 s", cv.route_frames(f) == 150 + 600,
+              str(cv.route_frames(f)))
+
+
+for test in (test_retired_entries, test_read_drops, test_templates, test_created_in_play, test_matrix,
+             test_route_frames):
     test()
 print("ALL PASS" if all(results) else f"{results.count(False)} FAILED")
 sys.exit(0 if all(results) else 1)

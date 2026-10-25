@@ -14,7 +14,13 @@
 #@default TIME=0        # Time of day: presses of right: Dynamic, Midnight, Dawn, Noon, Dusk
 #@default ROUTE=none    # a route for follow (file name beside the script), or none
 #@default WATCH=0       # watch <every updates>: every car's position in the log, for route.py
-#@default RACEFRAMES=1800
+#@default RACEFRAMES=1800   # frames of the race in all, from its start (with a route: its length)
+#@default LBSPAM=0      # presses of LB (special ability) 5 s apart, from the race's start
+#@default MAP=0         # 1: the overhead map (d-pad up) for 4 s, then back
+#@default SHOTN=0       # SHOTN screenshots of the race, SHOTEVERY frames apart (before RACEFRAMES)
+#@default SHOTEVERY=300
+#@default TOUR=0        # 1: press the car's buttons in the first 25 s of the race (nitro, camera view,
+#                         headlights, special ability, handbrake, weight transfer, horn)
 #
 # The menus move in real time and animate per update: each wait is a time and a number of
 # updates (see boot-to-race.pad).
@@ -71,7 +77,11 @@ trigger rt 1
 wait_until f32 0x827D7510 >= 9.3 300s
 mark race
 shot {SHOTS}/race-start.png 0.5
-wait {RACEFRAMES}f
+@if {TOUR}: wait 240f ; down x ; wait 150f ; up x ; wait 60f ; press rb 8f ; wait 150f ; press rb 8f ; wait 150f ; press rb 8f ; wait 150f ; press rb 8f ; wait 150f ; press y 8f ; wait 120f ; press y 8f ; wait 60f ; press lb 8f ; wait 200f ; press a 120f ; wait 120f ; press b 120f ; wait 120f ; press rs 60f ; wait 120f ; down x ; wait 200f ; up x
+@if {MAP}: wait 300f ; press up 10f ; wait 240f ; press up 10f ; wait 120f
+@repeat {LBSPAM}: press lb 10f ; wait 290f
+@repeat {SHOTN}: wait {SHOTEVERY}f ; shot {SHOTS}/race{I}.png 0.4
+wait {REMAINING}f
 shot {SHOTS}/race-end.png 0.5
 mark race_end
 @if {ROUTE}: follow stop

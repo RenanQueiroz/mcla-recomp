@@ -7,11 +7,19 @@ draw left out while it compiled), and the frames over 50 ms.
 
   python coverage.py soak  --script boot-to-roam.pad --backend d3d12 [--path rtv|rov|fbo|fsi]
                            --out <folder> --tag <name> [--pack <file>] [--no-pack] [--res 1]
-                           [--fixed-dt 60] [--timeout 900] [--salt N] [--extra ...]
-  python coverage.py batch <jobs file> --out <folder> [--lock] [--normal-priority]
-  python coverage.py report <folder>...
-  python coverage.py grow  <folder>... --out <pack> [--check]     the pack plus what the soaks
-                           in the folders created in play (through build_pack.py)
+                           [--fixed-dt 60] [--timeout 900] [--salt N] [--var NAME=VALUE ...]
+                           [--route-out <file>] [--extra ...]
+  python coverage.py batch <jobs file> --out <folder> [--lock] [--max-min 40] [--pack <file>]
+                           [--suffix <text>]      (--pack and --suffix: the same jobs again, with
+                           another pack and tags that don't collide)
+  python coverage.py report <folder>... [--match <regex>]
+  python coverage.py grow  <folder>... --out <pack> [--check] [--previous <pack>] [--drop <file>]
+                           the pack plus what the soaks in the folders created in play (through
+                           build_pack.py, which refuses a pack that lacks entries of the previous
+                           one for no stated reason)
+  matrix.py writes the jobs files of the races (see there); a script may be a template: see
+  script_copy. Routes: a probe run (arcade-race.pad --var WATCH=15) with --route-out writes the
+  leading opponent's route, which later runs drive (--var ROUTE=<file>).
 
 A soak writes <out>/<tag>.json (and <tag>.new.txt: the descriptions created in play) and keeps its
 storage in <out>/<tag>/cache (the folder build_pack.py reads). Runs go through devrun.py: private
@@ -23,6 +31,7 @@ A jobs file line is the arguments of "soak" (without --out), blank lines and # c
 """
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -139,8 +148,11 @@ def script_copy(script, shots, dest, variables=None):
       by their absolute paths;
     - "#@default NAME=VALUE" gives a variable's value when --var NAME=VALUE doesn't, and {NAME}
       is replaced by it everywhere;
-    - "@repeat N: command ; command" is N copies of the commands (N may be {NAME});
-      "@if V: command ; command" the commands once, unless V is empty, 0 or none.
+    - "@repeat N: command ; command" (the colon and a space end N) is N copies of the commands (N may be {NAME}; {I} in them is the
+      copy's number, from 1);
+      "@if V: command ; command" the commands once, unless V is empty, 0 or none;
+    - {REMAINING}: RACEFRAMES less the frames the waits and presses since "mark race" took (a
+      race of RACEFRAMES frames in all, however many buttons were pressed in it).
     Only coverage.py expands these: the plain dev pad takes a template for comments."""
     values = {}
     text = script.read_text(encoding="utf-8")
@@ -155,16 +167,25 @@ def script_copy(script, shots, dest, variables=None):
         for name, value in values.items():
             line = line.replace("{" + name + "}", value)
         if line.startswith("@if "):
-            condition, _, body = line[len("@if "):].partition(":")
+            condition, _, body = line[len("@if "):].partition(": ")
             if condition.strip() not in ("", "0", "none"):
                 expanded += [c.strip() for c in body.split(";")]
         elif line.startswith("@repeat "):
-            count, _, body = line[len("@repeat "):].partition(":")
-            expanded += [c.strip() for _ in range(int(count)) for c in body.split(";")]
+            count, _, body = line[len("@repeat "):].partition(": ")
+            expanded += [c.strip().replace("{I}", str(i)) for i in range(1, int(count) + 1) for c in body.split(";")]
         else:
             expanded.append(line)
     lines = []
+    race_frames = int(values.get("RACEFRAMES", "0") or 0)
+    spent = None  # frames of waits and presses since "mark race"
     for line in expanded:
+        if line.strip() == "mark race":
+            spent = 0
+        if "{REMAINING}" in line:
+            line = line.replace("{REMAINING}", str(max(0, race_frames - (spent or 0))))
+        elif spent is not None:
+            m = re.fullmatch(r"(?:wait|press [a-z]+) ([0-9]+)f", line.strip())
+            spent += int(m.group(1)) if m else 0
         word = line.split(None, 1)
         if len(word) == 2 and word[0] in ("include", "follow", "play"):
             first, _, tail = word[1].partition(" ")
@@ -175,6 +196,17 @@ def script_copy(script, shots, dest, variables=None):
     if left:
         raise SystemExit(f"{script.name}: no value for {sorted(set(left))} (--var NAME=VALUE)")
     dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def route_frames(path, fps=60):
+    """Frames a route takes to drive (a quarter more, and 10 s), from its points and speeds."""
+    pts = []
+    for line in Path(path).read_text().splitlines():
+        if line[:1] in "-0123456789":
+            x, z, v = map(float, line.split(","))
+            pts.append((x, z, v))
+    seconds = sum(math.dist(p[:2], q[:2]) / max(q[2], 3.0) for p, q in zip(pts, pts[1:]))
+    return int(seconds * fps * 1.25) + 600
 
 
 def soak(a):
@@ -192,7 +224,13 @@ def soak(a):
     shots = out / a.tag / "shots"
     shots.mkdir(parents=True, exist_ok=True)
     run_script = out / a.tag / script.name
-    script_copy(script, shots, run_script, dict(v.split("=", 1) for v in a.var))
+    variables = dict(v.split("=", 1) for v in a.var)
+    route = variables.get("ROUTE", "none")
+    if route not in ("none", "0", "") and "RACEFRAMES" not in variables:
+        found = Path(route) if Path(route).is_absolute() else script.parent / route
+        if found.exists():
+            variables["RACEFRAMES"] = str(route_frames(found, a.fixed_dt or 60))
+    script_copy(script, shots, run_script, variables)
     cmd = [sys.executable, str(DEVRUN), "run", "--script", str(run_script), "--backend", backend,
            "--res", str(a.res), "--cache-root", str(cache), "--timeout", str(a.timeout)]
     if a.fixed_dt:
@@ -232,6 +270,15 @@ def soak(a):
         return 1
     folder = devrun.RUNS / m.group(1)
     result.update(run=m.group(1), exit=int(m.group(2)), run_folder=str(folder))
+    if a.route_out:
+        # The route of the car that went furthest, from the run's `watch` lines.
+        import route as route_tool
+        try:
+            route_tool.from_log(argparse.Namespace(log=str(folder), file=str(a.route_out), spacing=4.0,
+                                                   fps=float(a.fixed_dt or 60)))
+            result["route"] = str(a.route_out)
+        except SystemExit as e:
+            result["error"] = f"route: {e}"
     gpu = devrun.gpu_report(folder)
     result["gpu_clean"] = None if not gpu else gpu.get("clean")
     log = (folder / "game.log").read_text(encoding="utf-8", errors="replace") if (folder / "game.log").exists() else ""
@@ -281,6 +328,10 @@ def batch(a):
         if not line or line.startswith("#"):
             continue
         args = shlex.split(line)
+        if "--tag" in args:
+            args[args.index("--tag") + 1] += a.suffix
+        if a.pack:
+            args += ["--pack", a.pack]
         tag = args[args.index("--tag") + 1] if "--tag" in args else f"job{n}"
         if (out / f"{tag}.json").exists() and "error" not in json.loads((out / f"{tag}.json").read_text()):
             print(f"[batch] {tag}: done already", flush=True)
@@ -308,15 +359,29 @@ def report(a):
                 rows.append(json.loads(f.read_text()))
             except ValueError:
                 continue
+    if a.match:
+        rows = [r for r in rows if re.search(a.match, r["tag"])]
     print(f"{'tag':34} {'script':20} {'api/path':10} {'preload':>7} {'new pipe':>9} {'new sh':>6} "
           f"{'>50ms':>5} {'>100':>5} {'worst':>6} {'frames':>7}")
+    totals = dict(runs=0, failed=0, new=0, shaders=0, over50=0, over100=0, frames=0, seconds=0.0)
     for r in rows:
         fr = r.get("frames") or {}
         new = sum((r.get("new_pipelines") or {}).values())
+        totals["runs"] += 1
+        totals["failed"] += bool(r.get("error"))
+        totals["new"] += new
+        totals["shaders"] += r.get("new_shaders", 0)
+        totals["over50"] += fr.get("over50", 0)
+        totals["over100"] += fr.get("over100", 0)
+        totals["frames"] += fr.get("frames", 0)
+        totals["seconds"] += fr.get("seconds", 0.0)
         print(f"{r['tag'][:34]:34} {r['script'][:20]:20} {(r['backend'][:3] + '/' + (r['path'] or '-')):10} "
               f"{r.get('preloaded_at_start', 0):7d} {new:9d} {r.get('new_shaders', 0):6d} "
               f"{fr.get('over50', 0):5d} {fr.get('over100', 0):5d} {fr.get('worst_ms', 0):6.0f} {fr.get('frames', 0):7d}"
               + (f"  ERROR {r['error'][:60]}" if r.get("error") else ""))
+    print(f"total: {totals['runs']} runs ({totals['failed']} failed), {totals['new']} pipelines and "
+          f"{totals['shaders']} shaders created in play, {totals['over50']} frames over 50 ms "
+          f"({totals['over100']} over 100) in {totals['frames']} frames, {totals['seconds'] / 60:.1f} min")
     return 0
 
 
@@ -328,13 +393,25 @@ def grow(a):
             storages.append(cache)
     if not storages:
         raise SystemExit("no soak storages found")
+    out = Path(a.out)
+    previous = Path(a.previous) if a.previous else (DEFAULT_PACK if DEFAULT_PACK.exists() else None)
+    if previous and previous.resolve() == out.resolve():
+        # The pack is being replaced: the previous one is kept aside for the comparison.
+        kept = out.with_name(out.stem + ".previous")
+        shutil.copyfile(previous, kept)
+        previous = kept
     cmd = [sys.executable, str(HERE / "build_pack.py"), "--game", os.environ["MCLA_GAME_DATA"],
-           "--out", str(a.out)] + (["--check"] if a.check else []) + [str(s) for s in storages]
+           "--out", str(out)] + (["--check"] if a.check else [])
+    if previous and not a.no_previous:
+        cmd += ["--previous", str(previous), "--report", str(out.with_suffix(".retired.json"))]
+        if a.drop:
+            cmd += ["--drop", str(a.drop)]
+    cmd += [str(s) for s in storages]
     print(" ".join(cmd[:8]), f"... {len(storages)} storages", flush=True)
     return subprocess.run(cmd).returncode
 
 
-def main():
+def make_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("soak")
@@ -354,6 +431,8 @@ def main():
     p.add_argument("--salt", type=int, default=0)
     p.add_argument("--var", action="append", default=[], metavar="NAME=VALUE",
                    help="a value for a script template's {NAME} (repeatable)")
+    p.add_argument("--route-out", help="write the route of the leading opponent (from a run whose script "
+                   "had `watch`: arcade-race.pad WATCH=15) to this file")
     p.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
     p = sub.add_parser("batch")
     p.add_argument("jobs")
@@ -361,13 +440,26 @@ def main():
     p.add_argument("--lock", action="store_true")
     p.add_argument("--normal-priority", action="store_true", default=True)
     p.add_argument("--max-min", type=float, default=40)
+    p.add_argument("--pack", help="the pack every job imports (instead of the repository's)")
+    p.add_argument("--suffix", default="", help="added to every job's tag, to run a jobs file again "
+                   "with another pack")
     p = sub.add_parser("report")
     p.add_argument("folders", nargs="+")
+    p.add_argument("--match", help="only the runs whose tag matches this regular expression")
     p = sub.add_parser("grow")
     p.add_argument("folders", nargs="+")
     p.add_argument("--out", required=True)
     p.add_argument("--check", action="store_true")
-    a = ap.parse_args()
+    p.add_argument("--previous", help="the pack being replaced (default: the repository's); the new "
+                   "one may only lack entries of it that build_pack.py can explain")
+    p.add_argument("--no-previous", action="store_true", help="a pack from nothing (after a change of "
+                   "the storage versions the old one is refused anyway): nothing is compared")
+    p.add_argument("--drop", help="a build_pack.py --drop file")
+    return ap
+
+
+def main():
+    a = make_parser().parse_args()
     sys.exit({"soak": soak, "batch": batch, "report": report, "grow": grow}[a.cmd](a))
 
 

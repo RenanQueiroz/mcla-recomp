@@ -6,6 +6,8 @@ the path of the car that went furthest as a route for "follow" (src/dev_pad.cpp)
 
   route.py record <file.route> [--seconds 240]   from the race start (run
                                                  it before the countdown ends)
+  route.py from-log <run folder> <file.route>    the same from a run whose script had
+                                                 `watch 15` on (arcade-race.pad WATCH=15)
   route.py show <file.route>                     length, points, speeds
 
 The game runs the race at its own pace while this records, so start it with a
@@ -61,9 +63,15 @@ def record(a):
                 break
         time.sleep(a.interval)
 
-    def length(track):
-        return sum(math.dist(p[2], q[2]) for p, q in zip(track, track[1:]))
+    write_route(a, tracks)
 
+
+def length(track):
+    return sum(math.dist(p[2], q[2]) for p, q in zip(track, track[1:]))
+
+
+def write_route(a, tracks):
+    """tracks {car: [(time s, frame, (x, z))]}: the route of the car that went furthest."""
     if not tracks:
         raise SystemExit("no opponents: is a race on?")
     address, track = max(tracks.items(), key=lambda kv: length(kv[1]))
@@ -98,6 +106,27 @@ def record(a):
     print(f"{a.file}: {len(points)} points")
 
 
+def from_log(a):
+    """The same route from a run's log, where the script had `watch <every>` on: the cars' positions
+    at every <every> updates of the race timer (devrun.watch), the player first. Under
+    --mcla_fixed_dt=N the ticks are 1/N s (60 without it); a run's game.log or its folder."""
+    import devrun
+    watched = devrun.watch(a.log)
+    if not watched:
+        raise SystemExit("no 'watch' lines in the log: run the script with `watch 15` (or so)")
+    tracks = {}
+    for tick in sorted(watched):
+        for i, p in enumerate(watched[tick]):
+            if i == 0:
+                continue  # the player
+            track = tracks.setdefault(i, [])
+            # A jump (a reset after a crash) starts over.
+            if track and math.dist(track[-1][2], (p[0], p[2])) > 30:
+                track.clear()
+            track.append((tick / a.fps, tick, (p[0], p[2])))
+    write_route(a, tracks)
+
+
 def show(a):
     points = []
     for line in open(a.file, encoding="utf-8"):
@@ -120,10 +149,16 @@ def main():
     p.add_argument("--interval", type=float, default=0.05)
     p.add_argument("--spacing", type=float, default=4.0)
     p.add_argument("--pipe", default="mcla-pad")
+    p = sub.add_parser("from-log")
+    p.add_argument("log", help="a run folder, or its game.log")
+    p.add_argument("file")
+    p.add_argument("--spacing", type=float, default=4.0)
+    p.add_argument("--fps", type=float, default=60.0, help="the watch ticks per second (the fixed "
+                   "time step of the run, 60 by default)")
     p = sub.add_parser("show")
     p.add_argument("file")
     a = parser.parse_args()
-    record(a) if a.cmd == "record" else show(a)
+    {"record": record, "from-log": from_log, "show": show}[a.cmd](a)
 
 
 if __name__ == "__main__":

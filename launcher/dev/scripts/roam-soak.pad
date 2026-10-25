@@ -1,0 +1,25 @@
+# Template (coverage.py soak): boot to the city, drive out of the car park as in drive-spawn.pad,
+# then circle on the street for MINUTES minutes of game time (free roam's time of day and weather
+# move on meanwhile; a screenshot each minute). Segments: title, map_zoom, free_roam, drive,
+# minute1, minute2, ...
+#@default MINUTES=8
+#@default STEER=0.6     # how far the stick leans while circling
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s 300f
+mark drive
+trigger rt 1 50f
+trigger rt 0.6
+stick lx 1 40f
+trigger rt 1
+wait 400f
+trigger rt 0.5
+stick lx {STEER}
+shot {SHOTS}/min00.png 0.4
+@repeat {MINUTES}: mark minute{I} ; wait 3500f ; shot {SHOTS}/min{I}.png 0.4
+release all
+mark end

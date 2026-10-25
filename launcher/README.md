@@ -928,7 +928,25 @@ in front. A real controller keeps working alongside it.
   `sunset-and-vine.route` with the `follow` command; see
   `dev\race-benchmark-2026-10-15.md`). Scripts can `include` others.
 - `dev\route.py record <file>` writes the path the leading opponent drives in
-  a race (from the pipe's `cars` command) as a route for `follow`.
+  a race (from the pipe's `cars` command) as a route for `follow`;
+  `route.py from-log <run folder> <file>` does the same from a run whose script
+  had `watch 15` on (no pipe, uncapped). `follow` drives the triggers and the left
+  stick only: buttons a script holds meanwhile (`down x`, `press lb`) stay.
+- `dev\scripts\arcade-race.pad`, `roam-soak.pad` and the `explore-*.pad` tours
+  (the pause menu, Modes > Arcade and Goal Attack and their race lists, the race
+  options, Settings, the controls) are templates and tours for
+  `dev\shaderpack\coverage.py` (below); `#@default NAME=VALUE`, `{NAME}`,
+  `@repeat N: a ; b`, `@if V: a ; b` and `{SHOTS}` in them are expanded by it,
+  not by the game.
+- `dev\shaderpack\coverage.py` plays a script on a new shader storage with the
+  shader pack imported at the start and reports what the pack did not cover (the
+  pipelines and shaders the game created while playing, each a draw left out while
+  it compiled) and the frames over 50 ms; `matrix.py` writes the jobs files for
+  the arcade's 38 races (a probe per race that makes its route, then two
+  variants of every race on each render target path, and a hold-out variant),
+  `coverage.py batch` runs them under the shared GPU lock, `coverage.py grow`
+  builds the grown pack from the soaks' storages, and `test_pack.py` tests the
+  tools that need no game.
 
 The game ignores buttons during its own transitions (the title screen's camera
 cuts, a menu closing), so scripts press until a condition holds rather than
