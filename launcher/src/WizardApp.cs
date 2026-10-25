@@ -41,7 +41,7 @@ sealed class WizardApp : Component
         var (tick, bump) = UseReducer(0, threadSafe: true);
         var (notice, setNotice) = UseState<string?>(null, threadSafe: true);
         var (confirmExit, setConfirmExit) = UseState(false);
-        var (expanded, setExpanded) = UseState(ImmutableHashSet<StepId>.Empty);
+        var (detailsOpen, setDetailsOpen) = UseState(false);
         var engineRef = UseRef<SetupEngine?>(null);
         var ctsRef = UseRef<CancellationTokenSource?>(null);
         var exitingRef = UseRef(false);
@@ -228,21 +228,25 @@ sealed class WizardApp : Component
         }, runState);
 
         // The development path through the pages: the release, then the check, then the setup, with no clicks.
+        // With screenshots on, each page stays long enough to be photographed.
+        void AutoStep(Action action)
+        {
+            if (dev.ShotsDir == null) { action(); return; }
+            _ = Task.Delay(2500).ContinueWith(_ => ReactorApp.UIDispatcher.TryEnqueue(() => action()), TaskScheduler.Default);
+        }
         UseEffect(() =>
         {
-            if (!autoRef.Current || release == null || dev.GamePath == null || page != WizardPage.Welcome) return;
+            if (!autoRef.Current || release == null || page != WizardPage.Welcome) return;
             if (PathBudget.Problem(installDir, out _) != null) return;
             autoRef.Current = false;
-            StartCheck(dev.GamePath);
+            // Without a game given it stops at the page where one is chosen.
+            if (dev.GamePath == null) AutoStep(() => setPage(WizardPage.PickGame));
+            else AutoStep(() => StartCheck(dev.GamePath));
         }, release);
         UseEffect(() =>
         {
-            if (dev.Auto && check is { Ok: true } && page == WizardPage.Checking && runState == RunState.Idle) StartSetup();
+            if (dev.Auto && check is { Ok: true } && page == WizardPage.Checking && runState == RunState.Idle) AutoStep(StartSetup);
         }, check);
-        UseEffect(() =>
-        {
-            if (page == WizardPage.Ready && dev.Auto) return;
-        }, page);
 
         // The taskbar button shows the setup's progress.
         UseEffect(() =>
@@ -274,14 +278,27 @@ sealed class WizardApp : Component
             return () => cts.Cancel();
         }, Array.Empty<object>());
 
-        // Development: a PNG of the window at each page and state.
+        // Development: a PNG of the window at each page and state, and every 20 seconds.
         UseEffect(() => { _ = WizardShots.TakeAsync($"{page}-{runState}"); }, page, runState, check == null, release == null, checking);
+        UseEffect(() =>
+        {
+            if (dev.ShotsDir == null) return () => { };
+            var cts = new CancellationTokenSource();
+            _ = Task.Run(async () =>
+            {
+                try { while (true) { await Task.Delay(20000, cts.Token); await WizardShots.TakeAsync("tick"); } }
+                catch (OperationCanceledException) { }
+            });
+            return () => cts.Cancel();
+        }, Array.Empty<object>());
 
         // ---- layout ------------------------------------------------------------------------------------
         long needed = release?.Game is { } g ? PathBudget.RequiredBytes(g.Files.Sum(f => f.Size), !inPlace) : 0;
-        string? folderProblem = PathBudget.Problem(installDir, out var resumes);
-        string? folderWarning = folderProblem == null ? PathBudget.Warning(installDir) : null;
-        long free = PathBudget.FreeBytes(installDir);
+        // Only the first page looks at the folder (it reads install.json, which the setup rewrites as it goes).
+        bool resumes = false;
+        string? folderProblem = page == WizardPage.Welcome ? PathBudget.Problem(installDir, out resumes) : null;
+        string? folderWarning = folderProblem == null && page == WizardPage.Welcome ? PathBudget.Warning(installDir) : null;
+        long free = page == WizardPage.Welcome ? PathBudget.FreeBytes(installDir) : 0;
         bool enoughRoom = resumes || free >= needed;
 
         static Element Info(string title, string? message, InfoBarSeverity severity) =>
@@ -350,11 +367,12 @@ sealed class WizardApp : Component
             var folder = gamePath != null && Directory.Exists(gamePath);
             return VStack(14,
                 Title("Checking your game"),
-                Info(result.Ok ? $"✓  {result.Headline}" : result.Headline, result.Detail, result.Ok ? InfoBarSeverity.Success : InfoBarSeverity.Error),
+                Info(result.Headline, result.Detail, result.Ok ? InfoBarSeverity.Success : InfoBarSeverity.Error),
                 result.Files.Count > 0
                     ? Expander(result.Ok ? "The 13 files" : "The files", VStack(2, result.Files.Select(f =>
                         TextBlock($"{(f.Ok ? "✓" : "✕")}  {f.Path}   {(f.Present ? GameChecker.FormatSize(f.Found!.Value) : "missing")}").FontFamily(Mono).FontSize(12)
                             .Foreground(f.Ok ? Theme.PrimaryText : Theme.Ref("SystemFillColorCriticalBrush")).WithKey(f.Path)).ToArray()), isExpanded: !result.Ok)
+                        .HAlign(HorizontalAlignment.Stretch)
                     : Empty(),
                 result.Ok && folder
                     ? VStack(4,
@@ -381,8 +399,6 @@ sealed class WizardApp : Component
                 StepState.Failed => TextBlock("✕").Foreground(color).FontSize(16),
                 _ => TextBlock("○").Foreground(color).FontSize(16),
             };
-            var log = engineRef.Current?.LogOf(step.Id) ?? ImmutableList<string>.Empty;
-            var open = expanded.Contains(step.Id);
             return VStack(4,
                 Grid(
                     columns: [GridSize.Px(30), GridSize.Star(), GridSize.Auto],
@@ -394,10 +410,23 @@ sealed class WizardApp : Component
                     TextBlock(step.Remaining ?? "").Foreground(Theme.SecondaryText).VAlign(VerticalAlignment.Center).Grid(column: 2)),
                 step.State == StepState.Running
                     ? (step.Fraction is double f ? Progress(f * 100) : ProgressIndeterminate()).Margin(30, 0, 0, 0)
-                    : step.Finished ? Progress(100).Margin(30, 0, 0, 0) : Empty(),
-                Expander("Details", ScrollViewer(TextBlock(string.Join("\n", log.TakeLast(300))).FontFamily(Mono).FontSize(11).IsTextSelectionEnabled().TextWrapping()).MaxHeight(160),
-                         isExpanded: open, onIsExpandedChanged: v => setExpanded(v ? expanded.Add(step.Id) : expanded.Remove(step.Id)))
-                    .Margin(30, 2, 0, 0)).WithKey(step.Id.ToString());
+                    : Empty()).WithKey(step.Id.ToString());
+        }
+
+        // What the steps logged, in step order: one place to look at when something is slow or has failed.
+        string DetailsText()
+        {
+            var engine = engineRef.Current;
+            if (engine == null) return "";
+            var lines = new List<string>();
+            foreach (var step in engine.Steps)
+            {
+                var log = engine.LogOf(step.Id);
+                if (log.Count == 0) continue;
+                lines.Add($"== {step.Title}");
+                lines.AddRange(log.TakeLast(40));
+            }
+            return string.Join("\n", lines);
         }
 
         Element SetupPage()
@@ -415,14 +444,16 @@ sealed class WizardApp : Component
                     }).Foreground(Theme.SecondaryText)),
                 runState == RunState.Failed && engine?.Failure != null ? Info("Something went wrong", engine.Failure, InfoBarSeverity.Error) : Empty(),
                 notice != null ? Info("", notice, InfoBarSeverity.Informational) : Empty(),
-                (ScrollViewer(VStack(14, steps.Select(StepRow).ToArray())) with { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }).MaxHeight(520),
+                VStack(10, steps.Select(StepRow).ToArray()),
+                Expander("Details", ScrollViewer(TextBlock(DetailsText()).FontFamily(Mono).FontSize(11).IsTextSelectionEnabled().TextWrapping()).MaxHeight(220),
+                         isExpanded: detailsOpen || runState == RunState.Failed, onIsExpandedChanged: setDetailsOpen).HAlign(HorizontalAlignment.Stretch),
                 DevBanner());
         }
 
         Element ReadyPage() =>
             VStack(14,
                 Title("Your game is ready"),
-                TextBlock("Midnight Club: Los Angeles is built on this PC. The launcher opens next, with Play and the game's settings.").TextWrapping(),
+                TextBlock("Midnight Club: Los Angeles is built on this PC. The launcher has Play and the game's settings.").TextWrapping(),
                 Button(HStack(8, Icon(Symbol.Play), TextBlock("Open the launcher")), OpenLauncher).AccentButton().AutomationName("Open the launcher"),
                 DevBanner());
 
@@ -455,7 +486,9 @@ sealed class WizardApp : Component
                     }
                     break;
             }
-            return HStack(8, buttons.ToArray()).HAlign(HorizontalAlignment.Right).Margin(0, 16, 0, 0);
+            // Keyed by page and state: a button of the page before would otherwise be reused, with its look (a plain
+            // button turned into the accent one of the page before).
+            return HStack(8, buttons.Select((b, i) => b.WithKey($"{page}-{runState}-{i}")).ToArray()).HAlign(HorizontalAlignment.Right).Margin(0, 16, 0, 0);
         }
 
         Element body = page switch

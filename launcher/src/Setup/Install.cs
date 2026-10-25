@@ -73,27 +73,53 @@ sealed record InstallRecord
 
     public bool Ready => State == "ready";
 
+    /// Read without keeping anyone from replacing the file (the window looks at it while the setup saves it).
     public static InstallRecord? Load(string file)
     {
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            if (!File.Exists(file)) return null;
-            var record = JsonSerializer.Deserialize(File.ReadAllText(file), InstallJson.Default.InstallRecord);
-            return record is { InstallRoot.Length: > 0 } ? record : null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
-        {
-            return null;
+            try
+            {
+                if (!File.Exists(file)) return null;
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var record = JsonSerializer.Deserialize(stream, InstallJson.Default.InstallRecord);
+                return record is { InstallRoot.Length: > 0 } ? record : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 5)
+            {
+                Thread.Sleep(40);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                return null;
+            }
         }
     }
 
-    /// Written whole and renamed, so that a crash can't leave half a file.
+    /// Written whole and renamed, so that a crash can't leave half a file. Another program with the file open
+    /// (a virus scanner, the indexer) can make the rename fail for a moment: it is tried again.
     public void Save(string file)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         var temp = $"{file}.{Environment.ProcessId}.tmp";
         File.WriteAllText(temp, JsonSerializer.Serialize(this, InstallJson.Default.InstallRecord), new UTF8Encoding(false));
-        File.Move(temp, file, overwrite: true);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Move(temp, file, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 40)
+            {
+                Thread.Sleep(50);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                try { File.Delete(temp); } catch (Exception inner) when (inner is IOException or UnauthorizedAccessException) { }
+                throw;
+            }
+        }
     }
 
     /// The pointer beside the launcher's exe: just where the install is.
@@ -106,20 +132,23 @@ sealed record InstallRecord
 partial class InstallJson : JsonSerializerContext;
 
 /// The rules for the folder the player chooses. The numbers are what the install needs: the longest path
-/// below the folder (measured on a finished install, with the margin the build adds) must stay under what
-/// Windows' programs accept (260 characters, the limit clang, Ninja and CMake have whatever the long-path
-/// setting says), and scripts\make_pc.ps1 itself refuses a checkout folder over 148.
+/// below the folder must stay under what Windows' programs accept (MAX_PATH, 259 characters, whatever the
+/// long-path setting says: PowerShell 5.1 and Explorer have it, so does anything the build runs), and
+/// scripts\make_pc.ps1 itself refuses a checkout folder over 148.
 static class PathBudget
 {
     /// Windows' MAX_PATH, without the terminating NUL.
     public const int MaxPath = 259;
     /// make_pc.ps1: "this folder's path is N characters long, and git cannot clone the SDK into one over 148".
     public const int MakePcRepoLimit = 148;
-    /// The longest path below the install folder, from the folder: the compiler's object file for the SDK's
-    /// windowed_app_main_sdl.cpp, below mcla-recomp\out\build\...\CMakeFiles\mcla.dir\ (see the wizard's
-    /// documentation, "Folder length"). Measured on a finished install; PathBudgetCheck in the check
-    /// harness measures a real one and fails if this is too small.
-    public const int LongestBelowRoot = 136;
+    /// The longest path below the install folder, from the folder, plus a little. Measured on finished installs
+    /// (the check harness's `install` prints it and fails if it is above this): 127, in CMake's own documentation
+    /// (tools\cmake-...\doc\cmake\html\_sources\variable\...); the longest file the build reads is 124
+    /// (mcla-recomp\third_party\rexglue-sdk-bin\include\rex\ui\vulkan\functions\...). The compiler's object files
+    /// are longer in a short folder (131, for the SDK's windowed_app_main_sdl.cpp below ...\CMakeFiles\mcla.dir\)
+    /// but CMake moves one into a short hashed folder when its path would pass 250 characters, so they never
+    /// decide. A new tool version can change the 127: run the harness's `install` when tools.json changes.
+    public const int LongestBelowRoot = 129;
 
     /// How many characters the install folder's own path may have.
     public static int MaxRootLength =>

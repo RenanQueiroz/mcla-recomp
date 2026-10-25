@@ -13,6 +13,8 @@
 //       checked downloads: a wrong hash or size is refused and deleted
 //   budget
 //       the folder rules (PathBudget)
+//   mode <scratch>
+//       which of Classic, Installed and Wizard starts, in each layout (Paths.Detect)
 //   cleanup <scratch>
 //       the removal of an install: only what the setup made, never through a link, never the game's own folder
 //   uninstall <install root> [<exe folder>]
@@ -50,10 +52,11 @@ static class Program
                 case "xdvdfs": await Xdvdfs(args[1], LoadFingerprint(args[2])); break;
                 case "verdicts": Verdicts(args[1], args[2], LoadFingerprint(args[3]), args[4]); break;
                 case "copy": await Copy(args[1], args[2], LoadFingerprint(args[3]), args.Length > 4 ? int.Parse(args[4]) : 0); break;
-                case "release": await Release(args[1]); break;
+                case "release": await Release(args.Length > 1 ? args[1] : null); break;
                 case "downloads": await Downloads(args[1]); break;
                 case "budget": Budget(); break;
                 case "cleanup": Cleanup(args[1]); break;
+                case "mode": Mode(args[1]); break;
                 case "uninstall": { var r = InstallCleanup.Uninstall(args[1], args.Length > 2 ? args[2] : null); Console.WriteLine($"{r.Summary}\nremoved: {string.Join(", ", r.Removed)}\nkept: {string.Join(", ", r.Kept)}"); break; }
                 case "install": return await Install(args[1..]);
                 default: Console.WriteLine($"unknown command {args[0]}"); return 2;
@@ -239,8 +242,20 @@ static class Program
 
     // -------------------------------------------------------------------------------------------
 
-    static async Task Release(string folder)
+    static async Task Release(string? folder)
     {
+        if (folder == null)
+        {
+            // The real source: GitHub's latest release of the fork (none is published until the first real release).
+            var real = ReleaseSource.FromOverride(null);
+            try
+            {
+                var latest = await real.LoadAsync(CancellationToken.None);
+                Check("GitHub's latest release is read", true, $"{latest.Tag} {latest.Commit[..8]}");
+            }
+            catch (SetupException ex) { Check("GitHub has no release yet, and the message says so", ex.Plain.Contains("no release"), $"{ex.Plain} ({ex.Detail})"); }
+            return;
+        }
         var source = ReleaseSource.FromOverride(folder);
         var release = await source.LoadAsync(CancellationToken.None);
         Check("release.json is read", true, $"{release.Tag} {release.Commit[..8]}, bundle {release.SdkBundle!.Asset}, {release.Game!.Files.Count} game files, git {source.GitUrl}");
@@ -250,7 +265,6 @@ static class Program
         {
             try { ReleaseInfo.Parse(alter(good)); Check($"refused: {what}", false, "accepted"); }
             catch (SetupException ex) { Check($"refused: {what}", true, ex.Plain); }
-            catch (JsonException ex) { Check($"refused: {what}", true, ex.Message); }
         }
         Refuse("another schema", j => j.Replace("\"schema\": 1", "\"schema\": 2"));
         Refuse("a short commit", j => j.Replace(release.Commit, release.Commit[..12]));
@@ -369,6 +383,46 @@ static class Program
         if (!Directory.Exists(link)) throw new IOException($"could not make a junction at {link}");
     }
 
+    static void Mode(string scratch)
+    {
+        SafeFolder.Delete(scratch);
+        void Touch(string file) { Directory.CreateDirectory(Path.GetDirectoryName(file)!); File.WriteAllText(file, ""); }
+        void Expect(string what, string exeDir, LaunchMode mode, string? root = null)
+        {
+            var (actual, actualRoot, launcherDir) = Paths.Detect(exeDir);
+            Check(what, actual == mode && (root == null || string.Equals(actualRoot, root, StringComparison.OrdinalIgnoreCase)), $"{actual}, {actualRoot ?? "-"}, {launcherDir}");
+        }
+
+        // Classic: below a folder with build-game.ps1, with or without a pointer or an install beside the exe.
+        var classic = Path.Combine(scratch, "classic", "mcla-recomp", "launcher");
+        Touch(Path.Combine(classic, "build-game.ps1"));
+        Directory.CreateDirectory(Path.Combine(classic, "app"));
+        Expect("the exe in a checkout's launcher\\app is Classic", Path.Combine(classic, "app"), LaunchMode.Classic);
+        Expect("so is the launcher\\ folder itself", classic, LaunchMode.Classic);
+        var other = Path.Combine(scratch, "other-install");
+        new InstallRecord { InstallRoot = other, State = "ready" }.Save(InstallRecord.PointerFile(Path.Combine(classic, "app")));
+        Expect("a pointer beside a Classic exe changes nothing", Path.Combine(classic, "app"), LaunchMode.Classic);
+
+        // Installed: a pointer to a finished install that has its checkout.
+        var root = Path.Combine(scratch, "install");
+        var exe = Path.Combine(scratch, "app");
+        Directory.CreateDirectory(exe);
+        Expect("no pointer is the Wizard", exe, LaunchMode.Wizard);
+        new InstallRecord { InstallRoot = root, State = "setting-up" }.Save(InstallRecord.PointerFile(exe));
+        Expect("a pointer to an unfinished setup is the Wizard (it resumes)", exe, LaunchMode.Wizard, root);
+        new InstallRecord { InstallRoot = root, State = "ready" }.Save(InstallRecord.PointerFile(exe));
+        Expect("a finished setup whose checkout is gone is the Wizard", exe, LaunchMode.Wizard, root);
+        Touch(new InstallLayout(root).BuildScript);
+        Expect("a finished setup with its checkout is Installed", exe, LaunchMode.Installed, root);
+        File.WriteAllText(InstallRecord.PointerFile(exe), "{ not json");
+        Expect("a pointer that can't be read is the Wizard", exe, LaunchMode.Wizard);
+
+        // The user's own install (read only): Classic, from its launcher\app and from the exe's usual places.
+        var real = @"C:\Games\Midnight Club Los Angeles\mcla-recomp\launcher";
+        if (File.Exists(Path.Combine(real, "build-game.ps1")))
+            Expect("the user's own install is Classic", Path.Combine(real, "app"), LaunchMode.Classic);
+    }
+
     static void Cleanup(string scratch)
     {
         SafeFolder.Delete(scratch);
@@ -386,6 +440,7 @@ static class Program
         File.WriteAllText(Path.Combine(root, "mcla-recomp", "game", "default.xex"), "copied game");
         MakeJunction(Path.Combine(root, "tools", "link-to-precious"), precious);
         File.WriteAllText(Path.Combine(root, "notes-of-the-player.txt"), "mine");
+        File.WriteAllText(Path.Combine(root, "install.json.123.tmp"), "left by a save that was cut short");
         var record = new InstallRecord { InstallRoot = root, State = "ready", GameMode = "in-place", GameDataRoot = precious };
         record.Save(Path.Combine(root, "install.json"));
         record.Save(InstallRecord.PointerFile(exe));
@@ -393,6 +448,7 @@ static class Program
         Check("the install's own folders and files are removed", !Directory.Exists(Path.Combine(root, "mcla-recomp")) && !Directory.Exists(Path.Combine(root, "tools")) && !File.Exists(Path.Combine(root, "install.json")));
         Check("the game used where it is is untouched, also through a link inside the install", File.Exists(Path.Combine(precious, "default.xex")));
         Check("something the player put in the folder stays, and so does the folder", File.Exists(Path.Combine(root, "notes-of-the-player.txt")));
+        Check("a save's leftover is removed", !File.Exists(Path.Combine(root, "install.json.123.tmp")));
         Check("the pointer beside the exe is removed", !File.Exists(InstallRecord.PointerFile(exe)));
         Console.WriteLine($"  {result.Summary}; kept: {string.Join(" | ", result.Kept)}");
         try { InstallCleanup.Uninstall(precious, null); Check("a folder that is not an install is refused", false); }

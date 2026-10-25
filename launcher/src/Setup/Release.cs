@@ -33,8 +33,13 @@ sealed record ReleaseInfo
 
     public static ReleaseInfo Parse(string json)
     {
-        var info = JsonSerializer.Deserialize<ReleaseInfo>(json, ReleaseJson.Options)
-                   ?? throw new SetupException("The release's description (release.json) is empty.");
+        ReleaseInfo? info;
+        try { info = JsonSerializer.Deserialize<ReleaseInfo>(json, ReleaseJson.Options); }
+        catch (JsonException ex)
+        {
+            throw new SetupException("The release's description (release.json) can't be read, so the setup can't tell what to install. Try again; if it keeps happening, report it.", ex.Message, ex);
+        }
+        if (info == null) throw new SetupException("The release's description (release.json) is empty.");
         info.Validate();
         return info;
     }

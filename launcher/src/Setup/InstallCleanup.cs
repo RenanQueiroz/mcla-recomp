@@ -30,6 +30,12 @@ static class InstallCleanup
             if (File.Exists(path)) { File.Delete(path); removed.Add(name); }
             else if (Directory.Exists(path)) { SafeFolder.Delete(path); removed.Add(name + "\\"); }
         }
+        // What a save that was cut short leaves beside install.json.
+        foreach (var temp in Directory.EnumerateFiles(layout.Root, InstallLayout.RecordName + ".*.tmp"))
+        {
+            File.Delete(temp);
+            removed.Add(Path.GetFileName(temp));
+        }
         if (record.GameMode == "in-place" && !string.IsNullOrEmpty(record.GameDataRoot))
             kept.Add($"{record.GameDataRoot} (the game, where it is)");
         // The pointer beside the exe: only the one that names this install.
