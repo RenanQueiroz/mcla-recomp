@@ -430,6 +430,33 @@ sealed class LauncherApp : Component
             }
         }
 
+        // The launcher of an install made by the setup replacing itself (Setup\LauncherUpdate.cs): the release's MCLA-Setup.exe is
+        // fetched and checked (SHA-256 and size from release.json), started as the updater, and this launcher quits; the
+        // installer swaps the folders and starts the new launcher, which writes the ready file five seconds after it is up, or puts
+        // this one back. Nothing is changed until the installer has the new launcher unpacked and this process has ended.
+        async void StartLauncherUpdate(ReleaseInfo release, ReleaseSource source, LauncherUpdate.Way way)
+        {
+            setNotice(null);
+            setUpdating("Getting the new launcher…");
+            try
+            {
+                var progress = new Action<long, long>((done, total) => setUpdating($"Downloading the new launcher: {done / 1_000_000} of {total / 1_000_000} MB…"));
+                var setupExe = await Task.Run(() => LauncherUpdate.FetchInstallerAsync(release, source, progress, CancellationToken.None));
+                setUpdating("Starting the installer…");
+                LauncherUpdate.Start(way, setupExe, LauncherUpdate.NewReadyFile());
+            }
+            catch (Exception ex)
+            {
+                setUpdating(null);
+                setNotice(ex is SetupException setup ? setup.Plain : $"The launcher could not be updated: {ex.Message}");
+                return;
+            }
+            exitingRef.Current = true;
+            playAfterPrepRef.Current = false;
+            prepRef.Current?.Stop();
+            ReactorApp.Exit();
+        }
+
         // Once, when the window opens: a title bar that follows dark mode
         // (set on the AppWindow, as Reactor's published previews have no
         // WindowSpec option for it yet), and the update check.
@@ -729,17 +756,29 @@ sealed class LauncherApp : Component
             if (status is not { LauncherOutdated: true } || busy || preparing) return null;
             if (installed && status.Target?.Release is { Launcher: not null } release)
             {
-                // The seam for the installer's hand-over (phase 6): when LauncherUpdate.InPlace is true this button downloads
-                // MCLA-Setup.exe (SelfUpdate.DownloadAsync), hands over to it (SelfUpdate.HandOver, with the ready file named
-                // by LauncherUpdate.ReadyFileVariable) and exits. Until then the launcher's folder is never swapped by the launcher
-                // itself: it can't know what else is in it.
-                return (InfoBar($"A newer launcher is in {release.Tag}",
-                                "The game doesn't need it to play. It is a separate download for now: the release's page has it. Your install and settings stay as they are.") with
+                // What the button does depends on how this launcher got where it is (Setup\LauncherUpdate.cs): MCLA-Setup.exe replaces
+                // the folder Setup made, or moves a launcher that was unpacked from a zip into its own folder; with no installer in
+                // the release the button opens the release's page. The launcher never swaps its own folder.
+                var way = status.Target?.Source == null ? LauncherUpdate.Way.ReleasePage : LauncherUpdate.WayFor(release);
+                var megabytes = release.Installer is { } sized ? $"about {Math.Max(1, sized.Size / 1_000_000)} MB" : "";
+                var (message, button) = way switch
+                {
+                    LauncherUpdate.Way.InPlace => ($"The game doesn't need it to play. Updating downloads it ({megabytes}), replaces the launcher's program and opens the new one. "
+                                                   + "Your install and settings stay as they are.", "Update the launcher"),
+                    LauncherUpdate.Way.Move => ("This launcher was not put here by the setup, so it can't replace itself. Updating installs the new launcher in its own folder "
+                                                + $"({megabytes}, with a shortcut) and opens it on the same install; you can delete this folder afterwards. Your install and settings stay as they are.",
+                                                "Move to the new launcher"),
+                    _ => ("The game doesn't need it to play. It is a separate download: the release's page has it. Your install and settings stay as they are.",
+                          "Open the release's page"),
+                };
+                return (InfoBar($"A newer launcher is in {release.Tag}", message) with
                 {
                     IsOpen = true,
                     IsClosable = false,
-                    ActionButtonContent = "Open the release's page",
-                    OnActionButtonClick = () => Open(LauncherUpdate.ReleasePage(release)),
+                    ActionButtonContent = button,
+                    OnActionButtonClick = way == LauncherUpdate.Way.ReleasePage
+                        ? () => Open(LauncherUpdate.ReleasePage(release))
+                        : () => StartLauncherUpdate(release, status.Target!.Source!, way),
                 }).Severity(InfoBarSeverity.Informational);
             }
             return (InfoBar("The launcher itself was updated", "Restarting rebuilds it (about a minute) and opens the new one.") with

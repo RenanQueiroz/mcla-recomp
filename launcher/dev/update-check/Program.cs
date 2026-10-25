@@ -308,6 +308,20 @@ static class Program
         Check(await Catch(() => SelfUpdate.DownloadAsync(good with { Name = @"..\evil.exe", Url = "https://example.com/x" }, folder, null, default)) is UpdateException, "a file name with a path is refused");
         Check(await Catch(() => SelfUpdate.DownloadAsync(good with { Sha256 = "abc", Url = "https://example.com/x" }, folder, null, default)) is UpdateException, "a missing or short SHA-256 is refused");
         Check(await Catch(() => SelfUpdate.DownloadAsync(good with { Size = 0, Url = "https://example.com/x" }, folder, null, default)) is UpdateException, "a missing size is refused");
+
+        // a development release source is a folder: the file is copied and checked the same way
+        folder = Dir("download-copy");
+        var local = Path.Combine(Scratch, "release-folder");
+        Directory.CreateDirectory(local);
+        File.WriteAllBytes(Path.Combine(local, "MCLA-Setup.exe"), data);
+        var copied = await SelfUpdate.CopyVerifiedAsync(Path.Combine(local, "MCLA-Setup.exe"), good, folder, default);
+        Check(File.Exists(copied) && File.ReadAllBytes(copied).AsSpan().SequenceEqual(data) && !File.Exists(copied + ".part"), "a file from a local release source is copied and checked");
+        var wrongData = (byte[])data.Clone();
+        wrongData[5] ^= 1;
+        File.WriteAllBytes(Path.Combine(local, "wrong.exe"), wrongData);
+        folder = Dir("download-copy-bad");
+        Check(await Catch(() => SelfUpdate.CopyVerifiedAsync(Path.Combine(local, "wrong.exe"), good, folder, default)) is UpdateException && Directory.GetFiles(folder).Length == 0, "a copy with the wrong SHA-256 is refused and nothing is left");
+        Check(await Catch(() => SelfUpdate.CopyVerifiedAsync(Path.Combine(local, "missing.exe"), good, folder, default)) is UpdateException, "a file missing from the local release source is refused");
     }
 
     static async Task<Exception?> Catch(Func<Task> action)
@@ -452,7 +466,7 @@ static class Program
         var withReady = $"--silent --dir \"{app5}\" --shortcut-dir \"{Path.Combine(root, "lnk5")}\" --ready-file \"{readyFile}\" --health-timeout 4";
         var writes = Compose(stub, "ready", "5.0.0", "cmd.exe");
         output = Run(writes, $"{withReady} --launch-args \"/c echo ready>%MCLA_READY_FILE% & ping -n 4 127.0.0.1 >nul\"", out code);
-        Check(code == 0 && File.Exists(readyFile) && Read(app5, "version.txt") == "5.0.0", $"a launcher that writes the ready file passes the start check{(code == 0 ? "" : "\n" + output)}");
+        Check(code == 0 && !File.Exists(readyFile) && Read(app5, "version.txt") == "5.0.0", $"a launcher that writes the ready file passes the start check (and the installer removes the file){(code == 0 ? "" : "\n" + output)}");
         var silent = Compose(stub, "silent", "6.0.0", "cmd.exe");
         output = Run(silent, $"--update --wait-pid {int.MaxValue / 2} {withReady} --launch-args \"/c ping -n 8 127.0.0.1 >nul\"", out code);
         Check(code == 1 && Read(app5, "version.txt") == "5.0.0" && !FolderSwap.Leftovers(app5).Any(), "a launcher that stays up but never writes the ready file is rolled back (the old version is back)");

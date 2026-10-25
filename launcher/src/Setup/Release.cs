@@ -28,6 +28,8 @@ sealed record ReleaseInfo
     public string Commit { get; init; } = "";
     public string Repository { get; init; } = "";
     public ReleaseAsset? Launcher { get; init; }
+    /// MCLA-Setup.exe: the installer that also replaces the launcher (SelfUpdate, LauncherUpdate); the launcher's folder is inside it.
+    public ReleaseAsset? Installer { get; init; }
     public ReleaseBundle? SdkBundle { get; init; }
     public Dictionary<string, ReleaseTool> Tools { get; init; } = [];
     public ReleaseGame? Game { get; init; }
@@ -72,6 +74,8 @@ sealed record ReleaseInfo
         }
         if (Launcher is { } launcher && (!IsPlainFileName(launcher.Asset) || !IsSha256(launcher.Sha256) || launcher.Size <= 0))
             throw new SetupException("The release's description names the launcher in a way that can't be used.");
+        if (Installer is { } installer && (!IsPlainFileName(installer.Asset) || !IsSha256(installer.Sha256) || installer.Size <= 0))
+            throw new SetupException("The release's description names the installer in a way that can't be used.");
         if (ShaderPack is { } pack
             && (pack.Path.Length == 0 || pack.Path.Contains("..") || pack.Path.Contains(':') || Path.IsPathRooted(pack.Path)
                 || pack.Path.StartsWith('/') || pack.Path.StartsWith('\\') || !IsSha256(pack.Sha256)))

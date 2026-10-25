@@ -147,13 +147,39 @@ static class SelfUpdate
 
     static void Validate(UpdateAsset a, bool allowLoopbackHttp)
     {
+        ValidateAsset(a);
+        if (!Uri.TryCreate(a.Url, UriKind.Absolute, out var uri)) throw new UpdateException($"not an address: {a.Url}");
+        var ok = uri.Scheme == Uri.UriSchemeHttps || (allowLoopbackHttp && uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
+        if (!ok) throw new UpdateException("the installer must come from an https address");
+    }
+
+    /// The name, SHA-256 and size of an asset: all of them have to be there and plain.
+    static void ValidateAsset(UpdateAsset a)
+    {
         if (a.Name.Length == 0 || a.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || a.Name is "." or ".." || a.Name.EndsWith('.') || a.Name.EndsWith(' '))
             throw new UpdateException($"not a plain file name: {a.Name}");
         if (a.Sha256.Length != 64 || !a.Sha256.All(Uri.IsHexDigit)) throw new UpdateException("the release gives no SHA-256 for the installer");
         if (a.Size <= 0) throw new UpdateException("the release gives no size for the installer");
-        if (!Uri.TryCreate(a.Url, UriKind.Absolute, out var uri)) throw new UpdateException($"not an address: {a.Url}");
-        var ok = uri.Scheme == Uri.UriSchemeHttps || (allowLoopbackHttp && uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
-        if (!ok) throw new UpdateException("the installer must come from an https address");
+    }
+
+    /// For a development release source (a folder, not a server): copies the file into `folder` and keeps it only if it is
+    /// exactly what `asset` says (SHA-256 and size); returns the path. Nothing is left behind on failure.
+    public static async Task<string> CopyVerifiedAsync(string sourceFile, UpdateAsset asset, string folder, CancellationToken cancel)
+    {
+        ValidateAsset(asset);
+        if (!File.Exists(sourceFile)) throw new UpdateException($"{Path.GetFileName(sourceFile)} is missing from the release source.");
+        Directory.CreateDirectory(folder);
+        var final = Path.Combine(folder, asset.Name);
+        var part = final + ".part";
+        try
+        {
+            File.Copy(sourceFile, part, overwrite: true);
+            if (!await IsExactlyAsync(part, asset, cancel))
+                throw new UpdateException("The download is damaged or not the release's file (the copy's SHA-256 or size is not what release.json says).");
+            File.Move(part, final, overwrite: true);
+            return final;
+        }
+        catch { TryDelete(part); throw; }
     }
 
     static void TryDelete(string path)

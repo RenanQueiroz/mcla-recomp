@@ -311,6 +311,7 @@ static unsafe class Program
                 }
             }
             FolderSwap.Commit(swap);
+            if (o.ReadyFile != null) { try { File.Delete(o.ReadyFile); } catch (Exception) { } }
             Status(o, "Done.", 1000);
             return 0;
         }

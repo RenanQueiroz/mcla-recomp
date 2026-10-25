@@ -18,6 +18,9 @@
     <Compile Include="..\..\src\ShaderPrep.cs" />
     <Compile Include="..\..\src\DisplayHdr.cs" />
     <Compile Include="..\..\src\Setup\*.cs" />
+    <!-- Setup\LauncherUpdate.cs uses the self-update pieces (and they the folder swap). -->
+    <Compile Include="..\..\src\SelfUpdate.cs" />
+    <Compile Include="..\..\installer\FolderSwap.cs" />
   </ItemGroup>
 
 </Project>

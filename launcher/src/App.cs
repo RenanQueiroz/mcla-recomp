@@ -5,11 +5,13 @@ using MclaLauncher;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 
-// A launcher that replaced the one before it says it started: five seconds alive. Whatever replaced it (the installer, once
-// it does the update: Setup\LauncherUpdate.cs) puts the old launcher back when the file doesn't appear. Not passed on to the
+// A launcher that replaced the one before it says it started: five seconds alive. Whatever replaced it (MCLA-Setup.exe,
+// Setup\LauncherUpdate.cs) puts the old launcher back when the file doesn't appear. Not passed on to the
 // game or anything else this launcher starts.
+var startedByUpdater = false;
 if (Environment.GetEnvironmentVariable(MclaLauncher.Setup.LauncherUpdate.ReadyFileVariable) is { Length: > 0 } swapMarker)
 {
+    startedByUpdater = true;
     Environment.SetEnvironmentVariable(MclaLauncher.Setup.LauncherUpdate.ReadyFileVariable, null);
     _ = Task.Delay(5000).ContinueWith(_ =>
     {
@@ -17,6 +19,16 @@ if (Environment.GetEnvironmentVariable(MclaLauncher.Setup.LauncherUpdate.ReadyFi
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     });
 }
+
+// What an update of this launcher (MCLA-Setup.exe, SelfUpdate.cs) leaves beside its folder: the previous folder, a failed one, the
+// downloaded installer. Not while the installer that started this launcher may still need the previous folder to go back to
+// (it decides within the first seconds), so a launcher it started waits a minute.
+if (SelfUpdate.InstalledBySetup)
+    _ = Task.Run(async () =>
+    {
+        if (startedByUpdater) await Task.Delay(TimeSpan.FromMinutes(1));
+        SelfUpdate.CleanUp();
+    });
 
 var wizard = Paths.Mode == LaunchMode.Wizard;
 var spec = new WindowSpec
