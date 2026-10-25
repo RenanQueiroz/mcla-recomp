@@ -768,6 +768,8 @@ sealed class LauncherApp : Component
                     LauncherUpdate.Way.Move => ("This launcher was not put here by the setup, so it can't replace itself. Updating installs the new launcher in its own folder "
                                                 + $"({megabytes}, with a shortcut) and opens it on the same install; you can delete this folder afterwards. Your install and settings stay as they are.",
                                                 "Move to the new launcher"),
+                    LauncherUpdate.Way.OtherInstalled => ($"A launcher installed by the setup is already in {LauncherUpdate.SetupFolder}, with an install of its own. Start that one: its update bar "
+                                                          + "updates it. This launcher, its install and its settings are not changed.", "Open its folder"),
                     _ => ("The game doesn't need it to play. It is a separate download: the release's page has it. Your install and settings stay as they are.",
                           "Open the release's page"),
                 };
@@ -776,8 +778,8 @@ sealed class LauncherApp : Component
                     IsOpen = true,
                     IsClosable = false,
                     ActionButtonContent = button,
-                    OnActionButtonClick = way == LauncherUpdate.Way.ReleasePage
-                        ? () => Open(LauncherUpdate.ReleasePage(release))
+                    OnActionButtonClick = way == LauncherUpdate.Way.ReleasePage ? () => Open(LauncherUpdate.ReleasePage(release))
+                        : way == LauncherUpdate.Way.OtherInstalled ? () => Open(LauncherUpdate.SetupFolder)
                         : () => StartLauncherUpdate(release, status.Target!.Source!, way),
                 }).Severity(InfoBarSeverity.Informational);
             }

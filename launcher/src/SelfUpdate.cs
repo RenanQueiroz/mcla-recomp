@@ -61,7 +61,7 @@ static class SelfUpdate
         bool allowLoopbackHttp = false, HttpMessageHandler? handler = null, TimeSpan? stall = null, TimeSpan? retryDelay = null)
     {
         Validate(asset, allowLoopbackHttp);
-        Directory.CreateDirectory(folder);
+        MakeDownloadFolder(folder);
         var final = Path.Combine(folder, asset.Name);
         if (File.Exists(final) && await IsExactlyAsync(final, asset, cancel)) return final; // an earlier try finished
         var part = final + ".part";
@@ -168,7 +168,7 @@ static class SelfUpdate
     {
         ValidateAsset(asset);
         if (!File.Exists(sourceFile)) throw new UpdateException($"{Path.GetFileName(sourceFile)} is missing from the release source.");
-        Directory.CreateDirectory(folder);
+        MakeDownloadFolder(folder);
         var final = Path.Combine(folder, asset.Name);
         var part = final + ".part";
         try
@@ -222,17 +222,52 @@ static class SelfUpdate
         return Process.Start(psi) ?? throw new UpdateException("Windows would not start the installer");
     }
 
-    /// For the launcher's start: removes the leftovers of an update (the old folder, a failed new one) and the
-    /// downloaded installers. Quiet and best effort; what is still in use stays for the next start.
-    public static void CleanUp(string? appFolder = null)
+    static void MakeDownloadFolder(string folder)
+    {
+        Directory.CreateDirectory(folder);
+        var marker = Path.Combine(folder, FolderSwap.DownloadMarker);
+        if (!File.Exists(marker)) File.WriteAllText(marker, "Installers the launcher downloaded to update itself; the launcher removes this folder.\n");
+    }
+
+    /// True while a MCLA-Setup.exe is running for this user (it holds the Local\MCLA-Setup mutex for the whole run).
+    public static bool SetupIsRunning()
     {
         try
         {
+            if (!Mutex.TryOpenExisting(@"Local\MCLA-Setup", out var mutex)) return false;
+            mutex.Dispose();
+            return true;
+        }
+        catch (UnauthorizedAccessException) { return true; } // it exists, and is not ours to open
+        catch (Exception) { return false; }
+    }
+
+    /// Removes the leftovers of an update beside the launcher's folder (the previous folder, a failed or half unpacked new one) and
+    /// the installers it downloaded: only what carries Setup's own marker (FolderSwap.Leftovers) and the download folder this code
+    /// made. Does nothing, and returns false, while a Setup is running: it may still need the previous folder to go back to, or be
+    /// unpacking the new one. Quiet and best effort; what is still in use stays for the next start.
+    public static bool CleanUp(string? appFolder = null)
+    {
+        try
+        {
+            if (SetupIsRunning()) return false;
             var folder = (appFolder ?? AppFolder).TrimEnd('\\', '/');
             FolderSwap.CleanLeftovers(folder);
             var downloads = DownloadFolder(folder);
-            if (Directory.Exists(downloads)) FolderSwap.DeleteFolder(downloads, TimeSpan.Zero);
+            if (Directory.Exists(downloads) && File.Exists(Path.Combine(downloads, FolderSwap.DownloadMarker))) FolderSwap.DeleteFolder(downloads, TimeSpan.Zero);
         }
         catch (Exception) { /* a clean-up never stops the launcher */ }
+        return true;
+    }
+
+    /// CleanUp, as soon as no Setup is running: looked at every few seconds, for a few minutes (the launcher that a Setup started
+    /// is running while that Setup waits for it).
+    public static void CleanUpWhenSetupIsDone(string? appFolder = null, int attempts = 100, int seconds = 3)
+    {
+        for (var i = 0; i < attempts; i++)
+        {
+            if (CleanUp(appFolder)) return;
+            Thread.Sleep(TimeSpan.FromSeconds(seconds));
+        }
     }
 }

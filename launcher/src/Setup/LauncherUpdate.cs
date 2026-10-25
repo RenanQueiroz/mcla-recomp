@@ -10,6 +10,7 @@
 //   Move         it was unpacked from a zip, or made by an older wizard: it can't be replaced in place, so MCLA-Setup.exe
 //                installs the new launcher in Setup's own folder with this one's install.json as its pointer
 //                (--import-pointer); the old folder stays for the player to delete.
+//   OtherInstalled  like Move, but the setup's folder already holds a launcher (with an install of its own): the button opens that folder.
 //   ReleasePage  the release has no installer (or InPlace is off): the button opens the release's page.
 // The new launcher is told a file's name in ReadyFileVariable and writes it five seconds after it is up (App.cs); the installer
 // takes that as "it started" (and puts the old launcher back if the file doesn't come).
@@ -23,10 +24,12 @@ static class LauncherUpdate
     /// Whether the launcher can update itself through the installer (the hand-over is wired in).
     public static bool InPlace => true;
 
-    public enum Way { ReleasePage, InPlace, Move }
+    /// OtherInstalled: this launcher was not installed by the setup, and the setup's folder already holds a launcher of its own (with an
+    /// install of its own): moving would land on that one, so nothing is offered but its folder.
+    public enum Way { ReleasePage, InPlace, Move, OtherInstalled }
 
     /// Where MCLA-Setup.exe puts the launcher it installs (its default, or what a test sets in MCLA_SETUP_DIR).
-    static string SetupFolder => Environment.GetEnvironmentVariable("MCLA_SETUP_DIR") is { Length: > 0 } dir
+    public static string SetupFolder => Environment.GetEnvironmentVariable("MCLA_SETUP_DIR") is { Length: > 0 } dir
         ? dir
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCLA");
 
@@ -36,6 +39,7 @@ static class LauncherUpdate
     public static Way WayFor(ReleaseInfo release) =>
         !InPlace || release.Installer == null ? Way.ReleasePage
         : SelfUpdate.InstalledBySetup ? Way.InPlace
+        : File.Exists(Path.Combine(SetupFolder, "installed.txt")) ? Way.OtherInstalled
         : Way.Move;
 
     /// Where the new launcher says it started: a file of its own in the temp folder, outside everything the installer swaps
