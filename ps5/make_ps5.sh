@@ -265,8 +265,8 @@ framegen=${MCLA_PS5_FRAMEGEN:-1}
 case $framegen in 0) framegen_cmake=OFF ;; 1) framegen_cmake=ON ;; *) fail "MCLA_PS5_FRAMEGEN must be 0 or 1" ;; esac
 if [ "${MCLA_PS5_FRAMEGEN:-}" = 1 ]; then
     rm -f "$rex_build/.framegen-failed"
-elif [ -z "${MCLA_PS5_FRAMEGEN:-}" ] && [ -f "$rex_build/.framegen-failed" ]; then
-    echo "note: frame generation is left out: FidelityFX did not build with it earlier (MCLA_PS5_FRAMEGEN=1 tries again)"
+elif [ "$fsr" = 1 ] && [ -z "${MCLA_PS5_FRAMEGEN:-}" ] && [ -f "$rex_build/.framegen-failed" ]; then
+    echo "note: frame generation is left out: FidelityFX did not build with it earlier (MCLA_PS5_FRAMEGEN=1, or deleting $rex_build/.framegen-failed, tries again)"
     framegen=0 framegen_cmake=OFF
 fi
 # (The frame generation switch only exists where FSR is built; the cache has no entry for it
@@ -291,11 +291,18 @@ if [ "$fsr" = 1 ] && [ "$framegen" = 1 ] && [ -f "$rex_build/_deps/ffx-vk-p/fail
     framegen=0 framegen_cmake=OFF
     logged ps5-configure-nofg cmake "$rex_build" -DREXGLUE_FSR_FRAMEGEN=OFF
     logged ps5-runtime-nofg ninja -C "$rex_build" -j "$jobs" rexruntime rexgpu-xenos
-    if [ -f "$rex_src/out/ps5-amd64/libamd_fidelityfx_vk.a" ]; then
+    # (The runtime's own marker, not the archive: one an earlier build left is still there if this
+    # one failed too.)
+    if [ ! -f "$rex_build/_deps/ffx-vk-p/failed" ] && [ -f "$rex_src/out/ps5-amd64/libamd_fidelityfx_vk.a" ]; then
         touch "$rex_build/.framegen-failed"
     else
         echo "warning: FidelityFX did not build without frame generation either, so it is not frame generation's code" >&2
     fi
+fi
+# A FidelityFX runtime that failed to build is not offered, whatever archives an earlier build
+# left next to the runtime's.
+if [ "$fsr" = 1 ] && [ -f "$rex_build/_deps/ffx-vk-p/failed" ]; then
+    rm -f "$rex_src/out/ps5-amd64"/libamd_fidelityfx_*.a "$rex_src/out/ps5-amd64"/libffx_*.a
 fi
 # FidelityFX's static libraries, next to the runtime's (the game links every
 # archive there): none without FSR; and none if they refer to a Vulkan function
