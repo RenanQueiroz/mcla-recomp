@@ -10,8 +10,9 @@ draw left out while it compiled), and the frames over 50 ms.
                            [--fixed-dt 60] [--timeout 900] [--salt N] [--var NAME=VALUE ...]
                            [--route-out <file>] [--extra ...]
   python coverage.py batch <jobs file> --out <folder> [--lock] [--max-min 40] [--pack <file>]
-                           [--suffix <text>]      (--pack and --suffix: the same jobs again, with
-                           another pack and tags that don't collide)
+                           [--suffix=<text>]      (--pack and --suffix: the same jobs again, with
+                           another pack and tags that don't collide; write --suffix=-a1, with the "=":
+                           argparse takes "--suffix -a1" for an option)
   python coverage.py report <folder>... [--match <regex>]
   python coverage.py compare <folder>... --old <pack> --new <pack> [--match <regex>]
                            what the runs' storages hold beyond each pack (the runs of a hold-out, made

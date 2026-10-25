@@ -161,7 +161,8 @@ def main():
         print(json.dumps(r))
     with open(root / "measure-results.jsonl", "a", encoding="utf-8") as f:
         for r in results:
-            f.write(json.dumps(dict(r, backend=a.backend, res=a.res, salt=a.salt)) + "\n")
+            f.write(json.dumps(dict(r, backend=a.backend, res=a.res, salt=a.salt, path=a.path, label=a.label,
+                                    pack=pack)) + "\n")
 
 
 if __name__ == "__main__":

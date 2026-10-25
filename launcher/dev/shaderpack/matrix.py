@@ -18,7 +18,7 @@ the dev root or the repository):
                     traffic cars add beyond the opponents'
   hold-<path>.txt   every --hold-every'th race in a third variant (V3) that the growth runs did not
                     play: run with the old pack and again with the grown one (coverage.py batch
-                    --pack <grown> --suffix -after), it says how much of the pack carries over
+                    --pack <grown> --suffix=-after), it says how much of the pack carries over
                     to what it was not made from
   roam-<path>.txt   free roam: a long circle in the city while time of day and weather move on
   grow1-<path>.txt for --sub-paths (rov, fsi) too when asked: every other race, V1 (not by default:
