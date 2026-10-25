@@ -275,7 +275,8 @@ sealed class SetupEngine
         {
             record.Save(ctx.Layout.RecordFile);
             // The pointer beside the exe: how the launcher finds the install next time. A folder that can't be
-            // written (the exe is somewhere read-only) is not fatal here; the launcher is then started with --install-dir.
+            // written (the exe is somewhere read-only) is not fatal here: the wizard then starts again, and the
+            // folder it is given (the one with this install's install.json) is a finished setup that opens at once.
             try { record.Save(InstallRecord.PointerFile(ctx.ExeDirectory)); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }

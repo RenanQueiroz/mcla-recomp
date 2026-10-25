@@ -494,10 +494,18 @@ static class Program
         foreach (var step in engine.Steps) Console.WriteLine($"  {step.State,-9} {step.Title}: {step.Text}");
         // The longest path the install holds, from the install folder: PathBudget.LongestBelowRoot must cover it.
         var full = Path.GetFullPath(root).TrimEnd('\\');
-        var longest = Directory.EnumerateFileSystemEntries(full, "*", SearchOption.AllDirectories).MaxBy(e => e.Length)!;
+        // The build's own products (mcla-recomp\out\) are left out of the measure: CMake moves an object file into a
+        // short hashed folder when its path would pass 250 characters, so their length depends on the folder and
+        // never decides it. Everything else is what PathBudget.LongestBelowRoot has to cover.
+        var entries = Directory.EnumerateFileSystemEntries(full, "*", SearchOption.AllDirectories).ToList();
+        var outFolder = Path.Combine(full, InstallLayout.RepoFolder, "out") + "\\";
+        var longest = entries.Where(e => !e.StartsWith(outFolder, StringComparison.OrdinalIgnoreCase)).MaxBy(e => e.Length)!;
         var below = longest.Length - full.Length - 1;
-        Console.WriteLine($"longest path below the install folder: {below} characters ({longest[(full.Length + 1)..]}); PathBudget.LongestBelowRoot = {PathBudget.LongestBelowRoot}; install folder {full.Length}, longest path in all {longest.Length}");
+        var longestOut = entries.MaxBy(e => e.Length)!;
+        Console.WriteLine($"longest path below the install folder (without out\\): {below} characters ({longest[(full.Length + 1)..]}); PathBudget.LongestBelowRoot = {PathBudget.LongestBelowRoot}");
+        Console.WriteLine($"install folder {full.Length}; longest path of all {longestOut.Length - full.Length - 1} below it, {longestOut.Length} in all (Windows' limit {PathBudget.MaxPath})");
         if (below > PathBudget.LongestBelowRoot) { Console.WriteLine("FAIL: the budget is too small"); return 4; }
+        if (longestOut.Length > PathBudget.MaxPath) { Console.WriteLine("FAIL: a path of the install is over Windows' limit"); return 4; }
         return 0;
     }
 }

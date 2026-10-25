@@ -55,6 +55,7 @@ sealed class DevOptions
         if (GameArguments.Length > 0) parts.Add($"game options: {GameArguments}");
         if (InstallDir != null) parts.Add("install folder given");
         if (GamePath != null) parts.Add("game given");
+        if (InPlace) parts.Add("use the game where it is");
         if (Auto) parts.Add("automatic");
         if (ShotsDir != null) parts.Add($"screenshots to {ShotsDir}");
         if (QuitAfterSeconds > 0) parts.Add($"closes after {QuitAfterSeconds} s");
