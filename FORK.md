@@ -157,8 +157,10 @@ instead of installing them, and `-SdkBundle` a prebuilt SDK (unpacked into
 and patches through its `mcla-sdk-bundle.json`) instead of cloning, patching and
 building one. `make_pc.ps1` keeps what it was asked for in
 `launcher\build-options.json`, and `launcher\build-game.ps1`, given no options,
-builds the way the last build did, so that an update (also the launcher's)
-neither falls back to msvc nor to building the SDK from source.
+builds the way the last build did (so does `make_pc.ps1`), so that an update
+(also the launcher's, an older one's too) neither falls back to msvc nor to
+building the SDK from source; an install built with msvc switches with a
+record written before its update (README.md, "Without Microsoft's compiler").
 
 **CI** (`.github/workflows/`, `scripts/ci/README.md`): every push and pull
 request checks that the pinned tools and the patch list agree, builds the SDK

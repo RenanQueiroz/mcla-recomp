@@ -54,7 +54,10 @@
 # What a finished build was asked for (-Toolchain, -ToolsDir, -SdkBundle, its
 # SHA-256) is kept in launcher\build-options.json when it is not just the
 # defaults, and launcher\build-game.ps1 (so an update, also the launcher's)
-# builds with the same options when it is given none.
+# builds with the same options when it is given none, and so does this script when
+# it is given none of -Toolchain, -ToolsDir, -SdkBundle and -SdkBundleSha256: a
+# record written by hand ({"toolchain": "mingw"}) switches a checkout at its next
+# build, by whichever build-game.ps1 starts it.
 #
 # On a PC with little free memory the number of compiler jobs is capped (about
 # one per 0.5 GB), so that it does not page; set CMAKE_BUILD_PARALLEL_LEVEL to
@@ -71,6 +74,23 @@ $ErrorActionPreference = "Stop"
 $env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
 $root = Split-Path $PSScriptRoot -Parent
 . "$PSScriptRoot\mcla-lib.ps1"
+# Given none of the options that say how to build (-Toolchain, -ToolsDir, -SdkBundle,
+# -SdkBundleSha256), the last build's are used (launcher\build-options.json), as
+# build-game.ps1 and env.ps1 do: a checkout built with mingw goes on with mingw however
+# this is started, by a build-game.ps1 that passes none too (an older one, as the
+# launcher of an install not updated yet runs). So a record written by hand
+# ({"toolchain": "mingw"}) is all an update needs to build with mingw.
+if (-not ($PSBoundParameters.ContainsKey("Toolchain") -or $PSBoundParameters.ContainsKey("ToolsDir") -or
+          $PSBoundParameters.ContainsKey("SdkBundle") -or $PSBoundParameters.ContainsKey("SdkBundleSha256"))) {
+    $recorded = Get-BuildOptions $root
+    if ($recorded) {
+        $Toolchain = $recorded.Toolchain; $ToolsDir = $recorded.ToolsDir
+        $SdkBundle = $recorded.SdkBundle; $SdkBundleSha256 = $recorded.SdkBundleSha256
+        if ($Toolchain -ne "msvc" -or $ToolsDir -or $SdkBundle) {
+            "build options of the last build: -Toolchain $Toolchain$(if ($ToolsDir) { ' -ToolsDir ' + $ToolsDir })$(if ($SdkBundle) { ' -SdkBundle ' + $SdkBundle })"
+        }
+    }
+}
 $sdk = "$root\third_party\rexglue-sdk"
 $sdkTag = "v0.10.0"
 $sdkCommit = "f5337cdc947ff6d4c4196737e2c807a48f2a1fc2"
@@ -554,11 +574,11 @@ try {
     }
     $missing = @(MissingTools)
     $required = @($missing | Where-Object { $_ -ne "Vulkan SDK" })
+    # Nobody can be asked when the launcher runs this (-NonInteractive).
+    $nonInteractive = [bool]([Environment]::GetCommandLineArgs() | Where-Object { $_ -like "-NonI*" })
     if ($missing -and -not $required -and -not $InstallTools) {
         # Only the Vulkan SDK: the game builds without it, FSR then for
-        # Direct3D 12 only. Asked only when someone can answer (the
-        # launcher runs this with -NonInteractive).
-        $nonInteractive = [bool]([Environment]::GetCommandLineArgs() | Where-Object { $_ -like "-NonI*" })
+        # Direct3D 12 only. Asked only when someone can answer.
         $answer = if ($nonInteractive) { "n" } else {
             Read-Host "The Vulkan SDK is missing: without it, the FSR anti-aliasing option is built for Direct3D 12 only. Install it now (from winget; it asks for administrator rights)? [y/N]"
         }
@@ -569,7 +589,18 @@ try {
     }
     if ($missing) {
         "missing: $($missing -join ', ')"
-        if ($required -and -not $InstallTools) {
+        if ($required -and -not $InstallTools -and $nonInteractive) {
+            # llvm-mingw alone is fetched without asking: a download into tools\ that is
+            # checked against its pinned SHA-256, needing no administrator rights and
+            # changing nothing outside the folder, and the player chose mingw already (the
+            # option, or the record of the last build: an install that switches with an
+            # update). Anything else would be installed on the PC, so it is not, unasked.
+            $others = @($required | Where-Object { $_ -ne "llvm-mingw" })
+            if ($others) {
+                Fail "missing: $($others -join ', '). Nobody can be asked here: run .\launcher\build-game.ps1 -InstallTools in a terminal, or install them yourself (README.md, 'Windows')"
+            }
+            "fetching llvm-mingw without asking (about 170 MB into tools\, checked against its pinned SHA-256; no administrator rights)"
+        } elseif ($required -and -not $InstallTools) {
             $answer = if ($mingw) {
                 Read-Host "Install them now? Programs come from winget (CMake's installer may ask for administrator rights), the compiler (llvm-mingw, about 170 MB, no administrator rights) from its release page, checked against a pinned SHA-256; the Vulkan SDK asks for administrator rights. [y/N]"
             } else {
@@ -871,11 +902,28 @@ try {
                 "note: the FSR runtime in the msvc SDK build ($msvcBin) is older than the SDK's patches, so it was not used; run make_pc.ps1 -Toolchain msvc once to refresh it"
                 $theirs = @()
             }
+            # None, and this PC has the msvc toolchain (Visual Studio Build Tools and the
+            # project's Clang, as an install that used it before has): its SDK is built
+            # once for them, in a process of its own, as this one's compiler and PATH are
+            # llvm-mingw's. It builds the SDK the patches in place now ask for (the
+            # runtime is part of it), and stops there. The same as running
+            # make_pc.ps1 -Toolchain msvc -Until sdk by hand. Not for a prebuilt SDK: its
+            # bundle has the DLLs, or nothing here makes them.
+            if (-not $theirs -and -not $SdkBundle -and (HasBuildTools) -and
+                (Test-Path -LiteralPath "$root\tools\$llvmName\bin\clang.exe")) {
+                "FSR: FidelityFX's runtime is made by the msvc toolchain, which is here: building its SDK once for it (make_pc.ps1 -Toolchain msvc -Until sdk)"
+                $ErrorActionPreference = "Continue"
+                & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Toolchain msvc -Until sdk 2>&1 | ForEach-Object { "$_" }
+                $msvcStatus = $LASTEXITCODE
+                $ErrorActionPreference = "Stop"
+                if ($msvcStatus -ne 0) { "note: the msvc SDK build did not finish ($msvcStatus), so FSR's runtime is not there (out\logs has the log)" }
+                $theirs = @(Get-ChildItem -LiteralPath $msvcBin -Filter "amd_fidelityfx_*.dll" -ErrorAction SilentlyContinue)
+            }
             if ($theirs) {
                 $theirs | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $build -Force }
                 "FSR: the runtime ($($theirs.Name -join ', ')) comes from the msvc SDK build"
             } else {
-                "note: the FSR anti-aliasing option and frame generation are not available: FidelityFX's runtime (amd_fidelityfx_dx12.dll) does not build with llvm-mingw. A prebuilt SDK bundle has it, and so does an SDK built once with -Toolchain msvc. The game offers MSAA and off."
+                "note: the FSR anti-aliasing option and frame generation are not available: FidelityFX's runtime (amd_fidelityfx_dx12.dll) does not build with llvm-mingw. A prebuilt SDK bundle has it, and so does an SDK built once with -Toolchain msvc (this build does that itself where Visual Studio Build Tools and the project's Clang are installed). The game offers MSAA and off."
             }
         }
     }

@@ -56,8 +56,11 @@ rebuild.
   build finishes, however it was run, if they are more than the defaults. Given
   none of them, a build, an update and the launcher's **Update and rebuild** build
   the way the last build did (the same toolchain, portable tools and prebuilt SDK,
-  and not msvc or an SDK built from source behind your back); `msvc` where there
-  is no record (every install made before there was a choice). Given any of them,
+  and not msvc or an SDK built from source behind your back; `make_pc.ps1` reads the
+  record itself, so an older `build-game.ps1`, which passes none, does too); `msvc`
+  where there is no record (every install made before there was a choice). A record
+  written by hand, `{"toolchain": "mingw"}`, switches an install with its next
+  update (README.md, "Without Microsoft's compiler"). Given any of them,
   only what is given is used. Changing the toolchain reconfigures and rebuilds the
   game; each toolchain has an SDK build of its own, the first one built the first
   time. A prebuilt SDK has no patched checkout, so `-ResetSdk` and the patch check
