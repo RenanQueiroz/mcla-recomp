@@ -934,8 +934,8 @@ std::vector<uint32_t> FindCars() {
 // follow <route> drives the player's car along a route, a file of "x,z,speed"
 // lines (metres on the ground, m/s) made by launcher/dev/route.py: the stick
 // steers at a point ahead on the route (pure pursuit), the triggers hold the
-// route's speed, and a car that stops against something backs off for a
-// second. When the whole world stands still once the car has moved (a
+// route's speed (the buttons a script holds are left as they are), and a car that stops against
+// something backs off for a second. When the whole world stands still once the car has moved (a
 // tutorial pop-up the first time something happens, "CONTINUE (A)"), A is
 // pressed; in a race A is the handbrake, so a stray press does no harm. It
 // runs in the frame hook, on the game's update thread, so with mcla_fixed_dt
@@ -959,6 +959,7 @@ struct Follower {
   int stuck = 0;
   int frozen_frames = 0;
   int press_a_frames = 0;
+  bool pressing_a = false;  // the A this follower itself holds (not one a script holds)
   int popups = 0;
   double max_offset = 0;
   uint64_t frames = 0;
@@ -1096,8 +1097,12 @@ void FollowFrame(double dt) {
   }
   wanted *= f.speed_scale;
 
+  // The buttons a script holds meanwhile (nitro, camera, special ability: `down x`, `press lb`)
+  // stay; only the triggers and the left stick are the follower's, and the A it presses itself.
   PadValues pad;
   constexpr uint16_t kButtonA = 0x1000;
+  pad.buttons = GetPad().buttons & ~(f.pressing_a ? kButtonA : uint16_t(0));
+  f.pressing_a = false;
   if (f.frozen_frames >= 15) {
     f.frozen_frames = 0;
     f.press_a_frames = 6;
@@ -1105,7 +1110,8 @@ void FollowFrame(double dt) {
   }
   if (f.press_a_frames > 0) {
     f.press_a_frames--;
-    pad.buttons = kButtonA;
+    pad.buttons |= kButtonA;
+    f.pressing_a = true;
   } else if (f.reverse_frames > 0) {
     f.reverse_frames--;
     pad.lt = 255;
