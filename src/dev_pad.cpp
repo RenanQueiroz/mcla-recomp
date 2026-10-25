@@ -653,8 +653,10 @@ bool WritePng(const std::string& path, uint32_t width, uint32_t height,
 #if defined(_WIN32)
 // The game's own window (the process's largest top-level one), for the `window` command.
 HWND g_game_hwnd = nullptr;
-std::thread g_cover_thread;
-DWORD g_cover_thread_id = 0;
+// The cover's thread is detached (a joinable static thread would end the process in
+// std::terminate if the run ends while it is up); uncover tells it to quit.
+std::atomic<bool> g_cover_active{false};
+std::atomic<DWORD> g_cover_thread_id{0};
 std::atomic<bool> g_cover_ready{false};
 
 HWND FindGameWindow() {
@@ -706,13 +708,14 @@ std::string WindowCommand(const std::string& what) {
   } else if (what == "cover") {
     // A black pop-up of ours over the window (not activated): the window is occluded, as by
     // another program's window, and loses the focus the way an alt-tab does when it is clicked.
-    if (g_cover_thread.joinable()) {
+    if (g_cover_active) {
       return "err already covered";
     }
     RECT rect;
     GetWindowRect(hwnd, &rect);
     g_cover_ready = false;
-    g_cover_thread = std::thread([rect] {
+    g_cover_active = true;
+    std::thread([rect] {
       g_cover_thread_id = GetCurrentThreadId();
       HWND cover = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"STATIC", L"",
                                    WS_POPUP | WS_VISIBLE | SS_BLACKRECT, rect.left, rect.top,
@@ -726,16 +729,19 @@ std::string WindowCommand(const std::string& what) {
         DispatchMessageW(&msg);
       }
       DestroyWindow(cover);
-    });
+      g_cover_active = false;
+    }).detach();
     for (int i = 0; i < 200 && !g_cover_ready; ++i) {
       Sleep(10);
     }
   } else if (what == "uncover") {
-    if (!g_cover_thread.joinable()) {
+    if (!g_cover_active) {
       return "err not covered";
     }
     PostThreadMessageW(g_cover_thread_id, WM_QUIT, 0, 0);
-    g_cover_thread.join();
+    for (int i = 0; i < 200 && g_cover_active; ++i) {
+      Sleep(10);
+    }
     SetForegroundWindow(hwnd);
   } else if (what != "state") {
     return "err usage: window minimize|restore|hide|show|cover|uncover|state";
