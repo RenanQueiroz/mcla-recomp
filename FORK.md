@@ -96,8 +96,9 @@ kinds of changes on top of upstream's `main`:
   fork's shader pack (`shaderpack/`, fingerprints and pipeline descriptions
   only): at every start the game rebuilds what its shader storage lacks of it
   from the player's own game files and adds it, under a session lock, with a
-  journal that undoes an import whose start didn't finish
-  (`src/shader_prepare.cpp`); `mcla.exe --mcla_prepare_shaders` also creates
+  journal that undoes an import whose start didn't finish, and a ledger of
+  what imports added, so that a later pack that drops an entry has it retired
+  (never the player's own) at the next start (`src/shader_prepare.cpp`); `mcla.exe --mcla_prepare_shaders` also creates
   every pipeline and quits, which the launcher runs after each build and before
   Play when the game's stamp says the driver, the settings or the storage
   changed; the SDK side is `patches/rexglue-shader-storage-prepare.patch`

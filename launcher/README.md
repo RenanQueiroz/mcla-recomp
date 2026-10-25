@@ -819,7 +819,10 @@ during a build:
   `build_pack.py` makes `shaderpack/545407F8.shaderpack` from shader storages,
   refuses anything but fingerprints, ranges of `default.xex` and pipeline
   descriptions, and accepts a pack only once `mcla.exe` rebuilt every shader
-  in it (`--mcla_prepare_shaders_check`); `measure.py` runs the preparation
+  in it (`--mcla_prepare_shaders_check`; `--previous` refuses a pack that
+  lacks entries of the pack it replaces for no stated reason, and the game
+  retires what a newer pack dropped: a ledger, `test_storage.py` R1 to R6);
+  the pack of 2026-10-25 was grown with `coverage.py` below; `measure.py` runs the preparation
   and the race benchmark through `devrun.py`. `shader-salt.sdk.patch` is the
   salt part of `shader-stutter-timers.sdk.patch`, for a cold driver cache.
   `devrun.py --stdout <file>` gives the game a standard output, as the

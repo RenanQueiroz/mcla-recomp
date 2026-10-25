@@ -21,7 +21,7 @@ The pack holds no game data: per shader its fingerprint, its kind, its source (a
 ## The pack
 
 - Sources: copies of the agents' development storages and, with the user's agreement, read-only copies of the user's own (its files' SHA-256 and times compared before and after each copy).
-- 723 shaders (every shader of those storages has a source in the game's files), pipelines: 2,928 D3D12 (`rtv`), 570 D3D12 rasterizer-ordered views (`rov`), 1,561 Vulkan (`fbo`), 474 Vulkan fragment shader interlock (`fsi`); 411,416 bytes.
+- (The pack of 2026-10-17; the grown pack of 2026-10-25 is at the end: 762 shaders, 5,876 descriptions, 436,640 bytes.) 723 shaders (every shader of those storages has a source in the game's files), pipelines: 2,928 D3D12 (`rtv`), 570 D3D12 rasterizer-ordered views (`rov`), 1,561 Vulkan (`fbo`), 474 Vulkan fragment shader interlock (`fsi`); 411,416 bytes.
 - The check: `mcla.exe` rebuilt 723 of 723.
 
 ## Method
@@ -154,7 +154,7 @@ The preparation's own handling, on a stand-in game (`launcher-check`'s stand-in 
 
 About 2.6 s of every run is the game's own start (window, graphics device, the executable loaded). A normal D3D12 start on that storage with the driver's cache cold: nothing missing (1 ms), then 2,928 pipelines in 1.32 s before the logos.
 
-**Not done: retiring an old pack's entries.** The import only adds. An entry of an older pack that a newer pack no longer has stays, created at every start: about 85 KB of process memory each on D3D12, 240 KB and 26 KB of video memory on Vulkan (from the figures above). Retiring them needs a record of which entries each pack added (nothing records it yet), a rewrite that removes them without touching the player's own, and a rollback for that rewrite (the journal's lengths only undo appends). Left for when a pack drops entries.
+**Retiring an old pack's entries: done on 2026-10-25** (the last section). Until then the import only added: an entry of an older pack that a newer pack no longer had stayed, created at every start, about 85 KB of process memory each on D3D12, 240 KB and 26 KB of video memory on Vulkan (from the figures above).
 
 **Frame generation, again** (`fg/present-gate.pad`, the clean build): through AMD's swap chain, HDR, 4,800 of 4,800 guest frames presented once in the 40 s drive, none dropped.
 
@@ -175,3 +175,92 @@ The fixes for the second review (`dc1a31a`: N1 to N6 on the game side, LM1 to LM
 - **LM2.** With `mcla_shader_pack_auto = false` the pack is compared only when the stamp says the last run imported it (`pack_import` "on", a preparation).
 - **LM3.** (Checked in the window: before Play, Stop ends the run and starts nothing and a second Play starts the game without preparing again; Play now ends the run and the game starts and leaves the journal at `done`; closing the launcher during the run ends it and starts nothing.) While a preparation runs the buttons are **Stop** (ends it, starts nothing, and Play doesn't ask for another until the launcher is opened again or *Prepare shaders* is used) and **Play now** (ends it and starts the game). Both are safe: the storage is only replaced whole and the game imports by itself at its start (the interrupted run counts as a failed start in the journal, which the next start that gets through resets).
 - **Lows.** A run the player (or the launcher closing) ended no longer sets the skip mark, and a failed run by hand sets it like an automatic one (before, any run by hand cleared it); the mark still silences every reason for that pack, on purpose: the failure was shown when it happened, and every reason would start the same failing preparation. Closing (or restarting to update) during a preparation no longer starts the game. A custom `--mcla_shader_pack` is the pack compared (relative paths against `mcla.exe`'s folder, as the game's working folder). Relative `cache_root` and `user_data_root` are taken against that folder too. Those two are read from the options and the `REX_` variables only, because the SDK reads them before `mcla.toml` is loaded (the launcher used to look in the toml). A malformed folder option ends the check without a preparation instead of throwing. Not fixed, by design: a graphics API left on "any" that the game resolves differently, a switch between two adapters that both stay installed, a storage format change without a new pack (no preparation fixes that one); each is in the header of `ShaderStamp.cs`.
+
+## Growing the pack and retiring stale entries (2026-10-25)
+
+Two jobs: the pack (2026-10-17) came from the agents' sessions and the owner's own, so places nobody had been to still compiled while playing; and an entry a newer pack drops stayed in every storage for good. The tools are `launcher/dev/shaderpack/coverage.py`, `matrix.py`, `route.py`, `measure.py` and `test_pack.py`, with `dev/scripts/arcade-race.pad` and the tours (`launcher/README.md` says how they are used). Everything ran on scratch user-data and cache roots under `C:\mcv\shp-dev` (never `Documents\mcla`), through `devrun.py`, which plays on a private copy of the save (the only use of the real save, its hashes compared before and after); the pack holds the same kind of data as before (fingerprints, offsets and lengths, pipeline descriptions) and no new kind of data came from the disc.
+
+### Method
+
+- **A soak** (`coverage.py soak`): a controller script on a new, empty storage with the pack imported at the start, as a player's is after the launcher's step. What the game creates while playing, the pipelines and shaders the storage holds afterwards that the pack did not, is what the pack missed: each was a draw left out while it compiled.
+- **The races** (`matrix.py`, 38 arcade races: 18 ordered, 14 circuit, 6 landmark): a probe run per race records the leading opponent's route from the cars' positions in the log (`watch 15`, `route.py from-log`); then each race runs on D3D12 `rtv` and on Vulkan `fbo` with the car following that route at 0.85 of the leader's speed (`follow`, which brings it back when it is knocked off: four reverses, a forward burst, the nearest route point behind or ahead, a tip's dialog dismissed by A), the race list and options menus, the pause menu, the map and the leaderboards toured, dynamic weather and time of day, 3 opponents, traffic off. For 10 of the races a run with traffic on, per API, and one free-roam soak per API (a long circle in the city with time of day and weather moving on).
+- **Totals:** 136 runs, 473 minutes, 4,165,253 frames (38 probes, 76 race runs, 20 with traffic on, 2 roam); 7 of them failed (below).
+- **The pack:** `coverage.py grow` gives `build_pack.py` all the runs' storages with `--previous` (it refuses a pack that lacks an entry of the old one for no stated reason) and `--check` (`mcla.exe` rebuilt every shader). `rov` and `fsi` were not played: their entries are the old pack's.
+- **The display:** the shared GPU lock lets the display sleep during batch runs (it is an OLED); a coverage count (pipelines and shaders created) does not depend on it, and nothing below that was timed was measured with the display off: the preparations were run with it kept on.
+
+### What the old pack missed
+
+| | old pack | grown pack |
+|---|---|---|
+| Shaders | 723 | 762 |
+| D3D12 `rtv` pipelines | 2,928 | 3,111 (+183) |
+| D3D12 `rov` pipelines | 570 | 570 |
+| Vulkan `fbo` pipelines | 1,561 | 1,721 (+160) |
+| Vulkan `fsi` pipelines | 474 | 474 |
+| Pipeline descriptions in all | 5,533 | 5,876 |
+| Size | 411,416 bytes | 436,640 bytes (+6.1%) |
+| The check | 723 of 723 rebuilt | 762 of 762 |
+
+- Nothing of the old pack was dropped (`grown-a1.retired.json`: no shader, no description).
+- Per run on the old pack: 0 to 65 pipelines created in play (the first races found the most; after the first 15 most runs found 0 to 11, but a few later ones still found 20 to 30: `c10` with traffic on, `l00` on Vulkan).
+- Traffic on found 28 `rtv` entries that no run with traffic off did, and none on `fbo` (10 races each).
+- **What a miss cost on the old pack** (warm driver cache, in the lines the dev build counts, `visible` in each soak's result): on D3D12, ordered race 5, 9 pipelines created in play: no draw left out, 6 made on the spot, 4.8 ms of the frame budget waited; on Vulkan `fbo`, 19 created: 66 draws left out over 33 frames, 13 presents skipped, 173 ms waited. With a cold driver cache, ordered race 3 on D3D12, 26 created: 235 draws left out, 266 ms waited. Over all 136 runs: 1,809 draws left out, 2,015 made on the spot, 557 ms of pipeline work on the GPU thread, 259 presents skipped.
+- **With the grown pack** the six baseline scripts (`boot-to-roam`, `drive-spawn` and `race.pad`, on both APIs, the same runs as the old pack's) create nothing in play, none of the visible counts above is more than 0, and the frames over 50 ms are 13 (3 over 100 ms, the worst 111 ms) in 33,551 frames, against 19 (3 over 100 ms, the worst 470 ms) in 33,550 with the old pack.
+
+### What this does not show
+
+- **No hold-out was run.** The grown pack was made from the 136 runs, and the runs that tested it were the old scripts, which the old pack already covered. How many of the draws a player would see left out in conditions the soaks did not use (dusk, rain, power ups, other traffic, career events) it saves is not measured; the 343 new pipelines are what the soaks showed the old pack lacked. `matrix.py` writes a hold-out (a third variant of every third race), `coverage.py compare` says what it needed beyond each pack, and `batch --only` runs a subset: not run, because the runs take hours.
+- **Not played:** `rov` and `fsi` (so those paths gain nothing here), the second variant of each race (noon, clear, power ups, one more opponent), traffic in most races.
+- **Races that did not complete (7 of 136):**
+  - `o15` (both APIs) and `o05`: a tool bug. A single reading of the log in which every opponent is 600 to 1,100 m away, and the next one is back, was taken for a reset, which cut the first part off the route: `o15`'s started 713 m from the grid (the follower never reached it, 0 to 6% covered; `o15` and `o16` are nearly the same 7.7 km route and `o16` completed), `o05`'s 1,154 m (its runs drove the last 2.7 of 6.2 km, and passed). Fixed in `route.py` (a reading far off that the next undoes is skipped; `test_pack.py` tests it); the routes were remade and the runs on them were not repeated.
+  - `o01` (66% of the route on both APIs), `o13` (45% and 42%) and `o09` (34% on D3D12; it completed on Vulkan): the whole world stands still ("a tip or a dialog") at a point of the route and ten presses of A do nothing; nothing frees the car. What the dialog is was not found out (only the last picture of each run was kept). The pack holds what they found before that; the rest of those routes, about 34 to 55% of them, was not driven.
+- **Unreachable by these scripts:** career events and their cutscenes, the garage, dealers and other players' cars, the powers Zone, Agro and Roar (not seen firing), police (not seen), the Race Editor and everything online, cheats that need collectables; the save is at the start of the career. These stay as they were: compiled the first time they are drawn.
+
+### The preparation with the grown pack
+
+The same session and build, one preparation per cell on a new empty storage with a new driver-cache salt, then again on it (`prep3.py`, `measure.py prepare --twice --pack`, the display kept on); "process" is from the process's creation to its report, memory at the end with every pipeline created.
+
+| API, path | Pack | Cold: rebuild | Cold: pipelines | Cold: process | Cold: memory | Warm: process | Warm: memory | Video |
+|---|---|---|---|---|---|---|---|---|
+| D3D12 `rtv` | old | 3.58 s | 2,928 in 2.31 s | 6.41 s | 1,110 MB | 0.62 s | 991 MB | 238 MB |
+| D3D12 `rtv` | grown | 3.59 s | 3,111 in 2.34 s | 6.40 s | 1,201 MB | 0.63 s | 997 MB | 238 MB |
+| Vulkan `fbo` | old | 3.49 s | 1,561 in 8.04 s | 12.13 s | 1,347 MB | 0.68 s | 1,170 MB | 328 MB |
+| Vulkan `fbo` | grown | 3.67 s | 1,721 in 8.58 s | 12.85 s | 1,421 MB | 0.69 s | 1,186 MB | 328 MB |
+| D3D12 `rov` | old | 3.63 s | 570 in 2.33 s | 6.43 s | 1,040 MB | 0.60 s | 967 MB | 238 MB |
+| D3D12 `rov` | grown | 3.69 s | 570 in 2.38 s | 6.54 s | 1,033 MB | 0.62 s | 974 MB | 238 MB |
+| Vulkan `fsi` | old | 3.49 s | 474 in 7.70 s | 11.84 s | 1,397 MB | 0.66 s | 1,109 MB | 334 MB |
+| Vulkan `fsi` | grown | 3.66 s | 474 in 7.74 s | 11.99 s | 1,446 MB | 0.66 s | 1,121 MB | 334 MB |
+
+- The grown pack rebuilds 39 shaders more (0.01 to 0.18 s more here) and creates 183 more pipelines on D3D12 `rtv` (+0.03 s) and 160 more on Vulkan `fbo` (+0.54 s); a normal start with the driver's cache warm is as before. The warm memory is 6 MB more on D3D12 and 16 MB more on Vulkan (33 and 100 KB a pipeline; the 85 KB of the old figures is the average between them). The pack file is 25 KB larger and is read at every start.
+- One cell each, so a few percent is noise. An earlier single run of D3D12 `rov` (2026-10-24) took 11.5 s for its 570 pipelines and 1,416 MB; today's two took 2.3 s and about 1,035 MB. That is not explained (a driver cache that is warm for those shaders despite the salt is the likely reason), so read the D3D12 "cold" cells as "new salt", and compare the packs within this table only. The 2026-10-17 tables above are from other days on the same machine (D3D12 `rtv` 1.2 s for its pipelines then, 1.7 s on 2026-10-24, 2.3 s here).
+
+### Retiring stale entries
+
+Until now the import only added: an entry of an older pack that a newer pack dropped stayed in the player's storage for good, created at every start. This adds what the 2026-10-17 note said was missing: a record of which entries each pack added, a removal that never touches the player's own, and a way to undo it (here: nothing to undo, by how it is ordered).
+
+**What counts as stale, and who says so**
+
+- A **pack** (`launcher/dev/shaderpack/build_pack.py`) may lack an entry of the pack it replaces only for a reason the tool can state: the shader has no source in the game's files, or `mcla.exe` could not rebuild it in the check (a description goes with a shader it uses), or `--drop <file>` names it with a reason (`<16 hex digits> <why>` per line: a shader, or a description of any list). Every other absence (a storage the maintainer forgot to give, a shorter run) REFUSES the pack: `--previous <pack>` compares, `--report` writes what went and why. A pack can grow without a reason; it cannot shrink without one. Entries of another storage version are not carried at all (the old pack is refused by the game with exit 5, the SDK empties such files, and a pack for the new versions is made from storages of the new versions).
+- A **storage** retires an entry only when an earlier pack's import *added* it (the ledger below says so) and the pack now in use no longer has it.
+
+On this build, against the pack of 2026-10-17: nothing in it is stale by those rules. All 723 shaders rebuild (the check), and every description of every list is created at the preload (D3D12 `rtv` 2,928 of 2,928, `rov` 570 of 570, Vulkan `fbo` 1,561 of 1,561, `fsi` 474 of 474), so the grown pack drops nothing and there was nothing to retire from the pack itself. The code is there for the pack that does drop something.
+
+**The ledger** (`<cache>\shaders\local\545407F8.ledger`, binary, with its XXH3): the pack whose import last got through the creation of the stored pipelines, the storage versions, and the shaders and descriptions an import *added*, the ones the storage did not have. What the storage held before an import (the player's own, an earlier build's imports), and what the game wrote itself, is never in it. It is written at the end of a start (`MclaShaderStorageAfterPreload`) only when it changes. A ledger that is missing, damaged, or for other storage versions means "retire nothing" (a new one is made at the next import); one that can't be read at the moment is left alone and nothing is retired that start.
+
+**The retirement** (`RetireStale`, called by the import before it plans what is missing) runs at a start, before the SDK opens the files, when
+- the ledger is the pack in use's (its import went through at an earlier start: a pack never retires anything at the start that imports it, so an import that is rolled back, disabled or interrupted meets no removal, and the rollback's lengths stay true),
+- the journal says `done` (no failed start since), and
+- less than half of what imports added would go (`retire-refused` in a preparation, a warning in the log, otherwise; the preparation of More > Prepare shaders, `--mcla_prepare_shaders_retry`, may retire more: a pack that lacks most of the one before is a mistake or another pack).
+
+It removes the ledger's descriptions the pack lacks, and the ledger's shaders the pack lacks that no description left in any of the four lists uses (a player's own description keeps its shader, and the shader stays listed). Lists are replaced first and the shader file last, each atomically (a temporary file, flushed, renamed), so a start that ends in between leaves a storage that is valid, and the next start finishes; nothing is added or moved, what stays keeps its order, the ledger loses what went. A failure while replacing (a file in use, a read-only file) is logged and the next start goes on. The log and, in a preparation, the standard output (`SHADERPREP retire <shaders> <descriptions>`) say what went and how long it took.
+
+So the order for a pack that drops entries is: start 1 imports it and, once its pipelines are created, the ledger names it; start 2 retires. (The launcher's preparation after an update is start 1, the first Play is start 2.) Entries from before the ledger existed are never retired: they can't be told from the player's own.
+
+**Tests** (`test_storage.py`, through `devrun.py` on scratch roots; the whole file, 35 checks, passes on the grown pack in 190 s, and `test_pack.py`, the pack tools' own tests that need no game):
+- R1: a start with a pack on an empty storage writes the ledger (the pack, 762 shaders, 3,111, 570, 1,721 and 474 descriptions).
+- R2: the player's own entries (a description with its shader, and one whose shader the import brings) are not in the ledger; the start that first sees a smaller pack retires nothing; the next start retires what the pack dropped (132 descriptions and 1 shader), in order and nothing else; the player's own description and its shader stay, so does a dropped shader something uses, a dropped shader nothing uses goes; the ledger loses what went and then nothing more is retired.
+- R3: a pack that lacks most of what imports added retires nothing and the log says why; `--mcla_prepare_shaders_retry` in a preparation retires them (`SHADERPREP retire 662 5735`).
+- R4: no ledger: nothing retired, a ledger is made for the pack in use. R5: a damaged ledger is ignored and made again. R6: a start that ended after the lists and before the shader file is finished by the next.
+- In `test_pack.py`: what a pack may lack of the previous one (a shader without a source, one that did not rebuild, `--drop`; anything else refused).
+
+**Not verified:** the retirement code is platform-neutral (the same file functions as the import's) but the Linux and PS5 builds were neither compiled nor run; the PS5 build uploads the pack as before.
