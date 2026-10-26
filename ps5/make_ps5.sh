@@ -121,8 +121,13 @@ if ! grep -q "Sleep the real remaining time" "$rex_src/src/core/threading_posix.
     git -C "$rex_src" apply "$repo/patches/rexglue-linux-wait-sleep.patch" || fail "the wait fix does not apply (is the checkout clean?)"
     echo "applied: rexglue-linux-wait-sleep.patch"
 fi
-# Not applied here, until it has been tested on a console: patches/rexglue-vulkan-paint-pipeline-format.patch
-# (Vulkan presenter; see patches/README.md). To turn it on, apply it the way the one above is.
+# The Vulkan paint pipeline fix (PR #23, patches/README.md): the presenter
+# no longer waits for the previous paint and remakes its pipeline every frame.
+# Tested on a PS5 Pro. Added later, so applied the same way.
+if ! grep -q "swapchain_effect_pipeline.swapchain_format =" "$rex_src/src/ui/vulkan/vulkan_presenter.cpp"; then
+    git -C "$rex_src" apply "$repo/patches/rexglue-vulkan-paint-pipeline-format.patch" || fail "the paint pipeline fix does not apply (is the checkout clean?)"
+    echo "applied: rexglue-vulkan-paint-pipeline-format.patch"
+fi
 
 # ---------------------------------------------------------------------------
 step "4/9 the recompiler (rexglue), for this machine"
