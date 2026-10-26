@@ -100,6 +100,11 @@ uint32_t MclaGuestFunctionForHostPc(uintptr_t host_pc) {
   return GuestFunctionFor(host_pc, &offset);
 }
 
+// Every guest function's host entry (sorted), for the sampling profiler.
+const std::vector<std::pair<uintptr_t, uint32_t>>& MclaGuestFunctionTable() {
+  return g_host_to_guest;
+}
+
 void MclaApp::InstallCrashTrace() {
   auto* dispatcher = runtime()->function_dispatcher();
   g_host_to_guest.clear();

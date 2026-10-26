@@ -251,6 +251,9 @@ void MclaDevPadSwap();
 #endif
 void MclaApplyMsaaAtSwap();
 void MclaTickSettingsMenu();
+// src/sampling_profiler.cpp: the frame counts of its windows.
+void MclaProfileCountSwap();
+void MclaProfileCountUpdate();
 
 // Low latency (NVIDIA Reflex, AMD Anti-Lag 2): the frame starts at the top of the engine timer,
 // on the update thread, before the timer reads the time: the driver's wait comes before the
@@ -276,6 +279,7 @@ void mcla_frame_start(PPCRegister& r3) {
 }
 
 void mcla_frame_delta(PPCRegister& r8) {
+  MclaProfileCountUpdate();
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
   MclaTickSettingsMenu();
@@ -345,6 +349,7 @@ static void PaceUnlimitedSwap(bool timed) {
 }
 
 bool mcla_present_interval(PPCRegister& r11) {
+  MclaProfileCountSwap();
   MclaDevPadSwap();
   MclaApplyMsaaAtSwap();
   if (OriginalTiming()) {

@@ -1,0 +1,13 @@
+# CPU profile window in the race benchmark (race.pad's start): the player's car follows the
+# route of the leading opponent; a window of --mcla_profile_seconds from 10 s of game time
+# after the start (--mcla_fixed_dt 60: 600 engine frames).
+include boot-to-race.pad
+follow sunset-and-vine.route
+wait_until f32 0x827D7510 >= 9.3 300s
+mark race
+wait 600f
+set mcla_profile_segment race
+# 15 s of profiling at ~140 FPS is about 2,100 engine frames.
+wait 2400f
+mark race_end
+follow stop

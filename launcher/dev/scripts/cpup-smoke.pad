@@ -1,0 +1,5 @@
+# Smoke test of the profile windows: the title screen, one window of 3 s.
+wait 15s
+set mcla_profile_segment smoke
+wait 5s
+mark end
