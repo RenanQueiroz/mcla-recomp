@@ -1,5 +1,4 @@
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index 048f0b2..45b25b7 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
 @@ -15,6 +15,7 @@
@@ -10,7 +9,7 @@ index 048f0b2..45b25b7 100644
  #include <iterator>
  #include <memory>
  #include <string>
-@@ -1351,6 +1352,29 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1468,6 +1469,29 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
    }
  
    DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
@@ -40,7 +39,7 @@ index 048f0b2..45b25b7 100644
  
    // Copying.
    bool copied = false;
-@@ -1398,7 +1422,10 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1520,7 +1544,10 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            uint32_t dump_rows;
            uint32_t dump_pitch;
            resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
@@ -52,7 +51,7 @@ index 048f0b2..45b25b7 100644
              REXGPU_ERROR("D3D12RenderTargetCache: Failed to dump host render targets for resolve");
              return false;
            }
-@@ -1535,8 +1562,12 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1657,8 +1684,12 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            }
            command_processor_.SetExternalPipeline(
                direct_source ? direct_pipeline : resolve_copy_pipelines_[size_t(copy_shader)]);
@@ -65,7 +64,7 @@ index 048f0b2..45b25b7 100644
  
            // Order the resolve with other work using the destination as a UAV.
            if (draw_resolution_scaled) {
-@@ -1566,6 +1597,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1688,6 +1719,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
    bool cleared = false;
    bool clear_depth = resolve_info.IsClearingDepth();
    bool clear_color = resolve_info.IsClearingColor();
@@ -74,7 +73,6 @@ index 048f0b2..45b25b7 100644
      switch (GetPath()) {
        case Path::kHostRenderTargets: {
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index dcdf992..b976db7 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -14,6 +14,7 @@
@@ -85,7 +83,7 @@ index dcdf992..b976db7 100644
  #include <memory>
  #include <tuple>
  #include <utility>
-@@ -1324,6 +1325,29 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1451,6 +1452,29 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
    DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
@@ -115,7 +113,7 @@ index dcdf992..b976db7 100644
  
    // Copying.
    bool copied = false;
-@@ -1376,7 +1400,10 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1508,7 +1532,10 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
            uint32_t dump_rows;
            uint32_t dump_pitch;
            resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
@@ -127,7 +125,7 @@ index dcdf992..b976db7 100644
              REXGPU_ERROR("VulkanRenderTargetCache: Failed to dump host render targets for resolve");
              return false;
            }
-@@ -1522,8 +1549,11 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1657,8 +1684,11 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                  copy_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, copy_shader_constants_size,
                  sizeof(direct_source_constants), &direct_source_constants);
            }
@@ -139,7 +137,7 @@ index dcdf992..b976db7 100644
  
            // Invalidate textures and mark the range as scaled if needed.
            texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
-@@ -1542,6 +1572,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1677,6 +1707,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    bool cleared = false;
    bool clear_depth = resolve_info.IsClearingDepth();
    bool clear_color = resolve_info.IsClearingColor();

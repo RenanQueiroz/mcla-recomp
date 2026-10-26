@@ -1,7 +1,19 @@
+diff --git a/include/rex/graphics/d3d12/shared_memory.h b/include/rex/graphics/d3d12/shared_memory.h
+--- a/include/rex/graphics/d3d12/shared_memory.h
++++ b/include/rex/graphics/d3d12/shared_memory.h
+@@ -80,6 +80,8 @@ class D3D12SharedMemory : public SharedMemory {
+                                         uint32_t length_allocations) override;
+ 
+   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
++  bool UploadByteRanges(
++      const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) override;
+ 
+  private:
+   D3D12CommandProcessor& command_processor_;
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
-@@ -61,6 +61,36 @@ REXCVAR_DEFINE_UINT32(d3d12_threaded_submission_split_draws, 1000, "GPU/D3D12",
+@@ -65,6 +65,36 @@ REXCVAR_DEFINE_UINT32(d3d12_threaded_submission_split_draws, 1000, "GPU/D3D12",
  REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
  REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
  
@@ -38,7 +50,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
  namespace rex::graphics::d3d12 {
  
  // Generated with `xb buildshaders`.
-@@ -2118,6 +2148,78 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2508,6 +2538,78 @@ bool D3D12CommandProcessor::HdrClearTexture(HdrTexture texture) {
  
  void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
@@ -117,7 +129,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
    SCOPE_profile_cpu_f("gpu");
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
-@@ -3112,6 +3214,7 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
+@@ -3716,6 +3818,7 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
  }
  
  bool D3D12CommandProcessor::IssueCopy() {
@@ -151,7 +163,7 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
  namespace rex::graphics::d3d12 {
  
  // Generated with `xb buildshaders`.
-@@ -1067,9 +1083,30 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
+@@ -1316,9 +1332,30 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
      case Path::kHostRenderTargets: {
        RenderTarget* const* depth_and_color_render_targets =
            last_update_accumulated_render_targets();
@@ -182,40 +194,6 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
      } break;
      case Path::kPixelShaderInterlock: {
        // For ROV, only the barrier is needed - already scheduled if required.
-diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
-index 816ec40..9dc26fb 100644
---- a/src/graphics/d3d12/texture_cache.cpp
-+++ b/src/graphics/d3d12/texture_cache.cpp
-@@ -40,6 +40,21 @@ REXCVAR_DEFINE_BOOL(d3d12_texture_heaps, true, "GPU/D3D12",
-                     "committed resource, which is much slower to create and destroy")
-     .lifecycle(rex::cvar::Lifecycle::kHotReload);
- 
-+#include <rex/graphics/flags.h>  // TMPPIX
-+#include <string>  // TMPPIX
-+
-+// TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
-+extern bool g_tmpgt_active;
-+void TmpGtMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s);
-+static inline void TmpPixMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
-+  if (g_tmpgt_active) TmpGtMark(l, s);
-+}
-+struct TmpPixScope {
-+  rex::graphics::d3d12::DeferredCommandList& l; const char* e;
-+  TmpPixScope(rex::graphics::d3d12::DeferredCommandList& list, const char* b, const char* end) : l(list), e(end) { TmpPixMark(l, b); }
-+  ~TmpPixScope() { TmpPixMark(l, e); }
-+};
-+
- namespace rex::graphics::d3d12 {
- 
- // Generated with `xb buildshaders`.
-@@ -1711,6 +1726,7 @@ void D3D12TextureCache::FreeTextureHeapRange(uint32_t heap_index, uint64_t offse
- 
- bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
-                                                               bool load_mips) {
-+  TmpPixScope tmppix(command_processor_.GetDeferredCommandList(), "<texload", ">texload");
-   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
-   TextureKey texture_key = d3d12_texture.key();
- 
 diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
 --- a/src/graphics/d3d12/shared_memory.cpp
 +++ b/src/graphics/d3d12/shared_memory.cpp
@@ -283,15 +261,36 @@ diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_me
    if (upload_page_ranges.empty()) {
      return true;
    }
-diff --git a/include/rex/graphics/d3d12/shared_memory.h b/include/rex/graphics/d3d12/shared_memory.h
---- a/include/rex/graphics/d3d12/shared_memory.h
-+++ b/include/rex/graphics/d3d12/shared_memory.h
-@@ -80,6 +80,8 @@ class D3D12SharedMemory : public SharedMemory {
-                                         uint32_t length_allocations) override;
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -40,6 +40,21 @@ REXCVAR_DEFINE_BOOL(d3d12_texture_heaps, true, "GPU/D3D12",
+                     "committed resource, which is much slower to create and destroy")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
-   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
-+  bool UploadByteRanges(
-+      const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) override;
++#include <rex/graphics/flags.h>  // TMPPIX
++#include <string>  // TMPPIX
++
++// TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
++extern bool g_tmpgt_active;
++void TmpGtMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s);
++static inline void TmpPixMark(rex::graphics::d3d12::DeferredCommandList& l, const char* s) {
++  if (g_tmpgt_active) TmpGtMark(l, s);
++}
++struct TmpPixScope {
++  rex::graphics::d3d12::DeferredCommandList& l; const char* e;
++  TmpPixScope(rex::graphics::d3d12::DeferredCommandList& list, const char* b, const char* end) : l(list), e(end) { TmpPixMark(l, b); }
++  ~TmpPixScope() { TmpPixMark(l, e); }
++};
++
+ namespace rex::graphics::d3d12 {
  
-  private:
-   D3D12CommandProcessor& command_processor_;
+ // Generated with `xb buildshaders`.
+@@ -1806,6 +1821,7 @@ void D3D12TextureCache::FreeTextureHeapRange(uint32_t heap_index, uint64_t offse
+ 
+ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                               bool load_mips) {
++  TmpPixScope tmppix(command_processor_.GetDeferredCommandList(), "<texload", ">texload");
+   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
+   TextureKey texture_key = d3d12_texture.key();
+ 

@@ -862,6 +862,25 @@ during a build:
   ownership range or resolve area that crosses tile 2,048 (with the console's
   EDRAM, the ranges that wrap around), with a count every 5,000. Goes on top of
   `rexglue-edram-size.patch`.
+- `gt-build.ps1` and `gt-phases.py` (2026-10-26): the GPU timestamp layer as one
+  reusable tool. The five `*timestamps*.sdk.patch` and `frame-log.sdk.patch`
+  files were rebased onto the SDK of v0.1.2 (`git apply` takes them in this
+  order, without fuzz: gpu-timestamps, gpu-timestamps-vulkan,
+  texload-split-timestamps, resolve-split-timestamps, frame-log).
+  `gt-build.ps1` applies them to `third_party\rexglue-sdk` (recorded in
+  `.gt-layer`; `-Reverse` takes them out again), rebuilds only the
+  `rexgpu-xenos` target and copies the plugin to `out\gt`, to put next to a
+  normal `mcla.exe` and DLLs of the same build. `gt-phases.py <dir>` reads
+  the timed frames (`<label>_<n>_gt.csv` from `set tmp_frame_log <label>` in
+  a pad, or `gt_<n>.csv` from `MCLA_GT_EVERY`) and prints the GPU time by
+  render phase (the game's phase markers: pre-passes, scene, post, tone map,
+  HUD), by category (draws, EDRAM transfers, resolves, texture loads,
+  uploads, and the split steps) and, with `--draws` and a text-log frame next
+  to them, by shader and draw size. Run frames with
+  `--mcla_render_markers_all_phases=true`, `--tmp_frame_log_dir=<folder>`,
+  `--tmp_frame_log_quiet=true` (timestamps only) and, on D3D12 at 1x and
+  2x, `--d3d12_threaded_submission_split_draws=0`; phases and per-draw
+  labels exist on D3D12 only, categories and passes on both APIs.
 
 ## Scripted controller input (unattended runs)
 

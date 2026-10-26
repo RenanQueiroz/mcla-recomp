@@ -2,9 +2,9 @@ diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -39,6 +39,74 @@
+ #include <rex/ui/low_latency.h>
  #include <rex/ui/presenter.h>
  
- REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
 +
 +// TMPFL: development frame log (launcher/dev/frame-log.sdk.patch). Setting
 +// tmp_frame_log to a new non-empty label logs the next tmp_frame_log_frames
@@ -73,10 +73,10 @@ diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor
 +  return true;
 +}
 +
- REXCVAR_DEFINE_BOOL(hdr_ui_layer, true, "GPU",
-                     "HDR output: keep the game's HUD and menus as a separate SDR layer over the "
-                     "HDR scene (rexglue-hdr-ui-layer.patch); off: the whole frame is SDR content");
-@@ -907,6 +975,8 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+ REXCVAR_DEFINE_INT32(shader_storage_progress, 0, "GPU",
+                      "While stored pipelines are created at start, print a progress line on "
+@@ -912,6 +980,8 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
        uint32_t value = reader->ReadAndSwap<uint32_t>();
        bin_select_ = (bin_select_ & 0xFFFFFFFF00000000ull) | value;
        result = true;
@@ -85,7 +85,7 @@ diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor
      } break;
      case PM4_SET_BIN_SELECT_HI: {
        uint32_t value = reader->ReadAndSwap<uint32_t>();
-@@ -926,6 +996,8 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+@@ -931,6 +1001,8 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
        uint64_t val_lo = reader->ReadAndSwap<uint32_t>();
        bin_select_ = (val_hi << 32) | val_lo;
        result = true;
@@ -94,7 +94,7 @@ diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor
      } break;
      case PM4_CONTEXT_UPDATE: {
        assert_true(count == 1);
-@@ -1052,6 +1124,12 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -1070,6 +1142,12 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
  }
  
  void CommandProcessor::OnGuestMarker(uint32_t kind, [[maybe_unused]] uint32_t value) {
@@ -105,12 +105,12 @@ diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor
 +    if (g_tmpfl_marker_hook) g_tmpfl_marker_hook(text);
 +  }
    switch (GuestMarkerKind(kind)) {
-     case GuestMarkerKind::kTonemapBegin:
-       hdr_frame_.tonemap = true;
+     case GuestMarkerKind::kSceneBegin:
+       // Temporal AA: the scene's draws from here on are jittered.
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
-@@ -66,6 +66,8 @@ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+@@ -69,6 +69,8 @@ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
  #include <cstdio>  // TMPGT
  #include <cstdlib>  // TMPGT
  #include <vector>  // TMPGT
@@ -119,7 +119,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
  #include <string>  // TMPPIX
  
  // TMPPIX: instantaneous markers bracketing kinds of GPU work, for a PIX capture.
-@@ -91,6 +93,16 @@ struct TmpPixScope {
+@@ -94,6 +96,16 @@ struct TmpPixScope {
    ~TmpPixScope() { TmpPixMark(l, e); }
  };
  extern std::string g_tmppix_last_pass;  // TMPPIX
@@ -136,7 +136,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
  
  namespace rex::graphics::d3d12 {
  
-@@ -2409,12 +2421,32 @@ bool D3D12CommandProcessor::HdrClearTexture(HdrTexture texture) {
+@@ -2539,12 +2551,32 @@ bool D3D12CommandProcessor::HdrClearTexture(HdrTexture texture) {
  void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
    g_tmppix_last_pass.clear();  // TMPPIX
@@ -170,7 +170,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
        if (!g_tmpgt_heap) {
          ID3D12Device* device = GetD3D12Provider().GetDevice();
          D3D12_QUERY_HEAP_DESC qd = {};
-@@ -2437,6 +2469,10 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2567,6 +2599,10 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          g_tmpgt_labels.resize(kTmpGtMax);
        }
        if (g_tmpgt_active) {
@@ -181,7 +181,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
          TmpGtMark(deferred_command_list_, "SWAP");
          deferred_command_list_.D3DResolveQueryData(g_tmpgt_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                                     g_tmpgt_count, g_tmpgt_readback, 0);
-@@ -2445,6 +2481,8 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2575,6 +2611,8 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          tmpgt_pending_count = g_tmpgt_count;
          tmpgt_pending_labels.assign(g_tmpgt_labels.begin(),
                                      g_tmpgt_labels.begin() + g_tmpgt_count);
@@ -190,7 +190,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
        } else if (tmpgt_pending_count) {
          if (GetCompletedSubmission() >= tmpgt_pending_submission) {
            uint64_t freq = 0;
-@@ -2455,6 +2493,11 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2585,6 +2623,11 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
              const char* dir = std::getenv("MCLA_GT_DIR");
              std::string path = std::string(dir ? dir : ".") + "\\gt_" +
                                 std::to_string(tmpgt_dumped++) + ".csv";
@@ -202,7 +202,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
              if (std::FILE* f = std::fopen(path.c_str(), "w")) {
                std::fprintf(f, "freq,%llu\n", (unsigned long long)freq);
                const uint64_t* t = static_cast<const uint64_t*>(data);
-@@ -2471,10 +2514,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2601,10 +2644,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          }
        } else {
          const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
@@ -217,7 +217,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
            TmpGtMark(deferred_command_list_, "FRAME");
          }
        }
-@@ -2906,6 +2952,127 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_
+@@ -3163,6 +3209,127 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_
    return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
  }
  
@@ -345,7 +345,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
  bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
-@@ -2979,6 +3146,23 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -3236,6 +3403,23 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
      return false;
    }
    ++submission_draws_;
@@ -369,7 +369,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
  
    // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
    if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
-@@ -2988,6 +3172,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -3245,6 +3429,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
            draw_util::GetNormalizedDepthControl(regs),
            pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
                         : 0)) {
@@ -377,7 +377,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
      return true;
    }
  
-@@ -2998,6 +3183,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -3255,6 +3440,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    }
    if (!primitive_processing_result.host_draw_vertex_count) {
      // Nothing to draw.
@@ -388,7 +388,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
-@@ -62,6 +62,10 @@ struct TmpPixScope {
+@@ -63,6 +63,10 @@ struct TmpPixScope {
    ~TmpPixScope() { TmpPixMark(l, e); }
  };
  std::string g_tmppix_last_pass;  // TMPPIX
@@ -399,9 +399,9 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
  
  namespace rex::graphics::d3d12 {
  
-@@ -1468,6 +1472,38 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
-   }
- 
+@@ -4196,6 +4200,38 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+   ID3D12Device* device = provider.GetDevice();
+   uint64_t current_submission = command_processor_.GetCurrentSubmission();
    DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
 +  if (g_tmpfl_active) {  // TMPFL: one line per resolve
 +    const draw_util::ResolveEdramInfo& tmp_ei =
@@ -436,5 +436,5 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
 +          tmp_regs[XE_GPU_REG_RB_COLOR_INFO], tmp_regs[XE_GPU_REG_RB_DEPTH_INFO]);
 +  }
  
-   // Copying.
-   bool copied = false;
+   bool resolve_clear_needed = render_target_resolve_clear_values && resolve_clear_rectangle;
+   D3D12_RECT clear_rect;
