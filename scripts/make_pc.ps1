@@ -52,6 +52,28 @@ function Patch([string]$name, [string]$repo, [string]$patch) {
     Logged $name { git -C $repo apply $patch }
 }
 
+# A first clone that was cut short leaves submodules missing, or with files
+# that were never checked out, and the clone is skipped on the next run once
+# the SDK's .git exists (issue #21). Fetch what is missing and put back files
+# missing from a submodule; changed files (an applied patch) are left alone.
+function RepairSubmodules {
+    Logged "sdk-submodules" { git -C $sdk submodule update --init --recursive }
+    $ErrorActionPreference = "Continue"
+    foreach ($line in @(git -C $sdk submodule status --recursive)) {
+        $path = Join-Path $sdk ($line.Substring(1).Split(' ')[1])
+        $missing = @(git -C $path ls-files --deleted)
+        if ($missing.Count -eq 0) { continue }
+        "restoring $($missing.Count) missing files in $path"
+        # A list file without a byte order mark: Windows PowerShell 5.1 puts
+        # one in front of text piped to a program, and git takes it as part
+        # of the first path.
+        $list = "$logs\sdk-missing-files.txt"
+        [IO.File]::WriteAllLines($list, [string[]]$missing)
+        git -C $path checkout --pathspec-from-file=$list 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "could not restore the files missing in $path; delete third_party\rexglue-sdk and run this again" }
+    }
+}
+
 Push-Location $root
 try {
     # -----------------------------------------------------------------------
@@ -149,6 +171,8 @@ try {
             Logged "sdk-clone" { git clone --recursive --branch $sdkTag https://github.com/rexglue/rexglue-sdk.git $sdk }
         }
         if ((git -C $sdk rev-parse HEAD) -ne $sdkCommit) { Fail "the SDK checkout is not $sdkTag ($sdkCommit)" }
+        RepairSubmodules
+        if (-not (Test-Path "$sdk\thirdparty\FFmpeg\config.h")) { Fail "the SDK download is incomplete (thirdparty\FFmpeg); delete third_party\rexglue-sdk and run this again" }
         Patch "sdk-patch" $sdk "$root\patches\rexglue-v0.10.0-mcla.patch"
         Patch "sdk-patch-ffmpeg" "$sdk\thirdparty\FFmpeg" "$root\patches\rexglue-ffmpeg-ps5-config.patch"
         # Git on Windows checks out symbolic links as small text files holding
