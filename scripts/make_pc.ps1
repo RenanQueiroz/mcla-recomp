@@ -212,6 +212,12 @@ try {
         Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
         (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
     }
+    # The Vulkan paint pipeline fix came later still, and is applied the same
+    # way: it is checked for by the line it adds.
+    if (-not (Select-String -Quiet -SimpleMatch "swapchain_effect_pipeline.swapchain_format =" "$sdk\src\ui\vulkan\vulkan_presenter.cpp")) {
+        Patch "sdk-patch-paint-format" $sdk "$root\patches\rexglue-vulkan-paint-pipeline-format.patch"
+        (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+    }
 
     # -----------------------------------------------------------------------
     Step "3/6 build and install the SDK (the long step, once)"

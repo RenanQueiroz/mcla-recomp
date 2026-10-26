@@ -121,6 +121,8 @@ if ! grep -q "Sleep the real remaining time" "$rex_src/src/core/threading_posix.
     git -C "$rex_src" apply "$repo/patches/rexglue-linux-wait-sleep.patch" || fail "the wait fix does not apply (is the checkout clean?)"
     echo "applied: rexglue-linux-wait-sleep.patch"
 fi
+# Not applied here, until it has been tested on a console: patches/rexglue-vulkan-paint-pipeline-format.patch
+# (Vulkan presenter; see patches/README.md). To turn it on, apply it the way the one above is.
 
 # ---------------------------------------------------------------------------
 step "4/9 the recompiler (rexglue), for this machine"
