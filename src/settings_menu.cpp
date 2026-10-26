@@ -28,6 +28,7 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
 REXCVAR_DEFINE_BOOL(mcla_motion_blur, true, "MCLA", "Motion blur");
@@ -38,6 +39,10 @@ REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
 // Set by a host that keeps the settings file somewhere other than next to
 // the executable (PS5).
 const char* g_mcla_settings_path = nullptr;
+
+#if !REX_PLATFORM_PS5
+void MclaWaitForSaves();  // src/mcla_app.cpp
+#endif
 
 namespace {
 
@@ -367,9 +372,18 @@ struct ItemDef {
 // The console's display is 60 Hz.
 constexpr double kFpsTargets[] = {30.0, 60.0};
 #else
-constexpr double kFpsTargets[] = {30.0, 60.0, 120.0, 0.0};
+// 40 to 50 are for variable-refresh displays.
+constexpr double kFpsTargets[] = {30.0, 40.0, 45.0, 50.0, 60.0, 120.0, 0.0};
 #endif
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
+// How often the HUD advances (mcla_ui_hud_rate, src/frame_timing.cpp): 0 is
+// every frame.
+#if REX_PLATFORM_PS5
+constexpr double kHudRates[] = {30.0, 60.0, 0.0};
+#else
+constexpr double kHudRates[] = {30.0, 60.0, 120.0, 0.0};
+#endif
+constexpr int kHudRateCount = int(sizeof(kHudRates) / sizeof(kHudRates[0]));
 constexpr const char* kPromptValues[] = {"auto", "xbox", "playstation"};
 constexpr const char* kPromptLabels[] = {"AUTO", "XBOX", "PLAYSTATION"};
 constexpr const char* kIntroValues[] = {"normal", "fast", "skip"};
@@ -378,6 +392,8 @@ constexpr const char* kIntroLabels[] = {"NORMAL", "FAST", "SKIP (NO LOGO)"};
 const ItemDef kDisplayItems[] = {
     {"PM_MxFps", ItemKind::kNumberChoice, "mcla_fps", "FPS TARGET", nullptr, nullptr, kFpsTargets,
      kFpsTargetCount, "%.0f", "UNCAPPED"},
+    {"PM_MxHudRate", ItemKind::kNumberChoice, "mcla_ui_hud_rate", "HUD UPDATES", nullptr, nullptr,
+     kHudRates, kHudRateCount, "%.0f PER SECOND", "EVERY FRAME"},
 #if !REX_PLATFORM_PS5
     // Neither means anything on the console: there is one display mode, and
     // the PS5 host turns the emulated vsync off at every start.
@@ -836,6 +852,31 @@ void CreateSubmenus() {
   REXLOG_INFO("settings menu: {} submenus added to the pause menu", kMenuCount);
 }
 
+// Ends the game as the window's close button does: on the UI thread, after any
+// career save in progress (MclaWaitForSaves), the window is closed, which ends
+// the title and the process (ReXApp::OnClosing).
+// WindowedAppContext::RequestDeferredQuit, used before, only left the UI loop:
+// the app then waited for the game's main thread, which doesn't end, so the
+// game played on behind a window that no longer answered. The PS5 host has no
+// window listener of that kind, so it keeps the request it had.
+void CloseGame() {
+  auto* runtime = rex::Runtime::instance();
+#if REX_PLATFORM_PS5
+  if (auto* context = runtime ? runtime->app_context() : nullptr) {
+    context->RequestDeferredQuit();
+  }
+#else
+  rex::ui::Window* window = runtime ? runtime->display_window() : nullptr;
+  if (!window) {
+    return;
+  }
+  window->app_context().CallInUIThread([window] {
+    MclaWaitForSaves();
+    window->RequestClose();
+  });
+#endif
+}
+
 bool ButtonClicked(uint32_t key) {
   return key && CallGuest(kIsButtonClickedFn, key, 1u) != 0;
 }
@@ -922,12 +963,9 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
   }
 
   if (ButtonClicked(g_quit_button_key.load(std::memory_order_relaxed))) {
-    auto* runtime = rex::Runtime::instance();
-    if (auto* context = runtime ? runtime->app_context() : nullptr) {
-      REXLOG_INFO("settings menu: quit requested");
-      SaveSettingsIfChanged();
-      context->RequestDeferredQuit();
-    }
+    REXLOG_INFO("settings menu: quit requested");
+    SaveSettingsIfChanged();
+    CloseGame();
     r3.u64 = 1;
     return true;
   }

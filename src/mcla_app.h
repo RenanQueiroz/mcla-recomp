@@ -6,6 +6,8 @@
 
 #include <rex/rex_app.h>
 
+#include "achievement_toast.h"
+
 class MclaApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -21,6 +23,18 @@ class MclaApp : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override;
   void OnPostSetup() override;
   void OnPreLaunchModule() override;
+  // The window's close button: lets a career save in progress finish first.
+  bool OnWindowCloseRequested() override;
+
+  // Achievement pop-ups, registered with the ImGui drawer only while one is
+  // on screen (src/achievement_toast.h). The SDK's toast is registered for the
+  // whole session, which made the presenter repaint at the monitor's refresh
+  // rate whatever the frame cap.
+  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog()
+      override {
+    return mcla::MakeOnDemandToast(rex::ReXApp::CreateAchievementNotificationDialog(),
+                                   imgui_drawer(), app_context());
+  }
 
  private:
   void InstallCrashTrace();

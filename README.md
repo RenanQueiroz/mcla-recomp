@@ -43,7 +43,9 @@ The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 202
 
 **Play:** double-click the **Midnight Club Los Angeles** shortcut the build leaves in the repository folder, or `mcla.exe` itself. Keep the folder where it was built; the game data is read from `game\`. An Xbox or PlayStation controller works.
 
-Options go after the program name, for example `mcla.exe --fullscreen=true --mcla_fps=60` (30, 60, 120, or 0 for uncapped). The pause menu has three extra entries: DISPLAY (frame-rate target, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`.
+Options go after the program name, for example `mcla.exe --fullscreen=true --mcla_fps=60` (30, 40, 45, 50, 60, 120, or 0 for uncapped). The pause menu has three extra entries: DISPLAY (frame-rate target, HUD updates, vsync, fullscreen, motion blur, depth of field), PERFORMANCE (detail options) and CONTROLS (button prompts, intro speed); changes are saved to `mcla.toml` next to `mcla.exe`. QUIT GAME, next to them, closes the game, after a career save in progress has finished.
+
+Frames are held to the target when they are presented (`--mcla_pace_at_swap=false` holds them before the game's update instead, as before). Menus and pop-ups advance 30 times a second as on the console, whatever the frame rate (`--mcla_ui_timing_fix=false` for once per frame); the HUD 60 times a second (`--mcla_ui_hud_rate`: 30 as on the console, 60, 120, or 0 for every frame).
 
 **Update:** `git pull`, then `.\scripts\make_pc.ps1` again.
 
@@ -133,6 +135,7 @@ If the game stops with `Call to invalid or unregistered function at guest addres
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by mihawk-99 (GPL-3): the RADV port and toolchain the PS5 version is built on.
 - XenonRecomp by hedge-dev, on which ReXGlue's analysis builds.
 - The Linux build by [@MoonFuji](https://github.com/MoonFuji).
+- [RecompiledHaloReach](https://github.com/Dyotson/RecompiledHaloReach) and [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined) by Dyotson (MIT): the achievement pop-ups shown without repainting the window all the time (`src/achievement_toast.h`, with the licence notice).
 
 ## Licence
 

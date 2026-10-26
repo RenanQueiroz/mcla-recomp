@@ -15,11 +15,13 @@
 #include "mcla_app.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #include <rex/chrono/clock.h>
@@ -53,6 +55,16 @@ REXCVAR_DEFINE_STRING(mcla_intro, "normal", "MCLA",
                       "Start-up legal screens and logos: normal (original speed), fast (as "
                       "fast as the host presents), skip (the title screen loses its logo)");
 
+// Where the frame limiter waits. At the start of the frame (the engine timer),
+// the simulation step is measured before the wait while the frame reaches the
+// screen after a variable amount of work, so at the cap moving objects advance
+// unevenly against their display times and the picture shakes. Holding the
+// finished frame at its swap instead is what vsync does, with a precise clock:
+// frames are presented at even intervals and each step measures one interval.
+REXCVAR_DEFINE_BOOL(mcla_pace_at_swap, true, "MCLA",
+                    "Hold frames to the FPS target at presentation, like a precise vsync, "
+                    "instead of before the game's update");
+
 namespace {
 
 // The engine timer object lives at a fixed guest address (sub_821BDA90).
@@ -65,6 +77,8 @@ constexpr double kMaxFrameSeconds = 0.125;
 
 // Set when the frame limiter has run; see PaceUnlimitedSwap.
 std::atomic<bool> g_limiter_ran_since_swap{false};
+// Set by the first pass through the engine timer: the start-up logos are over.
+std::atomic<bool> g_engine_timer_started{false};
 
 bool OriginalTiming() {
   return REXCVAR_GET(mcla_fps) < 0;
@@ -78,12 +92,17 @@ uint64_t NowMicros() {
 
 // Sleeps until the next frame deadline. The deadline advances by one period
 // per frame; a frame that is already late resets it, so lateness is not
-// repaid by running the following frames faster.
+// repaid by running the following frames faster. Each call site keeps its own
+// deadline (the template parameter).
+enum PaceSite { kPaceAtTimer, kPaceAtSwap };
+
+template <PaceSite kSite>
 void WaitForFrameDeadline() {
   static uint64_t next_us = 0;
   // The timer function has callers on other threads; pace only the first one.
+  // There is one swap per frame, from whichever thread presents.
   static const std::thread::id owner = std::this_thread::get_id();
-  if (std::this_thread::get_id() != owner) {
+  if (kSite == kPaceAtTimer && std::this_thread::get_id() != owner) {
     return;
   }
 
@@ -140,8 +159,11 @@ void mcla_frame_delta(PPCRegister& r8) {
   if (OriginalTiming()) {
     return;
   }
-  WaitForFrameDeadline();
+  if (!REXCVAR_GET(mcla_pace_at_swap)) {
+    WaitForFrameDeadline<kPaceAtTimer>();
+  }
   g_limiter_ran_since_swap.store(true, std::memory_order_relaxed);
+  g_engine_timer_started.store(true, std::memory_order_relaxed);
   // r8 was computed before the wait. Whatever the wait added is picked up by
   // the next frame's measurement, so no time is lost, only shifted one frame.
   static const uint64_t max_ticks = static_cast<uint64_t>(
@@ -165,18 +187,33 @@ void mcla_fixed_step_path(PPCRegister& r3, PPCRegister& f11) {
 // Loops that never reach the engine timer (the publisher logos at start-up,
 // loading screens) were paced on the console only by the present interval of
 // two vblanks, which is removed here, so they ran as fast as the host could
-// present: the logo sequence was over in about a second. A swap that follows
-// another with no pass through the frame limiter in between is held to the
-// original 30 per second.
+// present: the logo sequence was over in about a second. Such a loop shows as
+// swaps with no pass through the frame limiter between them; from the second
+// of those in a row, swaps are held to the original 30 per second.
+//
+// A single one is not enough. The game updates and presents on different
+// threads, and when uncapped the two drift against each other: about one swap
+// in forty has no update before it and the next one has two. Holding those to
+// 33 ms each made uncapped play stutter (and, by delaying the presenting
+// thread, made the pattern ten times as frequent: a quarter of all frames).
+//
+// The fast and skip intros leave such loops unpaced only until the engine
+// timer first runs, which is the start-up logos; loading screens after that
+// keep the 30.
 
-static void PaceUnlimitedSwap() {
+static void PaceUnlimitedSwap(bool timed) {
   static std::atomic<uint64_t> last_swap_us{0};
+  static std::atomic<bool> last_untimed{false};
   constexpr uint64_t kPeriodMicros = 1'000'000ull / 30;
-  const bool limited = g_limiter_ran_since_swap.exchange(false, std::memory_order_relaxed) ||
-                       REXCVAR_GET(mcla_intro) != "normal";
+  const bool untimed_loop = !timed && last_untimed.exchange(true, std::memory_order_relaxed);
+  if (timed) {
+    last_untimed.store(false, std::memory_order_relaxed);
+  }
+  const bool fast_logos = REXCVAR_GET(mcla_intro) != "normal" &&
+                          !g_engine_timer_started.load(std::memory_order_relaxed);
   const uint64_t last = last_swap_us.load(std::memory_order_relaxed);
   uint64_t now = NowMicros();
-  if (!limited && last && now - last < kPeriodMicros) {
+  if (untimed_loop && !fast_logos && last && now - last < kPeriodMicros) {
     std::this_thread::sleep_for(std::chrono::microseconds(kPeriodMicros - (now - last)));
     now = NowMicros();
   }
@@ -187,7 +224,13 @@ bool mcla_present_interval(PPCRegister& r11) {
   if (OriginalTiming()) {
     return false;
   }
-  PaceUnlimitedSwap();
+  // A swap that follows a pass through the engine timer is a gameplay frame:
+  // with mcla_pace_at_swap it is held here to the FPS target.
+  const bool timed = g_limiter_ran_since_swap.exchange(false, std::memory_order_relaxed);
+  if (timed && REXCVAR_GET(mcla_pace_at_swap)) {
+    WaitForFrameDeadline<kPaceAtSwap>();
+  }
+  PaceUnlimitedSwap(timed);
   r11.u64 = 1;
   return true;
 }
@@ -234,6 +277,134 @@ void mcla_chassis_depth_smoothing(PPCRegister& f0) {
   }
 }
 
+// The UI's Flash movies (menus, pop-ups, and the HUD with its song ticker and
+// "LOADING" badge) advance exactly one movie frame per game update: the UI
+// manager steps them in the Flash player's one-frame mode, which ignores the
+// elapsed time. The console updated 30 times a second, which is what the
+// movies were made for; at 120 FPS they all ran four times as fast (the song
+// ticker under the speedometer scrolls 2 px per update at 720p: 60 px/s at 30,
+// 240 at 120). Each movie is now advanced on its own schedule, 30 a second
+// (the HUD at a rate of its own, below), and an update that comes before a
+// movie is due skips that movie's advance.
+// A movie due within a quarter of a frame is advanced early, so at 30 FPS every
+// update still advances once, as before. A movie that falls behind (below 30
+// FPS) is not caught up, as on the console. The start-up logos are left alone:
+// the fast intro is meant to run them as fast as possible.
+//
+// The in-game HUD is two movies: HUDMAPMOVIE and the gauge movie, which the
+// HUD code creates itself, so it is not among the UI manager's screens. The
+// game sets the gauges' values every update and the movies' own scripts draw
+// them as they advance, in the same step that scrolls the song ticker: the
+// needles move as often as the ticker steps. So the HUD has a rate of its own:
+// 60 a second by default (smoother needles than at 30, the ticker twice its
+// original speed: the better trade in play); 30 as on the console (the ticker
+// at its original speed, the needles in 30 Hz steps);
+// 120 (the ticker 4 times as fast); or 0 for every frame, as without this
+// pacing.
+REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
+                    "Advance the UI's menus, pop-ups and map screens 30 times a second, as on the "
+                    "console, instead of once per rendered frame");
+REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 60, "MCLA",
+                     "How many times a second the in-game HUD advances (gauges, song ticker, "
+                     "LOADING badge): 60 (the default) or 120 for smoother needles with a faster "
+                     "ticker, 30 as on the console, 0 for every frame")
+    .range(0, 240);
+
+namespace {
+// The UI manager and its movie map (atMap name -> movie**: buckets at +60,
+// count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
+// context). From LARecomp's notes, used with its author's permission.
+constexpr uint32_t kUiManagerPtr = 0x8286D804;
+
+uint32_t ReadGuestU32(uint32_t address) {
+  if (address < 0x10000) {
+    return 0;
+  }
+  const uint8_t* p = rex::Runtime::instance()->virtual_membase() + address;
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+
+bool GuestStringIs(uint32_t address, const char* text) {
+  if (address < 0x10000) {
+    return false;
+  }
+  const char* s = reinterpret_cast<const char*>(rex::Runtime::instance()->virtual_membase() +
+                                                address);
+  return std::strncmp(s, text, std::strlen(text) + 1) == 0;
+}
+
+// Whether a player context belongs to one of the UI manager's screens other
+// than the HUD map.
+bool IsUiScreen(uint32_t context) {
+  const uint32_t manager = ReadGuestU32(kUiManagerPtr);
+  if (!manager) {
+    return false;
+  }
+  const uint32_t buckets = ReadGuestU32(manager + 60);
+  const uint32_t count = ReadGuestU32(manager + 64) >> 16;
+  for (uint32_t i = 0; buckets && i < count && i < 256; i++) {
+    uint32_t node = ReadGuestU32(buckets + 4 * i);
+    for (int guard = 0; node && guard < 256; guard++, node = ReadGuestU32(node + 12)) {
+      const uint32_t holder = ReadGuestU32(node + 8);
+      const uint32_t movie = holder ? ReadGuestU32(holder) : 0;
+      if (movie && ReadGuestU32(movie + 56) == context) {
+        return !GuestStringIs(ReadGuestU32(node), "HUDMAPMOVIE");
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
+
+bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
+  if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
+      !g_engine_timer_started.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  constexpr uint64_t kScreenPeriodMicros = 1'000'000ull / 30;
+  struct Schedule {
+    uint32_t context;
+    uint64_t next_us;
+    uint64_t checked_us;  // when IsUiScreen was last asked: movies come and go
+    bool screen;
+  };
+  static std::mutex mutex;
+  static std::array<Schedule, 32> schedules{};
+  static size_t replace = 0;
+  const uint32_t context = r31.u32;
+  const uint64_t now = NowMicros();
+  std::lock_guard lock(mutex);
+  Schedule* schedule = nullptr;
+  for (Schedule& s : schedules) {
+    if (s.context == context) {
+      schedule = &s;
+      break;
+    }
+  }
+  if (!schedule) {
+    schedule = &schedules[replace++ % schedules.size()];
+    *schedule = {context, 0, 0, false};
+  }
+  if (now - schedule->checked_us > 1'000'000) {
+    schedule->checked_us = now;
+    schedule->screen = IsUiScreen(context);
+  }
+  uint64_t period_us = kScreenPeriodMicros;
+  if (!schedule->screen) {
+    const int32_t hud_rate = REXCVAR_GET(mcla_ui_hud_rate);
+    if (hud_rate <= 0) {
+      return false;
+    }
+    period_us = 1'000'000ull / uint64_t(hud_rate);
+  }
+  if (schedule->next_us && now + period_us / 4 < schedule->next_us) {
+    return true;
+  }
+  const bool behind = !schedule->next_us || now > schedule->next_us + period_us;
+  schedule->next_us = behind ? now + period_us : schedule->next_us + period_us;
+  return false;
+}
+
 static bool SkipIntro() {
   return REXCVAR_GET(mcla_skip_intro) || REXCVAR_GET(mcla_intro) == "skip";
 }
@@ -260,6 +431,23 @@ void MclaApp::ConfigureFrameTiming() {
   }
 #ifdef _WIN32
   // Default Windows timer granularity is 15.6 ms; sleeps need 1 ms.
+  // Windows 11 stops honouring that request while none of the process's
+  // windows can be seen (minimized, covered, or the display asleep), and the
+  // limiter's sleeps then overshoot by up to 15.6 ms; opt out of that.
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+  PROCESS_POWER_THROTTLING_STATE throttling{};
+  throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+  throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+  throttling.StateMask = 0;
+  if (SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling,
+                            sizeof(throttling))) {
+    REXLOG_INFO("frame timing: 1 ms timer resolution kept while the window is hidden");
+  } else {
+    REXLOG_WARN("frame timing: could not keep the timer resolution while hidden (error {})",
+                GetLastError());
+  }
   timeBeginPeriod(1);
 #endif
   REXLOG_INFO("frame timing: real frame delta, target {} FPS, vsync {}", REXCVAR_GET(mcla_fps),
