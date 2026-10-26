@@ -7,6 +7,8 @@
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/filesystem/vfs.h>
+#include <rex/input/device_assignment.h>
+#include <rex/input/input_system.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/gpu_plugin.h>
@@ -41,6 +43,18 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
 
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   config.audio_factory = &CreateMclaAudioSystem;
+  // Every controller is player one. The SDK's default gives each pad its own
+  // player in connection order and never reuses a number, so a second gamepad
+  // device (Steam Input, DS4Windows, a wheel) or a pad that reconnects becomes
+  // player two, which has no profile: the game then says it is not signed in
+  // and never saves (issue #22). The game is single-player on one console.
+  config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
+    auto input = rex::input::CreateDefaultInputSystem(tool_mode);
+    if (input) {
+      input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
+    }
+    return input;
+  };
   if (config.gpu_plugin.empty()) {
     config.gpu_plugin = "xenos";
   }
