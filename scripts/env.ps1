@@ -11,6 +11,25 @@ if ($llvm) { $paths += "$($llvm.FullName)\bin" }
 # (from some other toolchain) is never picked up instead.
 $env:MCLA_CC = if ($llvm) { "$($llvm.FullName)\bin\clang.exe" } else { "" }
 $env:MCLA_CXX = if ($llvm) { "$($llvm.FullName)\bin\clang++.exe" } else { "" }
+# The Microsoft C++ libraries and headers Clang builds against. Left to itself
+# Clang takes the newest Visual Studio, even one without the C++ tools (a
+# Visual Studio 2026 installed for something else), and then cannot link
+# (issue #21). Point it at an install that has them: Visual Studio 2022 17.1
+# or newer first, the version this is tested with, else a newer one. A value
+# already set (a Developer PowerShell) is kept.
+if (-not ($env:VCToolsInstallDir -and (Test-Path $env:VCToolsInstallDir))) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vcTools = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+    if (Test-Path $vswhere) {
+        $vs = & $vswhere -products * -requires $vcTools -version "[17.1,18.0)" -latest -property installationPath
+        if (-not $vs) { $vs = & $vswhere -products * -requires $vcTools -version "[17.1," -latest -property installationPath }
+        $versionFile = "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt"
+        if ($vs -and (Test-Path $versionFile)) {
+            $tools = "$vs\VC\Tools\MSVC\$((Get-Content $versionFile -TotalCount 1).Trim())\"
+            if (Test-Path $tools) { $env:VCToolsInstallDir = $tools }
+        }
+    }
+}
 if ($ninja) { $paths += $ninja.DirectoryName }
 $paths += "C:\Program Files\CMake\bin"
 $env:PATH = ($paths -join ";") + ";" + $env:PATH
