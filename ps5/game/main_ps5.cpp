@@ -128,6 +128,9 @@ std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
 // weak import unbound (the call was silently skipped when it was one).
 #ifdef MCLA_TITLE
 extern "C" int sceSystemServiceHideSplashScreen(void);
+// Asks the shell to close the title (with the path "exit"). A title may not
+// end itself with the exit system call: that is refused with SIGSYS.
+extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 #endif
 
 // The Xenos GPU plugin's factory. On the other platforms the plugin is a
@@ -666,7 +669,10 @@ int main() {
     } else {
       input->AddDriver(std::make_unique<rex::input::nop::NopInputDriver>(nullptr, 0));
     }
-    input->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());
+    // Every pad is player one, as on the PC (src/mcla_app.cpp): a pad that
+    // reconnects gets a new number and would otherwise become player two,
+    // which is not signed in, so the game stops saving (issue #22).
+    input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
     return input;
   };
 #else
@@ -913,7 +919,23 @@ int main() {
     Finish("run time reached", 0);
   });
   app_context.RunMainMessageLoop();
-  ticker.join();
+  // QUIT GAME ends the message loop. In a play build the ticker never ends,
+  // so waiting for it left the picture frozen while the game ran on behind it;
+  // end the process here instead.
+  ticker.detach();
+#ifdef MCLA_TITLE
+  // Leave as a title does: the shell closes it and returns to the home screen.
+  // The process idles until then; if the request is refused, fall through.
+  Line("mcla-ps5 stops: the message loop ended; asking the system to close the title");
+  rex::FlushLogging();
+  const int result = sceSystemServiceLoadExec("exit", nullptr);
+  Line("sceSystemServiceLoadExec(\"exit\") returned 0x%08X", static_cast<unsigned>(result));
+  if (result == 0) {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+  }
+#endif
   return Finish("the message loop ended", 0);
 #else
   for (int second = 1; second <= MCLA_RUN_SECONDS; ++second) {
