@@ -84,9 +84,21 @@ try {
     $llvmVersion = "20.1.8"
     $llvmName = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc"
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    # Visual Studio 2022 17.1 or newer: the SDK uses std::byteswap, which
+    # Microsoft's C++ library has from that version on. With an older one
+    # (VS 2019, or an early 2022) the SDK build fails with "no member named
+    # 'byteswap' in namespace 'std'".
+    $vcTools = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
     function HasBuildTools {
         if (-not (Test-Path $vswhere)) { return $false }
-        [bool](& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+        [bool](& $vswhere -products * -requires $vcTools -version "[17.1," -property installationPath)
+    }
+    # The newest Visual Studio with the C++ tools of any version, to name an
+    # install that is there but too old.
+    function OldBuildTools {
+        if (-not (Test-Path $vswhere)) { return "" }
+        $found = @(& $vswhere -products * -requires $vcTools -sort -format json | ConvertFrom-Json) | Select-Object -First 1
+        if ($found) { "$($found.displayName) ($($found.installationVersion))" } else { "" }
     }
     function HasPython {
         if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $false }
@@ -118,6 +130,10 @@ try {
     $missing = @(MissingTools)
     if ($missing) {
         "missing: $($missing -join ', ')"
+        $old = OldBuildTools
+        if ($missing -contains "Visual Studio Build Tools" -and $old) {
+            "$old is installed, but the build needs Visual Studio 2022 version 17.1 or newer. Update it in the Visual Studio Installer, or let this install Build Tools 2022 next to it."
+        }
         if (-not $InstallTools) {
             $answer = Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights. [y/N]"
             if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in README.md) and run this again, or run with -InstallTools" }

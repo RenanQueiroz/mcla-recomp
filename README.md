@@ -39,7 +39,7 @@ cd mcla-recomp
 .\scripts\make_pc.ps1 -Iso C:\path\to\your.iso
 ```
 
-The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++ workload) and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. It then clones and patches the ReXGlue SDK v0.10.0, builds it (the long step, once), extracts your game into `game\`, recompiles it and builds `out\build\win-amd64-release\mcla.exe`. Each step is skipped when its result is already there, so after a failure or an update you run the same command again. Logs are in `out\logs`.
+The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 version 17.1 or newer (C++ workload) and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. It then clones and patches the ReXGlue SDK v0.10.0, builds it (the long step, once), extracts your game into `game\`, recompiles it and builds `out\build\win-amd64-release\mcla.exe`. Each step is skipped when its result is already there, so after a failure or an update you run the same command again. Logs are in `out\logs`.
 
 **Play:** double-click the **Midnight Club Los Angeles** shortcut the build leaves in the repository folder, or `mcla.exe` itself. Keep the folder where it was built; the game data is read from `game\`. An Xbox or PlayStation controller works.
 
@@ -54,6 +54,8 @@ Frames are held to the target when they are presented (`--mcla_pace_at_swap=fals
 | The SDK build fails with `'crtversion.h' file not found` | Another Clang on your path was used. Update and run `make_pc.ps1` again: it now uses only its own. |
 | Step 1 fails after downloading Clang, with `unable to run program "xz -d -qq"` | Windows 10's `tar.exe` cannot unpack `.tar.xz`. Update and run `make_pc.ps1` again: it now unpacks the archive with Python when `tar.exe` cannot. |
 | Installing a tool fails with `No package found matching input criteria` | winget's package list on your PC is out of date or broken: run `winget source reset --force` in an administrator PowerShell, then `make_pc.ps1` again, or install that tool yourself (Python from python.org or the Microsoft Store works). |
+| The SDK build fails with `no member named 'byteswap' in namespace 'std'` | Your Visual Studio is older than 2022 version 17.1 (VS 2019, or an early 2022). Update it in the Visual Studio Installer, or install Build Tools 2022, then run `make_pc.ps1` again. It now checks the version in step 1. |
+| Step 2 fails with `config.h: No such file or directory` | The first download of the SDK was cut short. Update and run `make_pc.ps1` again: it now repairs the download. If it still fails, delete `third_party\rexglue-sdk` and run it again. |
 | `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
 | The game closes by itself | Start it with `--log_file=run.log --log_level=info` and open an issue with the end of that file. |
 
