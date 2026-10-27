@@ -28,9 +28,13 @@ registers = ["r6"]
 # (the only code that sets the word at +4). r3 is the milliseconds the loop is about to pass to
 # Sleep (sub_821C91B8). With mcla_pump_sleep_max_ms of 0 or more r3 is capped there (the default, -1,
 # leaves it); with mcla_poll_stats it counts the rounds, the Sleep arguments and the time between
-# rounds (the rate at which a slot is freed).
+# rounds (the rate at which a slot is freed). With mcla_pump_wake_on_demand the hook does the Sleep
+# itself, as a wait that the main thread's ring wait ends early, and returns true: the jump skips the
+# `bl sub_821C91B8` that follows, to the instruction after it (`addi r1,r1,160`, the function's end;
+# nothing reads the Sleep's result).
 [[midasm_hook]]
 name = "mcla_poll_tick"
 address = 0x821449C8
 after_instruction = true
 registers = ["r3"]
+jump_address_on_true = 0x821449D0

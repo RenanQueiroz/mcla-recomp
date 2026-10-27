@@ -129,6 +129,7 @@ REXCVAR_DEFINE_BOOL(mcla_freeze, false, "MCLA",
 bool MclaSaveInProgress();  // src/save_wait.cpp
 
 uint64_t MclaPumpRounds();  // src/poll_wait.cpp: rounds of the thread that frees the command ring's slots
+uint64_t MclaPumpEarlyWakes();  // src/poll_wait.cpp: of those, the ones the main thread's ring wait called early
 
 namespace {
 
@@ -2044,6 +2045,7 @@ std::string Execute(const std::string& line) {
            std::to_string(g_swaps.load()) + " ms=" + std::to_string(elapsed) +
            " foreign_frame_calls=" + std::to_string(g_foreign_frame_calls.load()) +
            " pump_rounds=" + std::to_string(MclaPumpRounds()) +
+           " pump_early=" + std::to_string(MclaPumpEarlyWakes()) +
            " playing=" + std::to_string(g_playing.load()) +
            " state_polls=" + std::to_string(g_state_polls.load()) +
            " key_polls=" + std::to_string(g_key_polls.load()) +

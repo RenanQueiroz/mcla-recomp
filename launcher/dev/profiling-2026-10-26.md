@@ -228,6 +228,39 @@ word at +4 was stored 5,821 times by `sub_82160088` and the word at +0 5,768 tim
 byte at `0x82836810` was counted at all: the game's own loop never gave up on a slot in that run, while with the ring wait on
 four in five waits run to the deadline. How those two agree is not explained yet.
 
+## Wake on demand: the frame-pacing thread comes round when the main thread waits for it (2026-10-27)
+
+The finding above (the thread that frees the command ring's slots sleeps out 7 ms per round, and its round rate is the frame rate) gives
+the uncapped game a ceiling of about 143 to 145 FPS on a CPU whose frame is faster than 7 ms. Capping that `Sleep`
+(`mcla_pump_sleep_max_ms`) lifts the ceiling (202 and 239 FPS at 16 logical processors) but runs the thread all the time, costs CPU
+at 30 and 60 FPS with no gain, and starved the audio worker at 4 logical processors. `mcla_pump_wake_on_demand` (`src/poll_wait.cpp`,
+`config/poll_wait.toml`; off by default until the A/B below is done) does it only when it is needed:
+
+- the hook `mcla_poll_tick` (`0x821449C8`, after the load of the `Sleep` argument in `sub_82144888`) now returns a bool, and
+  `jump_address_on_true = 0x821449D0` skips the game's `bl sub_821C91B8`; nothing reads the `Sleep`'s result. With the option on the
+  hook does the wait itself: `WaitForSingleObject` on a manual-reset event with the `Sleep`'s argument (scaled like `XThread::Delay`
+  scales it), after clearing the event; the thread marks itself as waiting around it. A `Sleep(0)` is left to the game.
+- the hook `mcla_poll_wait` (`0x82148AB0`, in the main thread's wait for a free slot, `sub_82148A10`) is called every turn of that loop whether or
+  not `mcla_poll_wait` is on; it now sets the event when the thread is waiting and the ring is the first one (the one `sub_82160088` frees; the byte at
+  `+199` of the context picks it). So the round comes at once when the main thread has run out of work and waits for it, and
+  otherwise the thread keeps its 7 ms rhythm: nothing sets the event while a frame takes the main thread longer than the rhythm, or while a
+  frame-rate cap holds the main thread back, so a CPU that cannot exceed 145 FPS and the 30, 60 and 120 FPS caps see no change.
+- the audio watchdog: the SDL driver's steady underrun counter (silent frames after the game's first second of audio) is now counted
+  always (`rex::audio::dump::SteadyUnderruns()`, `patches/rexglue-xma-decoder-fixes.patch`), and the thread checks it once a round; a rise less than
+  two seconds after a round that came early turns the option off for the rest of the session with one warning in the log (an underrun with no
+  early round in the last two seconds is not its doing and is ignored). `--mcla_pump_wake_test_trip_s=N` trips it N seconds after the first early
+  round, to test the way back (development).
+- `mcla_pump_sleep_max_ms` stays as a development option; with it set (0 or more) the wake does nothing. The dev pad's `state` reply has
+  `pump_early=N` next to `pump_rounds=N`; `--mcla_poll_stats` logs the waits, the early ones and how often the ring wait saw the thread waiting.
+
+Checked so far (single runs under the shared lock, so they say how it behaves, not how much): the city route of
+`launcher/dev/scripts/wake-ab.pad` at 16 logical processors with the option on ran at 239 to 240 FPS uncapped (frame median 4.15 to 4.17 ms,
+p99 4.8 ms; the thread's rounds equal the frames, every one of them early) and held the caps (120.0, 60.0 and 30.0 swaps a second, no early round
+under a cap, the game clock 1.002 to 1.003 s a second); the ring wait only ever saw ring 0 with the thread waiting; with the watchdog tripped by
+`--mcla_pump_wake_test_trip_s=20` the frame rate fell back to 146 FPS and the log said so. The A/B (shipped Sleep against the option at 16, 8, 6 and 4
+logical processors with the caps 30, 60, 120 and uncapped, the frame and p99, the CPU per swap by thread, the pump's rounds a second, the audio
+counters and the game clock) is the next step; its numbers go here.
+
 ## Upper bounds for two codegen costs (2026-10-27)
 
 Timing-only builds, not exact: `nocsr` makes the SSE flush-mode switch (`ldmxcsr`) do nothing, `nolock` makes the global lock around the
