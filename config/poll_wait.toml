@@ -23,3 +23,13 @@ name = "mcla_poll_release"
 address = 0x82160140
 after_instruction = true
 registers = ["r6"]
+
+# 0x821449C8: `lwz r3,84(r1)` in sub_82144888, the loop of the guest thread that calls sub_82160088
+# (the only code that sets the word at +4). r3 is the milliseconds the loop is about to pass to
+# Sleep (sub_821C91B8). Development only: with mcla_poll_stats it counts the rounds, the Sleep
+# arguments and the time between rounds (the rate at which a slot is freed).
+[[midasm_hook]]
+name = "mcla_poll_tick"
+address = 0x821449C8
+after_instruction = true
+registers = ["r3"]

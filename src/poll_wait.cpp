@@ -14,9 +14,16 @@
 // high-resolution timer (and an event that the code that frees a slot sets) until
 // mcla_poll_tail_us before the loop's deadline, then a spin again for the rest. The tail is there
 // because the timer fires 0.3 ms late on average. The loop is otherwise the game's own: it reads
-// the word and the clock after every wait, so a wake-up that never comes (a writer this does not
-// know about) costs nothing but the sleep's length, and the game's own give-up after the 1,000
-// microseconds is where it was.
+// the word and the clock after every wait, so a wake-up that never comes costs nothing but the
+// sleep's length, and the game's own give-up after the 1,000 microseconds is where it was.
+//
+// Who sets the word (mcla_poll_find_writer, 2026-10-27): the only store to a word at +4 is the one
+// in sub_82160088, which sub_82144888 calls once a round; that loop is the guest thread that
+// sleeps between rounds, and it comes round about 144 times a second, once a frame. The word at
+// +0 is stored by the main thread itself at the end of sub_82161210, so there is nothing to hook
+// there. The release below therefore covers every wait that can end on a change of the word; a
+// wait ends that way only when a round falls within its 1,000 microseconds, and in the city four
+// in five do not (they end at the deadline, where the loop sets its flag byte and goes on).
 
 #include "generated/default/mcla_init.h"
 
@@ -24,6 +31,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <string>
 #include <thread>
 
 #include <rex/cvar.h>
@@ -74,10 +83,18 @@ uint8_t* GuestBase() {
 
 struct Stats {
   std::atomic<uint64_t> calls{0}, done_in_spin{0}, slept{0}, woken_by_release{0}, woken_by_timer{0},
-      tail_changed{0}, tail_deadline{0}, no_time_left{0}, no_sleep{0};
+      tail_changed{0}, tail_deadline{0}, no_time_left{0}, no_sleep{0}, releases{0};
+  // The thread that frees the slots (the loop of sub_82144888): how often it comes round, how far
+  // apart its rounds are and what it passes to Sleep (whole milliseconds).
+  std::atomic<uint64_t> ticks{0}, tick_periods{0}, tick_period_ns_sum{0}, tick_period_ns_max{0};
+  std::atomic<uint64_t> sleep_ms[17]{};  // [16]: 16 or more
+  std::atomic<int64_t> last_tick_ns{0};
   std::atomic<int64_t> last_log_ns{0};
 };
 Stats g_stats;
+
+float GuestFloat(uint32_t ea);
+uint8_t GuestByte(uint32_t ea);
 
 void MaybeLog() {
   using namespace std::chrono;
@@ -93,14 +110,47 @@ void MaybeLog() {
   REXLOG_INFO(
       "poll wait: {} calls: {} ended in the first spin, {} with no time left, {} without a sleep (too little time); "
       "{} slept ({} woken by the release, {} by the timer), then the tail spin ended {} on a change of the word, {} "
-      "at the deadline",
+      "at the deadline; the word was set {} times",
       g_stats.calls.load(), g_stats.done_in_spin.load(), g_stats.no_time_left.load(), g_stats.no_sleep.load(),
       g_stats.slept.load(), g_stats.woken_by_release.load(), g_stats.woken_by_timer.load(),
-      g_stats.tail_changed.load(), g_stats.tail_deadline.load());
+      g_stats.tail_changed.load(), g_stats.tail_deadline.load(), g_stats.releases.load());
+  if (g_stats.ticks.load()) {
+    std::string histogram;
+    for (int i = 0; i <= 16; ++i) {
+      const uint64_t n = g_stats.sleep_ms[i].load();
+      if (n) {
+        histogram += std::string(" ") + (i == 16 ? ">=" : "") + std::to_string(i) + "ms:" + std::to_string(n);
+      }
+    }
+    const uint64_t periods = g_stats.tick_periods.load();
+    // 0x820036EC: the float that the loop takes its Sleep from (that, less the time the round took,
+    // in whole milliseconds, kept between 0 and that); 0x827D1998: the byte that turns the Sleep on.
+    REXLOG_INFO(
+        "poll tick: the thread that sets the word came round {} times, {:.1f} us apart on average ({:.2f} ms at "
+        "most), Sleep arguments:{}; the float at 0x820036EC is {}, the byte at 0x827D1998 is {}",
+        g_stats.ticks.load(), periods ? g_stats.tick_period_ns_sum.load() / 1000.0 / periods : 0.0,
+        g_stats.tick_period_ns_max.load() / 1.0e6, histogram, GuestFloat(0x820036EC), GuestByte(0x827D1998));
+  }
 }
 
 uint32_t Swap32(uint32_t v) {
   return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+}
+
+float GuestFloat(uint32_t ea) {
+  uint8_t* base = GuestBase();
+  if (!base) {
+    return 0.0f;
+  }
+  const uint32_t raw = Swap32(*reinterpret_cast<const uint32_t*>(base + ea));
+  float value;
+  std::memcpy(&value, &raw, sizeof(value));
+  return value;
+}
+
+uint8_t GuestByte(uint32_t ea) {
+  uint8_t* base = GuestBase();
+  return base ? base[ea] : 0;
 }
 
 #if defined(_WIN32)
@@ -141,7 +191,7 @@ int64_t QpcFrequency() {
 // flag, after which the page is protected again. Stores by other threads while one is stepping are
 // missed, which is all right for finding the usual writer.
 constexpr uint32_t kRingPage = 0x82836000;
-constexpr uint32_t kRingWords = 0x82836814;  // the rings: 8 bytes each, +0 written by the main thread
+constexpr uint32_t kRingWords = 0x82836810;  // the flag byte (set when a wait gives up), then the rings: 8 bytes each
 constexpr uint32_t kRingWordsEnd = 0x82836834;
 
 struct Writer {
@@ -344,12 +394,45 @@ bool mcla_poll_wait(PPCRegister& r31, PPCRegister& r30, PPCRegister& r29, PPCReg
 }
 
 // 0x82160140 in sub_82160088, after `stw r11,4(r6)`: r6 = 0x82836814, so the word at r6+4 has just
-// been set; wake the main thread if it sleeps.
+// been set; wake the main thread if it sleeps. This is the only store to a word at +4 in the game
+// (mcla_poll_find_writer found no other), so every wait that can end by a change of the word
+// ends here.
 void mcla_poll_release(PPCRegister& r6) {
   (void)r6;
 #if defined(_WIN32)
+  if (REXCVAR_GET(mcla_poll_stats)) {
+    g_stats.releases.fetch_add(1, std::memory_order_relaxed);
+  }
   if (REXCVAR_GET(mcla_poll_wait)) {
     SetEvent(ReleaseEvent());
   }
+#endif
+}
+
+// 0x821449C8 in sub_82144888, after `lwz r3,84(r1)`: the loop of the thread that calls
+// sub_82160088 (the one that sets the word) has the milliseconds it is about to pass to Sleep in
+// r3. Development only (mcla_poll_stats): counts the rounds, the Sleep arguments and the time
+// between rounds, which is how often a slot is freed.
+void mcla_poll_tick(PPCRegister& r3) {
+#if defined(_WIN32)
+  if (!REXCVAR_GET(mcla_poll_stats)) {
+    return;
+  }
+  using namespace std::chrono;
+  const int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+  const int64_t last = g_stats.last_tick_ns.exchange(now, std::memory_order_relaxed);
+  g_stats.ticks.fetch_add(1, std::memory_order_relaxed);
+  if (last != 0) {
+    const uint64_t period = static_cast<uint64_t>(now - last);
+    g_stats.tick_periods.fetch_add(1, std::memory_order_relaxed);
+    g_stats.tick_period_ns_sum.fetch_add(period, std::memory_order_relaxed);
+    uint64_t seen = g_stats.tick_period_ns_max.load(std::memory_order_relaxed);
+    while (period > seen && !g_stats.tick_period_ns_max.compare_exchange_weak(seen, period)) {
+    }
+  }
+  g_stats.sleep_ms[std::min<uint32_t>(r3.u32, 16)].fetch_add(1, std::memory_order_relaxed);
+  MaybeLog();
+#else
+  (void)r3;
 #endif
 }
