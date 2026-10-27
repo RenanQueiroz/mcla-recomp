@@ -1,0 +1,56 @@
+# Does the game stay correct while the freeing thread's Sleep is capped (mcla_pump_sleep_max_ms)? (cpu-profile work)
+# Run it WITHOUT --mcla_fixed_dt (real-time steps) and with --mcla_fps=0 (uncapped). Boot -> title -> city, then a drive
+# whose steps are in wall time (cpup-roam.pad's are engine frames, so the car would leave the car park at another speed
+# at another frame rate), sampled every 2 s by cpup-sample.pad (wall clock, engine frames, swaps, the freeing thread's
+# rounds, the game clock, the position): at a correct game the game clock advances one second a second, the car covers
+# the same ground in the same time whatever the frame rate, and the engine frames and swaps are what the frame rate is.
+# Then the frame-rate caps 120, 60 and 30 are set with `set mcla_fps` while the car coasts to a stop, 8 s each: the swaps
+# a second must be the cap, whatever the thread's Sleep. Marks: title, map_zoom, free_roam, roam, drive, cap120, cap60,
+# cap30, end.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 8s
+mark roam
+include cpup-sample.pad
+trigger rt 1 0.35s
+trigger rt 0.6
+stick lx 1 0.28s
+trigger rt 1
+mark drive
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+wait 2s
+include cpup-sample.pad
+release all
+set mcla_fps 120
+mark cap120
+include cpup-sample.pad
+wait 8s
+include cpup-sample.pad
+set mcla_fps 60
+mark cap60
+include cpup-sample.pad
+wait 8s
+include cpup-sample.pad
+set mcla_fps 30
+mark cap30
+include cpup-sample.pad
+wait 8s
+include cpup-sample.pad
+set mcla_fps 0
+mark end

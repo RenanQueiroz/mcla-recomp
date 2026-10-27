@@ -176,7 +176,9 @@ spends 73.7% of its samples in that `Sleep` and 23.5% in a second wait (`sub_821
 kernel call `XMsgInProcessCall(250, 0x70009, ...)` in `sub_8240ECD0`: about 1.6 ms of a round in a host wait), 2.1% in the 24
 per-frame callbacks of `sub_8214D050` and 0.5% in `sub_82160088`, the function that frees the slot; its CPU is 0.25 ms a swap. It
 makes it look like the game's own limit of one round per 7 ms (143 a second); whether it sets the frame rate when nothing else
-does is what a cap on that `Sleep` measures.
+does is what a cap on that `Sleep` measures: `mcla_pump_sleep_max_ms` (`src/poll_wait.cpp`; -1, the default, leaves the game's own
+`Sleep`; 0 or more caps its argument at that many milliseconds, 0 being a `Sleep(0)`; read every round, so it can be changed while
+running). It exists for that experiment and is not a setting for players.
 
 ## The shipped defaults against v0.1.3, and the ring wait again (2026-10-27)
 
