@@ -48,6 +48,7 @@ git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
+git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
@@ -1432,6 +1433,41 @@ Then checked on the longer route and on the RTX 5080 (2026-10-27): on the Radeon
 | Change | Files | Affects |
 |---|---|---|
 | The command thread waits for the submission thread before it spins or waits for commands | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12, only with threaded submission on |
+
+## rexglue-resolve-direct-batched-loads.patch
+
+**What was slow.** The direct resolve shaders of `rexglue-direct-resolve.patch` loaded a thread's samples one at a time. A thread copies 4 or 8 pixels, and the copies that average run over 1, 2 or 4 samples, in loops the shaders keep rolled (so the conversions are there once) with a conditional on the format inside; every load had to come back before the next was issued. A sample of a multisampled render target goes through its FMASK and metadata, so a load is a long round trip, and a GPU with few compute units does not have enough threads in flight to hide that. On the integrated Radeon of an AMD Ryzen 7 9800X3D (2 RDNA2 compute units, shared DDR5) the resolves took 8.5 ms of a 39.7 ms GPU frame at native resolution, at 10 to 16 GB/s where a texture load decode reaches 50 GB/s on the same GPU, and 50.8 ms of 178.7 ms at 2x (4 times the pixels cost 6 times as much). On the RTX 5080 the loads are not what the resolves wait for.
+
+**What it does.** With `resolve_direct_batched_loads` (default on; restart to change) the direct resolve pipelines are built from the same sources with `XE_RESOLVE_DIRECT_BATCHED_LOADS` (`src/graphics/shaders/resolve_direct_batched_*.cs.xesl`: the fast 32bpp and 64bpp and the full 32bpp and 64bpp copies, the ones this game uses, 16 shaders for each API; the full 8bpp and 16bpp copies keep the earlier shaders):
+- a thread issues the loads of the pixels it converts, 4 or 8, in one run of instructions with nothing between them (the float view for colour up to 7e3 and for depth, the integer view for the integer formats, both for depth and stencil), and converts afterwards;
+- the copies that average take their samples two at a time (one or two iterations for 1, 2 or 4 samples), the second sample's loads issued with the first's, and add them in the same order as before.
+
+Everything after the loads is the original code, so the result is the same, bit for bit. `false` builds the pipelines of the earlier shaders. The new shaders are larger, as the conversions are there once for every pixel loaded (56 KB of DXBC for the full 32bpp copy against 19 KB).
+
+Measured on Windows, D3D12, the Radeon above, with the launcher's settings (2x MSAA), `--hdr=off`, GPU timestamps (`gpu-timestamps.sdk.patch`, `resolve-split-timestamps.sdk.patch`), free roam, median of ten frames. First version (the loads of a thread batched; the samples of the averaging copies still one after the other), four runs in the order off, on, on, off, 65 s each (`launcher/dev/gpu-weak-2026-10-27.md`):
+
+| Per frame, ms | Off | On |
+|---|---|---|
+| Frame (swap to swap), free roam | 39.73, 39.46 | 36.91, 36.75 (-7%) |
+| Frame, drive | 38.39, 38.46 | 35.91, 35.89 (-6.5%) |
+| Resolves | 8.50, 8.38 | 5.76, 5.77 |
+| 1280x720 depth, 2x MSAA, two a frame | 0.865, 0.697 | 0.487, 0.342 |
+| The four 640x640 4x MSAA depth cascades | 0.782, 0.703, 0.690, 0.628 | 0.414, 0.350, 0.350, 0.286 |
+| 1280x720 colour, 7e3 to 8_8_8_8 (the shadow mask) | 1.31 | 1.22 |
+| 1280x720 colour, 10:10:10:2 to 16_16_16_16F (the HDR scene) | 1.25 | 1.08 to 1.12 |
+
+The averaging copies gained little from that: they are bound by the arithmetic of the 7e3 conversion and unpacking, done for every sample of every pixel, which two compute units get through at about 0.3 trillion operations a second. Loading two samples together (a run in a slow state of the GPU, where everything took 1.4 times as long, gave the same ratios as the first version) did not change that. The next step is to skip the second sample's conversion where it equals the first's (exact: most pixels of a multisampled picture have the same samples); it is not in this patch yet (`launcher/dev/gpu-weak-2026-10-27.md`).
+
+Not done yet: the bit-exact comparison with the EDRAM buffer path (`launcher/dev/direct-resolve-validate.sdk.patch` applies to the tree, with the setting on and off), the D3D12 debug layer and Vulkan validation, and the frame times at 2x and on Vulkan; `launcher/dev/gpu-weak-2026-10-27.md` says where each stands.
+
+Built and run on Windows only, with an NVIDIA RTX 5080 and the Radeon above; not run on Intel or the PS5 (the Vulkan shaders are the same sources).
+
+| Change | Files | Affects |
+|---|---|---|
+| The setting | `include/rex/graphics/flags.h`, `src/graphics/pipeline/render_target/cache.cpp` | D3D12, Vulkan |
+| The batched loads | `src/graphics/shaders/resolve_direct.xesli`, `src/graphics/shaders/resolve_direct_fast_32bpp.xesli` | D3D12, Vulkan |
+| 16 shaders (XeSL sources, DXBC and SPIR-V) | `src/graphics/shaders/resolve_direct_batched_*`, `src/graphics/shaders/bytecode/d3d12_5_1/resolve_direct_batched_*_cs.h`, `src/graphics/shaders/vulkan_spirv/resolve_direct_batched_*_cs.h` | D3D12, Vulkan |
+| The tables and the choice | `include/rex/graphics/d3d12/render_target_cache.h`, `src/graphics/d3d12/render_target_cache.cpp`, `include/rex/graphics/vulkan/render_target_cache.h`, `src/graphics/vulkan/render_target_cache.cpp` | D3D12, Vulkan |
 
 ## rexglue-upstream-storage-flush.patch
 
