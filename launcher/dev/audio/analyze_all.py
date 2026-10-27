@@ -1,7 +1,7 @@
 r"""Analysis of the audio batches: every run's dumps and game.log (audio_analyze.py), a table per variant, the decision rules, and
 the two listening clips (old and new) made from the first batch.
 
-   python -P -E analyze_all.py --runs <audio\runs folder> --dumps C:\mcv\audio\dev\dumps --out <results folder> [--batches A,B,C] [--ref]
+   python -P -E analyze_all.py --runs <audio\runs folder> --dumps C:\mcv\audio\dev\dumps --out <results folder> [--batches A,B,C,D] [--ref]
                                [--clips <folder>]
 
 Writes <out>\<batch>-<tag>.json per run, <out>\SUMMARY.md (the table and the verdict) and, with --clips, the clips.
@@ -91,12 +91,112 @@ def write_clip(mix_path, t0, seconds, dest):
             "peak": round(float(np.abs(clip).max()), 3)}
 
 
+NOMINAL_HZ = 48000 / 256  # guest audio frames (256 samples at 48 kHz) per second: 187.5
+
+
+def frame_rate_section(table, out):
+    """The frame-rate test: the shipped behaviour (variant old = every new switch off) at --mcla_fps=30, 60 and uncapped on the radio
+    drive. Batch D has the three caps (30 and 60 twice); the uncapped runs of batch A (old1, old2: the same route, the same switches
+    off) are counted with batch D's uncapped runs. Returns the SUMMARY lines and writes D-radio-balance.csv (the balance over time)."""
+    groups = {"30": [], "60": [], "uncapped": []}
+    for r in table:
+        if r.get("error") or r.get("note") or r["variant"] != "old":
+            continue
+        if r["batch"] == "D":
+            cap = str(r.get("fps_cap"))
+            groups["uncapped" if cap in ("0", "None") else cap].append(r)
+        elif r["batch"] == "A" and r["tag"] != "warm":
+            groups["uncapped"].append(r)
+    lines = ["", "## Frame rate: the shipped behaviour (every new switch off) at 30, 60 and uncapped FPS", ""]
+    if not groups["30"] or not (groups["60"] or groups["uncapped"]):
+        lines.append("- batch D has not run (or too little of it): no frame-rate verdict")
+        return lines
+    cols = ["batch", "tag", "fps_cap", "drive_fps", "radio_s", "radio_bal_std", "radio_bal_step_p95", "radio_bal_slope", "radio_bal_drift",
+            "radio_dropouts", "radio_clicks_per_min", "gaps", "clicks_per_min", "underruns", "pump_hz", "pump_hz_min", "play_hz",
+            "radio_decode_ratio", "pump_late", "pump_over8", "xma_us_per_pump", "radio_file"]
+    lines += ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+    rows = [r for g in ("30", "60", "uncapped") for r in groups[g]]
+    for r in rows:
+        lines.append("| " + " | ".join("" if r.get(c) is None else str(r.get(c)) for c in cols) + " |")
+    lines += ["", "Columns: drive_fps = the game's mean FPS during the drive; radio_* = the longest stereo XMA stream (the radio) as the decoder "
+              "produced it, balance = 20 log10(L rms / R rms) per 5 s window; radio_bal_slope = its least-squares slope in dB/min, radio_bal_drift = "
+              "median of the last third minus the first third; pump_hz / play_hz = guest mixer callbacks / guest frames played per second "
+              f"(nominal {NOMINAL_HZ}; _min = the worst interval); radio_decode_ratio = audio seconds the decoder produced for the radio stream / wall "
+              "seconds it was active (1.0 = consumed in real time; another value = the game's audio clock runs at another speed than the wall "
+              "clock). The uncapped rows of batch A are the same route with the same switches off.", ""]
+    # the balance over time
+    lines += ["Radio balance in dB (L - R) per 5 s window from the start of the stream (`.` = a channel silent):", "", "```"]
+    for r in rows:
+        ser = r.get("radio_series") or []
+        lines.append(f"{r['batch']}-{r['tag']:<8} cap {str(r.get('fps_cap')):>3}: "
+                     + " ".join("." if v is None else f"{v:+.1f}" for v in ser[:36]))
+    lines += ["```", ""]
+    width = max((len(r.get("radio_series") or []) for r in rows), default=0)
+    csv = ["t_s," + ",".join(f"{r['batch']}-{r['tag']}" for r in rows)]
+    for i in range(width):
+        csv.append(str(i * 5) + "," + ",".join(
+            "" if i >= len(r.get("radio_series") or []) or r["radio_series"][i] is None else str(r["radio_series"][i]) for r in rows))
+    (out / "D-radio-balance.csv").write_text("\n".join(csv) + "\n", encoding="utf-8")
+
+    def med(g, key):
+        vals = [r.get(key) for r in groups[g] if isinstance(r.get(key), (int, float))]
+        return statistics.median(vals) if vals else None
+
+    def fmt(v):
+        return "n/a" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+
+    lines.append("Medians per frame-rate cap (runs: " + ", ".join(f"{g}: {len(groups[g])}" for g in ("30", "60", "uncapped")) + "):")
+    lines.append("")
+    # (key, label, the absolute change that matters)
+    metrics = [("radio_bal_step_p95", "radio balance step p95 (dB)", 1.0), ("radio_bal_std", "radio balance std (dB)", 1.5),
+               ("radio_bal_slope", "radio balance slope (dB/min, absolute)", 0.5), ("radio_dropouts", "radio one-channel dropout windows", 1),
+               ("radio_clicks_per_min", "radio clicks per minute", 2), ("gaps", "gaps in the mix", 2),
+               ("clicks_per_min", "clicks per minute in the mix", 2), ("underruns", "SDL underruns", 3),
+               ("pump_late", "late guest mixer callbacks", 50)]
+    flags = []
+    for key, label, thr in metrics:
+        vals = {g: med(g, key) for g in ("30", "60", "uncapped")}
+        if key == "radio_bal_slope":
+            vals = {g: (abs(v) if v is not None else None) for g, v in vals.items()}
+        base = vals["30"]
+        worse = []
+        for g in ("60", "uncapped"):
+            v = vals[g]
+            if v is not None and base is not None and v - base > thr and (base == 0 or v >= 1.5 * base):
+                worse.append(g)
+        flags += [(label, g) for g in worse]
+        lines.append(f"- {label}: 30 = {fmt(vals['30'])}, 60 = {fmt(vals['60'])}, uncapped = {fmt(vals['uncapped'])}"
+                     + (f"  <- WORSE ABOVE 30 ({', '.join(worse)})" if worse else ""))
+    ratios = {g: med(g, "radio_decode_ratio") for g in ("30", "60", "uncapped")}
+    hz = {g: med(g, "pump_hz") for g in ("30", "60", "uncapped")}
+    for label, vals, ref, thr in (("radio decode/wall ratio (1.0 = real time)", ratios, 1.0, 0.02),
+                                  ("guest mixer callbacks per second", hz, NOMINAL_HZ, NOMINAL_HZ * 0.02)):
+        worse = [g for g in ("60", "uncapped") if vals[g] is not None and vals["30"] is not None
+                 and abs(vals[g] - ref) - abs(vals["30"] - ref) > thr]
+        flags += [(label, g) for g in worse]
+        lines.append(f"- {label}: 30 = {fmt(vals['30'])}, 60 = {fmt(vals['60'])}, uncapped = {fmt(vals['uncapped'])}"
+                     + (f"  <- FURTHER FROM NOMINAL ABOVE 30 ({', '.join(worse)})" if worse else ""))
+    anything = any((med(g, k) or 0) > 0 for g in ("30", "60", "uncapped") for k in ("radio_dropouts", "gaps", "underruns")) or any(
+        (med(g, "radio_bal_step_p95") or 0) > 1.0 for g in ("30", "60", "uncapped"))
+    lines.append("")
+    if flags:
+        lines.append("**Frame-rate dependent on this PC: YES** (" + "; ".join(f"{label} at {g}" for label, g in flags[:6])
+                     + "). The effect shows only above 30 FPS: the cause is likely game-side timing (audio code ticked per frame) rather than the "
+                     "decoder; compare with batch A (old vs new) and check whether a cap (--mcla_fps=30 or 60) removes it for the player.")
+    elif anything:
+        lines.append("**Frame-rate dependent on this PC: NO.** The effects that exist (the non-zero values above) are the same at 30, 60 and uncapped.")
+    else:
+        lines.append("**Frame-rate dependent on this PC: NOT SHOWN.** Nothing (dropouts, gaps, underruns, balance steps) shows at any rate, so this "
+                     "run cannot tell (the player's reports are from a slower CPU): the 'old' rows of batches A and C carry the same caveat.")
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", required=True)
     ap.add_argument("--dumps", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--batches", default="A,B,C")
+    ap.add_argument("--batches", default="A,B,C,D")
     ap.add_argument("--ref", action="store_true")
     ap.add_argument("--clips")
     a = ap.parse_args()
@@ -114,7 +214,10 @@ def main():
             dump = Path(a.dumps) / name
             runfolder = Path(a.runs) / batch / tag
             log = runfolder / "game.log"
-            rec = {"batch": batch, "tag": tag, "variant": cfg.get("variant"), "aff": cfg.get("aff"),
+            segs = row.get("segments") or {}
+            rec = {"batch": batch, "tag": tag, "variant": cfg.get("variant"), "aff": cfg.get("aff"), "fps_cap": cfg.get("fps"),
+                   "exit": row.get("exit_code"),
+                   "drive_fps": round((segs.get("drive") or {}).get("mean_fps", 0), 1) or None,
                    "error": row.get("error"), "bad": row.get("bad"), "seconds": row.get("seconds")}
             if not dump.exists():
                 rec["note"] = "no dump folder"
@@ -142,7 +245,8 @@ def main():
                     r["file"] = c["file"]
                     rep["reference"].append(r)
             parsed = aa.parse_log(log)
-            rep["stats_total"] = aa.summarize_stats(parsed["stats"])
+            rep["stats_total"] = aa.summarize_stats(parsed["stats"], dump / "audio_stats_total.txt")
+            rep["rates"] = aa.pump_rates(parsed["stats"])
             rep["underrun_lines"] = len(parsed["underruns"])
             rep["times"] = log_times(log)
             rep_path.write_text(json.dumps(rep, indent=1), encoding="utf-8")
@@ -169,13 +273,19 @@ def main():
                 # what the inline XMA decodes cost per mixer callback (they run inside it when the guest kicks a context)
                 "xma_us_per_pump": (round((st.get("xma.work inline") or 0) * (st.get("xma.avg_us") or 0) / st["pump.n"])
                                     if st.get("pump.n") else None),
+                "radio_bal_slope": (radio.get("balance_trend") or {}).get("slope_db_per_min"),
+                "radio_bal_drift": (radio.get("balance_trend") or {}).get("drift_db"),
+                "radio_decode_ratio": radio.get("decode_vs_wall"),
+                "pump_hz": rep["rates"].get("pump_hz_median"), "pump_hz_min": rep["rates"].get("pump_hz_min"),
+                "play_hz": rep["rates"].get("sdl_frames_hz_median"), "play_hz_min": rep["rates"].get("sdl_frames_hz_min"),
+                "radio_series": radio.get("balance_series_5s"), "radio_file": radio.get("file"),
                 "ref_lag": ref0.get("lag_frames"), "ref_mismatch_pct": ref0.get("blocks_mismatched_pct"),
                 "ref_diff_max_lsb": ref0.get("diff_max_lsb"), "ref_error": ref0.get("error"),
             })
             table.append(rec)
 
     # ---- SUMMARY.md
-    cols = ["batch", "tag", "variant", "aff", "mix_s", "underruns", "gaps", "gap_ms_total", "clicks_per_min", "mix_bal_step_p95",
+    cols = ["batch", "tag", "variant", "aff", "fps_cap", "drive_fps", "exit", "mix_s", "underruns", "gaps", "gap_ms_total", "clicks_per_min", "mix_bal_step_p95",
             "radio_s", "radio_bal_std", "radio_bal_step_p95", "radio_dropouts", "radio_clicks_per_min", "wrote_rd", "wrote_valid",
             "wrote_other", "work_inline", "work_worker", "work_slow", "xma_errors", "recheck_abort", "stalled", "cas_retry", "pump_late",
             "pump_gap_max_us", "pump_avg_us", "pump_over4", "pump_over8", "xma_us_per_pump", "queue_min", "ref_lag", "ref_mismatch_pct", "ref_diff_max_lsb", "error"]
@@ -232,6 +342,7 @@ def main():
                        "unless `old` shows the effect (underruns, late pumps, overwritten read offsets, dropouts) at all.")
     else:
         verdict.append("- batch A is incomplete: no verdict")
+    verdict += frame_rate_section(table, out)
     (out / "SUMMARY.md").write_text("\n".join(lines + verdict) + "\n", encoding="utf-8")
     print("\n".join(lines + verdict))
 

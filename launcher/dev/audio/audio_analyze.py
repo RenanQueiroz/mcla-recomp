@@ -106,6 +106,37 @@ def balance_stats(x, rate, window_s=1):
     return out
 
 
+def balance_series(x, rate, window_s=5):
+    """Left/right balance in dB (20 log10 rmsL/rmsR) per window of window_s seconds; None where either channel is below -50 dBFS
+    (nothing to balance). Used to see the balance over time (a stream whose balance wanders or flips)."""
+    if x.shape[1] < 2:
+        return []
+    win = int(rate * window_s)
+    n = len(x) // win
+    if n == 0:
+        return []
+    blocks = x[: n * win, :2].reshape(n, win, 2).astype(np.float64)
+    rms = np.sqrt((blocks ** 2).mean(axis=1))
+    floor = 10 ** (-50 / 20)
+    out = []
+    for l, r in rms:
+        out.append(round(float(20 * np.log10(l / r)), 2) if l > floor and r > floor else None)
+    return out
+
+
+def balance_trend(series):
+    """{"slope_db_per_min", "drift_db"} of a balance series (5 s windows): the least-squares slope, and the median of the last third
+    minus the median of the first third. Needs 6 windows with both channels playing."""
+    pts = [(i, v) for i, v in enumerate(series) if v is not None]
+    if len(pts) < 6:
+        return {}
+    t = np.array([p[0] for p in pts], dtype=np.float64) * 5.0 / 60.0
+    v = np.array([p[1] for p in pts], dtype=np.float64)
+    slope = float(np.polyfit(t, v, 1)[0])
+    k = max(1, len(v) // 3)
+    return {"slope_db_per_min": round(slope, 2), "drift_db": round(float(np.median(v[-k:]) - np.median(v[:k])), 2)}
+
+
 def find_clicks(x, rate, order=12, block=4096, sigma_factor=9.0, floor=0.03):
     """Isolated discontinuities: a sample whose linear-prediction residual is far above the block's (robust sigma) while the
     residual 8..48 samples later is back to normal. A splice, a dropped or repeated block, a one-sample glitch look like that;
@@ -186,6 +217,8 @@ def analyze_mix(path):
     out["clicks_per_min"] = round(len(clicks) / seconds * 60, 2) if seconds else 0
     out["click_times_s"] = [round(c / rate, 2) for c in clicks[:40]]
     out["balance"] = balance_stats(x, rate)
+    out["balance_series_5s"] = balance_series(x, rate)
+    out["balance_trend"] = balance_trend(out["balance_series_5s"])
     r = per_second_rms(x, rate)
     if len(r):
         loud = r[:, :2].max(axis=1)
@@ -207,7 +240,25 @@ def analyze_ctx(path):
     out["clicks_per_min"] = round(len(clicks) / seconds * 60, 2) if seconds else 0
     out["click_times_s"] = [round(c / rate, 2) for c in clicks[:20]]
     out["balance"] = balance_stats(x, rate)
+    out["balance_series_5s"] = balance_series(x, rate)
+    out["balance_trend"] = balance_trend(out["balance_series_5s"])
     out["peak"] = round(float(np.abs(x).max()), 3)
+    side = Path(path).with_suffix(".json")
+    if side.exists():
+        # The context's sidecar (written with every block, so it is there for a stream still open when the game left): how much audio the
+        # decoder produced against the wall time between the first and the last write. About 1.0 when the game consumes the stream in real
+        # time; the decoder runs ahead by a buffer only, so a stream consumed at another speed (the game's audio clock against the wall
+        # clock) shows as a ratio that is not 1.
+        try:
+            side_j = json.loads(side.read_text(encoding="utf-8"))
+            wall = (side_j["last_us"] - side_j["first_us"]) / 1e6
+            dec = side_j["pcm_bytes"] / (side_j["rate"] * side_j["channels"] * 2)
+            out["decoded_s"] = round(dec, 2)
+            out["wall_s"] = round(wall, 2)
+            out["decode_vs_wall"] = round(dec / wall, 4) if wall > 5 else None
+            out["first_us"] = side_j["first_us"]
+        except (ValueError, KeyError, ZeroDivisionError):
+            pass
     return out
 
 
@@ -323,9 +374,45 @@ def parse_log(path):
     return out
 
 
-def summarize_stats(rows):
-    total = next((r for r in rows if r["label"] == "TOTAL"), None)
-    return total or {}
+def summarize_stats(rows, total_file=None):
+    """The run's totals: the final line the game wrote at exit (audio_stats_total.txt in the dump folder), else the LAST cumulative
+    TOTAL line of the log (one per interval; the game leaves without a chance to print a final one, up to one interval short)."""
+    totals = [r for r in rows if r["label"] == "TOTAL"]
+    if total_file and Path(total_file).exists():
+        text = Path(total_file).read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            sm = STATS_RE.search(line)
+            if sm:
+                row = {"label": sm.group(1), "t": float(sm.group(2)), "ts": None, "from_file": True}
+                for part in sm.group(3).split("|"):
+                    head, _, rest = part.strip().partition(":")
+                    for k, v in KV_RE.findall(rest):
+                        row[f"{head.strip()}.{k.strip()}"] = int(v)
+                totals.append(row)
+    return totals[-1] if totals else {}
+
+
+def pump_rates(rows):
+    """Per interval line: guest mixer callbacks per second and guest frames played per second (nominal 187.5: 48000 / 256), from the
+    differences of the interval lines' times. Returns {"pump_hz_median", "pump_hz_min", "sdl_frames_hz_median", "sdl_frames_hz_min", "intervals"}
+    over the intervals in which the guest was running (pump.n > 0)."""
+    iv = [r for r in rows if r["label"] == "interval"]
+    pump, play = [], []
+    for a, b in zip(iv, iv[1:]):
+        dt = b["t"] - a["t"]
+        if dt <= 0.5 or not b.get("pump.n"):
+            continue
+        pump.append(b["pump.n"] / dt)
+        if b.get("sdl.frames") is not None:
+            play.append(b["sdl.frames"] / dt)
+    out = {"intervals": len(pump)}
+    if pump:
+        out["pump_hz_median"] = round(float(np.median(pump)), 1)
+        out["pump_hz_min"] = round(float(min(pump)), 1)
+    if play:
+        out["sdl_frames_hz_median"] = round(float(np.median(play)), 1)
+        out["sdl_frames_hz_min"] = round(float(min(play)), 1)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
