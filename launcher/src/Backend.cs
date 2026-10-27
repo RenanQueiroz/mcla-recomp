@@ -352,6 +352,8 @@ sealed record RepoStatus(
     bool LauncherOutdated,             // the checkout has a newer launcher than this exe
     string? FetchError)
 {
+    /// When FetchError came from the network: the report for "Copy details" (what was tried, the addresses and their timings, the proxy).
+    public string? FetchDetail { get; init; }
     /// Installed mode: where the install would move to (a release, or main); null in a clone or when not looked at.
     public Setup.UpdateTarget? Target { get; init; }
     public bool UpdateAvailable => Incoming.Count > 0 || Target is { SwitchBack: true };
@@ -376,6 +378,7 @@ static class Repo
     static async Task<RepoStatus> GetInstalledStatusAsync(bool fetch)
     {
         string? fetchError = null;
+        string? fetchDetail = null;
         Setup.UpdateTarget? target = null;
         // An update that began and was not built (the launcher closed, a crash): the options are made to name its SDK bundle.
         try { await Setup.UpdateEngine.RepairPendingAsync(new Setup.InstallLayout(Paths.InstallRoot!), AppContext.BaseDirectory); }
@@ -384,7 +387,7 @@ static class Repo
         {
             target = await Setup.UpdateResolver.ResolveAsync(Paths.Repo, Setup.InstallChannel.Read(Paths.InstallRoot!), fetch, CancellationToken.None);
         }
-        catch (Setup.SetupException ex) { fetchError = ex.Plain; }
+        catch (Setup.SetupException ex) { fetchError = ex.Plain; fetchDetail = ex.Detail; }
         catch (TimeoutException) { fetchError = "GitHub didn't answer in time."; }
 
         var head = (await Git("rev-parse", "HEAD")).Output.Trim();
@@ -410,6 +413,7 @@ static class Repo
         return new RepoStatus(head, recent, incoming, patchesChanged, File.Exists(Paths.GameExe), buildCurrent, 0, launcherOutdated, fetchError)
         {
             Target = target,
+            FetchDetail = fetchDetail,
         };
     }
 

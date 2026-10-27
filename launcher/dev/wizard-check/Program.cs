@@ -9,6 +9,11 @@
 //       source (sparse placeholders) which must be refused
 //   release <folder>
 //       a release source folder: release.json parsed and validated, and altered copies refused
+//   net <scratch>
+//       (Checks4.cs) the real GitHub through the launcher's network code: the latest release, a tool archive through the
+//       redirect to the asset CDN, a file of the fork's release, GitHub's API route
+//   offline <folder with a release.json> <scratch>
+//       "Use files I downloaded": a folder as the release source, the checksums still applying
 //   downloads <scratch>
 //       checked downloads: a wrong hash or size is refused and deleted
 //   budget
@@ -66,6 +71,8 @@ static partial class Program
                 case "verdicts": Verdicts(args[1], args[2], LoadFingerprint(args[3]), args[4]); break;
                 case "copy": await Copy(args[1], args[2], LoadFingerprint(args[3]), args.Length > 4 ? int.Parse(args[4]) : 0); break;
                 case "release": await Release(args.Length > 1 ? args[1] : null); break;
+                case "net": await NetChecks(args[1]); break;
+                case "offline": await OfflineChecks(args[1], args[2]); break;
                 case "downloads": await Downloads(args[1]); break;
                 case "budget": Budget(); break;
                 case "cleanup": Cleanup(args[1]); break;

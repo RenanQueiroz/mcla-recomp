@@ -44,6 +44,13 @@ sealed class WizardApp : Component
         var (release, setRelease) = UseState<ReleaseInfo?>(null, threadSafe: true);
         var (releaseSource, setReleaseSource) = UseState<ReleaseSource?>(null, threadSafe: true);
         var (releaseError, setReleaseError) = UseState<string?>(null, threadSafe: true);
+        // The network details of a failed look-up (Net.cs's report), what the look-up is trying now, and the folder of the
+        // player's own downloads when "Use files I downloaded" is in use.
+        var (releaseDetail, setReleaseDetail) = UseState<string?>(null, threadSafe: true);
+        var (releaseProgress, setReleaseProgress) = UseState("Looking up the latest release…", threadSafe: true);
+        var (offlineFolder, setOfflineFolder) = UseState<string?>(dev.Downloads, threadSafe: true);
+        var (offlineOpen, setOfflineOpen) = UseState(false);
+        var loadRef = UseRef(0);
         var (check, setCheck) = UseState<GameCheckResult?>(null, threadSafe: true);
         var (checking, setChecking) = UseState(false, threadSafe: true);
         var (runState, setRunState) = UseState(RunState.Idle, threadSafe: true);
@@ -65,28 +72,37 @@ sealed class WizardApp : Component
         string? folderWarning = folderProblem == null && page == WizardPage.Welcome ? PathBudget.Warning(installDir) : null;
         long free = page == WizardPage.Welcome ? PathBudget.FreeBytes(installDir) : 0;
         bool enoughRoom = resumes || free >= needed;
+        // With the player's own downloads as the source, the setup goes on only when every file it needs is in the folder.
+        var offlineFiles = page == WizardPage.Welcome && release != null && releaseSource is { IsOffline: true } ? releaseSource.OfflineFiles() : [];
+        var offlineMissing = offlineFiles.Count(f => !f.Present);
 
         // ---- the release: GitHub's latest, or the development override ------------------------------
-        async Task LoadReleaseAsync()
+        async Task LoadReleaseAsync(string? downloads = null)
         {
+            var mine = ++loadRef.Current;   // only the newest look-up may answer
             setReleaseError(null);
+            setReleaseDetail(null);
             setRelease(null);
+            setReleaseProgress(downloads == null ? "Looking up the latest release…" : "Reading the folder…");
             try
             {
-                var source = ReleaseSource.FromOverride(dev.ReleaseSource);
-                setReleaseSource(source);
-                setRelease(await Task.Run(() => source.LoadAsync(CancellationToken.None)));
+                var source = downloads != null ? ReleaseSource.FromDownloads(downloads) : ReleaseSource.FromOverride(dev.ReleaseSource);
+                if (mine == loadRef.Current) setReleaseSource(source);
+                var found = await Task.Run(() => source.LoadAsync(CancellationToken.None, line => { if (mine == loadRef.Current) setReleaseProgress(line); }));
+                if (mine == loadRef.Current) setRelease(found);
             }
             catch (SetupException ex)
             {
+                if (mine != loadRef.Current) return;
                 setReleaseError(ex.Plain);
+                setReleaseDetail(ex.Detail);
             }
         }
         UseEffect(() =>
         {
             if (ReactorApp.PrimaryWindow?.AppWindow is { } appWindow)
                 appWindow.TitleBar.PreferredTheme = Microsoft.UI.Windowing.TitleBarTheme.UseDefaultAppMode;
-            _ = LoadReleaseAsync();
+            _ = LoadReleaseAsync(dev.Downloads);
         }, Array.Empty<object>());
 
         // ---- the game ----------------------------------------------------------------------------------
@@ -147,6 +163,24 @@ sealed class WizardApp : Component
             }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException) { setNotice($"Couldn't open the folder chooser: {ex.Message}"); }
         }
+
+        // "Use files I downloaded": the folder the player saved release.json and the other files into.
+        async void ChooseDownloadsFolder()
+        {
+            var picking = UseFolderPickerAsync(new FolderPickerOptions(CommitButtonText: "Use this folder"));
+            try
+            {
+                var folder = await picking;
+                if (folder == null) return;
+                setOfflineFolder(folder.Path);
+                setNotice(null);
+                _ = LoadReleaseAsync(folder.Path);
+            }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException) { setNotice($"Couldn't open the folder chooser: {ex.Message}"); }
+        }
+
+        void CopyDetails(string text) =>
+            setNotice(ClipboardText.Copy(text) is { } why ? $"Couldn't copy the details: {why}" : "The details are copied. Paste them into a report on GitHub.");
 
         async void ChooseInstallFolder()
         {
@@ -393,11 +427,74 @@ sealed class WizardApp : Component
                 folderWarning != null ? Info("A better folder exists", folderWarning, InfoBarSeverity.Warning) : Empty(),
                 resumes ? Info("An earlier setup is in this folder", ResumeText(layout), InfoBarSeverity.Informational) : Empty(),
                 !enoughRoom ? Info("Not enough room", $"There is {GameChecker.FormatSize(free)} free on that drive. Free some space or choose another drive.", InfoBarSeverity.Error) : Empty(),
-                releaseError != null
-                    ? (InfoBar("Couldn't find the latest release", releaseError) with { IsOpen = true, IsClosable = false, ActionButtonContent = "Try again", OnActionButtonClick = () => _ = LoadReleaseAsync() }).Severity(InfoBarSeverity.Error)
-                    : release == null ? HStack(8, ProgressRing().Width(20).Height(20), TextBlock("Looking up the latest release…").Foreground(Theme.SecondaryText))
-                    : TextBlock($"Release {release.Tag}" + (releaseSource?.IsOverride == true ? "  (from a local release source)" : "")).Foreground(Theme.SecondaryText));
+                ReleaseArea(),
+                OfflinePanel(),
+                notice != null ? Info("", notice, InfoBarSeverity.Informational) : Empty());
         }
+
+        // The look-up of the latest release: while it runs, what it is trying; when it fails, the stage that failed in words, the
+        // details to copy, and what to try; when it is done, the release.
+        Element ReleaseArea()
+        {
+            if (releaseError != null)
+            {
+                var downloads = offlineFolder != null;
+                return VStack(8,
+                    (InfoBar(downloads ? "Couldn't use that folder" : "Couldn't find the latest release", releaseError)
+                        with { IsOpen = true, IsClosable = false, ActionButtonContent = "Try again", OnActionButtonClick = () => _ = LoadReleaseAsync(offlineFolder) })
+                        .Severity(InfoBarSeverity.Error),
+                    HStack(8,
+                        releaseDetail != null ? Button("Copy details", () => CopyDetails(releaseDetail)) : Empty(),
+                        downloads
+                            ? Button("Look it up on GitHub again", () => { setOfflineFolder(null); _ = LoadReleaseAsync(null); })
+                            : Button("Try release.json in a browser", () => Open(releaseSource?.ReleaseJsonUrl ?? ReleaseSource.ReleasesPage))),
+                    releaseDetail != null
+                        ? Expander("Details", ScrollViewer(TextBlock(releaseDetail).FontFamily(Mono).FontSize(11).IsTextSelectionEnabled().TextWrapping()).MaxHeight(200),
+                                   isExpanded: false).HAlign(HorizontalAlignment.Stretch)
+                        : Empty());
+            }
+            if (release == null) return HStack(8, ProgressRing().Width(20).Height(20), TextBlock(releaseProgress).Foreground(Theme.SecondaryText));
+            return TextBlock($"Release {release.Tag}" + (releaseSource is { IsOffline: true } ? "  (from the files you downloaded)" : releaseSource?.IsOverride == true ? "  (from a local release source)" : ""))
+                .Foreground(Theme.SecondaryText);
+        }
+
+        // "Use files I downloaded": for a network where the setup can't reach GitHub (or its download servers) but a web browser
+        // can. The files are downloaded by hand into a folder; the setup checks each against release.json's checksums as usual.
+        Element OfflinePanel()
+        {
+            var fromDownloads = releaseSource is { IsOffline: true };
+            return Expander("Use files I downloaded",
+                VStack(10,
+                    TextBlock("If your web browser can open GitHub but this setup can't (a network or provider that blocks it, an antivirus), "
+                              + "download the files in the browser and let the setup use them from a folder. Each file is still checked against the release's checksums.")
+                        .TextWrapping().Foreground(Theme.SecondaryText),
+                    TextBlock("1. Open the release's page, and under Assets download release.json and the file that starts with rexglue-sdk- and ends with -llvm-mingw- and a date, "
+                              + "then .zip (not the one with \"source\" in its name) into one folder.\n"
+                              + "2. Choose that folder here. This page then lists the build tools to download as well (a few hundred MB), each with its link.\n"
+                              + "3. When every file is in the folder, press Next.").TextWrapping(),
+                    HStack(8, Button("Open the release's page", () => Open(ReleaseSource.ReleasesPage)),
+                              Button(fromDownloads ? "Choose another folder…" : "Choose the folder…", ChooseDownloadsFolder).AutomationName("Choose the folder with the downloaded files")),
+                    fromDownloads && release != null ? DownloadsChecklist() : Empty(),
+                    TextBlock("The setup still gets the game's source code from github.com with git; this only replaces the downloads of release.json, the SDK and the build tools.")
+                        .TextWrapping().Foreground(Theme.SecondaryText)),
+                isExpanded: offlineOpen || releaseError != null || fromDownloads, onIsExpandedChanged: setOfflineOpen)
+                .HAlign(HorizontalAlignment.Stretch);
+        }
+
+        Element DownloadsChecklist() =>
+            VStack(6,
+                BodyStrong($"Files in {offlineFolder}"),
+                VStack(4, offlineFiles.Select(f => (Element)Grid(
+                    columns: [GridSize.Px(24), GridSize.Star(), GridSize.Auto, GridSize.Auto],
+                    rows: [GridSize.Auto],
+                    TextBlock(f.Present ? "✓" : "✕").Foreground(f.Present ? Theme.Ref("SystemFillColorSuccessBrush") : Theme.Ref("SystemFillColorCriticalBrush")).VAlign(VerticalAlignment.Center).Grid(column: 0),
+                    TextBlock(f.Name).FontFamily(Mono).FontSize(12).IsTextSelectionEnabled().VAlign(VerticalAlignment.Center).Grid(column: 1),
+                    TextBlock(GameChecker.FormatSize(f.Size)).Foreground(Theme.SecondaryText).Margin(8, 0, 8, 0).VAlign(VerticalAlignment.Center).Grid(column: 2),
+                    (f.Present ? Empty() : Button("Open its link", () => Open(f.Url)).AutomationName($"Open the link to {f.Name}")).Grid(column: 3)).WithKey(f.Name)).ToArray()),
+                offlineMissing == 0
+                    ? Info("All the files are there", "The setup checks each one against the release's checksums when it uses it.", InfoBarSeverity.Success)
+                    : HStack(8, TextBlock($"{offlineMissing} still to download into that folder, with the size shown.").Foreground(Theme.Ref("SystemFillColorCriticalBrush")).VAlign(VerticalAlignment.Center),
+                                Button("Check again", () => bump(t => t + 1))));
 
         Element GameZone() =>
             Border(VStack(10,
@@ -503,6 +600,10 @@ sealed class WizardApp : Component
                         _ => "",
                     }).Foreground(Theme.SecondaryText)),
                 runState == RunState.Failed && engine?.Failure != null ? Info("Something went wrong", engine.Failure, InfoBarSeverity.Error) : Empty(),
+                runState == RunState.Failed && engine?.FailureIsNetwork == true
+                    ? Info("Downloads not getting through?", "If your web browser can open GitHub but the setup can't, go Back to the first page and open \"Use files I downloaded\": "
+                           + "download the files in the browser, and the setup uses them from a folder. \"Copy the log\" has the network details.", InfoBarSeverity.Informational)
+                    : Empty(),
                 notice != null ? Info("", notice, InfoBarSeverity.Informational) : Empty(),
                 VStack(10, steps.Select(StepRow).ToArray()),
                 Expander("Details", ScrollViewer(TextBlock(DetailsText()).FontFamily(Mono).FontSize(11).IsTextSelectionEnabled().TextWrapping()).MaxHeight(220),
@@ -527,7 +628,7 @@ sealed class WizardApp : Component
             {
                 case WizardPage.Welcome:
                     buttons.Add(Button("Next", NextFromWelcome).AccentButton()
-                        .IsEnabled(release != null && folderProblem == null && enoughRoom));
+                        .IsEnabled(release != null && folderProblem == null && enoughRoom && offlineMissing == 0));
                     break;
                 case WizardPage.PickGame:
                     buttons.Add(Button("Back", () => setPage(WizardPage.Welcome)));
