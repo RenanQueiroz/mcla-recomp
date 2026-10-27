@@ -65,3 +65,37 @@ Vulkan is the same within 5% in each thread (free roam 6.77 ms, race 7.13 ms).
 The generated code switches the SSE flush mode 4,836 times by `ldmxcsr` (`enableFlushModeUnconditional` 2,657 sites,
 `disableFlushModeUnconditional` 2,179) and checks it at about 32,000 more; the profile cannot see an instruction, so its
 share has to be measured by an A/B with the instruction removed (not done at the time of writing).
+
+## The timer queue fix, checked in the game (2026-10-27)
+
+A build of the SDK with counters in the timer thread (dumped every 5 s), one 65 s run of the free-roam route, D3D12, native, uncapped,
+16 logical processors: every wait for a timer due within 20 ms (63,040 of them) ended on the high-resolution timer, none on the
+event for a newly queued timer, none fell back to the condition variable, the timer was made; 1,000 callbacks a second; a wait
+was 0.33 ms late on average (0.69 ms asked; the worst, 33 ms, while the game was loading). The `rex::thread::TimerQueue` thread
+used 0.04 ms of CPU per swap in free roam (6.87 without), the whole process 17.7 ms per swap (23.5), and the frame median was
+6.85 ms in both. The alternating comparison (3 runs a side, 16 and 8 logical processors) is `ab	qab-report.txt` of the scratch
+tree's notes; its numbers are added here when it has been run.
+
+## The GPU command thread, with names (P1 windows, DLLs rebuilt with line tables and the same code)
+
+`GPU_Commands` uses 3.2 to 3.3 ms of CPU per swap in free roam (it waits for commands 56 to 62% of the time), 4.9 ms in the
+race (32% waiting; 5.8 ms and 21% on Vulkan). It is not what limits a frame at native resolution (in the race the render guest
+thread is), and nothing in it is above 5% of its samples. Inclusive shares of the thread's samples, D3D12 free roam / race:
+
+| What | Free roam | Race |
+|---|---|---|
+| Draws (`ExecutePacketType3Draw` -> `D3D12CommandProcessor::IssueDraw`, nested indirect buffers included) | 30% (2.1 ms) | 48% |
+| `UpdateBindings` (descriptors and constants per draw; self time 3.2% in free roam) | 5.8% | 12% |
+| `D3D12TextureCache::RequestTextures` | 4.3% | 8% |
+| `D3D12RenderTargetCache::Update` | 4.8% | 6.4% |
+| `SharedMemory::RequestRange` called from `IssueDraw` (and again from `PrimitiveProcessor::Process`, 2.5 and 2.3%) | 2.1% | 4.7% |
+| ... of which `EnablePhysicalMemoryAccessCallbacks` -> `VirtualProtect` | under 1% | 1.9% |
+| `PrimitiveProcessor::Process` | 3.0% | 2.7% |
+| `PipelineCache::ConfigurePipeline` | 2.0% | 2.2% |
+| Register writes (`ExecutePacketType0` -> `WriteRegisterRangeFromRing`) | 3.5% | 4.8% |
+| The swap packet (`IssueSwap`) | 1.5% | 1.5% |
+
+Vulkan has the same shape (`UpdateBindings` 7 to 8.5%, a third of it inside the driver). The candidates for a saving are
+`UpdateBindings` and the two `RequestRange` calls per draw, each about 0.1 to 0.3 ms per swap in free roam: together perhaps
+10 to 15% of this thread's CPU, with no effect on the frame time at native resolution on this PC, so they matter only for a
+machine on which this thread is the limit. The full trees are `gpu-tree.txt` in the scratch tree's results.
