@@ -290,7 +290,11 @@ bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
 // Vulkan on AMD's integrated GPUs (the ones that share the CPU's memory) and on Intel's;
 // Direct3D 12 on AMD's discrete cards, on NVIDIA and when nothing is known. Which GPU: the
 // one Direct3D 12 would take (the SDK's d3d12_adapter: the adapter of that number, else
-// the first one that isn't software), whatever API is then used for it.
+// the first one that isn't software), whatever API is then used for it. A software adapter
+// (Windows' WARP: d3d12_adapter = -2, or its number) is Direct3D 12's, its vendor being
+// Microsoft's, neither AMD's nor Intel's: Vulkan has no device for it, so the recommendation
+// is Direct3D 12; a number that names no adapter gets none (the launcher, ShaderStamp.cs,
+// answers the same for all of these).
 //  - AMD integrated, measured on a Ryzen 7 9800X3D's Radeon: Vulkan 6 to 10% faster at the
 //    game's own resolution, GPU time per frame 6 to 9% less (launcher/dev/gpu-weak-2026-10-27.md).
 //    Integrated is Direct3D 12's own answer, D3D12_FEATURE_DATA_ARCHITECTURE.UMA, which

@@ -552,9 +552,10 @@ sun shadows (`mcla_far_shadow_interval`) to being drawn every 2nd frame and the
 environment map of the cars (`mcla_env_map_interval`) every 4th, the picture of the last
 time kept in between; an option set by hand (the Anti-aliasing setting here, the pause
 menu's PERFORMANCE rows, `mcla.toml`) keeps its value. On the integrated Radeon of the
-Ryzen 9800X3D (Direct3D 12, native resolution) the passes and the blur are worth 1.7 to
-2.0 ms of 37 and anti-aliasing off another 2.3 to 2.5 ms (29% at 2x), about 11% together
-(`dev\gpu-weak-2026-10-27.md` has each option's saving and what was left out: the
+Ryzen 9800X3D (Direct3D 12, native resolution) the passes and the blur are worth 1.6 ms
+of 36.8 and anti-aliasing off another 2.5 to 2.9 ms (29% at 2x), 11 to 12% together
+(free roam 36.8 to 32.3 ms, driving 35.8 to 31.7 ms; `dev\gpu-weak-2026-10-27.md` has
+each option's saving and what was left out: the
 reflection view every 2nd frame saves 0.3 ms, too little for a reflection that lags).
 
 *Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is

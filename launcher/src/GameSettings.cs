@@ -197,9 +197,9 @@ static class GameSettings
     {
         Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the far sun shadows every "
              + "2nd frame and the environment map of the cars every 4th (the picture of the last time is kept "
-             + "in between). On an integrated Radeon that is about 5% less frame time at the game's own "
-             + "resolution from the shadows, the map and the blur, and 6 to 7% more from leaving "
-             + "anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
+             + "in between). On an integrated Radeon that is about 12% less frame time at the game's own "
+             + "resolution (32.3 instead of 36.8 ms in free roam): 4% from the shadows, the map and the "
+             + "blur, and 7 to 8% from leaving anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
              + "integrated graphics. An option you set by hand (Anti-aliasing here, or the pause menu's "
              + "PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
     };

@@ -303,8 +303,9 @@ static class DisplayDrivers
     // DXGI lists them. AMD's integrated ones are told by Direct3D 12's own answer (the
     // architecture's UMA flag, from a device made for the adapter), which holds however much
     // memory the BIOS sets aside for the GPU. Vulkan also needs vulkan-1.dll (the game also
-    // needs a Vulkan device for that GPU, which only it can see). "vulkan", "d3d12", or null when
-    // the adapter can't be read. Asked once for each option.
+    // needs a Vulkan device for that GPU, which only it can see). A software adapter (WARP, by -2
+    // or by its number) is "d3d12" as in the game: its vendor is neither AMD's nor Intel's. "vulkan",
+    // "d3d12", or null when the adapter can't be read or the number names none. Asked once for each option.
     public static string? AutomaticApi(int adapterOption)
     {
         lock (automaticApi)
