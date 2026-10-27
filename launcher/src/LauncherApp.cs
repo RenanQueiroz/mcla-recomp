@@ -1030,7 +1030,7 @@ sealed class LauncherApp : Component
                     ? [TextBlock("The game is running: change these in its pause menu, on the Settings tab.").Foreground(Theme.SecondaryText),
                        TextBlock("They show here again once it has closed.").Foreground(Theme.SecondaryText)]
                     : [TextBlock("These are the game's own settings, in mcla.toml next to mcla.exe. Its pause menu changes them too.").Foreground(Theme.SecondaryText),
-                       TextBlock("Resolution, Graphics API and Intro take effect when the game starts.").Foreground(Theme.SecondaryText)]),
+                       TextBlock("Resolution, Graphics API, Language and Intro take effect when the game starts.").Foreground(Theme.SecondaryText)]),
                 Expander("Advanced",
                     VStack(16,
                         VStack(4,
