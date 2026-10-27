@@ -41,7 +41,7 @@ REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
 const char* g_mcla_settings_path = nullptr;
 
 #if !REX_PLATFORM_PS5
-void MclaWaitForSaves();  // src/mcla_app.cpp
+void MclaWaitForSaves();  // src/save_wait.cpp
 #endif
 
 namespace {

@@ -75,6 +75,7 @@ namespace rex::arch {
 uint64_t Ps5FaultCount();
 }
 extern const char* g_mcla_settings_path;  // src/settings_menu.cpp
+void MclaWaitForSaves();                  // src/save_wait.cpp
 namespace rex::ui::vulkan {
 uint64_t Ps5PresentCount();
 }
@@ -876,6 +877,9 @@ int main() {
 #ifdef MCLA_TITLE
   // Leave as a title does: the shell closes it and returns to the home screen.
   // The process idles until then; if the request is refused, fall through.
+  // The system closes it at once, so a career save being written is let
+  // finish first (the game's threads still run here).
+  MclaWaitForSaves();
   Line("mcla-ps5 stops: the message loop ended; asking the system to close the title");
   rex::FlushLogging();
   const int result = sceSystemServiceLoadExec("exit", nullptr);
