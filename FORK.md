@@ -137,8 +137,9 @@ doesn't load is reported unavailable and the game goes on with MSAA.
 ## Testing so far
 
 Everything here was built and measured on **Windows only, with an NVIDIA RTX 5080**
-(and a Ryzen 7 9800X3D), on the D3D12 and Vulkan backends. None of it has been
-built or run on AMD or Intel graphics, on Linux, or on the PS5 yet. It needs
+(and a Ryzen 7 9800X3D), on the D3D12 and Vulkan backends. It has also been run on
+the 9800X3D's integrated AMD Radeon graphics (both backends); none of it has been
+built or run on a discrete AMD card or on Intel graphics, on Linux, or on the PS5 yet. It needs
 testing there before anyone relies on it.
 
 ## Building and playing
