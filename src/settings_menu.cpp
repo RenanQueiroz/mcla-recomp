@@ -63,6 +63,7 @@ bool MclaSingleTileAvailable();  // src/render_perf.cpp
 int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
 bool MclaFsrAvailable();  // src/perf_options.cpp
 bool MclaFsrNextStart();  // src/perf_options.cpp
+bool MclaUpscalingAvailable();  // src/perf_options.cpp
 
 namespace {
 
@@ -647,15 +648,24 @@ std::string MenuStateKey() {
 // it starts, are kRequiresRestart, and their rows say "(NEXT START)" (RowLabel).
 constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
 // mcla_anti_aliasing (src/perf_options.cpp): none, the game's 2x MSAA, or AMD
-// FSR 3.1 at native resolution (the SDK's temporal_aa, rexglue-temporal-aa.patch),
-// with its sharpening (temporal_aa_sharpness). All change during play; FSR
-// starts once it is ready (half a second or so the first time).
-constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr"};
+// FSR 3.1 (the SDK's temporal_aa, rexglue-temporal-aa.patch) at native resolution or
+// upscaling (rexglue-fsr-upscaling.patch: the scene is drawn smaller), with its
+// sharpening (temporal_aa_sharpness). All change during play; FSR starts once it is
+// ready (half a second or so the first time). The row's last three values are FSR with
+// a level of mcla_upscaling (the second option the row writes, ItemSetIndex).
+constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr", "fsr_quality",
+                                               "fsr_balanced", "fsr_performance"};
+// The mcla_upscaling value of each of them (the render size is in the label).
+constexpr const char* kUpscalingValues[] = {"off", "off", "off", "quality", "balanced", "performance"};
+[[maybe_unused]] constexpr double kUpscalingRatios[] = {1.0, 1.0, 1.0, 1.5, 1.7, 2.0};
 #if REX_PLATFORM_WIN32
-constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE AA"};
+constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE AA",
+                                               "FSR QUALITY", "FSR BALANCED", "FSR PERFORM."};
 #else
 // Built for Linux and the console, but not yet run on either.
-constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (UNTESTED)"};
+constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (UNTESTED)",
+                                               "FSR 1.5X (UNTESTED)", "FSR 1.7X (UNTESTED)",
+                                               "FSR 2X (UNTESTED)"};
 #endif
 // While FSR can run only after a restart (the PS5 started without it chosen:
 // its device features are enabled only then, ps5/game/main_ps5.cpp). A row's value is clipped
@@ -785,9 +795,18 @@ bool IsAntiAliasingWithoutFsr(const ItemDef& item) {
          !MclaFsrAvailable();
 }
 
+// The ANTI ALIASING row: OFF, MSAA, FSR NATIVE AA, then FSR with an upscaling level where
+// the scene can be drawn smaller (MclaUpscalingAvailable).
+bool IsAntiAliasingItem(const ItemDef& item) {
+  return item.kind == ItemKind::kStringChoice && item.values == kAntiAliasingValues;
+}
+
 int ItemValueCount(const ItemDef& item) {
-  if (IsAntiAliasingWithoutFsr(item)) {
-    return item.value_count - 1;
+  if (IsAntiAliasingItem(item)) {
+    if (!MclaFsrAvailable()) {
+      return 2;
+    }
+    return MclaUpscalingAvailable() ? item.value_count : 3;
   }
   if (IsFrameGenerationItem(item) && FrameGenerationUnavailable()) {
     return 1;
@@ -890,10 +909,21 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
     case ItemKind::kToggle:
       return index ? "ON" : "OFF";
     case ItemKind::kStringChoice:
-      if (item.values == kAntiAliasingValues && !std::strcmp(item.values[index], "fsr") &&
-          MclaFsrNextStart()) {
-        return kFsrNextStartLabel;
+      if (IsAntiAliasingItem(item) && index >= 2 && MclaFsrNextStart()) {
+        return index == 2 ? kFsrNextStartLabel : "";
       }
+#if REX_PLATFORM_WIN32
+      if (IsAntiAliasingItem(item) && index >= 3) {
+        // The size the scene is drawn at, with the resolution (the guest picture is 720 lines):
+        // "FSR QUALITY 1440P" (a value's text is clipped at about 19 capital letters in a row's
+        // space: "FSR 3.1 QUALITY 1440P" lost its end).
+        const double scale = std::strtod(OptionGet("resolution_scale").c_str(), nullptr);
+        const int lines = int(720.0 * (scale >= 1.0 ? scale : 1.0) / kUpscalingRatios[index] + 0.5);
+        char buffer[64];
+        std::snprintf(buffer, sizeof buffer, "%s %dP", item.value_labels[index], lines);
+        return buffer;
+      }
+#endif
       if (IsFrameGenerationItem(item) && index == 1 && FrameGenerationNextStart()) {
         return kFsrNextStartLabel;
       }
@@ -949,6 +979,16 @@ int ItemCurrentIndex(const ItemDef& item) {
     case ItemKind::kStringChoice:
       if (IsAntiAliasingWithoutFsr(item) && value == "fsr") {
         return 1;  // MSAA, what the game uses then
+      }
+      if (IsAntiAliasingItem(item) && value == "fsr") {
+        // FSR with the level of mcla_upscaling (native where it isn't offered).
+        const std::string level = OptionGet("mcla_upscaling");
+        for (int i = 3; i < item.value_count && MclaUpscalingAvailable(); ++i) {
+          if (level == kUpscalingValues[i]) {
+            return i;
+          }
+        }
+        return 2;
       }
       if (IsFrameGenerationItem(item) && FrameGenerationUnavailable()) {
         return 0;
@@ -1019,6 +1059,16 @@ void ItemSetIndex(const ItemDef& item, int index) {
       OptionSet(item.option, index ? "true" : "false");
       break;
     case ItemKind::kStringChoice:
+      if (IsAntiAliasingItem(item)) {
+        // FSR with a level writes mcla_upscaling too (native AA turns it off; OFF and MSAA
+        // leave it, it only counts with FSR).
+        OptionSet(item.option, index >= 2 ? "fsr" : item.values[index]);
+        if (index >= 2) {
+          OptionSet("mcla_upscaling", kUpscalingValues[index]);
+          NoteChanged("mcla_upscaling");
+        }
+        break;
+      }
       OptionSet(item.option, item.values[index]);
       break;
     case ItemKind::kNumberChoice: {

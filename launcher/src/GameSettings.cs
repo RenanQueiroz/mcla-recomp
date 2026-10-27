@@ -181,6 +181,23 @@ static class GameSettings
         Offered = (file, value) => !SettingValues.Same(value, "fsr") || FsrRuntimeBuilt(file),
         Unavailable = "not built for this graphics API: the game uses MSAA",
     };
+    // mcla_upscaling (src/perf_options.cpp, the SDK's temporal_aa_upscale, rexglue-fsr-upscaling.patch):
+    // with FSR anti-aliasing, the 3D scene is drawn smaller and FSR 3.1 upscales it; the pause
+    // menu's ANTI ALIASING row offers the same levels (FSR 3.1 QUALITY, BALANCED, PERFORMANCE).
+    public static readonly GameSetting Upscaling = new("mcla_upscaling", "FSR upscaling",
+        [new("Off (native resolution)", "off"), new("Quality (1.5×: 1440p for 4K)", "quality"),
+         new("Balanced (1.7×)", "balanced"), new("Performance (2×: 1080p for 4K)", "performance")], "off")
+    {
+        Info = "Only with FSR anti-aliasing: draws the 3D scene at a smaller size and lets FSR 3.1 upscale it to "
+             + "the game's resolution, which takes load off the graphics card. The HUD, the menus and the "
+             + "post-processing (bloom, tone mapping) stay at full size and sharp. Quality draws the scene at "
+             + "two thirds of the width and height, Balanced at 59%, Performance at half; the lower, the "
+             + "more GPU time it saves and the softer the picture, with more trails behind fast-moving "
+             + "traffic and pedestrians. Off draws the scene at the full resolution (FSR as anti-aliasing "
+             + "only). Changes during play in the pause menu (ANTI ALIASING).",
+        Offered = (file, value) => SettingValues.Same(value, "off") || FsrRuntimeBuilt(file),
+        Unavailable = "not built for this graphics API",
+    };
     static bool FsrRuntimeBuilt(IReadOnlyDictionary<string, string> file)
     {
         var api = file.TryGetValue("mcla_gpu_backend", out var raw) ? SettingValues.Parse(raw) : "any";
@@ -385,7 +402,7 @@ static class GameSettings
 
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0) =>
-        [Resolution, FrameRateFor(file, refreshHz), Display, DisplayGamma, AntiAliasing, FrameGeneration,
+        [Resolution, FrameRateFor(file, refreshHz), Display, DisplayGamma, AntiAliasing, Upscaling, FrameGeneration,
          LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApi];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
