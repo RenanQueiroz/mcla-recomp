@@ -1,0 +1,107 @@
+diff --git a/include/rex/thread/mutex.h b/include/rex/thread/mutex.h
+index 51a0674..faee97f 100644
+--- a/include/rex/thread/mutex.h
++++ b/include/rex/thread/mutex.h
+@@ -89,6 +89,12 @@ class global_critical_region {
+  public:
+   static std::recursive_mutex& mutex();
+ 
++  // Whether the guest's "interrupts disabled" regions (mtmsrd r13 ... mtmsrd) go without this
++  // lock: the cvar guest_atomics_lock_free, read once and kept for the life of the process, so
++  // that a thread cannot enter a region with the lock and leave it without. See the macros in
++  // the code generator's pch.h (resources/templates/codegen/pch_h.inja).
++  static bool guest_regions_lock_free();
++
+   // Acquires a lock on the global critical section.
+   // Use this when keeping an instance is not possible. Otherwise, prefer
+   // to keep an instance of global_critical_region near the members requiring
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index b10adf9..4277172 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -315,21 +315,41 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+   return count;
+ }
+ 
+-#define REX_CHECK_GLOBAL_LOCK()                                        \
+-  ([&]() -> u64 {                                                      \
+-    auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
+-    return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
++// The console's Interlocked helpers disable interrupts (mtmsrd r13), do a lwarx / compare / stwcx.
++// and restore the interrupt state (mtmsrd). Here that took the global critical region's lock, which
++// every other thread that uses the region (the guest's, the GPU command thread, the kernel) then waited
++// behind, while all the region holds is loads, compares, branches and a store-conditional, which is a
++// compare-and-swap and atomic by itself. With the SDK's cvar guest_atomics_lock_free (the default) the
++// three macros below leave the lock alone: mfmsr reads "interrupts enabled", the two mtmsrd do nothing
++// more than set the MSR bits. Read once, so a thread cannot enter a region with the lock and leave it
++// without.
++inline bool ppc_regions_lock_free_() {
++  static const bool lock_free = rex::thread::global_critical_region::guest_regions_lock_free();
++  return lock_free;
++}
++
++#define REX_CHECK_GLOBAL_LOCK()                                          \
++  ([&]() -> u64 {                                                        \
++    if (ppc_regions_lock_free_()) {                                      \
++      return 0x8000;                                                     \
++    }                                                                    \
++    auto lock_ = rex::thread::global_critical_region::AcquireDirect();   \
++    return ppc_global_lock_count_().load() ? 0 : 0x8000;                 \
+   }())
+ 
+-#define REX_ENTER_GLOBAL_LOCK()                          \
+-  do {                                                   \
+-    rex::thread::global_critical_region::mutex().lock(); \
+-    ppc_global_lock_count_().fetch_add(1);               \
++#define REX_ENTER_GLOBAL_LOCK()                            \
++  do {                                                     \
++    if (!ppc_regions_lock_free_()) {                       \
++      rex::thread::global_critical_region::mutex().lock(); \
++      ppc_global_lock_count_().fetch_add(1);               \
++    }                                                      \
+   } while (0)
+ 
+-#define REX_LEAVE_GLOBAL_LOCK()                                                           \
+-  do {                                                                                    \
+-    auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
+-    assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+-    rex::thread::global_critical_region::mutex().unlock();                                \
++#define REX_LEAVE_GLOBAL_LOCK()                                                             \
++  do {                                                                                      \
++    if (!ppc_regions_lock_free_()) {                                                        \
++      auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
++      assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
++      rex::thread::global_critical_region::mutex().unlock();                                \
++    }                                                                                       \
+   } while (0)
+diff --git a/src/core/mutex.cpp b/src/core/mutex.cpp
+index d639924..c3ea9e8 100644
+--- a/src/core/mutex.cpp
++++ b/src/core/mutex.cpp
+@@ -9,10 +9,26 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/cvar.h>
+ #include <rex/thread/mutex.h>
+ 
++REXCVAR_DEFINE_BOOL(guest_atomics_lock_free, true, "Kernel",
++                    "Let the guest's atomic read-modify-write helpers (the console's Interlocked "
++                    "functions: mtmsrd r13, lwarx, compare, stwcx., mtmsrd) run without the global "
++                    "critical region lock. Each of them holds nothing but loads, compares, branches "
++                    "and a store-conditional (a compare-and-swap here), which is atomic by itself; "
++                    "the lock made every other thread that takes it (the guest's, the GPU command "
++                    "thread, the kernel) wait behind them. Read once at the first use, so a change "
++                    "takes effect at the next start. Off takes the lock as before.")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex::thread {
+ 
++bool global_critical_region::guest_regions_lock_free() {
++  static const bool lock_free = REXCVAR_GET(guest_atomics_lock_free);
++  return lock_free;
++}
++
+ std::recursive_mutex& global_critical_region::mutex() {
+   static std::recursive_mutex global_mutex;
+   return global_mutex;

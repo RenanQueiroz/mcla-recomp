@@ -1,0 +1,26 @@
+# CPU profile windows in the city (cpu-profile work): boot -> title -> map zoom-out -> free roam,
+# then a profile window standing at the spawn point (roam) and one driving (drive). A window is
+# started by `set mcla_profile_segment <label>` (src/sampling_profiler.cpp) and lasts
+# --mcla_profile_seconds (15), written to <--mcla_profile stem>.<label><ext>. Marks: as
+# boot-to-roam.pad, then roam and drive.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+# Let the city settle (traffic, streaming) before the first window.
+wait 8s
+mark roam
+set mcla_profile_segment roam
+wait 16s
+mark drive
+# Out of the car park and along the street, as drive-spawn.pad, then straight on.
+trigger rt 1 50f
+trigger rt 0.6
+stick lx 1 40f
+trigger rt 1
+set mcla_profile_segment drive
+wait 16s
+release all
+mark end

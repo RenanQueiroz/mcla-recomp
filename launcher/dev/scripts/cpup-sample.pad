@@ -1,0 +1,6 @@
+# One sample for cpup-speed.pad: the wall clock (ms), the engine frames, the swaps and the rounds of the
+# thread that frees the command ring's slots (state), the game clock (the mode timer, seconds since the
+# mode loaded) and the player's position. The replies are logged as "dev pad: <line> -> <reply>".
+state
+peekf 0x827D7510 1
+pos
