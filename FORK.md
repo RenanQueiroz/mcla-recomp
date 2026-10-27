@@ -153,8 +153,10 @@ builds and plays from then on.
 
 Two toolchains build it (`-Toolchain`, README.md, "Windows"): `msvc`, the
 default, is the project's Clang 20.1.8 with Visual Studio Build Tools' headers
-and libraries; `mingw` is llvm-mingw 20250709 (the same Clang version, with lld,
-libc++ and the mingw-w64 headers, on Windows' own UCRT), downloaded into
+and libraries (Build Tools 2022 version 17.1 or newer, and a Windows SDK newer
+than 10.0.19041, which `make_pc.ps1` installs if it is not there); `mingw` is
+llvm-mingw 20250709 (the same Clang version, with lld, libc++ and the mingw-w64
+headers, on Windows' own UCRT), downloaded into
 `tools\` from its release page and checked against a pinned SHA-256, with no
 Microsoft compiler and no administrator rights. Each keeps its own SDK build
 (`third_party\rexglue-sdk\out\build` and `out\install`, `win-amd64` and
@@ -274,6 +276,20 @@ fetch `upstream`, merge `upstream/main` into `main`, build and check, then push.
 The launcher follows this fork's `main` and only reports how many upstream
 commits it has not taken yet. When upstream merges one of the changes above,
 the fork's copy of it goes away in that merge.
+
+What came in that way so far (merge of 2026-10-27): upstream's pull request 18 (frame
+pacing, the pause menu's QUIT GAME and 40, 45 and 50 FPS, the UI rates, the
+achievement pop-up) was merged with `-s ours`, joining its history and keeping the fork's
+own form of that code, which later changes of the fork build on (RESTART GAME, the dev
+pad's `saving`, the HUD rate); and pull request 23, the Vulkan paint pipeline format fix,
+whose patch the fork already had: the fork keeps its copy of
+`patches/rexglue-vulkan-paint-pipeline-format.patch` (same lines changed, other hunk
+position and comment), since a patch that changed would have every SDK checkout that
+has it patched afresh. Upstream's changes after that were taken in: the PC build's
+repair of a half-cloned SDK, the Visual Studio 2022 17.1 and Windows SDK checks, Clang
+pointed at a Visual Studio with the C++ tools, the SDK build folder started again when the
+Windows SDK changes (issue 21), and the PS5's QUIT GAME that lets a save finish
+(`src/save_wait.cpp`, which now also holds the dev pad's `MclaSaveInProgress`).
 
 ```
 git remote add upstream https://github.com/holdmysocks/mcla-recomp.git
