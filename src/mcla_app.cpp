@@ -10,6 +10,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,9 +23,12 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi.h>
+#include <dxgi1_6.h>
 #include <shellapi.h>
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+
+#include "gpu_choice.h"
 #endif
 
 #include <fmt/format.h>
@@ -48,6 +52,24 @@ REXCVAR_DEFINE_BOOL(mcla_hide_cursor, true, "MCLA",
                     "Hide the mouse pointer over the game when a controller is used or the "
                     "mouse has been still for a few seconds; moving the mouse or clicking "
                     "shows it again");
+#ifdef _WIN32
+REXCVAR_DEFINE_BOOL(mcla_prefer_dedicated_gpu, true, "MCLA",
+                    "On a PC with more than one GPU (a laptop with integrated and dedicated "
+                    "graphics): run on the GPU Windows' graphics settings give this app, else on "
+                    "the high-performance one, instead of the first adapter Windows lists (often "
+                    "the integrated one). false takes that first adapter, as before. A "
+                    "d3d12_adapter or vulkan_device you set always wins. Takes effect at the next "
+                    "start")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+// Read by NVIDIA's Optimus and AMD's PowerXpress drivers when the exe loads: on a laptop with
+// switchable graphics they run the program on the dedicated GPU (src/gpu_choice.h has the
+// game's own choice). Not tied to mcla_prefer_dedicated_gpu: an exported variable is fixed.
+extern "C" {
+__declspec(dllexport) DWORD NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
 
 
 std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
@@ -292,8 +314,9 @@ bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
 // share the CPU's memory and whose smallest wave is 32 lanes); Direct3D 12 on AMD's discrete
 // cards, on AMD's integrated GCN (Vega) GPUs, on NVIDIA and when nothing is known. The rule
 // itself is src/automatic_api.h (apart from Windows, so a test can run it). Which GPU: the
-// one Direct3D 12 would take (the SDK's d3d12_adapter: the adapter of that number, else
-// the first one that isn't software), whatever API is then used for it. A software adapter
+// one the game uses (ChooseGpu, src/gpu_choice.h: Windows' graphics settings for this exe, else
+// the high-performance GPU; the SDK's d3d12_adapter, when set, wins), whatever API is then used
+// for it. A software adapter
 // (Windows' WARP: d3d12_adapter = -2, or its number) is Direct3D 12's, its vendor being
 // Microsoft's, neither AMD's nor Intel's: Vulkan has no device for it, so the recommendation
 // is Direct3D 12; a number that names no adapter gets none (the launcher, ShaderStamp.cs,
@@ -312,8 +335,9 @@ bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
 //  - Intel: the SDK takes a slower path of rasterizer-ordered views for render targets on
 //    Direct3D 12 and Vulkan uses ordinary framebuffer ones. Not measured: no Intel GPU.
 //  - NVIDIA: Vulkan is no faster in races (the RTX 5080).
-// The launcher's Graphics API setting repeats the rule (launcher/src/ShaderStamp.cs) so that
-// it can mark the API recommended for the player's GPU; this and that must agree. Vulkan
+// The launcher's Graphics API setting repeats the rule and the choice of the GPU
+// (launcher/src/ShaderStamp.cs) so that it can mark the API recommended for the player's GPU;
+// this and that must agree. Vulkan
 // needs vulkan-1.dll and, for Automatic, a Vulkan device that is the same GPU (matched by
 // LUID, else by vendor and device id): the SDK takes Vulkan's first device otherwise.
 // Choosing the API (launcher, pause menu, --mcla_gpu_backend) skips the decision; only the
@@ -426,62 +450,247 @@ int FindVulkanDevice(UINT vendor, UINT device_id, const LUID& luid) {
   return found >= 0 ? found : by_ids;
 }
 
+// --- Which GPU (src/gpu_choice.h) ---------------------------------------------------------
+
+std::string ToUtf8(const wchar_t* text) {
+  char name[512] = {};
+  WideCharToMultiByte(CP_UTF8, 0, text, -1, name, int(sizeof(name)) - 1, nullptr, nullptr);
+  return name;
+}
+
+// Whether Direct3D 12 can make a device on the adapter at feature level 11_0, which the SDK
+// requires of the adapter it takes (src/ui/d3d12/d3d12_provider.cpp).
+bool CanMakeD3d12Device(IDXGIAdapter1* adapter) {
+  HMODULE module = LoadLibraryW(L"d3d12.dll");  // (stays loaded: the SDK loads it again)
+  if (!module) {
+    return false;
+  }
+  const auto create_device =
+      reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(module, "D3D12CreateDevice"));
+  return create_device &&
+         SUCCEEDED(create_device(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr));
+}
+
+// The exe's entry in Windows' graphics settings (Settings > System > Display > Graphics): a value
+// named by the exe's full path, with data such as "GpuPreference=2;". False if there is none.
+bool ReadWindowsGraphicsEntry(std::string* exe, std::string* data) {
+  wchar_t path[MAX_PATH * 4] = {};
+  const DWORD length = GetModuleFileNameW(nullptr, path, DWORD(std::size(path)));
+  if (length == 0 || length >= std::size(path)) {
+    return false;
+  }
+  *exe = ToUtf8(path);
+  wchar_t value[512] = {};
+  DWORD size = sizeof(value);
+  if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", path,
+                   RRF_RT_REG_SZ, nullptr, value, &size) != ERROR_SUCCESS) {
+    return false;
+  }
+  *data = ToUtf8(value);
+  return true;
+}
+
+struct ChosenGpu {
+  bool done = false;
+  bool have = false;  // an adapter was chosen
+  bool prefer_dedicated = true;
+  int index = -1;  // its number in IDXGIFactory1::EnumAdapters1's order (the SDK's d3d12_adapter)
+  DXGI_ADAPTER_DESC1 desc{};
+  std::string name;
+  mcla::gpu_choice::Choice choice;
+  mcla::automatic_api::AdapterFacts facts;  // vendor, and for AMD's what Direct3D 12 says
+};
+ChosenGpu g_gpu;
+
+bool SameLuid(const LUID& a, const LUID& b) {
+  return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
+}
+
+// Lists the adapters, applies the rule of src/gpu_choice.h and logs both: the lines to ask for
+// when someone says the game is slow ("GPU: ..." in the log). Run once, before the API is
+// decided. Sets nothing: ApplyGpuChoice does, once the GPU plugin is loaded.
+void ChooseGpu() {
+  using namespace mcla::gpu_choice;
+  if (g_gpu.done) {
+    return;
+  }
+  g_gpu.done = true;
+  g_gpu.prefer_dedicated = REXCVAR_GET(mcla_prefer_dedicated_gpu);
+  IDXGIFactory1* factory = nullptr;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
+    REXLOG_WARN("GPU: DXGI could not be started; the SDK takes the adapter");
+    return;
+  }
+
+  // The adapters in the order the SDK numbers them (d3d12_adapter).
+  std::vector<DXGI_ADAPTER_DESC1> descs;
+  std::vector<Adapter> adapters;
+  std::vector<char> described;
+  IDXGIAdapter1* adapter = nullptr;
+  for (UINT i = 0; factory->EnumAdapters1(i, &adapter) == S_OK; ++i) {
+    DXGI_ADAPTER_DESC1 desc{};
+    const bool ok = SUCCEEDED(adapter->GetDesc1(&desc));
+    adapter->Release();
+    adapter = nullptr;
+    if (!ok) {
+      desc = {};
+    }
+    descs.push_back(desc);
+    described.push_back(ok);
+    adapters.push_back({(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0});
+  }
+  REXLOG_INFO("GPU: Windows lists {} adapter(s), in the order of d3d12_adapter:", descs.size());
+  for (size_t i = 0; i < descs.size(); ++i) {
+    REXLOG_INFO("GPU:   [{}] '{}' vendor 0x{:04X} device 0x{:04X}, {} MiB dedicated video memory{}",
+                i, ToUtf8(descs[i].Description), descs[i].VendorId, descs[i].DeviceId,
+                uint64_t(descs[i].DedicatedVideoMemory) >> 20,
+                adapters[i].software ? ", software" : "");
+  }
+
+  // Windows' ranking of them, by IDXGIFactory6 (Windows 10 1803 and later), as indices.
+  std::vector<int> high_performance, power_saving;
+  IDXGIFactory6* factory6 = nullptr;
+  if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory6))) && factory6) {
+    const auto rank = [&](DXGI_GPU_PREFERENCE preference, std::vector<int>& out,
+                          const char* what) {
+      IDXGIAdapter1* listed = nullptr;
+      std::string line;
+      for (UINT i = 0; factory6->EnumAdapterByGpuPreference(i, preference,
+                                                           IID_PPV_ARGS(&listed)) == S_OK;
+           ++i) {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(listed->GetDesc1(&desc))) {
+          for (size_t k = 0; k < descs.size(); ++k) {
+            if (SameLuid(desc.AdapterLuid, descs[k].AdapterLuid)) {
+              out.push_back(int(k));
+              line += fmt::format("{}{}", line.empty() ? "" : ", ", k);
+              break;
+            }
+          }
+        }
+        listed->Release();
+        listed = nullptr;
+      }
+      REXLOG_INFO("GPU: Windows ranks them for {}: {}", what, line.empty() ? "none" : line);
+    };
+    rank(DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, high_performance, "high performance");
+    rank(DXGI_GPU_PREFERENCE_MINIMUM_POWER, power_saving, "power saving");
+    factory6->Release();
+  } else {
+    REXLOG_INFO("GPU: this Windows has no IDXGIFactory6 (no ranking of the adapters)");
+  }
+
+  Request request;
+  request.prefer_dedicated = g_gpu.prefer_dedicated;
+  const std::string option_text = rex::cvar::GetFlagByName("d3d12_adapter");
+  request.adapter_option = std::atoi(option_text.c_str());
+  request.adapter_option_set = !option_text.empty() && rex::cvar::GetFlagSource("d3d12_adapter") !=
+                                                           rex::cvar::Source::kDefault;
+  std::string exe, entry;
+  if (ReadWindowsGraphicsEntry(&exe, &entry)) {
+    request.windows_preference = ParseWindowsPreference(entry);
+    REXLOG_INFO("GPU: Windows' graphics settings for '{}': '{}'", exe, entry);
+  } else {
+    REXLOG_INFO("GPU: Windows' graphics settings have no entry for '{}'", exe);
+  }
+
+  std::vector<signed char> usable_cache(adapters.size(), -1);
+  const auto usable = [&](int i) {
+    if (i < 0 || size_t(i) >= adapters.size() || !described[i]) {
+      return false;
+    }
+    if (usable_cache[i] < 0) {
+      IDXGIAdapter1* candidate = nullptr;
+      usable_cache[i] = factory->EnumAdapters1(UINT(i), &candidate) == S_OK && candidate &&
+                        CanMakeD3d12Device(candidate);
+      if (candidate) {
+        candidate->Release();
+      }
+    }
+    return usable_cache[i] != 0;
+  };
+  g_gpu.choice = Choose(adapters, high_performance, power_saving, request, usable);
+  const Choice& choice = g_gpu.choice;
+  if (choice.index < 0) {
+    if (choice.why == Why::kUserIndex || choice.why == Why::kUserSoftware) {
+      REXLOG_WARN("GPU: d3d12_adapter = {} set by the user names no adapter that runs "
+                  "Direct3D 12 at feature level 11_0", request.adapter_option);
+    } else {
+      REXLOG_WARN("GPU: no adapter runs Direct3D 12 at feature level 11_0");
+    }
+    factory->Release();
+    return;
+  }
+  g_gpu.have = true;
+  g_gpu.index = choice.index;
+  g_gpu.desc = descs[choice.index];
+  g_gpu.name = ToUtf8(g_gpu.desc.Description);
+  g_gpu.facts.vendor = g_gpu.desc.VendorId;
+  if (g_gpu.desc.VendorId == mcla::automatic_api::kVendorAmd) {
+    IDXGIAdapter1* chosen = nullptr;
+    if (factory->EnumAdapters1(UINT(choice.index), &chosen) == S_OK && chosen) {
+      ReadAdapterFacts(chosen, g_gpu.facts);
+      chosen->Release();
+    }
+  }
+  factory->Release();
+
+  std::string why;
+  switch (choice.why) {
+    case Why::kUserIndex:
+      why = fmt::format("d3d12_adapter = {} set by the user", request.adapter_option);
+      break;
+    case Why::kUserSoftware:
+      why = "d3d12_adapter = -2 set by the user: the software adapter";
+      break;
+    case Why::kUserFirst:
+      why = fmt::format("d3d12_adapter = {} set by the user: the first adapter Windows lists",
+                        request.adapter_option);
+      break;
+    case Why::kOff:
+      why = "mcla_prefer_dedicated_gpu is off: the first adapter Windows lists";
+      break;
+    case Why::kWindowsPowerSaving:
+      why = "Windows' graphics settings ask for power saving for this app";
+      break;
+    case Why::kWindowsHighPerformance:
+      why = "Windows' graphics settings ask for high performance for this app";
+      break;
+    case Why::kHighPerformance:
+      why = "the high-performance GPU";
+      break;
+    case Why::kFirstListed:
+      why = high_performance.empty() ? "the first adapter Windows lists, as it ranks none"
+                                     : "the first adapter Windows lists";
+      break;
+    case Why::kNone:
+      break;
+  }
+  if (choice.set_default && choice.first_index >= 0 && choice.first_index != choice.index) {
+    why += fmt::format("; Windows lists '{}' first", ToUtf8(descs[choice.first_index].Description));
+  }
+  REXLOG_INFO("GPU: '{}' ({})", g_gpu.name, why);
+}
+
 }  // namespace
 
 // Works out the rule above once: what Automatic does, which Vulkan device that is, and
 // the API to recommend for the GPU. `automatic` is whether the player left the API on
-// Automatic (only then is Vulkan's device looked for and the decision logged).
+// Automatic (only then is Vulkan's device looked for and the decision logged). The GPU is
+// ChooseGpu's.
 static void DecideAutomaticBackend(bool automatic) {
   if (g_automatic.decided) {
     return;
   }
   g_automatic.decided = true;
-  const int adapter_option = std::atoi(rex::cvar::GetFlagByName("d3d12_adapter").c_str());
-  if (adapter_option == -2) {  // WARP
-    g_automatic.recommended = "d3d12";
+  ChooseGpu();
+  if (!g_gpu.have) {
     return;
   }
-  IDXGIFactory1* factory = nullptr;
-  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
-    return;
-  }
-  // The adapter Direct3D 12 would take. Only an AMD one is asked what it is (its
-  // architecture and smallest wave): an Intel one is Vulkan's whatever it is, anything else
-  // Direct3D 12's.
-  DXGI_ADAPTER_DESC1 chosen{};
-  bool have_chosen = false;
-  mcla::automatic_api::AdapterFacts facts;
-  IDXGIAdapter1* adapter = nullptr;
-  for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
-    DXGI_ADAPTER_DESC1 desc{};
-    const bool described = SUCCEEDED(adapter->GetDesc1(&desc));
-    const bool candidate =
-        described && (adapter_option >= 0 ? int(i) == adapter_option
-                                          : !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE));
-    if (candidate) {
-      facts.vendor = desc.VendorId;
-      if (desc.VendorId == mcla::automatic_api::kVendorAmd) {
-        ReadAdapterFacts(adapter, facts);
-      }
-    }
-    adapter->Release();
-    adapter = nullptr;
-    if (candidate) {
-      chosen = desc;
-      have_chosen = true;
-      break;
-    }
-  }
-  factory->Release();
-  if (!have_chosen) {
-    return;
-  }
-
-  const bool vulkan_gpu = mcla::automatic_api::PrefersVulkan(facts);
-  char name[128] = {};
-  WideCharToMultiByte(CP_UTF8, 0, chosen.Description, -1, name, int(sizeof(name)) - 1, nullptr,
-                      nullptr);
-  const char* kind = mcla::automatic_api::KindOf(facts);
+  const DXGI_ADAPTER_DESC1& chosen = g_gpu.desc;
+  const char* name = g_gpu.name.c_str();
+  const bool vulkan_gpu = mcla::automatic_api::PrefersVulkan(g_gpu.facts);
+  const char* kind = mcla::automatic_api::KindOf(g_gpu.facts);
   if (!vulkan_gpu) {
     g_automatic.recommended = "d3d12";
     if (automatic) {
@@ -508,6 +717,44 @@ static void DecideAutomaticBackend(bool automatic) {
     g_automatic.vulkan_device = device;
     REXLOG_INFO("graphics API: Vulkan (Automatic: {} '{}', Vulkan device {})", kind, name,
                 device);
+  }
+}
+
+// Once the GPU plugin is loaded: the chosen GPU becomes d3d12_adapter's default (a number the
+// player set is left alone, and nothing is written to mcla.toml), and when the API is Vulkan,
+// Automatic's or the player's, vulkan_device's default becomes the Vulkan device of that same
+// GPU (matched by LUID, else by vendor and device id) instead of the loader's first.
+// mcla_prefer_dedicated_gpu off leaves both as they were before: only Automatic's Vulkan sets
+// vulkan_device.
+static void ApplyGpuChoice(bool vulkan) {
+  if (!g_gpu.have) {
+    return;
+  }
+  if (g_gpu.choice.set_default &&
+      !rex::cvar::SetDefaultValue("d3d12_adapter", std::to_string(g_gpu.index))) {
+    REXLOG_WARN("GPU: d3d12_adapter = {} not taken", g_gpu.index);
+  }
+  if (!vulkan) {
+    return;
+  }
+  if (rex::cvar::GetFlagSource("vulkan_device") != rex::cvar::Source::kDefault) {
+    REXLOG_INFO("GPU: vulkan_device = {} set by the user",
+                rex::cvar::GetFlagByName("vulkan_device"));
+    return;
+  }
+  int device = g_automatic.vulkan ? g_automatic.vulkan_device : -1;
+  if (!g_automatic.vulkan && g_gpu.prefer_dedicated) {
+    device = FindVulkanDevice(g_gpu.desc.VendorId, g_gpu.desc.DeviceId, g_gpu.desc.AdapterLuid);
+  }
+  if (device >= 0) {
+    if (rex::cvar::SetDefaultValue("vulkan_device", std::to_string(device))) {
+      REXLOG_INFO("GPU: Vulkan device {} is '{}'", device, g_gpu.name);
+    } else {
+      REXLOG_WARN("GPU: vulkan_device = {} not taken", device);
+    }
+  } else if (g_gpu.prefer_dedicated) {
+    REXLOG_INFO("GPU: {} for '{}'; vulkan_device stays at the loader's first",
+                device == -2 ? "Vulkan is not available" : "Vulkan lists no device", g_gpu.name);
   }
 }
 
@@ -548,6 +795,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // the SDK tries once more and reports it.
   std::string backend = REXCVAR_GET(mcla_gpu_backend);
 #ifdef _WIN32
+  ChooseGpu();
   DecideAutomaticBackend(backend == "any");
   if (backend == "any" && g_automatic.vulkan) {
     backend = "vulkan";
@@ -560,6 +808,9 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
                    backend);
     }
   }
+#ifdef _WIN32
+  const bool vulkan_backend = backend == "vulkan" && config.graphics;
+#endif
   if (!config.graphics) {
     config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);
   }
@@ -567,13 +818,10 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   MclaMigrateAntiAliasing();
   MclaApplyPreset();
 #ifdef _WIN32
-  // Automatic took Vulkan for the GPU Direct3D 12 would use: Vulkan's own choice (its first
-  // device) must be that GPU too. A vulkan_device given by hand wins.
-  if (g_automatic.vulkan && g_automatic.vulkan_device >= 0 &&
-      rex::cvar::GetFlagSource("vulkan_device") == rex::cvar::Source::kDefault &&
-      !rex::cvar::SetDefaultValue("vulkan_device", std::to_string(g_automatic.vulkan_device))) {
-    REXLOG_WARN("graphics API: vulkan_device = {} not taken", g_automatic.vulkan_device);
-  }
+  // The GPU the game chose (ChooseGpu) is the one the SDK takes, whatever the API: d3d12_adapter
+  // for Direct3D 12, vulkan_device for Vulkan (Automatic's or the player's), whose own choice
+  // is its first device. A d3d12_adapter or vulkan_device given by hand wins.
+  ApplyGpuChoice(vulkan_backend);
 #endif
 
   // Development: scripted controller input (src/dev_pad.cpp), off by default.

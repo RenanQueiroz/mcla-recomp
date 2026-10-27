@@ -155,11 +155,12 @@ sealed record DisplayHdr(bool HdrOn, float PeakNits, float SdrWhiteNits)
 }
 
 /// The GPU vendor the game will use, for the settings that are a vendor's feature (the low latency
-/// setting's name): the adapter the game used at its last start (its shader record has it: the
-/// game picks its own, which on a laptop with two GPUs can be the other one) while an adapter of
-/// that vendor is still in the machine (a swapped card, a removed external one: the record names
-/// the old one until the next start), else the first hardware adapter's, as DXGI lists them (0
-/// if none can be read).
+/// setting's name): the GPU the game will choose at its next start (DisplayDrivers.ChooseGpu: the
+/// one Windows' graphics settings give the exe, else the high-performance one, which on a laptop
+/// with two GPUs is not the one DXGI lists first), else the adapter the game used at its last start
+/// (its shader record has it) while an adapter of that vendor is still in the machine (a swapped
+/// card, a removed external one: the record names the old one until the next start), else the first
+/// hardware adapter's, as DXGI lists them (0 if none can be read).
 static class GpuVendor
 {
     static readonly Lazy<IReadOnlyList<uint>> Vendors = new(() => [.. DisplayDrivers.List().Select(adapter => adapter.Vendor)]);
@@ -167,8 +168,9 @@ static class GpuVendor
     public static readonly Lazy<uint> First = new(() => Vendors.Value is { Count: > 0 } list ? list[0] : 0u);
 
     // (Adapters that can't be listed at all can't contradict the record.)
-    public static uint For(uint lastUsed) =>
-        lastUsed != 0 && (Vendors.Value.Count == 0 || Vendors.Value.Contains(lastUsed)) ? lastUsed : First.Value;
+    public static uint For(uint lastUsed, DisplayDrivers.GpuOptions options) =>
+        DisplayDrivers.ChooseGpu(options)?.Vendor
+        ?? (lastUsed != 0 && (Vendors.Value.Count == 0 || Vendors.Value.Contains(lastUsed)) ? lastUsed : First.Value);
 }
 
 /// The main display's refresh rate as Windows reports it (a variable-refresh display: its
