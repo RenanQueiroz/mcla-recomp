@@ -47,6 +47,7 @@ git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
+git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
@@ -148,7 +149,7 @@ The Vulkan backend counted none of these, so `REX_PERF_LOG_CSV` showed 0 draws o
 
 Direct3D 12 command lists are replayed and submitted on a thread of their own ("GPU Submission"). The GPU command thread only records into the deferred command list; at the end of a submission the recording and its command allocator go to the worker, which resets the command list, replays the recording into it, closes it, executes it and signals the submission fence. While threaded, a submission is also ended every 1,000 draws (`d3d12_threaded_submission_split_draws`, 0 for never) so that replay overlaps recording; not while an occlusion query is active or pipelines are being created. Allocators are reused only after their fence, which the worker signals after submitting. Anything that has to see earlier work in the queue first (tile mapping updates, clearing the allocator cache, shutdown) lets the worker finish, and the swap waits until its frame is in the queue, so presentation latency does not grow. Cvar `d3d12_threaded_submission` (default on; can change at run time). The design is from ForzaHorizon1-ReImagined's threaded submission for Vulkan (MIT); the code here is written for this backend.
 
-Before this, replaying the recording took 23 to 41% of the GPU command thread at native resolution. Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D, uncapped): 15.1% less GPU command thread time per draw at native resolution (95 to 111 FPS on a heavy view; the split alone 7.1%), 4.7% at three times the resolution, where the GPU limits. 60 FPS pacing unchanged (99.4% of frames within 1 ms). Stress: three 15-minute runs (cvar switched every 5 seconds; achievement toasts; minimize and restore; about 110 fullscreen switches at 3x) and runs with the D3D12 debug layer, also with GPU-based validation: no errors from this change and no hangs. Built and run on Windows only.
+Before this, replaying the recording took 23 to 41% of the GPU command thread at native resolution. Measured in one run with the cvar switched every 4 seconds (Windows, D3D12, RTX 5080 and Ryzen 7 9800X3D, uncapped): 15.1% less GPU command thread time per draw at native resolution (95 to 111 FPS on a heavy view; the split alone 7.1%), 4.7% at three times the resolution, where the GPU limits. 60 FPS pacing unchanged (99.4% of frames within 1 ms). Stress: three 15-minute runs (cvar switched every 5 seconds; achievement toasts; minimize and restore; about 110 fullscreen switches at 3x) and runs with the D3D12 debug layer, also with GPU-based validation: no errors from this change and no hangs. Built and run on Windows only. It showed short bursts of garbage blocks on an AMD GPU that `rexglue-threaded-submission-d3d12-idle-wait.patch` fixes.
 
 | Change | Files | Affects |
 |---|---|---|
@@ -1412,6 +1413,25 @@ With frame generation on (FSR 3.1; 3x uncapped, and the Half display cap, 116 re
 | Frame generation's components in the runtime on every platform; the option | `cmake/fidelityfx/CMakeLists.txt`, `cmake/rexglue_fsr.cmake` | Linux, the PS5 (Windows unchanged) |
 | The device's runtime check off Windows; `rexui` knows what the runtime is | `src/ui/vulkan/vulkan_device.cpp`, `src/ui/CMakeLists.txt` | Linux, the PS5 |
 | The pacer on a fixed-refresh display | `src/ui/vulkan/vulkan_presenter_frame_generation.cpp` | the PS5 (and a PC with `frame_generation_pacing=display`) |
+
+## rexglue-threaded-submission-d3d12-idle-wait.patch
+
+**Why.** A fix for `rexglue-threaded-submission-d3d12.patch`. On the Radeon of a Ryzen 7 9800X3D PC (D3D12, adapter 1, the integrated GPU), the game showed, for 2 to 3 frames at a time and at the same places of a deterministic route, a whitish translucent veil over the scene in blocks of about 8x8 pixels (at 720p; on dark walls and roads it looked like flat beige, tile-shaped areas). `--d3d12_threaded_submission=false` removed it, and the SDK without the threaded submission never showed it. The D3D12 debug layer reported no errors in either mode.
+
+**What it changes.** The GPU command thread now waits until the submission thread has put its lists in the queue whenever it is about to spin or wait for more guest commands (`CommandProcessor::PrepareForWait`: its idle loop, which spins with `SwitchToThread` and then waits, and the long waits on a register or memory value). It has nothing else to process then, so none of the overlap with the replay is lost; the wait is short (about 0.4 ms on average, about 0.6 times per swap). Cvar `d3d12_threaded_submission_idle_wait` (default on; off is the behaviour before this patch; can change at run time).
+
+**What is known, and what is not.** The exact cause is not known. The veil needs the GPU command thread to spin in its idle loop while the submission thread replays and submits the list of the guest command buffer that has just ended (an extra thread burning a core did not bring it back). Measured on the Radeon, on the 12 seconds of the route where the veil came back in every threaded run of a longer one (`blink-drive5.pad` of the scratch tests, the first stretch of the longer route), counting events of at least 100 changed 32-pixel blocks in a 60 FPS capture, per run:
+- shipped behaviour (cvar off, or without the patch): 4, 3, 3, 1, 2, 4 (mean 2.8).
+- with this patch: 0, 0. In a scratch build with a diagnostics switchboard, the same wait at the idle entry: 0, 0, and with a wait at every packet start too: 0, 0; a wait right after the hand-over of the last list of every guest command buffer: 0, 0, 0, 0; a 3 or 10 ms sleep right after it: 0, 0, and 3 ms right before it: 0, 0; an idle spin of 5 or 50 iterations instead of 500: 0, 0, and no spin at all: 0; a wait after every hand-over (the "d1" of the notes): 0, and 0, 0 on the longer route, like the unthreaded mode.
+- no effect (1 to 7 events a run): a UAV or aliasing barrier at the start of every list; the submission thread waiting for the GPU after every list; the command thread waiting for the submission thread at the start of every draw, copy, swap, occlusion packet, submission start or fence check, or at every packet start; deferring the write-back of the read pointer to after the list is queued; a store fence at the hand-over; a higher priority or a fixed processor for the submission thread; asynchronous pipelines off; memexport readback off. An extra thread burning a core with the wait in place: 1 weak event.
+- Spinning with only `SwitchToThread`, or only a memory fence, was as bad as `MaybeYield`; spinning with `_mm_pause` (never giving the core away) once ended in `DEVICE_REMOVED` within seconds, a hung GPU, which says the damage is real GPU-side garbage and not an artefact of the capture.
+- The submission thread is not falling behind: its replay time (about 0.25 ms on average, 10 ms at most) and its latency from the hand-over (about 50 us) are about the same with and without the veil, and making it slower (a 2 ms sleep before the replay or before `ExecuteCommandLists`, one run) did not make the veil worse.
+
+Not measured yet at the time of writing: the longer route on the Radeon with this patch (shipped against fixed, A-B-B-A), the RTX 5080 (frame time, and the GPU command thread's CPU time per swap: the gain of the threading must remain), a run with the D3D12 debug layer, and Vulkan, which this patch does not touch (it has its own threaded submission, `rexglue-threaded-submission-vulkan.patch`, and may have the same idle spin). Built and run on Windows only; the PS5's list names the patch so that the lists stay in step (D3D12 code, not built there).
+
+| Change | Files | Affects |
+|---|---|---|
+| The command thread waits for the submission thread before it spins or waits for commands | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12, only with threaded submission on |
 
 ## rexglue-upstream-storage-flush.patch
 

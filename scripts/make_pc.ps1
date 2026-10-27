@@ -430,6 +430,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-content-header-padding.patch"; File = "src\system\xam\content_manager.cpp"; Adds = "Written as zeros." }
     @{ Patch = "rexglue-low-latency.patch"; File = "src\ui\low_latency.cpp"; Adds = "LowLatency::OnFrameStart" }
     @{ Patch = "rexglue-frame-generation-nonwindows.patch"; File = "src\ui\vulkan\vulkan_presenter_frame_generation.cpp"; Adds = "frame_generation_pacing" }
+    @{ Patch = "rexglue-threaded-submission-d3d12-idle-wait.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_threaded_submission_idle_wait" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }
