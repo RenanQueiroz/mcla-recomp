@@ -1,9 +1,9 @@
 diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
 new file mode 100644
-index 0000000..022e720
+index 0000000..643e995
 --- /dev/null
 +++ b/include/rex/audio/audio_dump.h
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,175 @@
 +/**
 + * @file        audio/audio_dump.h
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -20,13 +20,20 @@ index 0000000..022e720
 +#include <atomic>
 +#include <cstdint>
 +#include <cstdio>
++#include <mutex>
 +#include <string>
 +#include <vector>
 +
 +namespace rex::audio::dump {
 +
-+/// Reads the cvars, creates the dump folder and starts the statistics reporter. Called once, by
++/// Reads the cvars, creates the dump folder and starts the statistics reporter. Called by
 +/// AudioSystem::Setup. Shutdown() prints the totals and stops the reporter.
++///
++/// The game exits through std::_Exit (window close), which runs no Shutdown: Init() also arms a
++/// process-exit guard (a static destructor, which still runs then, after the other threads have
++/// been killed) that flushes every open dump file, patches its WAV header and writes the final
++/// totals to <audio_dump_dir>/audio_stats_total.txt. Nothing here can end in std::terminate:
++/// the reporter thread object is never destroyed while joinable.
 +void Init();
 +void Shutdown();
 +
@@ -96,9 +103,22 @@ index 0000000..022e720
 +/// Bytes still allowed to be written by all dump writers together (audio_dump_max_mb).
 +bool TakeBudget(uint64_t bytes);
 +
-+/// Streaming WAV writer: the header is written at Open and patched at Close. Writes are buffered
-+/// in memory and reach the file in blocks of 256 KB.
-+class WavWriter {
++/// A dump file that the process-exit guard can bring to a consistent state (see Init()).
++class ExitFlushable {
++ public:
++  /// Never blocks: skips the file when its lock cannot be taken (a thread killed inside a write).
++  virtual void FlushForExit() = 0;
++
++ protected:
++  virtual ~ExitFlushable() = default;
++  void RegisterForExit();
++  void UnregisterForExit();
++};
++
++/// Streaming WAV writer: the header is written at Open and its sizes are patched after every
++/// block that is written to the file (blocks of 256 KB) and at Close, so the file on disk is a
++/// valid WAV at any moment, whatever happens to the process afterwards.
++class WavWriter : public ExitFlushable {
 + public:
 +  WavWriter() = default;
 +  ~WavWriter() { Close(); }
@@ -112,16 +132,21 @@ index 0000000..022e720
 +  void Close();
 +  bool is_open() const { return file_ != nullptr; }
 +  uint64_t data_bytes() const { return data_bytes_; }
++  /// Number of blocks written to the file so far (changes when the file on disk has grown).
++  uint32_t flushes() const { return flushes_; }
++  void FlushForExit() override;
 +
 + private:
-+  void Flush();
++  void FlushLocked();
++  std::mutex mutex_;
 +  std::FILE* file_ = nullptr;
 +  uint64_t data_bytes_ = 0;
++  uint32_t flushes_ = 0;
 +  std::vector<uint8_t> buffer_;
 +};
 +
 +/// Plain append-only file with the same budget.
-+class RawWriter {
++class RawWriter : public ExitFlushable {
 + public:
 +  RawWriter() = default;
 +  ~RawWriter() { Close(); }
@@ -133,8 +158,10 @@ index 0000000..022e720
 +  void Close();
 +  bool is_open() const { return file_ != nullptr; }
 +  uint64_t bytes() const { return bytes_; }
++  void FlushForExit() override;
 +
 + private:
++  std::mutex mutex_;
 +  std::FILE* file_ = nullptr;
 +  uint64_t bytes_ = 0;
 +};
@@ -230,7 +257,7 @@ index f8949ca..18cd701 100644
  
  }  // namespace rex::audio::sdl
 diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
-index 8426798..2ba8226 100644
+index 8426798..c22c332 100644
 --- a/include/rex/audio/xma/context.h
 +++ b/include/rex/audio/xma/context.h
 @@ -164,6 +164,8 @@ struct kPacketInfo {
@@ -251,7 +278,7 @@ index 8426798..2ba8226 100644
  
    int Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr);
    bool Work();
-@@ -263,6 +267,17 @@ class XmaContext {
+@@ -263,6 +267,18 @@ class XmaContext {
  
    void StoreContextMerged(const XMA_CONTEXT_DATA& data, const XMA_CONTEXT_DATA& initial_data,
                            uint8_t* context_ptr);
@@ -265,11 +292,12 @@ index 8426798..2ba8226 100644
 +  bool DumpOpen(uint32_t rate, uint32_t channels);
 +  void DumpInputBuffers(const XMA_CONTEXT_DATA& data);
 +  void DumpPcm(const uint8_t* big_endian_samples, size_t bytes, const XMA_CONTEXT_DATA& data);
++  void DumpWriteJson();
 +  void DumpClose();
  
    static void ConvertFrame(const uint8_t** samples, bool is_two_channel, uint8_t* output_buffer);
  
-@@ -306,6 +321,13 @@ class XmaContext {
+@@ -306,6 +322,13 @@ class XmaContext {
    bool carry_valid_ = false;
    uint8_t pending_output_limit_ = 0;
    uint8_t pending_start_skip_ = 0;
@@ -297,10 +325,10 @@ index d55f16a..5d2f1e6 100644
      xma_context.cpp
 diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
 new file mode 100644
-index 0000000..01b3d8f
+index 0000000..7814eb8
 --- /dev/null
 +++ b/src/audio/audio_dump.cpp
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,531 @@
 +/**
 + * @file        audio/audio_dump.cpp
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -313,18 +341,21 @@ index 0000000..01b3d8f
 +
 +#include <algorithm>
 +#include <chrono>
-+#include <condition_variable>
++#include <cstdio>
 +#include <cstring>
 +#include <filesystem>
 +#include <mutex>
++#include <string>
 +#include <thread>
++#include <vector>
 +
 +#include <rex/audio/audio_dump.h>
 +#include <rex/cvar.h>
 +#include <rex/logging.h>
 +
 +REXCVAR_DEFINE_BOOL(audio_stats, false, "Audio",
-+                    "Dev tool: log counters of the audio path every audio_stats_interval seconds and at exit "
++                    "Dev tool: log counters of the audio path every audio_stats_interval seconds (an "
++                    "'interval' line, and a cumulative 'TOTAL' line: the last one is the result) and at exit "
 +                    "(XMA decoding and what the game wrote into a context meanwhile, the audio worker's pumps, "
 +                    "the SDL output's underruns)");
 +REXCVAR_DEFINE_INT32(audio_stats_interval, 10, "Audio", "Dev tool: seconds between audio_stats lines")
@@ -350,11 +381,25 @@ index 0000000..01b3d8f
 +thread_local bool tls_xma_worker = false;
 +Counters g_counters;
 +
-+std::thread g_reporter;
-+std::mutex g_reporter_mutex;
-+std::condition_variable g_reporter_cv;
-+bool g_reporter_stop = false;
++// The reporter thread and its flags live on the heap and are never destroyed while the thread may
++// still run: a global std::thread that is still joinable when the static destructors run ends in
++// std::terminate (the game leaves through std::_Exit, which kills every thread and then runs the
++// DLLs' static destructors). The thread polls its flags (no lock, nothing a killed thread could
++// leave locked).
++struct Reporter {
++  std::thread thread;
++  std::atomic<bool> stop{false};
++  std::atomic<bool> finished{false};
++};
++Reporter* g_reporter = nullptr;
 +bool g_initialized = false;
++std::atomic<bool> g_total_written{false};
++
++// Maxima and minima over the whole run, as of the last interval (the counters' own are reset at every one).
++std::atomic<uint64_t> g_run_work_max{0};
++std::atomic<uint64_t> g_run_pump_max{0};
++std::atomic<uint64_t> g_run_gap_max{0};
++std::atomic<uint64_t> g_run_queue_min{~0ull};
 +
 +struct Snapshot {
 +  uint64_t xma_work_inline = 0, xma_work_worker = 0, xma_work_us = 0, xma_work_slow = 0, xma_kicks = 0,
@@ -396,60 +441,167 @@ index 0000000..01b3d8f
 +  return b ? a / b : 0;
 +}
 +
-+// One statistics line. `prev` is the snapshot of the last line (zeros for the totals).
-+void Report(const char* label, const Snapshot& now, const Snapshot& prev, uint64_t work_max,
-+            uint64_t pump_max, uint64_t gap_max, uint64_t queue_min) {
-+  const uint64_t works = (now.xma_work_inline - prev.xma_work_inline) +
-+                         (now.xma_work_worker - prev.xma_work_worker);
-+  REXAPU_INFO(
-+      "audio stats {} t={:.1f}s | xma: kicks={} work inline={} worker={} avg_us={} max_us={} slow(>2ms)={} "
-+      "frames={} errors={} recheck_abort={} stalled={} cas_retry={} | game wrote during a decode: "
-+      "read_offset={} valid={} other={} | pump: n={} avg_us={} max_us={} gap_max_us={} late(>8ms)={} "
-+      "over4ms={} over8ms={} | sdl: callbacks={} frames={} underruns={} queue_min={}",
-+      label, static_cast<double>(NowUs()) / 1e6, now.xma_kicks - prev.xma_kicks,
-+      now.xma_work_inline - prev.xma_work_inline, now.xma_work_worker - prev.xma_work_worker,
-+      Div(now.xma_work_us - prev.xma_work_us, works), work_max, now.xma_work_slow - prev.xma_work_slow,
-+      now.xma_frames - prev.xma_frames, now.xma_decode_errors - prev.xma_decode_errors,
-+      now.xma_recheck_abort - prev.xma_recheck_abort, now.xma_stalled_loops - prev.xma_stalled_loops,
-+      now.xma_cas_retries - prev.xma_cas_retries, now.wrote_rd - prev.wrote_rd,
-+      now.wrote_valid - prev.wrote_valid, now.wrote_other - prev.wrote_other,
-+      now.pump_count - prev.pump_count, Div(now.pump_us - prev.pump_us, now.pump_count - prev.pump_count),
-+      pump_max, gap_max, now.pump_late - prev.pump_late, now.pump_over_4ms - prev.pump_over_4ms,
-+      now.pump_over_8ms - prev.pump_over_8ms, now.sdl_callbacks - prev.sdl_callbacks,
-+      now.sdl_frames - prev.sdl_frames, now.sdl_underruns - prev.sdl_underruns,
-+      queue_min == ~0ull ? 0 : queue_min);
++unsigned long long U(uint64_t v) {
++  return static_cast<unsigned long long>(v);
 +}
 +
-+void ReporterMain(int interval_s) {
++// One statistics line. `prev` is the snapshot of the last line (zeros for the totals).
++std::string Format(const char* label, const Snapshot& now, const Snapshot& prev, uint64_t work_max,
++                   uint64_t pump_max, uint64_t gap_max, uint64_t queue_min) {
++  const uint64_t works = (now.xma_work_inline - prev.xma_work_inline) +
++                         (now.xma_work_worker - prev.xma_work_worker);
++  char buf[1536];
++  std::snprintf(
++      buf, sizeof(buf),
++      "audio stats %s t=%.1fs | xma: kicks=%llu work inline=%llu worker=%llu avg_us=%llu max_us=%llu "
++      "slow(>2ms)=%llu frames=%llu errors=%llu recheck_abort=%llu stalled=%llu cas_retry=%llu | game wrote "
++      "during a decode: read_offset=%llu valid=%llu other=%llu | pump: n=%llu avg_us=%llu max_us=%llu "
++      "gap_max_us=%llu late(>8ms)=%llu over4ms=%llu over8ms=%llu | sdl: callbacks=%llu frames=%llu "
++      "underruns=%llu queue_min=%llu",
++      label, static_cast<double>(NowUs()) / 1e6, U(now.xma_kicks - prev.xma_kicks),
++      U(now.xma_work_inline - prev.xma_work_inline), U(now.xma_work_worker - prev.xma_work_worker),
++      U(Div(now.xma_work_us - prev.xma_work_us, works)), U(work_max),
++      U(now.xma_work_slow - prev.xma_work_slow), U(now.xma_frames - prev.xma_frames),
++      U(now.xma_decode_errors - prev.xma_decode_errors), U(now.xma_recheck_abort - prev.xma_recheck_abort),
++      U(now.xma_stalled_loops - prev.xma_stalled_loops), U(now.xma_cas_retries - prev.xma_cas_retries),
++      U(now.wrote_rd - prev.wrote_rd), U(now.wrote_valid - prev.wrote_valid),
++      U(now.wrote_other - prev.wrote_other), U(now.pump_count - prev.pump_count),
++      U(Div(now.pump_us - prev.pump_us, now.pump_count - prev.pump_count)), U(pump_max), U(gap_max),
++      U(now.pump_late - prev.pump_late), U(now.pump_over_4ms - prev.pump_over_4ms),
++      U(now.pump_over_8ms - prev.pump_over_8ms), U(now.sdl_callbacks - prev.sdl_callbacks),
++      U(now.sdl_frames - prev.sdl_frames), U(now.sdl_underruns - prev.sdl_underruns),
++      U(queue_min == ~0ull ? 0 : queue_min));
++  return buf;
++}
++
++// The cumulative line: everything since the start, maxima and minima of the whole run.
++std::string TotalLine() {
++  Counters& c = g_counters;
++  return Format("TOTAL", Take(), Snapshot{},
++                std::max(g_run_work_max.load(), c.xma_work_us_max.load()),
++                std::max(g_run_pump_max.load(), c.pump_us_max.load()),
++                std::max(g_run_gap_max.load(), c.pump_gap_max_us.load()),
++                std::min(g_run_queue_min.load(), c.sdl_queue_min.load()));
++}
++
++// Writes the final totals next to the dumps (once). The file exists even when the process left
++// through std::_Exit and the log's last lines are the periodic ones.
++void WriteTotalFile(const std::string& line) {
++  if (g_dir.empty() || g_total_written.exchange(true)) {
++    return;
++  }
++  if (std::FILE* f = std::fopen((g_dir + "audio_stats_total.txt").c_str(), "wb")) {
++    std::fwrite(line.data(), 1, line.size(), f);
++    std::fputc('\n', f);
++    std::fclose(f);
++  }
++}
++
++void ReporterMain(Reporter* self, int interval_s) {
 +  Snapshot prev;
-+  uint64_t run_work_max = 0, run_pump_max = 0, run_gap_max = 0, run_queue_min = ~0ull;
-+  std::unique_lock<std::mutex> lock(g_reporter_mutex);
-+  while (!g_reporter_stop) {
-+    if (g_reporter_cv.wait_for(lock, std::chrono::seconds(interval_s), [] { return g_reporter_stop; })) {
++  const auto interval = std::chrono::seconds(interval_s);
++  auto due = std::chrono::steady_clock::now() + interval;
++  while (!self->stop.load(std::memory_order_acquire)) {
++    std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    if (self->stop.load(std::memory_order_acquire)) {
 +      break;
 +    }
++    if (std::chrono::steady_clock::now() < due) {
++      continue;
++    }
++    due += interval;
 +    Counters& c = g_counters;
 +    const uint64_t work_max = c.xma_work_us_max.exchange(0);
 +    const uint64_t pump_max = c.pump_us_max.exchange(0);
 +    const uint64_t gap_max = c.pump_gap_max_us.exchange(0);
 +    const uint64_t queue_min = c.sdl_queue_min.exchange(~0ull);
-+    run_work_max = std::max(run_work_max, work_max);
-+    run_pump_max = std::max(run_pump_max, pump_max);
-+    run_gap_max = std::max(run_gap_max, gap_max);
-+    run_queue_min = std::min(run_queue_min, queue_min);
++    Max(g_run_work_max, work_max);
++    Max(g_run_pump_max, pump_max);
++    Max(g_run_gap_max, gap_max);
++    Min(g_run_queue_min, queue_min);
 +    const Snapshot now = Take();
-+    Report("interval", now, prev, work_max, pump_max, gap_max, queue_min);
++    REXAPU_INFO("{}", Format("interval", now, prev, work_max, pump_max, gap_max, queue_min));
++    // The cumulative line too, every time: the process may leave without a chance to print the last one.
++    REXAPU_INFO("{}", TotalLine());
 +    prev = now;
 +  }
-+  Counters& c = g_counters;
-+  run_work_max = std::max(run_work_max, c.xma_work_us_max.load());
-+  run_pump_max = std::max(run_pump_max, c.pump_us_max.load());
-+  run_gap_max = std::max(run_gap_max, c.pump_gap_max_us.load());
-+  run_queue_min = std::min(run_queue_min, c.sdl_queue_min.load());
-+  Report("TOTAL", Take(), Snapshot{}, run_work_max, run_pump_max, run_gap_max, run_queue_min);
++  const std::string total = TotalLine();
++  REXAPU_INFO("{}", total);
++  WriteTotalFile(total);
++  self->finished.store(true, std::memory_order_release);
++}
++
++void FlushAllForExit();
++
++// Runs when the process ends: from exit(), or from the DLL's detach after std::_Exit/ExitProcess
++// (the other threads are gone by then and may have been killed inside a lock, so nothing here
++// waits on a lock: try_lock or skip). Never throws.
++void OnProcessExit() {
++  if (!g_stats.load() && !g_dump.load()) {
++    return;
++  }
++  FlushAllForExit();
++  Reporter* r = g_reporter;
++  if (r) {
++    // Alive (exit() from a thread of the process): it prints the totals when told to stop.
++    // Killed (ExitProcess): it never answers; the totals are written here.
++    r->stop.store(true, std::memory_order_release);
++    for (int i = 0; i < 40 && !r->finished.load(std::memory_order_acquire); ++i) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
++    if (!r->finished.load(std::memory_order_acquire)) {
++      WriteTotalFile(TotalLine());
++    }
++  }
++}
++
++struct ExitGuard {
++  ~ExitGuard() {
++    try {
++      OnProcessExit();
++    } catch (...) {
++    }
++  }
++};
++
++// The dump files that are open (leaked: it is usable until the process is gone).
++struct Registry {
++  std::mutex mutex;
++  std::vector<ExitFlushable*> items;
++};
++
++Registry& Reg() {
++  static Registry* registry = new Registry;
++  return *registry;
++}
++
++void FlushAllForExit() {
++  if (!g_dump.load()) {
++    return;
++  }
++  Registry& r = Reg();
++  if (!r.mutex.try_lock()) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(r.mutex, std::adopt_lock);
++  for (ExitFlushable* item : r.items) {
++    item->FlushForExit();
++  }
 +}
 +
 +}  // namespace
++
++void ExitFlushable::RegisterForExit() {
++  Registry& r = Reg();
++  std::lock_guard<std::mutex> lock(r.mutex);
++  r.items.push_back(this);
++}
++
++void ExitFlushable::UnregisterForExit() {
++  Registry& r = Reg();
++  std::lock_guard<std::mutex> lock(r.mutex);
++  r.items.erase(std::remove(r.items.begin(), r.items.end(), this), r.items.end());
++}
 +
 +Counters& C() {
 +  return g_counters;
@@ -521,9 +673,18 @@ index 0000000..01b3d8f
 +    }
 +  }
 +  if (StatsEnabled()) {
-+    g_reporter_stop = false;
-+    g_reporter = std::thread(ReporterMain, REXCVAR_GET(audio_stats_interval));
++    g_total_written.store(false);
++    g_run_work_max.store(0);
++    g_run_pump_max.store(0);
++    g_run_gap_max.store(0);
++    g_run_queue_min.store(~0ull);
++    g_reporter = new Reporter;
++    g_reporter->thread = std::thread(ReporterMain, g_reporter, REXCVAR_GET(audio_stats_interval));
 +  }
++  // Armed here, not at load time: a function-local static is destroyed before the objects that
++  // were constructed earlier (the logging, the cvars), which the exit path still uses.
++  static ExitGuard guard;
++  (void)guard;
 +}
 +
 +void Shutdown() {
@@ -531,13 +692,14 @@ index 0000000..01b3d8f
 +    return;
 +  }
 +  g_initialized = false;
-+  if (g_reporter.joinable()) {
-+    {
-+      std::lock_guard<std::mutex> lock(g_reporter_mutex);
-+      g_reporter_stop = true;
++  Reporter* r = g_reporter;
++  g_reporter = nullptr;
++  if (r) {
++    r->stop.store(true, std::memory_order_release);
++    if (r->thread.joinable()) {
++      r->thread.join();  // it prints the totals and ends within ~50 ms
 +    }
-+    g_reporter_cv.notify_all();
-+    g_reporter.join();
++    delete r;
 +  }
 +}
 +
@@ -562,24 +724,31 @@ index 0000000..01b3d8f
 +bool WavWriter::Open(const std::string& path, uint16_t format_tag, uint16_t channels, uint32_t rate,
 +                     uint16_t bits) {
 +  Close();
-+  file_ = std::fopen(path.c_str(), "wb");
-+  if (!file_) {
-+    return false;
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    file_ = std::fopen(path.c_str(), "wb");
++    if (!file_) {
++      return false;
++    }
++    uint8_t header[44] = {};
++    std::memcpy(header, "RIFF", 4);
++    Put32(header + 4, 36);
++    std::memcpy(header + 8, "WAVEfmt ", 8);
++    Put32(header + 16, 16);
++    Put16(header + 20, format_tag);
++    Put16(header + 22, channels);
++    Put32(header + 24, rate);
++    Put32(header + 28, rate * channels * (bits / 8));
++    Put16(header + 32, static_cast<uint16_t>(channels * (bits / 8)));
++    Put16(header + 34, bits);
++    std::memcpy(header + 36, "data", 4);
++    std::fwrite(header, 1, sizeof(header), file_);
++    std::fflush(file_);
++    data_bytes_ = 0;
++    flushes_ = 0;
++    buffer_.clear();
 +  }
-+  uint8_t header[44] = {};
-+  std::memcpy(header, "RIFF", 4);
-+  std::memcpy(header + 8, "WAVEfmt ", 8);
-+  Put32(header + 16, 16);
-+  Put16(header + 20, format_tag);
-+  Put16(header + 22, channels);
-+  Put32(header + 24, rate);
-+  Put32(header + 28, rate * channels * (bits / 8));
-+  Put16(header + 32, static_cast<uint16_t>(channels * (bits / 8)));
-+  Put16(header + 34, bits);
-+  std::memcpy(header + 36, "data", 4);
-+  std::fwrite(header, 1, sizeof(header), file_);
-+  data_bytes_ = 0;
-+  buffer_.clear();
++  RegisterForExit();
 +  return true;
 +}
 +
@@ -587,60 +756,107 @@ index 0000000..01b3d8f
 +  if (!file_ || !bytes) {
 +    return;
 +  }
-+  if (!TakeBudget(bytes)) {
++  std::lock_guard<std::mutex> lock(mutex_);
++  if (!file_ || !TakeBudget(bytes)) {
 +    return;
 +  }
 +  const uint8_t* p = static_cast<const uint8_t*>(data);
 +  buffer_.insert(buffer_.end(), p, p + bytes);
 +  data_bytes_ += bytes;
 +  if (buffer_.size() >= (256u << 10)) {
-+    Flush();
++    FlushLocked();
 +  }
 +}
 +
-+void WavWriter::Flush() {
-+  if (file_ && !buffer_.empty()) {
-+    std::fwrite(buffer_.data(), 1, buffer_.size(), file_);
-+  }
-+  buffer_.clear();
-+}
-+
-+void WavWriter::Close() {
++// Writes the buffered data and brings the header's two sizes up to date, so the file is a
++// complete WAV after every call.
++void WavWriter::FlushLocked() {
 +  if (!file_) {
 +    return;
 +  }
-+  Flush();
++  if (!buffer_.empty()) {
++    std::fwrite(buffer_.data(), 1, buffer_.size(), file_);
++    buffer_.clear();
++  }
 +  uint8_t field[4];
-+  std::fseek(file_, 4, SEEK_SET);
 +  Put32(field, static_cast<uint32_t>(std::min<uint64_t>(36 + data_bytes_, 0xFFFFFFFFull)));
++  std::fseek(file_, 4, SEEK_SET);
 +  std::fwrite(field, 1, 4, file_);
-+  std::fseek(file_, 40, SEEK_SET);
 +  Put32(field, static_cast<uint32_t>(std::min<uint64_t>(data_bytes_, 0xFFFFFFFFull)));
++  std::fseek(file_, 40, SEEK_SET);
 +  std::fwrite(field, 1, 4, file_);
-+  std::fclose(file_);
-+  file_ = nullptr;
++  std::fseek(file_, 0, SEEK_END);
++  std::fflush(file_);
++  ++flushes_;
++}
++
++void WavWriter::FlushForExit() {
++  if (!mutex_.try_lock()) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(mutex_, std::adopt_lock);
++  FlushLocked();
++}
++
++void WavWriter::Close() {
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (!file_) {
++      return;
++    }
++    FlushLocked();
++    std::fclose(file_);
++    file_ = nullptr;
++  }
++  UnregisterForExit();
 +}
 +
 +bool RawWriter::Open(const std::string& path) {
 +  Close();
-+  file_ = std::fopen(path.c_str(), "wb");
-+  bytes_ = 0;
-+  return file_ != nullptr;
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    file_ = std::fopen(path.c_str(), "wb");
++    bytes_ = 0;
++    if (!file_) {
++      return false;
++    }
++  }
++  RegisterForExit();
++  return true;
 +}
 +
 +void RawWriter::Write(const void* data, size_t bytes) {
-+  if (!file_ || !bytes || !TakeBudget(bytes)) {
++  if (!file_ || !bytes) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(mutex_);
++  if (!file_ || !TakeBudget(bytes)) {
 +    return;
 +  }
 +  std::fwrite(data, 1, bytes, file_);
 +  bytes_ += bytes;
 +}
 +
-+void RawWriter::Close() {
++void RawWriter::FlushForExit() {
++  if (!mutex_.try_lock()) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(mutex_, std::adopt_lock);
 +  if (file_) {
++    std::fflush(file_);
++  }
++}
++
++void RawWriter::Close() {
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (!file_) {
++      return;
++    }
 +    std::fclose(file_);
 +    file_ = nullptr;
 +  }
++  UnregisterForExit();
 +}
 +
 +}  // namespace rex::audio::dump
@@ -898,7 +1114,7 @@ index 20a2cd8..29538b6 100644
          REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
          driver->frames_unused_.push(buffer);
 diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
-index 11b83be..111ecab 100644
+index 11b83be..a07f42f 100644
 --- a/src/audio/xma_context.cpp
 +++ b/src/audio/xma_context.cpp
 @@ -10,11 +10,17 @@
@@ -919,7 +1135,7 @@ index 11b83be..111ecab 100644
  #include <rex/dbg.h>
  #include <rex/logging.h>
  #include <rex/memory/ring_buffer.h>
-@@ -36,10 +42,89 @@ extern "C" {
+@@ -36,10 +42,90 @@ extern "C" {
  // Credits for most of this code goes to:
  // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
  
@@ -1004,12 +1220,13 @@ index 11b83be..111ecab 100644
 +  uint32_t in_packets[2] = {0, 0};
 +  std::string stem;
 +  std::string blocks;
++  uint32_t json_flushes = 0;  // pcm.flushes() when the .json was last written
 +};
 +
  const uint32_t XmaContext::kBitsPerPacketHeader;
  const uint32_t XmaContext::kOutputMaxSizeBytes;
  
-@@ -47,6 +132,7 @@ XmaContext::XmaContext()
+@@ -47,6 +133,7 @@ XmaContext::XmaContext()
      : work_completion_event_(rex::thread::Event::CreateAutoResetEvent(false)) {}
  
  XmaContext::~XmaContext() {
@@ -1017,7 +1234,7 @@ index 11b83be..111ecab 100644
    if (av_context_) {
      avcodec_free_context(&av_context_);
    }
-@@ -97,12 +183,47 @@ bool XmaContext::Work() {
+@@ -97,12 +184,47 @@ bool XmaContext::Work() {
      return false;
    }
  
@@ -1065,7 +1282,7 @@ index 11b83be..111ecab 100644
  
    if (!data.output_buffer_valid) {
      return true;
-@@ -133,10 +254,28 @@ bool XmaContext::Work() {
+@@ -133,10 +255,28 @@ bool XmaContext::Work() {
    }
  
    while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
@@ -1094,7 +1311,7 @@ index 11b83be..111ecab 100644
        break;
      }
    }
-@@ -190,6 +329,7 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
+@@ -190,6 +330,7 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
  }
  
  void XmaContext::ResetDecoderState() {
@@ -1102,7 +1319,7 @@ index 11b83be..111ecab 100644
    // A freed or re-initialized context is a new logical stream, so the previous
    // wave's MDCT overlap-add tail must not survive into frame 0 of the next one.
    // avcodec_flush_buffers() cannot drop it: ff_xmaframes_decoder declares no
-@@ -221,6 +361,11 @@ void XmaContext::Release() {
+@@ -221,6 +362,11 @@ void XmaContext::Release() {
    assert_true(is_allocated());
  
    set_is_allocated(false);
@@ -1114,7 +1331,7 @@ index 11b83be..111ecab 100644
    ResetDecoderState();
    auto context_ptr = memory()->TranslateVirtual(guest_ptr());
    std::memset(context_ptr, 0, sizeof(XMA_CONTEXT_DATA));
-@@ -316,7 +461,19 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
+@@ -316,7 +462,19 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
      if (packet_frame_offset <= kMaxFrameSizeinBits) {
        return (next_packet_index * kBitsPerPacket) + packet_frame_offset;
      }
@@ -1135,7 +1352,7 @@ index 11b83be..111ecab 100644
    }
  
    return kBitsPerPacketHeader;
-@@ -347,18 +504,42 @@ memory::RingBuffer XmaContext::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
+@@ -347,18 +505,42 @@ memory::RingBuffer XmaContext::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
  
  kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
    kPacketInfo packet_info = {};
@@ -1178,7 +1395,7 @@ index 11b83be..111ecab 100644
        break;
      }
  
-@@ -367,10 +548,7 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
+@@ -367,10 +549,7 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
        break;
      }
  
@@ -1190,7 +1407,7 @@ index 11b83be..111ecab 100644
  
      packet_info.frame_count_++;
  
-@@ -399,7 +577,12 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
+@@ -399,7 +578,12 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
  
  void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
                                      const XMA_CONTEXT_DATA& initial_data, uint8_t* context_ptr) {
@@ -1203,7 +1420,7 @@ index 11b83be..111ecab 100644
  
    fresh.loop_count = data.loop_count;
    fresh.output_buffer_write_offset = data.output_buffer_write_offset;
-@@ -422,6 +605,82 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+@@ -422,6 +606,82 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
    fresh.Store(context_ptr);
  }
  
@@ -1286,7 +1503,7 @@ index 11b83be..111ecab 100644
  void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
    if (!current_frame_remaining_subframes_) {
      return;
-@@ -459,6 +718,8 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
+@@ -459,6 +719,8 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
  
    output_rb->Write(raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
                     subframes_to_write * kOutputBytesPerBlock);
@@ -1295,7 +1512,7 @@ index 11b83be..111ecab 100644
  
    const int8_t headroom = (current_frame_remaining_subframes_ - subframes_to_write == 0)
                                ? data->output_buffer_padding
-@@ -509,6 +770,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
+@@ -509,6 +771,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
      char errbuf[AV_ERROR_MAX_STRING_SIZE];
      av_strerror(ret, errbuf, sizeof(errbuf));
      REXAPU_ERROR("XmaContext {}: Error sending packet for decoding: {} ({})", id(), errbuf, ret);
@@ -1305,7 +1522,7 @@ index 11b83be..111ecab 100644
      return false;
    }
    ret = avcodec_receive_frame(av_context, av_frame);
-@@ -520,6 +784,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
+@@ -520,6 +785,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
      char errbuf[AV_ERROR_MAX_STRING_SIZE];
      av_strerror(ret, errbuf, sizeof(errbuf));
      REXAPU_ERROR("XmaContext {}: Error during decoding: {} ({})", id(), errbuf, ret);
@@ -1315,7 +1532,7 @@ index 11b83be..111ecab 100644
      return false;
    }
    return true;
-@@ -598,6 +865,14 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
+@@ -598,6 +866,14 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
    }
  
    kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
@@ -1330,7 +1547,7 @@ index 11b83be..111ecab 100644
    const uint32_t packet_to_skip = skip_count + 1;
    const uint32_t next_packet_index = packet_index + packet_to_skip;
  
-@@ -666,6 +941,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
+@@ -666,6 +942,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
      carry_valid_ = false;
    }
    PreparePacket(packet_info.current_frame_size_, padding_start);
@@ -1340,7 +1557,7 @@ index 11b83be..111ecab 100644
    const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
    if (decoded) {
      ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
-@@ -815,4 +1093,118 @@ void XmaContext::ConvertFrame(const uint8_t** samples, bool is_two_channel,
+@@ -815,4 +1094,135 @@ void XmaContext::ConvertFrame(const uint8_t** samples, bool is_two_channel,
  #endif
  }
  
@@ -1361,11 +1578,14 @@ index 11b83be..111ecab 100644
 +    d.in_ptr[b] = 0;
 +    d.in_packets[b] = 0;
 +  }
++  d.json_flushes = 0;
 +  d.opened = d.pcm.Open(d.stem + ".wav", 1, static_cast<uint16_t>(channels), rate, 16) &&
 +             d.input.Open(d.stem + ".xma");
 +  if (!d.opened) {
 +    d.pcm.Close();
 +    d.input.Close();
++  } else {
++    DumpWriteJson();
 +  }
 +  return d.opened;
 +}
@@ -1431,16 +1651,20 @@ index 11b83be..111ecab 100644
 +    }
 +    dump_->pcm.Write(chunk, n);
 +  }
++  // The .json follows the .wav (which is a valid file after every block): a stream that is still
++  // open when the game exits, which skips every destructor, has both.
++  if (dump_->pcm.flushes() != dump_->json_flushes) {
++    dump_->json_flushes = dump_->pcm.flushes();
++    DumpWriteJson();
++  }
 +}
 +
-+void XmaContext::DumpClose() {
++void XmaContext::DumpWriteJson() {
 +  if (!dump_ || !dump_->opened) {
 +    return;
 +  }
 +  DumpState& d = *dump_;
 +  const uint64_t pcm_bytes = d.pcm.data_bytes();
-+  d.pcm.Close();
-+  d.input.Close();
 +  std::string blocks = d.blocks;
 +  if (!blocks.empty()) {
 +    blocks.pop_back();
@@ -1455,6 +1679,16 @@ index 11b83be..111ecab 100644
 +    std::fwrite(json.data(), 1, json.size(), f);
 +    std::fclose(f);
 +  }
++}
++
++void XmaContext::DumpClose() {
++  if (!dump_ || !dump_->opened) {
++    return;
++  }
++  DumpState& d = *dump_;
++  d.pcm.Close();
++  d.input.Close();
++  DumpWriteJson();
 +  d.opened = false;
 +}
 +
