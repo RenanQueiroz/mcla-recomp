@@ -2,7 +2,7 @@ diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
 index 5cfea05..e11f579 100644
 --- a/src/core/timer_queue.cpp
 +++ b/src/core/timer_queue.cpp
-@@ -12,17 +12,187 @@
+@@ -12,17 +12,190 @@
  #include <algorithm>
  #include <forward_list>
  
@@ -36,9 +36,12 @@ index 5cfea05..e11f579 100644
 +                    "a condition variable's timeout is cut down to whole milliseconds, so a timer due "
 +                    "in under 1 ms makes the wait return at once and the thread spin until it is due: "
 +                    "a whole core with the 1 ms timestamp timer. On gives that core back (the process "
-+                    "used 22 to 30% less CPU in the city), but the frame was 1 to 2.4% longer in its "
-+                    "busier scenes, with or without timer_queue_hr_spin_us, so it is off by "
-+                    "default. Off is the condition variable and its spin.")
++                    "used 22 to 58% less CPU). With 4 logical processors it also shortened the frame "
++                    "(uncapped +17 to 21% FPS, the 99th percentile 30 ms to 10-12 ms); with 16 and 8 "
++                    "it made the frame 1 to 2.4% longer in the busier scenes, with or without "
++                    "timer_queue_hr_spin_us. So the SDK's default is off; the MCLA host turns it on by "
++                    "itself for 5 or fewer logical processors (src/mcla_app.cpp). Off is the "
++                    "condition variable and its spin.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +REXCVAR_DEFINE_INT32(timer_queue_hr_spin_us, 0, "Kernel",
@@ -190,7 +193,7 @@ index 5cfea05..e11f579 100644
  namespace rex::thread {
  
  using WaitItem = TimerQueueWaitItem;
-@@ -142,9 +312,9 @@ class TimerQueue {
+@@ -142,9 +315,9 @@ class TimerQueue {
    // This ring buffer will be used to introduce timers queued by the public API
    static constexpr size_t kWaitCount = 512;
    dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;

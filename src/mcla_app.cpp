@@ -580,6 +580,85 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   MclaDevPadConfigure(config);
 }
 
+#ifdef _WIN32
+// How many logical processors the process may run on: the bits of its affinity mask
+// (GetProcessAffinityMask, which includes the limit of a job object, as a launcher or a test
+// harness puts on a process). A mask that is the whole processor group says nothing about the
+// other groups of a machine with more than 64 processors, so then every group is counted.
+// 0 if it cannot be told.
+static uint32_t LogicalProcessorsAvailable() {
+  DWORD_PTR process = 0;
+  DWORD_PTR system = 0;
+  if (!GetProcessAffinityMask(GetCurrentProcess(), &process, &system) || process == 0) {
+    return GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+  }
+  if (process == system) {
+    const DWORD all = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (all != 0) {
+      return all;
+    }
+  }
+  uint32_t count = 0;
+  for (; process != 0; process &= process - 1) {
+    ++count;
+  }
+  return count;
+}
+
+// The two CPU options whose best setting depends on how many logical processors there are
+// (README.md, "Turning a change off"; launcher/dev/profiling-2026-10-26.md, "Wake on demand"
+// and "The timer queue and the frame-pacing thread by processor count"; A/B of 3 runs a side
+// at 16, 8, 6 and 4 logical processors, uncapped and at caps of 120, 60 and 30):
+// - 6 or more: mcla_pump_wake_on_demand. It lifts the 145 FPS the game's own Sleep holds the
+//   uncapped game to (+49 to +65%, the caps unchanged, no audio underrun at 16, 8 and 6); at 4
+//   logical it gained only 11 to 16%, and one run in three ran the audio dry for 2 frames and
+//   cap 120 had a 19% longer p99, so it is left off there.
+// - 5 or fewer: timer_queue_hr_wait. It gives back the core the timer thread spins on: at 4
+//   logical +17 to 21% FPS uncapped, p99 27-30 ms to 10-12 ms, cap 120 held (117 to 120), the
+//   process 23 to 58% less CPU and the late audio wake-ups ~300 to ~20 a run, with no
+//   underrun. At 6 it saved 31 to 50% of the CPU and left the frame 1.7% longer when driving,
+//   and at 16 and 8 it made the frame 1 to 2.4% longer, so it is left off from 6 up.
+// Each follows the usual rule: a value from the command line, the environment or mcla.toml wins
+// (SetDefaultValue then only records the default), and none is saved. Both are read where they
+// are used (the timer thread at every wait, the pump thread at every round), so the default
+// set here is in effect for the whole run. Not on Linux and the PS5, which keep both off.
+static void ApplyCpuDefaults() {
+  constexpr uint32_t kWakeOnDemandFrom = 6;
+  const uint32_t logical = LogicalProcessorsAvailable();
+  if (logical == 0) {
+    REXLOG_WARN("CPU: could not count the logical processors; both options keep their defaults (off)");
+    return;
+  }
+  const bool many = logical >= kWakeOnDemandFrom;
+  struct Option {
+    const char* name;
+    const char* label;
+    bool automatic_on;
+  };
+  const Option options[] = {
+      {"timer_queue_hr_wait", "timer queue high-resolution wait", !many},
+      {"mcla_pump_wake_on_demand", "pump wake on demand", many},
+  };
+  std::string text;
+  bool any_automatic = false;
+  for (const Option& option : options) {
+    const bool by_player = rex::cvar::GetFlagSource(option.name) != rex::cvar::Source::kDefault;
+    if (option.automatic_on && !rex::cvar::SetDefaultValue(option.name, "true")) {
+      REXLOG_WARN("CPU: {} = true not taken", option.name);
+    }
+    if (!text.empty()) {
+      text += ", ";
+    }
+    text += fmt::format("{} {}{}", option.label,
+                        rex::cvar::GetFlagByName(option.name) == "true" ? "on" : "off",
+                        by_player ? " (set by the player)" : "");
+    any_automatic = any_automatic || !by_player;
+  }
+  REXLOG_INFO("CPU: {} logical processors: {}{}", logical, text,
+              any_automatic ? (many ? " (automatic; 6 or more)" : " (automatic; 5 or fewer)") : "");
+}
+#endif
+
 // SDK settings measured to suit this game on PC (README.md, "Turning a change
 // off"; the PS5 host sets its own). They become the options' defaults
 // (rex::cvar::SetDefaultValue): used unless the command line, an environment
@@ -621,6 +700,9 @@ void MclaApp::ApplyPcDefaults() {
       REXLOG_INFO("PC defaults: {} = {}", name, value);
     }
   }
+#ifdef _WIN32
+  ApplyCpuDefaults();
+#endif
 }
 
 // As PC games do with a controller: the pointer goes away during play and
