@@ -195,12 +195,13 @@ static class GameSettings
     public static readonly GameSetting Preset = new("mcla_preset", "Graphics preset",
         [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low")], "custom")
     {
-        Info = "Low-end turns off anti-aliasing and the full-screen blur and draws the far sun shadows, the "
-             + "environment map of the cars and the reflection view only every 2nd to 4th frame (the picture "
-             + "of the last time is kept in between), which helps most on weak or integrated graphics. An "
-             + "option you set by hand "
-             + "(Anti-aliasing here, or the pause menu's PERFORMANCE rows) keeps its value. Custom leaves "
-             + "everything as it is set.",
+        Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the far sun shadows every "
+             + "2nd frame and the environment map of the cars every 4th (the picture of the last time is kept "
+             + "in between). On an integrated Radeon that is about 5% less frame time at the game's own "
+             + "resolution from the shadows, the map and the blur, and 6 to 7% more from leaving "
+             + "anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
+             + "integrated graphics. An option you set by hand (Anti-aliasing here, or the pause menu's "
+             + "PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
     };
     // temporal_aa_sharpness (the SDK's): FSR's own sharpening (RCAS) after it.
     public static readonly GameSetting FsrSharpness = new("temporal_aa_sharpness", "FSR sharpness",
@@ -238,16 +239,27 @@ static class GameSettings
              + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
     };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
-        [new("Automatic (Vulkan on AMD and Intel graphics, Direct3D 12 otherwise)", "any"),
+        [new("Automatic (Vulkan on integrated AMD and Intel graphics, Direct3D 12 otherwise)", "any"),
          new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any")
     {
-        Info = "Which graphics system the game uses. Automatic picks Vulkan on AMD and Intel graphics and "
-             + "Direct3D 12 on NVIDIA. On an NVIDIA GeForce RTX 5080 the two are within a few percent in the "
-             + "city, and Direct3D 12 is 10 to 15% faster in races at 3×; on an AMD Ryzen 9800X3D's integrated "
-             + "Radeon, Vulkan is 6 to 10% faster at the game's own resolution. (Intel graphics are not "
-             + "measured: Direct3D 12 uses a slower path for them in the SDK, which Vulkan doesn't need.) "
-             + "Pick one to override. Takes effect the next time the game starts.",
+        Info = "Which graphics system the game uses. Automatic picks Vulkan on integrated AMD graphics (a "
+             + "Ryzen with Radeon graphics, which share the CPU's memory) and on Intel graphics, and Direct3D 12 "
+             + "on AMD graphics cards and on NVIDIA. On an NVIDIA GeForce RTX 5080 the two are within a few "
+             + "percent in the city, and Direct3D 12 is 10 to 15% faster in races at 3×; on an AMD Ryzen "
+             + "9800X3D's integrated Radeon, Vulkan is 6 to 10% faster at the game's own resolution; on a "
+             + "Radeon RX 6600 XT a user found Direct3D 12 20 to 25% faster (Vulkan's GPU command thread costs "
+             + "more CPU). Intel graphics are not measured: Direct3D 12 uses a slower path for them in the SDK, "
+             + "which Vulkan doesn't need. The one marked (recommended) is the one Automatic picks for your "
+             + "graphics card. Pick one to override. Takes effect the next time the game starts.",
     };
+    /// The setting with (recommended) after the API Automatic picks on this PC (DisplayDrivers.AutomaticApi;
+    /// null: not known, nothing is marked).
+    public static GameSetting GraphicsApiFor(string? recommended) =>
+        recommended is null ? GraphicsApi : GraphicsApi with
+        {
+            Choices = [GraphicsApi.Choices[0],
+                       .. GraphicsApi.Choices.Skip(1).Select(c => SettingValues.Same(c.Value, recommended) ? c with { Label = c.Label + " (recommended)" } : c)],
+        };
     public static readonly GameSetting Intro = new("mcla_intro", "Intro",
         [new("Normal", "normal"), new("Fast", "fast"), new("Skip (hides the title logo)", "skip")], "normal")
     {
@@ -402,9 +414,9 @@ static class GameSettings
     }
 
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
-                                            uint gpuVendor = 0) =>
+                                            uint gpuVendor = 0, string? recommendedApi = null) =>
         [Resolution, FrameRateFor(file, refreshHz), Display, DisplayGamma, Preset, AntiAliasing, FrameGeneration,
-         LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApi];
+         LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Intro, Prompts];

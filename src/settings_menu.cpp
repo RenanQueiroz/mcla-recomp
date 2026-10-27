@@ -63,6 +63,9 @@ bool MclaSingleTileAvailable();  // src/render_perf.cpp
 int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
 bool MclaFsrAvailable();  // src/perf_options.cpp
 bool MclaFsrNextStart();  // src/perf_options.cpp
+#if REX_PLATFORM_WIN32
+const char* MclaRecommendedBackend();  // src/mcla_app.cpp
+#endif
 
 namespace {
 
@@ -911,6 +914,16 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
         const std::string why = rex::ui::Presenter::GetFrameGenerationStatus().why;
         return why.empty() ? "OFF (UNAVAILABLE)" : "OFF (" + why + ")";
       }
+#if REX_PLATFORM_WIN32
+      if (!std::strcmp(item.option, "mcla_gpu_backend")) {
+        // The API recommended for this GPU (src/mcla_app.cpp), so that the default isn't ignored.
+        const char* recommended = MclaRecommendedBackend();
+        if (recommended && !std::strcmp(item.values[index], recommended)) {
+          return std::string(item.value_labels[index]) + " (RECOMMENDED)";
+        }
+        return item.value_labels[index];
+      }
+#endif
       if (IsLowLatencyItem(item)) {
         const rex::ui::LowLatency::Status status = rex::ui::LowLatency::GetStatus();
         if (status.state != rex::ui::LowLatency::State::kAvailable) {

@@ -81,9 +81,9 @@ REXCVAR_DEFINE_INT32(mcla_reflection_interval, 0, "MCLA",
 REXCVAR_DEFINE_STRING(mcla_preset, "custom", "MCLA",
                       "A starting point for the detail options, for a weak GPU:\n"
                       " custom: every option as set (the default)\n"
-                      " low: no anti-aliasing, the far shadows, the environment map and the "
-                      "reflection drawn less often, and the full-screen blur off; an option set "
-                      "by hand keeps its value")
+                      " low: no anti-aliasing and no full-screen blur, the far shadows drawn "
+                      "every 2nd frame and the environment map every 4th; an option set by "
+                      "hand keeps its value")
     .allowed({"custom", "low"});
 
 // For measuring what an option is worth. The title screen's camera wanders, so
@@ -494,7 +494,12 @@ uint32_t MclaRenderPhasesToSkip() {
 
 // mcla_preset: the options a preset stands for take its values as their defaults, so
 // that one chosen by hand (the command line, the environment, mcla.toml) still wins,
-// and none is saved as if the player had chosen it.
+// and none is saved as if the player had chosen it. Low is what was worth its look on the
+// integrated Radeon (launcher/dev/gpu-weak-2026-10-27.md): anti-aliasing off (6.5% of the
+// frame at native resolution, 29% at 2x), the far shadows every 2nd frame and the
+// environment map every 4th (about 1 ms each at native), the full-screen blur (0.5 ms).
+// The reflection view stays every frame: every 2nd saved about 0.3 ms, too little for a
+// reflection that lags.
 void MclaApplyPreset() {
   if (REXCVAR_GET(mcla_preset) != "low") {
     return;
@@ -503,7 +508,6 @@ void MclaApplyPreset() {
       {"mcla_anti_aliasing", "off"},
       {"mcla_far_shadow_interval", "2"},
       {"mcla_env_map_interval", "4"},
-      {"mcla_reflection_interval", "2"},
       {"mcla_fullscreen_blur", "false"},
   };
   for (const auto& [name, value] : kLow) {
