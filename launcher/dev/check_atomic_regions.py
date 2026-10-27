@@ -58,7 +58,7 @@ for f in files:
                     continue
                 if "__sync_bool_compare_and_swap" in s:
                     cas += 1
-                if re.search(r"REX_(MM_)?STORE|REX_CHECK_GLOBAL_LOCK|REX_ENTER_GLOBAL_LOCK|sub_[0-9A-F]{8}\(|__imp__|REX_CALL|call", s):
+                if re.search(r"REX_(MM_)?STORE|REX_CHECK_GLOBAL_LOCK|REX_ENTER_GLOBAL_LOCK|sub_[0-9A-F]{8}\(|__imp__|REX_CALL|\bcall\b", s):
                     bad.append((name, "statement in region: " + s[:90]))
                 if re.search(r"__sync_|__atomic|atomic_", s) and "atomic_thread_fence" not in s and "__sync_bool_compare_and_swap" not in s:
                     bad.append((name, "other atomic in region: " + s[:90]))
