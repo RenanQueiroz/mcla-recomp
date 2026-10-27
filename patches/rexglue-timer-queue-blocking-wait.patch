@@ -1,8 +1,8 @@
 diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
-index 5cfea05..193baa7 100644
+index 5cfea05..e11f579 100644
 --- a/src/core/timer_queue.cpp
 +++ b/src/core/timer_queue.cpp
-@@ -12,17 +12,184 @@
+@@ -12,17 +12,187 @@
  #include <algorithm>
  #include <forward_list>
  
@@ -29,20 +29,23 @@ index 5cfea05..193baa7 100644
 +                    "sleep every 20th turn). Off restores the spin wait.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
-+REXCVAR_DEFINE_BOOL(timer_queue_hr_wait, true, "Kernel",
++REXCVAR_DEFINE_BOOL(timer_queue_hr_wait, false, "Kernel",
 +                    "On Windows, with the timer thread blocking: wait for a timer that is due within "
 +                    "20 ms on a high-resolution waitable timer (0.3 ms late on average, nothing "
 +                    "spinning) instead of the condition variable. With libc++ (the llvm-mingw builds) "
 +                    "a condition variable's timeout is cut down to whole milliseconds, so a timer due "
-+                    "in under 1 ms made the wait return at once and the thread spin until it was due: "
-+                    "a whole core with the 1 ms timestamp timer. Off restores the condition variable.")
++                    "in under 1 ms makes the wait return at once and the thread spin until it is due: "
++                    "a whole core with the 1 ms timestamp timer. On gives that core back (the process "
++                    "used 22 to 30% less CPU in the city), but the frame was 1 to 2.4% longer in its "
++                    "busier scenes, with or without timer_queue_hr_spin_us, so it is off by "
++                    "default. Off is the condition variable and its spin.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +REXCVAR_DEFINE_INT32(timer_queue_hr_spin_us, 0, "Kernel",
 +                     "With timer_queue_hr_wait: how many microseconds before a timer is due the "
 +                     "timer thread stops sleeping and spins (with the processor's pause hint) "
 +                     "until it is. The high-resolution wait wakes 0.3 ms late on average, so a "
-+                     "timer that matters to the minute (the 1 ms timestamp the guest reads) is "
++                     "timer that matters to the millisecond (the 1 ms timestamp the guest reads) is "
 +                     "late by that; spinning for the last part trades some of the saved CPU for "
 +                     "an exact wake-up. 0 sleeps all the way.")
 +    .range(0, 1000)
@@ -187,7 +190,7 @@ index 5cfea05..193baa7 100644
  namespace rex::thread {
  
  using WaitItem = TimerQueueWaitItem;
-@@ -142,9 +309,9 @@ class TimerQueue {
+@@ -142,9 +312,9 @@ class TimerQueue {
    // This ring buffer will be used to introduce timers queued by the public API
    static constexpr size_t kWaitCount = 512;
    dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;

@@ -40,7 +40,8 @@ Vulkan is the same within 5% in each thread (free roam 6.77 ms, race 7.13 ms).
    milliseconds, so a deadline under 1 ms away returns at once and the thread goes round until it is due. See
    `patches/README.md`, `rexglue-timer-queue-blocking-wait.patch`.
 2. **The main guest thread spends 40% of its time polling**: `sub_82148A10`, a ring of three buffer slots per thread class,
-   waits for the render thread to release the next slot by calling guest `Sleep(0)` (`sub_82460270` ->
+   waits for the next slot to be freed (by the next round of the thread that runs `sub_82144888`, see "The wait for a ring
+   slot" below; it is not the render thread) by calling guest `Sleep(0)` (`sub_82460270` ->
    `KeDelayExecutionThread` -> `XThread::Delay(0)` -> `SwitchToThread()`), reading the clock twice a turn
    (`sub_82144FC8`, `QueryPerformanceCounter`). 2.8 ms of its 6.5 ms CPU per swap in free roam, 0.9 ms in the race;
    about 30% of its CPU time is kernel time.
@@ -92,7 +93,82 @@ the 3 runs' medians, per swap is the thread's CPU:
 The saving in CPU is real and large (a whole core), and the frame is not shorter: where most is going on (driving, the job threads
 busy) it is 1.6 to 2.4% longer, with the main thread's CPU +3% and +6% and the job threads' +23% and +7% there. The wait is 0.33 ms
 late on average, so the guest's tick count is up to 1.3 ms old instead of 1 ms; `timer_queue_hr_spin_us` keeps the thread awake
-for the last part of the wait to find out whether that lateness is the cause.
+for the last part of the wait to find out whether that lateness is the cause (it is not: the next section).
+
+## The three options measured together (2026-10-27)
+
+One build with the three options as cvars (`timer_queue_hr_wait`, with `timer_queue_hr_spin_us`; `guest_atomics_lock_free`;
+`mcla_poll_wait`), D3D12, native, uncapped, the city route, 16 and then 8 logical processors (job object), the race at 16;
+1 warm-up per group (the first variant's: the shader and file caches are warm after it) and 3 runs a side, the variants
+alternating and rotated; the display woken before and checked after each run (on at both ends of all of them). The
+reference ("off") is the same build with `timer_queue_hr_wait`, `guest_atomics_lock_free` and `mcla_poll_wait` off; a
+separate base (the SDK as v0.1.3 ships it) agreed with it within the noise (frame -0.2 to +0.3%, p99 +0.6 to +1.3%, CPU
++-1%, except the GPU command thread +3%). Means of the 3 runs; per swap = per presented frame. The keep rule: on every
+segment the frame median at most 1.0% and the p99 at most 3.0% longer than the reference (the runs' own spread is
++-0.3% in the frame median).
+
+| 16 processors | Frame median, free roam / standing / driving | Change | p99 change | Process CPU per swap |
+|---|---|---|---|---|
+| reference | 6.882 / 6.817 / 6.877 ms | | | 23.67 / 23.51 / 26.11 ms |
+| high-resolution timer wait | 6.899 / 6.916 / 6.966 | +0.2 / +1.4 / +1.3% | -0.9 / -0.8 / +0.4% | -30 / -28 / -28% |
+| + 400 us spin tail | 6.901 / 6.906 / 6.995 | +0.3 / +1.3 / +1.7% | +1.2 / +2.2 / +2.3% | -25 / -23 / -20% |
+| lock-free guest atomics | 6.847 / 6.797 / 6.827 | -0.5 / -0.3 / -0.7% | -2.0 / -0.9 / -1.1% | -2 / -1 / -3% |
+| main thread's ring wait on a timer | 6.793 / 6.930 / 6.929 | -1.3 / +1.7 / +0.8% | -0.2 / -0.3 / +1.5% | -19 / -18 / -12% |
+| timer wait + tail + atomics | 6.944 / 6.980 / 7.036 | +0.9 / +2.4 / +2.3% | +2.5 / +0.6 / +2.4% | -26 / -25 / -24% |
+
+| 8 processors | Frame median | Change | p99 change | Process CPU per swap |
+|---|---|---|---|---|
+| reference | 6.856 / 6.839 / 6.864 ms | | | 24.09 / 24.26 / 26.13 ms |
+| timer wait + 400 us tail | 6.921 / 6.942 / 6.997 | +0.9 / +1.5 / +1.9% | +2.2 / +2.3 / +0.9% | -26 / -25 / -18% |
+| lock-free guest atomics | 6.853 / 6.815 / 6.849 | -0.1 / -0.4 / -0.2% | -0.5 / -0.4 / +0.1% | 0 / -1 / +3% |
+| main thread's ring wait on a timer | 6.694 / 6.751 / 6.869 | -2.4 / -1.3 / +0.1% | -0.1 / -1.1 / -1.1% | -17 / -18 / -15% |
+| timer wait + tail + atomics | 6.954 / 6.911 / 7.041 | +1.4 / +1.0 / +2.6% | +2.1 / +1.0 / +0.3% | -27 / -27 / -20% |
+
+The race (16 processors, 3 runs a side): lock-free atomics, frame 6.855 to 6.840 ms (-0.2%), p99 8.59 to 8.49 (-1.2%), render thread 5.65
+to 5.37 ms (-5%), process 36.19 to 35.85 (-1%).
+
+- **Timer queue: the high-resolution wait fails the rule** with and without the spin tail, at both processor counts (+1.3 to
+  +1.9% in the standing and driving segments). The tail removed the lateness (counters in the timer thread: wake-ups 306 us late on
+  average without it, 6,898 of 59,633 more than 500 us late; 38 us with it, 274 of 54,774) and the frame stayed longer, so the
+  late wake-up is not the cause; what is, is not known. `timer_queue_hr_wait` therefore defaults to off (v0.1.3's behaviour,
+  one core spinning in the llvm-mingw builds); the option and the tail stay for a machine that needs the core.
+- **Lock-free atomics: kept on.** It passes everywhere, the render thread uses 3 to 12% less CPU, the frame is 0.1 to 0.7% shorter
+  (the race 0.2%). The shipped combination (this on, the timer wait off, the poll wait off) is measured against the v0.1.3 SDK
+  in the next run; against the reference above it is this row.
+- **The main thread's wait for a ring slot on a timer** (`mcla_poll_wait`, `src/poll_wait.cpp`): the main thread's CPU falls by
+  57 to 66% (6.40 to 2.24 ms per swap in free roam) and the process's by 12 to 19%, but the frame time is not settled: it fails
+  the rule once at 16 processors (+1.7% standing, +0.8% driving, -1.3% free roam) and passes at 8 (-2.4 / -1.3 / +0.1%). The signs
+  are mixed, so the runs' spread may be most of it; it stays off until a longer comparison clears it.
+
+### The wait for a ring slot
+
+Who frees a slot (`mcla_poll_find_writer`: the page of the ring is made read-only, each write is counted by the guest function it
+comes from and let through; one 40 s run of the free-roam route, the game slowed a little by the trace): the word at +4 of the ring
+(`0x82836818`, the one the main thread waits to change) is stored only by `sub_82160088` (5,782 stores in 40 s, 145 a second), which
+`sub_82144888` calls once a round; that function is the loop of a guest thread that sleeps between rounds (a `Sleep` whose argument is worked out from the time the
+round took, 72% of that thread's samples). The word at +0 (`0x82836814`) is stored by `sub_82161210`
+(5,712 stores, 143 a second), the main thread's own frame function, at its end: it is the main thread's write position, not a
+word it waits for. So there is no missing writer; the hook after the store in `sub_82160088` is the only place where a slot is
+freed, and it was there from the start.
+
+How the main thread's waits ended (`mcla_poll_wait` on, `mcla_poll_stats`, 40 s of the free-roam route, 16 processors): 28,950
+waits, about 5 a frame; 1,770 ended in the first 40 us spin on a change of the word; 27,179 slept, 2,471 woken by the release and
+24,708 by the timer, and then 1,532 ended in the tail spin on a change of the word and 23,176 at the loop's own deadline of 1,000 us.
+So 20% of the waits end because a slot was freed and 80% because the game's loop gives up after a millisecond (it then sets its
+flag byte and goes on). A round of the freeing thread comes once a frame, so most of a frame's waits cannot end on it. What
+the poll wait saves is the CPU of waiting: a sleep on a timer for most of the millisecond instead of `Sleep(0)` and two clock
+reads a turn.
+
+### The frame time does not follow the CPU time
+
+In every variant and segment of this section the frame median stays between 6.69 and 7.04 ms (mostly 6.8 to 6.9) while the process's
+CPU per swap goes from 16.6 to 26.8 ms and the render thread's, in the city, from 3.5 to 4.1: a third of the process's CPU can go (timer queue, poll
+wait) and the frame time moves by +-2%, at 16 and at 8 logical processors alike, and the race (a render thread at 82% of a core) has
+the same 6.85 ms. Something other than any one thread's CPU time sets the frame time in these routes. The thread that frees the ring
+slots comes round 143 to 145 times a second, once per frame;
+whether that thread's own `Sleep` (its argument is the float at `0x820036EC`, less the time its round took, in whole milliseconds)
+sets the 6.85 ms is the next thing to find out. `--mcla_poll_stats` now also logs that thread's rounds, their spacing, the
+distribution of its `Sleep` arguments and the float, with or without the poll wait.
 
 ## Upper bounds for two codegen costs (2026-10-27)
 
