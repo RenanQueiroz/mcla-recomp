@@ -19,6 +19,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dxgi.h>
 #include <shellapi.h>
 #endif
 
@@ -56,6 +57,10 @@ void MclaSaveMenuSettings();  // src/settings_menu.cpp
 bool MclaPrepareShadersIsRequested();  // src/shader_prepare.cpp
 void MclaShaderStorageAfterPreload(rex::Runtime* runtime);
 void MclaMigrateAntiAliasing();  // src/perf_options.cpp
+void MclaApplyPreset();  // src/perf_options.cpp
+#ifdef _WIN32
+static bool AutomaticBackendIsVulkan();
+#endif
 
 #ifdef _WIN32
 // The pause menu's RESTART GAME (src/settings_menu.cpp) starts the game again
@@ -355,6 +360,11 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // back to the plugin's default, as the SDK would do next; if that fails too,
   // the SDK tries once more and reports it.
   std::string backend = REXCVAR_GET(mcla_gpu_backend);
+#ifdef _WIN32
+  if (backend == "any" && AutomaticBackendIsVulkan()) {
+    backend = "vulkan";
+  }
+#endif
   if (backend != "any") {
     config.graphics = rex::system::LoadGpuPlugin("xenos", backend);
     if (!config.graphics) {
@@ -367,10 +377,59 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   }
   ApplyPcDefaults();
   MclaMigrateAntiAliasing();
+  MclaApplyPreset();
 
   // Development: scripted controller input (src/dev_pad.cpp), off by default.
   MclaDevPadConfigure(config);
 }
+
+#ifdef _WIN32
+// What "any" (Automatic) means on Windows: Vulkan on AMD and Intel graphics, otherwise the
+// plugin's own choice, Direct3D 12. The GPU is the one Direct3D 12 would take (the SDK's
+// d3d12_adapter: the first physical adapter unless one is given), which Vulkan's loader
+// lists in the same order. Measured on an AMD Ryzen 9800X3D's integrated Radeon: Vulkan is
+// 6 to 10% faster at the game's own resolution (launcher/dev/gpu-weak-2026-10-27.md). On
+// Intel the SDK takes a slower path of rasterizer-ordered views for render targets on
+// Direct3D 12, where Vulkan uses ordinary framebuffer ones (not measured: no Intel GPU was
+// available). NVIDIA stays on Direct3D 12: its Vulkan is not faster in races. Without a
+// Vulkan driver (no vulkan-1.dll) it stays on Direct3D 12 too. Choosing the API in the
+// launcher or the pause menu, or --mcla_gpu_backend, skips all this.
+static bool AutomaticBackendIsVulkan() {
+  const int adapter_option = std::atoi(rex::cvar::GetFlagByName("d3d12_adapter").c_str());
+  if (adapter_option == -2) {
+    return false;  // WARP.
+  }
+  IDXGIFactory1* factory = nullptr;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
+    return false;
+  }
+  UINT vendor = 0;
+  IDXGIAdapter1* adapter = nullptr;
+  for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+    DXGI_ADAPTER_DESC1 desc{};
+    const bool described = SUCCEEDED(adapter->GetDesc1(&desc));
+    adapter->Release();
+    if (!described) {
+      continue;
+    }
+    if (adapter_option >= 0 ? int(i) == adapter_option : !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+      vendor = desc.VendorId;
+      break;
+    }
+  }
+  factory->Release();
+  if (vendor != 0x1002 && vendor != 0x8086) {
+    return false;
+  }
+  HMODULE vulkan = LoadLibraryW(L"vulkan-1.dll");
+  if (!vulkan) {
+    return false;
+  }
+  FreeLibrary(vulkan);
+  REXLOG_INFO("graphics API: Vulkan (Automatic on {} graphics)", vendor == 0x1002 ? "AMD" : "Intel");
+  return true;
+}
+#endif
 
 // SDK settings measured to suit this game on PC (README.md, "Turning a change
 // off"; the PS5 host sets its own). They become the options' defaults

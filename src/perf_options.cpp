@@ -63,6 +63,28 @@ REXCVAR_DEFINE_DOUBLE(mcla_traffic_distance, 400.0, "MCLA",
     .range(100.0, 600.0);
 REXCVAR_DEFINE_DOUBLE(mcla_pedestrians, 1.0, "MCLA", "Pedestrian density scale").range(0.0, 1.0);
 REXCVAR_DEFINE_DOUBLE(mcla_parked_cars, 1.0, "MCLA", "Parked car density scale").range(0.0, 1.0);
+// Off-screen render passes that are drawn only every few frames, the picture of the
+// last one kept in between (0 or 1: every frame, as shipped). After the scene itself
+// they are what a weak GPU pays most for (launcher/dev/gpu-weak-2026-10-27.md).
+REXCVAR_DEFINE_INT32(mcla_far_shadow_interval, 0, "MCLA",
+                     "The two farthest sun-shadow cascades are drawn only every this many frames "
+                     "(0: every frame, as shipped)")
+    .range(0, 8);
+REXCVAR_DEFINE_INT32(mcla_env_map_interval, 0, "MCLA",
+                     "The environment map of the cars' paint and the speedometer is drawn only "
+                     "every this many frames (0: every frame, as shipped)")
+    .range(0, 8);
+REXCVAR_DEFINE_INT32(mcla_reflection_interval, 0, "MCLA",
+                     "The reflection view is drawn only every this many frames (0: every "
+                     "frame, as shipped)")
+    .range(0, 8);
+REXCVAR_DEFINE_STRING(mcla_preset, "custom", "MCLA",
+                      "A starting point for the detail options, for a weak GPU:\n"
+                      " custom: every option as set (the default)\n"
+                      " low: no anti-aliasing, the far shadows, the environment map and the "
+                      "reflection drawn less often, and the full-screen blur off; an option set "
+                      "by hand keeps its value")
+    .allowed({"custom", "low"});
 
 // For measuring what an option is worth. The title screen's camera wanders, so
 // two runs never show the same scene; this switches the named option between
@@ -180,6 +202,41 @@ void ApplyShadowPhases(uint8_t* base) {
     cleared = false;
     REXLOG_INFO("perf options: shadow phases back on");
   }
+}
+
+// --- Off-screen passes drawn every few frames ----------------------------------------
+
+// Render phase bits (launcher/dev/frame-structure-2026-10-16.md): the sun-shadow
+// cascades are 0x20, 0x40, 0x80 and 0x100 (the 0x100 phase also redraws the foliage
+// impostors), the environment map 0x4 and 0x8, the reflection view 0x2.
+constexpr uint32_t kPhaseReflection = 0x2;
+constexpr uint32_t kPhaseEnvironmentMap = 0x4 | 0x8;
+constexpr uint32_t kPhaseFarShadows = 0x80 | 0x100;
+
+// The phases to leave out of this frame. Called on the render thread at the start
+// of the phase loop, once a frame, so every phase of one option is left out together,
+// and the options' frames fall apart (a different offset each) to even out the load.
+uint32_t PhasesToSkipThisFrame() {
+  static uint32_t frame = 0;
+  ++frame;
+  struct Rule {
+    int32_t interval;
+    uint32_t phases;
+    uint32_t offset;
+  };
+  const Rule rules[] = {
+      {REXCVAR_GET(mcla_far_shadow_interval), kPhaseFarShadows, 0},
+      {REXCVAR_GET(mcla_env_map_interval), kPhaseEnvironmentMap, 1},
+      {REXCVAR_GET(mcla_reflection_interval), kPhaseReflection, 2},
+  };
+  uint32_t skip = 0;
+  for (const Rule& rule : rules) {
+    if (rule.interval > 1 &&
+        frame % uint32_t(rule.interval) != rule.offset % uint32_t(rule.interval)) {
+      skip |= rule.phases;
+    }
+  }
+  return skip;
 }
 
 // --- Anti-aliasing ----------------------------------------------------------------
@@ -427,6 +484,37 @@ bool MclaFsrNextStart() {
 
 bool MclaFsrAvailable() {
   return FsrOffered();
+}
+
+// The phases the render thread leaves out of the frame it is about to draw (0 for
+// none); src/render_markers.cpp clears them in the renderer's mask for the frame.
+uint32_t MclaRenderPhasesToSkip() {
+  return PhasesToSkipThisFrame();
+}
+
+// mcla_preset: the options a preset stands for take its values as their defaults, so
+// that one chosen by hand (the command line, the environment, mcla.toml) still wins,
+// and none is saved as if the player had chosen it.
+void MclaApplyPreset() {
+  if (REXCVAR_GET(mcla_preset) != "low") {
+    return;
+  }
+  constexpr std::pair<const char*, const char*> kLow[] = {
+      {"mcla_anti_aliasing", "off"},
+      {"mcla_far_shadow_interval", "2"},
+      {"mcla_env_map_interval", "4"},
+      {"mcla_reflection_interval", "2"},
+      {"mcla_fullscreen_blur", "false"},
+  };
+  for (const auto& [name, value] : kLow) {
+    if (rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) {
+      continue;
+    }
+    if (!rex::cvar::SetDefaultValue(name, value)) {
+      REXLOG_WARN("preset low: {} = {} not taken", name, value);
+    }
+  }
+  REXLOG_INFO("perf options: preset low");
 }
 
 void MclaMigrateAntiAliasing() {

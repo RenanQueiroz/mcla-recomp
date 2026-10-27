@@ -546,12 +546,22 @@ instead of 93 to 94% (`dev\single-tile-edram-2026-10-16.md`). Off, the scene is
 drawn as on the console. With `--edram_tiles=2048` there is no room for one tile:
 the pause menu's row says UNAVAILABLE and nothing changes either way.
 
-*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which
-tries Direct3D 12 first, `d3d12` or `vulkan`). Every setting and SDK patch here
-works on both. On this machine, in scripted runs, Vulkan matches D3D12 at native
-resolution; at 3x the two are within a few percent in the city (Vulkan slightly
-ahead in free roam), and D3D12 is 10 to 15% faster in the race benchmark
-(`dev\direct-resolve-2026-10-15.md`). Since D3D12's textures are placed in
+*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is
+Vulkan on AMD and Intel graphics and Direct3D 12 otherwise, `d3d12` or `vulkan`).
+Every setting and SDK patch here works on both. On the RTX 5080 of this machine, in
+scripted runs, Vulkan matches D3D12 at native resolution; at 3x the two are within a
+few percent in the city (Vulkan slightly ahead in free roam), and D3D12 is 10 to 15%
+faster in the race benchmark (`dev\direct-resolve-2026-10-15.md`), so NVIDIA stays on
+D3D12. On the Ryzen 9800X3D's integrated Radeon Vulkan is 6 to 10% faster at native
+resolution (35.7 against 39.5 ms a frame in free roam, three runs each; 2.6% at 2x) and
+the GPU time per frame is 6 to 9% less, so Automatic takes it there; on Intel graphics
+Direct3D 12 uses the SDK's slower rasterizer-ordered-view path for the render targets,
+which Vulkan does not need, so Automatic takes Vulkan there too (not measured: there was
+no Intel GPU to try it on). The GPU is the one Direct3D 12 would use (`d3d12_adapter`,
+else the first physical adapter), and the choice needs `vulkan-1.dll`; picking an API
+here, in the pause menu or with `--mcla_gpu_backend` skips all of it
+(`dev\gpu-weak-2026-10-27.md`). A shader cache prepared before this change was made for
+Direct3D 12: run *Prepare shaders* again on AMD and Intel graphics. Since D3D12's textures are placed in
 shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`).
 
