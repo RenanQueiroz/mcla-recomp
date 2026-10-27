@@ -88,7 +88,8 @@ kinds of changes on top of upstream's `main`:
   go away from the list as upstream merges them.
 - **Fork-only extras** that have no place upstream: `launcher/`, a Windows
   launcher that checks this fork for updates, builds with `make_pc.ps1`,
-  edits the game's settings in `mcla.toml` (shared with the pause menu) and
+  edits the game's settings in `mcla.toml` (shared with the pause menu, plus
+  the game's language, which only the launcher and `mcla.toml` set) and
   starts the game, the measurement tools in
   `launcher/dev/` (`launcher/README.md`), and scripted controller input for
   unattended runs and benchmarks (`src/dev_pad.cpp`, off unless its options

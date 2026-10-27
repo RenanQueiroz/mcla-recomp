@@ -591,6 +591,8 @@ Intel graphics and prepares the shaders again before the next Play. Since D3D12'
 shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`).
 
+*Language* (`user_language`, the SDK's Xbox 360 language id; the game's default 1 is English) lists the five languages the game's own code has text for: English (1), French (4), German (3), Italian (6) and Spanish (5), the way the console's language setting would choose them. Any other id gives English, so an id typed into `mcla.toml` by hand (2 Japanese, 7 Korean, ...) shows as "set in mcla.toml". It is read when the game starts. There is no row for it in the pause menu. It is not a separate SDK patch: `XGetLanguage`, which the SDK answers with English whatever the setting says, is only called by one function of the game, behind an AV-pack check the SDK's `XGetAVPack` (6) always skips (`KNOWN-ISSUES.md`).
+
 *HUD updates* (`mcla_ui_hud_rate`) sets how many times a second the HUD's
 Flash movies (the gauges, the song ticker, the LOADING badge) take a step: 60
 (the default since 2026-10-16, the user's choice after playing at 30 and 60), 30

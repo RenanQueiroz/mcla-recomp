@@ -304,6 +304,18 @@ static class GameSettings
             Choices = [GraphicsApi.Choices[0],
                        .. GraphicsApi.Choices.Skip(1).Select(c => SettingValues.Same(c.Value, recommended) ? c with { Label = c.Label + " (recommended)" } : c)],
         };
+    // user_language (the SDK's, src/kernel/xam/xam_user.cpp): the Xbox 360 language id the game's
+    // ExGetXConfigSetting(USER, LANGUAGE) call gets. The game's own code (sub_82457AB0, sub_82387928)
+    // knows five: 1 English, 3 German, 4 French, 5 Spanish, 6 Italian; any other id (Japanese, Korean,
+    // Polish, ...) gives English. English is the SDK's default, so the line is only written for a change.
+    public static readonly GameSetting Language = new("user_language", "Language",
+        [new("English", 1L), new("Français (French)", 4L), new("Deutsch (German)", 3L),
+         new("Italiano (Italian)", 6L), new("Español (Spanish)", 5L)], 1L)
+    {
+        Info = "The language of the game's menus and on-screen text: the five the game was made in, English "
+             + "(the default), French, German, Italian and Spanish. Takes effect the next time the game "
+             + "starts.",
+    };
     public static readonly GameSetting Intro = new("mcla_intro", "Intro",
         [new("Normal", "normal"), new("Fast", "fast"), new("Skip (hides the title logo)", "skip")], "normal")
     {
@@ -463,7 +475,7 @@ static class GameSettings
          FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
-    public static readonly GameSetting[] Game = [Intro, Prompts];
+    public static readonly GameSetting[] Game = [Language, Intro, Prompts];
 
     // The launcher's own options (Advanced).
     public const string ExtraArgumentsInfo =
