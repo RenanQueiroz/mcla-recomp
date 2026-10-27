@@ -559,8 +559,9 @@ each option's saving and what was left out: the
 reflection view every 2nd frame saves 0.3 ms, too little for a reflection that lags).
 
 *Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is
-Vulkan on AMD's integrated graphics and on Intel graphics and Direct3D 12 on AMD graphics
-cards and NVIDIA, `d3d12` or `vulkan`). The setting marks the one Automatic picks for
+Vulkan on AMD's integrated graphics of the RDNA generation and on Intel graphics and
+Direct3D 12 on everything else (AMD graphics cards, NVIDIA, and the integrated Vega graphics
+of the older Ryzen APUs), `d3d12` or `vulkan`). The setting marks the one Automatic picks for
 your GPU "(recommended)", as does the pause menu's row, so that the default is not ignored.
 Every setting and SDK patch here works on both. On the RTX 5080 of this machine, in
 scripted runs, Vulkan matches D3D12 at native resolution; at 3x the two are within a
@@ -570,7 +571,12 @@ D3D12. On the Ryzen 9800X3D's integrated Radeon Vulkan is 6 to 10% faster at nat
 resolution (35.7 against 39.5 ms a frame in free roam, three runs each; 2.6% at 2x) and
 the GPU time per frame is 6 to 9% less, so Automatic takes it there. An integrated AMD GPU
 is one that Direct3D 12 says shares the CPU's memory (the architecture's UMA), whatever size
-of memory the BIOS sets aside for it; a Radeon graphics card is not one: a user's RX 6600 XT
+of memory the BIOS sets aside for it, and of the RDNA generation if the smallest wave Direct3D 12
+reports is 32 lanes (`D3D12_FEATURE_DATA_D3D12_OPTIONS1.WaveLaneCountMin`; GCN, and so Vega,
+reports 64). A Ryzen 7 5700G (Vega 8) showed the HUD, the menus and parts of the city missing on
+Vulkan (fork issue #14), so the Vega APUs, the Ryzen 3000G to 5000G, stay on Direct3D 12; Vega
+was not available here to try, so that is on the user's report only. A Radeon graphics card is not
+integrated either: a user's RX 6600 XT
 with an i5-10400 was 20 to 25% faster on Direct3D 12 (fork issue #7: Vulkan's GPU command
 thread costs more CPU), so cards stay on Direct3D 12 (not tried here: no AMD card was
 available). On Intel graphics Direct3D 12 uses the SDK's slower rasterizer-ordered-view
@@ -580,7 +586,7 @@ would use (`d3d12_adapter`, else the first physical adapter), and the choice nee
 `vulkan-1.dll` and a Vulkan device that is that GPU (the game points `vulkan_device` at it);
 picking an API here, in the pause menu or with `--mcla_gpu_backend` skips all of it
 (`dev\gpu-weak-2026-10-27.md`). A shader cache prepared before this change was made for
-Direct3D 12: the launcher sees that Automatic now means Vulkan on AMD's integrated and
+Direct3D 12: the launcher sees that Automatic now means Vulkan on AMD's RDNA integrated and
 Intel graphics and prepares the shaders again before the next Play. Since D3D12's textures are placed in
 shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`).

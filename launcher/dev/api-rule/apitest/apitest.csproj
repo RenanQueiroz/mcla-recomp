@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Calls the launcher's Automatic-API rule (launcher\src\ShaderStamp.cs, DisplayDrivers) through reflection on a built
+       MclaLauncher.dll: with made-up values (the table of ..\api_rule_test.cpp) and for this PC's Direct3D 12 adapters.
+       A dev tool; nothing here is shipped (the launcher's project does not include this folder). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
