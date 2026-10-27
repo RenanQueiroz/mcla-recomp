@@ -399,9 +399,9 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
  
  namespace rex::graphics::d3d12 {
  
-@@ -4196,6 +4200,38 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
-   ID3D12Device* device = provider.GetDevice();
-   uint64_t current_submission = command_processor_.GetCurrentSubmission();
+@@ -1469,6 +1473,38 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+   }
+ 
    DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
 +  if (g_tmpfl_active) {  // TMPFL: one line per resolve
 +    const draw_util::ResolveEdramInfo& tmp_ei =
@@ -435,6 +435,6 @@ diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/ren
 +          tmp_regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], tmp_regs[XE_GPU_REG_RB_SURFACE_INFO],
 +          tmp_regs[XE_GPU_REG_RB_COLOR_INFO], tmp_regs[XE_GPU_REG_RB_DEPTH_INFO]);
 +  }
- 
-   bool resolve_clear_needed = render_target_resolve_clear_values && resolve_clear_rectangle;
-   D3D12_RECT clear_rect;
+   if (g_tmpgt_active) {  // TMPR4
+     const draw_util::ResolveEdramInfo& tmp_ei =
+         resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info : resolve_info.color_edram_info;

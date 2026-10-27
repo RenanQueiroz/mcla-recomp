@@ -37,6 +37,8 @@ $recordFile = "$sdkDir\.gt-layer"
 $applied = @(if (Test-Path -LiteralPath $recordFile) { Get-Content -LiteralPath $recordFile } else { })
 
 function GitApply([string[]]$gitArgs, [string]$patch) {
+    # git says why a check failed on stderr, which "Stop" would turn into an error: the exit code is what counts.
+    $ErrorActionPreference = "Continue"
     & git -C $sdkDir apply --whitespace=nowarn @gitArgs $patch 2>&1 | Out-Host
     return ($LASTEXITCODE -eq 0)
 }
@@ -52,14 +54,18 @@ if ($Reverse) {
     exit 0
 }
 
+if ($applied.Count -gt 0) {
+    # Recorded as applied: make sure the layer is still in (the sources may have been reset). The layers overlap (a later one's
+    # context holds the lines of an earlier one), so only the last one applied reverses cleanly on its own.
+    $lastName = $applied[$applied.Count - 1]
+    if (-not (GitApply @("--reverse", "--check") "$root\launcher\dev\$lastName.sdk.patch")) {
+        throw "$lastName is recorded as applied but does not reverse cleanly: reset the SDK sources (make_pc.ps1 re-patches a clean clone) and run this again"
+    }
+}
 foreach ($name in $Layer) {
     $patch = "$root\launcher\dev\$name.sdk.patch"
     if (-not (Test-Path -LiteralPath $patch)) { throw "no patch $patch" }
-    if ($applied -contains $name) {
-        # Recorded as applied: make sure it still is (the sources may have been reset).
-        if (GitApply @("--reverse", "--check") $patch) { "already applied: $name"; continue }
-        throw "$name is recorded as applied but does not reverse cleanly: reset the SDK sources (make_pc.ps1 re-patches a clean clone) and run this again"
-    }
+    if ($applied -contains $name) { "already applied: $name"; continue }
     if (-not (GitApply @("--check") $patch)) {
         throw "$name does not apply to the SDK's sources (rebase it: launcher\dev\gt-phases.py's header lists what each patch needs)"
     }
