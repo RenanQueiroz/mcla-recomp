@@ -70,7 +70,7 @@ static class SelfUpdate
         {
             try
             {
-                await FetchAsync(asset, part, progress, cancel, handler, stall ?? TimeSpan.FromSeconds(60));
+                await FetchAsync(asset, part, progress, cancel, handler, stall ?? TimeSpan.FromSeconds(60), allowLoopbackHttp);
                 File.Move(part, final, overwrite: true);
                 return final;
             }
@@ -90,16 +90,15 @@ static class SelfUpdate
         throw new UpdateException($"Could not download {asset.Name}: {last?.Message}", last);
     }
 
-    static async Task FetchAsync(UpdateAsset asset, string part, Action<long, long>? progress, CancellationToken cancel, HttpMessageHandler? handler, TimeSpan stall)
+    static async Task FetchAsync(UpdateAsset asset, string part, Action<long, long>? progress, CancellationToken cancel, HttpMessageHandler? handler, TimeSpan stall, bool allowLoopbackHttp)
     {
-        using var client = handler != null ? new HttpClient(handler, disposeHandler: false) : new HttpClient();
-        client.Timeout = Timeout.InfiniteTimeSpan; // the timeouts below are per step
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("MclaLauncher/1.0");
-        using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        headerTimeout.CancelAfter(TimeSpan.FromSeconds(30));
-        HttpResponseMessage response;
-        try { response = await client.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, headerTimeout.Token); }
-        catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { throw new TimeoutException("the server did not answer in 30 seconds"); }
+        // The shared client (Net.cs): both IP families raced, the system's proxy, redirects followed over https only; a failure
+        // names the stage and the host (NetworkFailure, an HttpRequestException, so it is tried again like any network trouble).
+        // The timeouts below are per step.
+        using var own = handler != null ? NetClient.Create(handler) : null;
+        var operation = new NetOperation($"download {asset.Name}");
+        HttpResponseMessage response = await NetClient.GetAsync(asset.Url, operation,
+            new NetRequest { Client = own, AnswerTimeout = TimeSpan.FromSeconds(30), AllowPlainHttp = allowLoopbackHttp }, cancel);
         using (response)
         {
             if (response.StatusCode != HttpStatusCode.OK)
@@ -119,6 +118,7 @@ static class SelfUpdate
                     int n;
                     try { n = await network.ReadAsync(buffer, read.Token); }
                     catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { throw new TimeoutException($"nothing arrived for {stall.TotalSeconds:N0} seconds"); }
+                    catch (Exception ex) when (ex is IOException or HttpRequestException) { throw NetClient.ReadFailure(ex, operation, stalled: false, stall); }
                     if (n == 0) break;
                     received += n;
                     if (received > asset.Size) throw new UpdateException($"The download is damaged or not the release's file (the server sent more than the {asset.Size} bytes of {asset.Name}).");

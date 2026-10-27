@@ -15,6 +15,8 @@
   <ItemGroup>
     <Compile Include="..\..\installer\FolderSwap.cs" />
     <Compile Include="..\..\src\SelfUpdate.cs" />
+    <!-- SelfUpdate.cs downloads through the launcher's network code. -->
+    <Compile Include="..\..\src\Net.cs" />
   </ItemGroup>
 
 </Project>

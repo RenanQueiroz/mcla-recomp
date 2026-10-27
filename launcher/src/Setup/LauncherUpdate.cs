@@ -64,7 +64,7 @@ static class LauncherUpdate
         }
         catch (UpdateException ex)
         {
-            throw new SetupException($"The new launcher could not be fetched. {ex.Message}", ex.Message, ex);
+            throw new SetupException($"The new launcher could not be fetched. {ex.Message}", (ex.InnerException as NetworkFailure)?.Report() ?? ex.Message, ex);
         }
     }
 

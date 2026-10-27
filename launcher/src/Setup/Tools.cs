@@ -66,7 +66,7 @@ static class Verified
                 log($"{name}: downloaded and checked ({size:N0} bytes)");
                 return;
             }
-            catch (Exception ex) when (ex is TransferException or SetupException { InnerException: HttpRequestException } or IOException && attempt < 3 && !ct.IsCancellationRequested)
+            catch (Exception ex) when (ex is TransferException or SetupException { InnerException: HttpRequestException and not NetworkFailure { Retriable: false } } or IOException && attempt < 3 && !ct.IsCancellationRequested)
             {
                 log($"{name}: attempt {attempt} failed ({ex.Message}); trying again");
                 await Task.Delay(TimeSpan.FromSeconds(2 * attempt), ct);

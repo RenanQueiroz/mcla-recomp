@@ -20,6 +20,8 @@
     <Compile Include="..\..\src\Setup\*.cs" />
     <!-- Setup\LauncherUpdate.cs uses the self-update pieces (and they the folder swap). -->
     <Compile Include="..\..\src\SelfUpdate.cs" />
+    <!-- The network code (Setup\Release.cs and SelfUpdate.cs download through it). -->
+    <Compile Include="..\..\src\Net.cs" />
     <Compile Include="..\..\installer\FolderSwap.cs" />
   </ItemGroup>
 

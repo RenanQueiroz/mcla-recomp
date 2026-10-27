@@ -52,6 +52,7 @@ sealed class LauncherApp : Component
         var (checking, setChecking) = UseState(true);
         var (error, setError) = UseState<string?>(null);
         var (notice, setNotice) = UseState<string?>(null);
+        var (detailsCopied, setDetailsCopied) = UseState(false);
         var (build, setBuild) = UseState<BuildRun?>(null);
         var (buildResult, setBuildResult) = UseState<int?>(null);
         // An install made by the setup wizard (Installed mode) updates from a release (Setup\Updates.cs), and may update itself.
@@ -105,6 +106,7 @@ sealed class LauncherApp : Component
             try
             {
                 setStatus(await Task.Run(() => Repo.GetStatusAsync(fetch)));
+                setDetailsCopied(false);
                 setError(null);
             }
             catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception)
@@ -774,6 +776,22 @@ sealed class LauncherApp : Component
                            + ". The game still plays, compiling shaders as it meets them.", InfoBarSeverity.Warning);
             if (buildResult == 0)
                 return Info("Build finished", $"You're on version {status.Head[..7]}.", InfoBarSeverity.Success);
+            // The check for updates could not reach GitHub: said in words (which stage, which host), with the details to copy.
+            if (status.FetchError != null)
+            {
+                var detail = status.FetchDetail;
+                return (InfoBar("Couldn't check for updates", status.FetchError) with
+                {
+                    IsOpen = true,
+                    IsClosable = false,
+                    ActionButtonContent = detail == null ? null : detailsCopied ? "Copied" : "Copy details",
+                    OnActionButtonClick = detail == null ? null : () =>
+                    {
+                        if (ClipboardText.Copy(detail) is { } why) setNotice($"Couldn't copy the details: {why}");
+                        else setDetailsCopied(true);
+                    },
+                }).Severity(InfoBarSeverity.Warning);
+            }
             return Empty();
         }
 

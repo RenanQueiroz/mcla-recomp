@@ -67,6 +67,7 @@ sealed class SetupEngine
     string? bundleZip;
     string? failure;
     string? failureDetail;
+    bool failureIsNetwork;
 
     public SetupEngine(SetupContext context)
     {
@@ -119,6 +120,8 @@ sealed class SetupEngine
     /// The plain line that says what went wrong, and the detail for the log, after a failed run.
     public string? Failure { get { lock (gate) return failure; } }
     public string? FailureDetail { get { lock (gate) return failureDetail; } }
+    /// The failure was a download that did not get through (a NetworkFailure: the page then offers the files downloaded by hand).
+    public bool FailureIsNetwork { get { lock (gate) return failureIsNetwork; } }
     public InstallRecord Record => record;
 
     // ---------------------------------------------------------------------------------------------
@@ -180,7 +183,7 @@ sealed class SetupEngine
     /// cancelled and SetupException (also in Failure) when a step failed; steps that were done are kept for a retry.
     public async Task RunAsync(CancellationToken ct)
     {
-        lock (gate) { failure = null; failureDetail = null; }
+        lock (gate) { failure = null; failureDetail = null; failureIsNetwork = false; }
         ChildJob.Enabled = true;
         InstallLock installLock;
         try { installLock = InstallLock.Acquire(ctx.Layout.Root); }
@@ -240,7 +243,7 @@ sealed class SetupEngine
         catch (Exception ex)
         {
             var plain = ex is SetupException se ? se.Plain : $"The setup stopped: {ex.Message}";
-            lock (gate) { failure = plain; failureDetail = (ex as SetupException)?.Detail ?? ex.ToString(); }
+            lock (gate) { failure = plain; failureDetail = (ex as SetupException)?.Detail ?? ex.ToString(); failureIsNetwork = ex is SetupException { InnerException: NetworkFailure }; }
             foreach (var t in Titles) Set(t.Id, s => s.State is StepState.Running or StepState.Waiting ? s with { State = StepState.Cancelled, Text = "Stopped", Remaining = null } : s, force: true);
             Log(StepId.Game, $"FAILED: {plain}");
             if (failureDetail != null) Log(StepId.Game, failureDetail);

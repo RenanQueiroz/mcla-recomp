@@ -134,7 +134,7 @@ log** and **Report it on GitHub**. Logs are in the install folder's `logs\`.
 on it says so. The programs the setup starts (git, the build) are in a job object that ends with the wizard,
 however it ends; a build can't go on writing into an install after its wizard is gone. Renames and deletes of
 files a virus scanner may hold are retried for about ten seconds; the network has timeouts (30 s for GitHub to
-answer, 60 s without a byte in a download).
+answer, 60 s without a byte in a download) and its own failure messages (**The network**, below).
 
 **The folder.** The install folder's path may have **129 characters** at most, and only letters without accents,
 digits, spaces, dots, dashes and underscores (the wizard says so before it starts):
@@ -165,6 +165,49 @@ digits, spaces, dots, dashes and underscores (the wizard says so before it start
 (`releases/latest/download/release.json`, then the assets of its tag). Until the first release is published
 the wizard says there is none yet. What `release.json` names (the SDK bundle's file, the tools' addresses and
 versions, the shader pack's path) must be plain file names and `https` addresses, or the release is refused.
+When GitHub can't be reached the first page offers **Use files I downloaded** (below).
+
+**The network.** Everything the wizard and the launcher fetch (`release.json`, the assets, the tools, the new
+installer of a launcher update) goes through `src\Net.cs`, which has no dependency on the rest of the launcher:
+
+- *Connecting.* A `ConnectCallback` on the one `SocketsHttpHandler` resolves all the addresses of the name, tries
+  them in the order RFC 8305 gives (the family DNS listed first, then the other, taking turns), starts the next
+  attempt 250 ms after the previous one if nothing has connected yet (at once when it failed), keeps the first socket that
+  connects and drops the others. (.NET's own handler tries the addresses one after the other: on a network that
+  advertises IPv6 and does not route it, it waited for the IPv6 address until the connect timeout while a browser
+  was already on IPv4: fork issue 13.) The whole connect has 15 s, the name lookup 10 s. With a proxy the handler asks
+  the callback for the proxy's address, so the same logic connects to the proxy; the system's proxy settings are
+  used, and a proxy that wants a login gets the Windows one.
+- *Redirects* are followed by `NetClient.GetAsync` itself (at most 5, `https` only, a redirect to anything else is
+  refused), which is what lets a failure say on which host it was: GitHub's `releases/latest/download/...` answers
+  with a redirect to `github.com/.../releases/download/<tag>/...`, which redirects to the asset host
+  (`release-assets.githubusercontent.com`, a different name, with its own addresses). Query strings (signed links)
+  are left out of the log.
+- *Failures name the stage:* `NetStage.Lookup` (the DNS lookup), `Connect` (connecting to the host or the
+  proxy), `Secure` (the handshake), `Answer` (connected, no answer in 30 s), `Status` (the server's answer: 404, 403, 5xx,
+  407 from a proxy), `Read` (the body stopped or was cut), `Redirect`. The wizard shows the message
+  (`NetworkFailure.Plain`), a **Copy details** button and a **Details** area with `NetOperation.Report()`: what was
+  asked, when, the program and Windows, whether the PC has an IPv6 address that can leave the network, the proxy
+  for each host, every step with its time (addresses tried with family and how long each took, redirects, status
+  lines) and the exception chain.
+- *release.json* has three tries: its address; one more after a short pause (a failure that is not a 404); then
+  GitHub's API (`api.github.com/repos/<repo>/releases/latest`: the asset named `release.json`, whose
+  `browser_download_url` must be this repository's `releases/download/` address on `github.com`). The API allows 60
+  requests an hour per internet address without signing in: a 403 or 429 with `X-RateLimit-Remaining: 0` (or a
+  `Retry-After`) has its own message, with the time it resets. A 404 from the first address (no release yet) is final.
+  The page shows which one it is trying. Downloads of assets are tried three times (`Verified.FetchAsync`) with
+  the same stage messages; a 404 is not retried.
+- *Use files I downloaded* (the first page, always there below the release line, opened when the look-up fails):
+  for a PC whose browser reaches GitHub and the setup does not. The player downloads `release.json` and the SDK
+  bundle (and then the four tool archives, whose names and links the page lists once `release.json` is read) into one
+  folder and chooses it. It is the development override's folder logic (`ReleaseSource.LocalFolder`: the
+  files beside `release.json`, tool archives also in a `tools\` folder there) with the rules of GitHub's release: the
+  repository `release.json` names must be this one, `dev-source.json` in the folder is ignored, `https` only, plain
+  file names only, and every file is checked against `release.json`'s SHA-256 and size when it is used (the page
+  only looks at sizes: **Next** waits until all five files are there). It replaces the downloads only: the
+  source is still cloned with git from `github.com`.
+- The launcher's update check (`More > Check for updates`, and at start) uses the same routes; when it fails, a bar
+  under the header says why and has **Copy details**.
 
 **Removing an install.** There is no button yet; `InstallCleanup.Uninstall` (the harness's `uninstall`
 command) removes exactly the names `install.json` lists as made by the setup (`mcla-recomp\`, `tools\`,
@@ -183,6 +226,17 @@ the top of every page) whenever one is in use.
   come from a folder (a downloaded draft; tool archives sit there too, and are used instead of downloads);
   `dev-source.json` in it, `{"gitUrl": "<a local repository>"}`, replaces the clone's URL (a draft has no tag
   on GitHub; make one in a local clone). An `http(s)` address is refused.
+- `launcher\dev\net-check` (CI runs it; `dotnet run --project dev\net-check -c Release`) checks `Net.cs` on local servers
+  only: the connect logic (an IPv6 address that never answers and a working IPv4 one: IPv4 wins at about 250 ms; the
+  first attempt failing starts the next at once; an attempt that connects after it lost is closed; nothing connecting
+  fails at the budget naming every address), the name lookup, a request through a proxy, the message of each stage
+  (a name that doesn't exist, a refused connection, a host that never answers, a redirect to a host that can't be
+  reached, 404, 403 with and without the API limit, 407, a body that stalls or is cut) and the routes of `release.json`.
+- `--github-web=<address>` / `MCLA_GITHUB_WEB` and `--github-api=<address>` / `MCLA_GITHUB_API`: where GitHub's web
+  site and API are (`https`, or `http://127.0.0.1:<port>`), for a test server that fails on purpose;
+  `--downloads=<folder>`: starts as if the player had chosen that folder under *Use files I downloaded*.
+  `dotnet run --project dev\net-check -c Release -- ui <the wizard's exe, copied out of a clone> <folder for the
+  screenshots> down|api|rate|downloads <a release.json> [<downloads folder>]` runs the real window against such a server.
 - `--install-dir=<folder>`, `--game=<.iso or folder>`, `--in-place`, `--auto` (go through the pages without
   clicks), `--quit-after=<seconds>`, `MCLA_DEV_SHOTS=<folder>` (a PNG of the window at each page and every
   20 s, to look at what nobody is watching).
@@ -192,7 +246,11 @@ the top of every page) whenever one is in use.
 - `launcher\dev\wizard-check` runs the engine with no window: `xdvdfs`, `verdicts`, `copy` (with a cancel and a
   resume), `release`, `names`, `downloads` (a wrong hash, a wrong size, an archive that leaves its folder),
   `archive`, `nonhttps`, `budget`, `mode`, `lock`, `orphan` (a child in the job dies with its parent), `retry`,
-  `remaining`, `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
+  `remaining`, `net <scratch>` (the real GitHub through `Net.cs`: the latest release, a tool archive through the
+  redirect to the asset host, a file of the fork's release, the API route, and HTTPS through a small proxy of its own;
+  needs the internet), `offline <folder with a release.json> <scratch>` (*Use files I downloaded*: what is listed, the
+  checksums still refusing wrong bytes of the right size, the rules of a downloaded release.json),
+  `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
   copy of the harness with the install's `install.json` beside it: what an update would be, doing it (and ending the process in
   the middle of it), a plain Rebuild, and the channel), `cleanup`, `cleanup2`, `uninstall`, and
   `install <release folder> <install folder> <game, or "adopt"> [--in-place] [--args "..."]`.

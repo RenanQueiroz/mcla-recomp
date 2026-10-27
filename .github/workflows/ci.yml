@@ -112,6 +112,15 @@ jobs:
         shell: powershell
         run: .\scripts\ci\smoke-installer.ps1 -Exe "$env:RUNNER_TEMP\setup\MCLA-Setup.exe"
 
+      # The network code the launcher and the setup wizard share (launcher\src\Net.cs): the connect logic (IPv6
+      # black-holed, IPv4 working: IPv4 wins after 250 ms), the messages that name the stage that failed, and the
+      # routes for release.json (the direct address, one more try, GitHub's API). Local servers only.
+      - name: Network checks
+        shell: powershell
+        run: |
+          dotnet run --project launcher\dev\net-check -c Release
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       # The self-update pieces: the folder swap, the verified download, and the real installer with fake
       # launchers (update that waits for the old one, the way back, a damaged file, a held file, ...).
       - name: Self-update checks
