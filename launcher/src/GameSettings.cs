@@ -502,6 +502,46 @@ static class GameSettings
     }
 }
 
+/// The player's name: the profile's gamertag, which the game shows (the SDK's user_name cvar,
+/// patches/rexglue-user-name.patch). The SDK takes 1 to 15 ASCII letters, digits and spaces (the
+/// spaces around it dropped) and otherwise "User", as before the name could be set; the launcher
+/// lets only such a name through. It is a line in mcla.toml like the game's other settings, and the
+/// game reads it when it starts. The profile's number (the XUID), so the folder of the save and
+/// the achievements, doesn't depend on it.
+static class PlayerName
+{
+    public const string Key = "user_name";
+    public const string Default = "User";
+    public const int MaxLength = 15;
+    public const string Info =
+        "The name the game shows for you (the profile's gamertag): up to 15 letters, digits and spaces, without "
+        + "accents. Empty is \"User\", as before this setting. Takes effect the next time the game starts. Your "
+        + "save and achievements stay as they are whatever the name: they belong to the profile, not to its name. "
+        + "A name the game can't take is ignored and the game says \"User\".";
+
+    /// What can be typed: ASCII letters, digits and spaces, 15 at most, spaces and all (a space typed last
+    /// is the start of the next word).
+    public static string Clean(string? text)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in text ?? "")
+            if ((char.IsAsciiLetterOrDigit(c) || c == ' ') && sb.Length < MaxLength) sb.Append(c);
+        return sb.ToString();
+    }
+
+    /// What goes into mcla.toml: the cleaned name without the spaces around it; null (no line, the game
+    /// says "User") when nothing is left.
+    public static string? ForFile(string? text)
+    {
+        var name = Clean(text).Trim();
+        return name.Length == 0 ? null : name;
+    }
+
+    /// The name the file has, "" while it has none.
+    public static string In(IReadOnlyDictionary<string, string> file) =>
+        file.TryGetValue(Key, out var raw) ? SettingValues.Display(SettingValues.Parse(raw)) : "";
+}
+
 /// Values as mcla.toml holds them. Parsing never throws: a value it can't make
 /// sense of comes back as its text, which the drop-down shows as set by hand.
 static class SettingValues

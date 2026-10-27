@@ -45,6 +45,7 @@ git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
 git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
+git apply ../../patches/rexglue-user-name.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
@@ -1339,6 +1340,22 @@ The creation of the stored pipelines (a counter, `shader_storage_progress`, and 
 | Change | Files | Affects |
 |---|---|---|
 | The content header file written with zero padding | `src/system/xam/content_manager.cpp` | all platforms |
+
+## rexglue-user-name.patch
+
+**Why.** The SDK signs the player in as a profile called "User" whatever they are called (`UserProfile` set `name_ = "User"`), and the game shows that name where it shows the player's own (it asks `XamUserGetName`, which copies at most 15 characters and the terminator, as an Xbox gamertag has 15). A player asked to be able to change it (fork issue #14).
+
+**What it changes.** A `user_name` setting (default `User`; the command line, `REX_USER_NAME` or `mcla.toml`; restart to apply) that `UserProfile` takes its name from: the spaces around it dropped, then 1 to 15 ASCII letters, digits and spaces, as a gamertag is made of. Anything else is ignored with a warning in the log (`user_name '...' is not a gamertag ...: using 'User'`) and the name is `User`, so a mistyped name never breaks the profile. The start-up log says which name and XUID the profile has (`user profile: name 'Zed', XUID B13EBABEBABEBABE`). Nothing else about the profile moves with the name: the XUID (`0xB13EBABEBABEBABE`, which the game checks and which names the folder of the saves and achievements) is the same for every name, and `ContentManager::ResolveGameUserContentPath` (where a game's title-specific profile settings go, `<root>/<title id>/profile/<name>`) used the profile's name as its folder, so it is fixed to `User`, the folder it always had: those settings stay found when the name changes. mcla's launcher has a *Player name* box that writes the setting to `mcla.toml` (`launcher/src/GameSettings.cs`, `PlayerName`).
+
+**Checked.** The patch applies to the pristine v0.10.0 files and, in `make_pc.ps1`'s order, to the patched SDK (`scripts/ci/check_pins.py`). The runs on Windows (a name in the log, where the game shows it, a save loading with the profile under another name, names the SDK refuses) are written in `launcher/dev/player-name-2026-10-27.md`.
+
+**Upstream:** a candidate for upstream ReXGlue (a setting for the profile's name).
+
+| Change | Files | Affects |
+|---|---|---|
+| `user_name`: the profile's name from a setting, validated as a gamertag | `src/system/xam/user_profile.cpp` | all platforms |
+| The profile-settings folder keeps the name `User` | `src/system/xam/content_manager.cpp` | all platforms |
+
 ## rexglue-low-latency.patch
 
 **Why.** When the GPU is the limit (3x resolution, and frame generation on top), the game runs ahead of it: the CPU finishes the next frame while the GPU is still on this one, and the frames queue in front of the GPU. Each queued frame is input lag (22 ms from the game's swap to the screen at 3x, uncapped, on an RTX 5080). The GPU vendors' latency reducers take the queue away: the driver holds the game back at the start of a frame, just long enough that the frame meets a free GPU. This patch makes the game ask for them: NVIDIA Reflex (Direct3D 12 through NVAPI, Vulkan through `VK_NV_low_latency2`) and AMD Anti-Lag 2 (Direct3D 12's driver extension, Vulkan's `VK_AMD_anti_lag`). Intel has no equivalent the game can use. **NVIDIA Reflex is on by default** (it costs 4 to 5% of the frame rate at 3x on Direct3D 12 and nothing elsewhere, for 13 to 15 ms less from the game's swap to the screen: below); AMD Anti-Lag 2 is off by default (untested); either is forced on whenever frame generation is on.

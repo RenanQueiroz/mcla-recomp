@@ -263,6 +263,7 @@ git apply ../../patches/rexglue-d3d12-storage-preload-threads.patch
 git apply ../../patches/rexglue-vulkan-pipeline-storage-keep-unsupported.patch
 git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
+git apply ../../patches/rexglue-user-name.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch

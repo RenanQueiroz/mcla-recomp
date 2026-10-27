@@ -210,6 +210,7 @@ rexglue-d3d12-storage-preload-threads.patch src/graphics/d3d12/pipeline_cache.cp
 rexglue-vulkan-pipeline-storage-keep-unsupported.patch src/graphics/vulkan/pipeline_cache.cpp pipeline_storage_valid_count
 rexglue-shader-storage-prepare.patch src/graphics/shader_storage_progress.h ShaderStorageProgress
 rexglue-content-header-padding.patch src/system/xam/content_manager.cpp Written as zeros.
+rexglue-user-name.patch src/system/xam/user_profile.cpp ProfileNameFromCvar
 rexglue-low-latency.patch src/ui/low_latency.cpp LowLatency::OnFrameStart
 rexglue-frame-generation-nonwindows.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp frame_generation_pacing
 rexglue-threaded-submission-d3d12-idle-wait.patch src/graphics/d3d12/command_processor.cpp d3d12_threaded_submission_idle_wait

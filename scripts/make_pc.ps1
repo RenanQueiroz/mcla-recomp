@@ -429,6 +429,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-vulkan-pipeline-storage-keep-unsupported.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "pipeline_storage_valid_count" }
     @{ Patch = "rexglue-shader-storage-prepare.patch"; File = "src\graphics\shader_storage_progress.h"; Adds = "ShaderStorageProgress" }
     @{ Patch = "rexglue-content-header-padding.patch"; File = "src\system\xam\content_manager.cpp"; Adds = "Written as zeros." }
+    @{ Patch = "rexglue-user-name.patch"; File = "src\system\xam\user_profile.cpp"; Adds = "ProfileNameFromCvar" }
     @{ Patch = "rexglue-low-latency.patch"; File = "src\ui\low_latency.cpp"; Adds = "LowLatency::OnFrameStart" }
     @{ Patch = "rexglue-frame-generation-nonwindows.patch"; File = "src\ui\vulkan\vulkan_presenter_frame_generation.cpp"; Adds = "frame_generation_pacing" }
     @{ Patch = "rexglue-threaded-submission-d3d12-idle-wait.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_threaded_submission_idle_wait" }
