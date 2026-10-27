@@ -20,6 +20,9 @@
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
 //     (mcla_pad_timeout_shot=<file.png>: the same picture when a wait_until or
 //     press_until times out)
+//   screen <file.png> [scale] (Windows: the game window's client area as the screen shows
+//     it, the presenter's scaling filter (present_effect) and the UI over the picture
+//     included; shot saves the guest output before them. Needs the display on)
 //   state   log <text>   include <script>   quit   set <option> <value>
 //   window minimize|restore|hide|show|cover|uncover|state (Windows: the game's own window,
 //     for checking what a minimised, hidden or covered window does to the frame loop)
@@ -754,6 +757,90 @@ std::string WindowCommand(const std::string& what) {
                             " foreground=" + (GetForegroundWindow() == hwnd ? "1" : "0");
   REXLOG_INFO("dev pad: window {}: {}", what, state);
   return "ok " + state;
+}
+
+// The game window's client area as the desktop shows it (a copy from the screen, so the
+// window is put above the others for the moment), for looking at the presenter's scaling
+// filter, which `shot` doesn't have: it saves the guest output before the presenter.
+bool ScreenShot(const std::string& path, double scale, std::string& result) {
+  HWND hwnd = FindGameWindow();
+  if (!hwnd) {
+    result = "no window";
+    return false;
+  }
+  // The window's pixels, not a DPI-scaled size, whatever the process is aware of.
+  using SetThreadDpiFn = HANDLE(WINAPI*)(HANDLE);
+  SetThreadDpiFn set_dpi = reinterpret_cast<SetThreadDpiFn>(reinterpret_cast<void*>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext")));
+  HANDLE old_dpi = set_dpi ? set_dpi(reinterpret_cast<HANDLE>(intptr_t(-4))) : nullptr;
+  RECT client = {};
+  POINT origin = {0, 0};
+  GetClientRect(hwnd, &client);
+  ClientToScreen(hwnd, &origin);
+  const int width = client.right - client.left;
+  const int height = client.bottom - client.top;
+  bool ok = width > 0 && height > 0;
+  std::vector<uint8_t> bgra;
+  if (ok) {
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    Sleep(300);
+    HDC screen = GetDC(nullptr);
+    HDC memory = CreateCompatibleDC(screen);
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib && bits) {
+      HGDIOBJ previous = SelectObject(memory, dib);
+      ok = BitBlt(memory, 0, 0, width, height, screen, origin.x, origin.y, SRCCOPY | CAPTUREBLT) != 0;
+      GdiFlush();
+      if (ok) {
+        bgra.assign(static_cast<const uint8_t*>(bits), static_cast<const uint8_t*>(bits) + size_t(width) * height * 4);
+      }
+      SelectObject(memory, previous);
+    } else {
+      ok = false;
+    }
+    if (dib) {
+      DeleteObject(dib);
+    }
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
+  if (set_dpi && old_dpi) {
+    set_dpi(old_dpi);
+  }
+  if (!ok) {
+    result = "the screen copy failed";
+    return false;
+  }
+  scale = std::clamp(scale, 0.05, 1.0);
+  const uint32_t out_width = std::max<uint32_t>(1, uint32_t(width * scale));
+  const uint32_t out_height = std::max<uint32_t>(1, uint32_t(height * scale));
+  std::vector<uint8_t> rgb(size_t(out_width) * out_height * 3);
+  for (uint32_t y = 0; y < out_height; y++) {
+    const uint32_t sy = std::min<uint32_t>(height - 1, uint32_t((y + 0.5) / scale));
+    for (uint32_t x = 0; x < out_width; x++) {
+      const uint32_t sx = std::min<uint32_t>(width - 1, uint32_t((x + 0.5) / scale));
+      const uint8_t* src = bgra.data() + (size_t(sy) * width + sx) * 4;
+      uint8_t* dst = rgb.data() + (size_t(y) * out_width + x) * 3;
+      dst[0] = src[2];
+      dst[1] = src[1];
+      dst[2] = src[0];
+    }
+  }
+  if (!WritePng(path, out_width, out_height, rgb)) {
+    result = "cannot write " + path;
+    return false;
+  }
+  result = std::to_string(out_width) + "x" + std::to_string(out_height);
+  return true;
 }
 #endif
 
@@ -1927,6 +2014,19 @@ std::string Execute(const std::string& line) {
     }
     std::string result;
     return Shot(rest(1, last), scale, result) ? "ok " + result : "err " + result;
+  }
+  if (cmd == "screen") {
+#if defined(_WIN32)
+    double scale = 1.0;
+    size_t last = args.size() - 1;
+    if (args.size() > 2 && ParseNumber(args[last], scale)) {
+      last--;
+    }
+    std::string result;
+    return ScreenShot(rest(1, last), scale, result) ? "ok " + result : "err " + result;
+#else
+    return "err screen is for Windows";
+#endif
   }
   if (cmd == "window") {
 #if defined(_WIN32)

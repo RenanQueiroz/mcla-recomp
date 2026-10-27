@@ -144,6 +144,28 @@ static class GameSettings
     {
         Info = "Fullscreen covers the whole screen; Windowed runs the game in a window on the desktop.",
     };
+    // present_effect (the SDK presenter's, src/ui/presenter.cpp; built in by rexglue-fsr-upscaling.patch):
+    // how the finished picture is scaled to the window. Read when the game starts. What each does,
+    // from GetGuestOutputPaintFlow: Bilinear is one smooth stretch. FSR 1 enlarges with EASU (passes of at
+    // most 2x each) and sharpens with RCAS, but only where the picture is enlarged along an axis; where it
+    // isn't it is CAS. CAS sharpens at the same size, resamples (up to 2x enlarging, or any shrinking) and
+    // sharpens in one pass, and a bigger enlarging finishes with a bilinear stretch. HDR output and frame
+    // generation always scale bilinearly.
+    public static readonly GameSetting ScreenFilter = new("present_effect", "Screen scaling filter",
+        [new("Bilinear (default)", "bilinear"), new("FSR 1 (enlarges, then sharpens)", "fsr"),
+         new("CAS (sharpens)", "cas")], "bilinear")
+    {
+        Info = "How the finished picture (3D scene, HUD and menus together) is scaled to your screen or window "
+             + "when the two sizes differ: Native (720p) on a 1080p, 1440p or 4K screen enlarges it, 2× on a 1080p "
+             + "screen shrinks it. When they match, Bilinear changes nothing and the other two only sharpen. "
+             + "Bilinear (the default) is a plain smooth stretch, the softest when enlarged. FSR 1 (AMD FidelityFX "
+             + "Super Resolution 1) rebuilds edges as it enlarges, in steps of at most 2×, then sharpens. "
+             + "CAS (AMD FidelityFX Contrast Adaptive Sharpening) sharpens and enlarges by up to 2× in one pass; "
+             + "a bigger step finishes with a bilinear stretch. When the picture is larger than the screen (2× on a 1080p screen) "
+             + "FSR 1 has nothing to enlarge and does what CAS does, resampling and sharpening in one pass, "
+             + "while Bilinear just shrinks it. HDR output and frame generation always use Bilinear. Takes effect "
+             + "the next time the game starts.",
+    };
     // The console's gamma ramp for an HDTV, or sRGB, which a PC monitor
     // expects (src/display_gamma.cpp); it changes during play too.
     public static readonly GameSetting DisplayGamma = new("mcla_display_gamma", "Display gamma",
@@ -183,15 +205,17 @@ static class GameSettings
     };
     // mcla_upscaling (src/perf_options.cpp, the SDK's temporal_aa_upscale, rexglue-fsr-upscaling.patch):
     // with FSR anti-aliasing, the 3D scene is drawn smaller and FSR 3.1 upscales it; the pause
-    // menu's ANTI ALIASING row offers the same levels (FSR 3.1 QUALITY, BALANCED, PERFORMANCE).
+    // menu's ANTI ALIASING row offers the same levels (FSR 3.1 ULTRA Q., QUALITY, BALANCED, PERFORMANCE).
     public static readonly GameSetting Upscaling = new("mcla_upscaling", "FSR upscaling",
-        [new("Off (native resolution)", "off"), new("Quality (1.5×: 1440p for 4K)", "quality"),
+        [new("Off (native resolution)", "off"), new("Ultra Quality (4/3×: 1080p at 2×)", "ultra_quality"),
+         new("Quality (1.5×: 1440p for 4K)", "quality"),
          new("Balanced (1.7×)", "balanced"), new("Performance (2×: 1080p for 4K)", "performance")], "off")
     {
         Info = "Only with FSR anti-aliasing: draws the 3D scene at a smaller size and lets FSR 3.1 upscale it to "
              + "the game's resolution, which takes load off the graphics card. The HUD, the menus and the "
-             + "post-processing (bloom, tone mapping) stay at full size and sharp. Quality draws the scene at "
-             + "two thirds of the width and height, Balanced at 59%, Performance at half; the lower, the "
+             + "post-processing (bloom, tone mapping) stay at full size and sharp. Ultra Quality draws the "
+             + "scene at three quarters of the width and height (exactly 1080p at the 2× resolution, 1620p at "
+             + "3×), Quality at two thirds, Balanced at 59%, Performance at half; the lower, the "
              + "more GPU time it saves and the softer the picture, with more trails behind fast-moving "
              + "traffic and pedestrians. Off draws the scene at the full resolution (FSR as anti-aliasing "
              + "only). Changes during play in the pause menu (ANTI ALIASING).",
@@ -402,7 +426,7 @@ static class GameSettings
 
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0) =>
-        [Resolution, FrameRateFor(file, refreshHz), Display, DisplayGamma, AntiAliasing, Upscaling, FrameGeneration,
+        [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, AntiAliasing, Upscaling, FrameGeneration,
          LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApi];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];

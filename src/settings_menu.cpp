@@ -651,21 +651,23 @@ constexpr double kDetailScales[] = {0.5, 0.75, 1.0};
 // FSR 3.1 (the SDK's temporal_aa, rexglue-temporal-aa.patch) at native resolution or
 // upscaling (rexglue-fsr-upscaling.patch: the scene is drawn smaller), with its
 // sharpening (temporal_aa_sharpness). All change during play; FSR starts once it is
-// ready (half a second or so the first time). The row's last three values are FSR with
+// ready (half a second or so the first time). The row's last four values are FSR with
 // a level of mcla_upscaling (the second option the row writes, ItemSetIndex).
-constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr", "fsr_quality",
-                                               "fsr_balanced", "fsr_performance"};
+constexpr const char* kAntiAliasingValues[] = {"off", "msaa", "fsr", "fsr_ultra_quality",
+                                               "fsr_quality", "fsr_balanced", "fsr_performance"};
 // The mcla_upscaling value of each of them (the render size is in the label).
-constexpr const char* kUpscalingValues[] = {"off", "off", "off", "quality", "balanced", "performance"};
-[[maybe_unused]] constexpr double kUpscalingRatios[] = {1.0, 1.0, 1.0, 1.5, 1.7, 2.0};
+constexpr const char* kUpscalingValues[] = {"off", "off", "off", "ultra_quality",
+                                            "quality", "balanced", "performance"};
+[[maybe_unused]] constexpr double kUpscalingRatios[] = {1.0, 1.0, 1.0, 4.0 / 3.0, 1.5, 1.7, 2.0};
 #if REX_PLATFORM_WIN32
 constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 NATIVE AA",
-                                               "FSR QUALITY", "FSR BALANCED", "FSR PERFORM."};
+                                               "FSR ULTRA Q.", "FSR QUALITY", "FSR BALANCED",
+                                               "FSR PERFORM."};
 #else
 // Built for Linux and the console, but not yet run on either.
 constexpr const char* kAntiAliasingLabels[] = {"OFF", "MSAA 2X", "FSR 3.1 (UNTESTED)",
-                                               "FSR 1.5X (UNTESTED)", "FSR 1.7X (UNTESTED)",
-                                               "FSR 2X (UNTESTED)"};
+                                               "FSR 1.33X (UNTESTED)", "FSR 1.5X (UNTESTED)",
+                                               "FSR 1.7X (UNTESTED)", "FSR 2X (UNTESTED)"};
 #endif
 // While FSR can run only after a restart (the PS5 started without it chosen:
 // its device features are enabled only then, ps5/game/main_ps5.cpp). A row's value is clipped

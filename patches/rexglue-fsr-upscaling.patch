@@ -337,6 +337,22 @@ index 047ab5f..b059c8b 100644
        // Maximum mip level is in the texture resource itself, but mip_base_map
        // can be used to limit fetching to mip_min_level.
      };
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 612589d..a910d57 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -166,6 +166,11 @@ endif()
+ if(REXGLUE_ENABLE_FSR)
+     target_include_directories(rexgpu-xenos PRIVATE ${REXGLUE_ROOT}/thirdparty/fidelityfx-api/include)
+     target_compile_definitions(rexgpu-xenos PRIVATE REX_HAS_FSR=1)
++    # The presenter's scaling filters (src/ui/CMakeLists.txt) change the layout of the presenter's
++    # classes in the headers; the graphics system sees the same one.
++    if(WIN32)
++        target_compile_definitions(rexgpu-xenos PRIVATE REX_HAS_FIDELITYFX_SDK=1)
++    endif()
+     if(REXGLUE_FSR_STATIC)
+         target_compile_definitions(rexgpu-xenos PRIVATE REX_FSR_STATIC=1)
+         target_sources(rexgpu-xenos PRIVATE vulkan/temporal_aa_static.cpp)
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 index ccb619c..3301e60 100644
 --- a/src/graphics/d3d12/command_processor.cpp
@@ -11596,7 +11612,7 @@ index 0000000..7e563d8
 +    0x000200F9, 0x00005445, 0x000200F8, 0x00005445, 0x000100FD, 0x00010038,
 +};
 diff --git a/src/graphics/temporal_aa.cpp b/src/graphics/temporal_aa.cpp
-index 3046054..c971f4c 100644
+index 3046054..807c7a7 100644
 --- a/src/graphics/temporal_aa.cpp
 +++ b/src/graphics/temporal_aa.cpp
 @@ -57,8 +57,13 @@ REXCVAR_DEFINE_UINT32(temporal_aa_debug, 0, "GPU",
@@ -11615,16 +11631,18 @@ index 3046054..c971f4c 100644
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  REXCVAR_DEFINE_UINT32(temporal_aa_flip_jitter, 0, "GPU",
                        "Temporal anti-aliasing, development: the jitter FSR is told, x (1) and y (2) "
-@@ -77,13 +82,31 @@ REXCVAR_DEFINE_DOUBLE(temporal_aa_cut_distance, 25.0, "GPU",
+@@ -77,13 +82,33 @@ REXCVAR_DEFINE_DOUBLE(temporal_aa_cut_distance, 25.0, "GPU",
                        "one frame is a cut, and FSR's history is dropped")
      .range(0.0, 10000.0)
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_DOUBLE(temporal_aa_upscale, 1.0, "GPU",
 +                      "FSR upscaling (rexglue-fsr-upscaling.patch), with temporal_aa = fsr: the "
-+                      "ratio of the output to the size the 3D scene is drawn at (1.5 Quality, "
-+                      "1.7 Balanced, 2 Performance, 3 Ultra Performance); 1, the default: the "
-+                      "scene is drawn at the output size (FSR native AA). Post-processing and "
-+                      "the HUD stay at the output size.")
++                      "ratio of the output to the size the 3D scene is drawn at (4/3 Ultra "
++                      "Quality, 1.5 Quality, 1.7 Balanced, 2 Performance, 3 Ultra Performance); "
++                      "1, the default: the scene is drawn at the output size (FSR native AA). "
++                      "The size is the output's over the ratio, rounded: 1920x1080 for a "
++                      "2560x1440 output at 4/3. Post-processing and the HUD stay at the output "
++                      "size.")
 +    .range(1.0, 3.0)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload)
 +    // The game sets it from its own setting, like temporal_aa.
@@ -11648,7 +11666,7 @@ index 3046054..c971f4c 100644
  constexpr uint32_t kTaaJitterPhases = 8;
  
  float TaaHalton(uint32_t index, uint32_t base) {
-@@ -178,7 +201,10 @@ void CommandProcessor::TaaSceneMarker(uint32_t slot) {
+@@ -178,7 +203,10 @@ void CommandProcessor::TaaSceneMarker(uint32_t slot) {
    // In the scene of a jittered frame (the pass ran in the one before, so FSR
    // is ready); replayed per tile in a tiled scene, where the snapshots would
    // be of one tile, so only the first is taken.
@@ -11660,7 +11678,7 @@ index 3046054..c971f4c 100644
        (taa_frame_.snapshots & (1u << slot))) {
      return;
    }
-@@ -216,9 +242,41 @@ void CommandProcessor::TaaJitterNdcOffset(xenos::PrimitiveType primitive_type,
+@@ -216,9 +244,41 @@ void CommandProcessor::TaaJitterNdcOffset(xenos::PrimitiveType primitive_type,
      return;
    }
    ++taa_frame_.scene_draws;
@@ -11702,7 +11720,7 @@ index 3046054..c971f4c 100644
    // The scene's full-screen passes (the fog) are rectangles; its geometry
    // isn't, and is drawn through the viewport into the main view (as wide as
    // the target).
-@@ -239,11 +297,149 @@ void CommandProcessor::TaaJitterNdcOffset(xenos::PrimitiveType primitive_type,
+@@ -239,11 +299,149 @@ void CommandProcessor::TaaJitterNdcOffset(xenos::PrimitiveType primitive_type,
    if (std::abs(std::abs(x_scale) * 2.0f - float(pitch)) > 1.0f) {
      return;
    }
@@ -11854,7 +11872,7 @@ index 3046054..c971f4c 100644
  bool CommandProcessor::TaaCheckDraw() {
    if (taa_frame_.mode == TaaMode::kOff || !taa_frame_.post || taa_frame_.done) {
      return false;
-@@ -286,6 +482,17 @@ bool CommandProcessor::TaaCheckDraw() {
+@@ -286,6 +484,17 @@ bool CommandProcessor::TaaCheckDraw() {
      taa_frame_.status = 's';
      return false;
    }
@@ -11872,7 +11890,7 @@ index 3046054..c971f4c 100644
    taa_frame_.status = 'i';  // the matrices not invertible
    Mat4 view, view_projection, inverse_view_projection;
    for (uint32_t i = 0; i < 4; ++i) {
-@@ -368,6 +575,7 @@ bool CommandProcessor::TaaCheckDraw() {
+@@ -368,6 +577,7 @@ bool CommandProcessor::TaaCheckDraw() {
      taa_frame_time_ms_ = float(std::clamp(ms, 1.0, 100.0));
    }
    taa_last_time_ = now;
@@ -11880,7 +11898,7 @@ index 3046054..c971f4c 100644
    return true;
  }
  
-@@ -396,12 +604,37 @@ void CommandProcessor::TaaEndFrame() {
+@@ -396,12 +606,37 @@ void CommandProcessor::TaaEndFrame() {
                                         : next_start ? "available from the next start (the device "
                                                        "was created without its features)"
                                                      : "unavailable");
@@ -11918,7 +11936,7 @@ index 3046054..c971f4c 100644
      TaaRelease();
    }
    TaaFrameEnd();
-@@ -430,11 +663,41 @@ void CommandProcessor::TaaEndFrame() {
+@@ -430,11 +665,41 @@ void CommandProcessor::TaaEndFrame() {
      }
    } else {
      taa_off_since_ = 0;
@@ -12785,3 +12803,23 @@ index 1fd3bd2..e474eb9 100644
    if (parameters.aniso_filter != xenos::AnisoFilter::kDisabled) {
      sampler_create_info.anisotropyEnable = VK_TRUE;
      sampler_create_info.maxAnisotropy =
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index a84f2fe..e1695f8 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -133,6 +133,15 @@ if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sd
+     target_compile_definitions(rexui PRIVATE REX_HAS_FIDELITYFX_SDK=1)
+ endif()
+ 
++# The presenter's scaling filters (present_effect = cas or fsr: FidelityFX's Contrast Adaptive Sharpening
++# and FSR 1 as pixel shaders, whose bytecode is in src/ui/shaders) are compiled where
++# REX_HAS_FIDELITYFX_SDK is defined, which the SDK does only with the whole FidelityFX source
++# (REXGLUE_ENABLE_FIDELITYFX). They need none of it, so a Windows build with FSR gets them
++# (rexglue-fsr-upscaling.patch); present_effect was bilinear only before.
++if(REXGLUE_ENABLE_FSR AND WIN32)
++    target_compile_definitions(rexui PRIVATE REX_HAS_FIDELITYFX_SDK=1)
++endif()
++
+ # Frame generation on D3D12 (rexglue-frame-generation.patch): the ffx-api
+ # headers (MIT); the runtime is loaded at run time from the executable's folder.
+ if(REXGLUE_ENABLE_FSR AND WIN32 AND REXGLUE_USE_D3D12)

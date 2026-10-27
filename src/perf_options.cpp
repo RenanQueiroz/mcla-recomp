@@ -54,10 +54,11 @@ REXCVAR_DEFINE_STRING(mcla_upscaling, "off", "MCLA",
                       "FSR upscaling, with mcla_anti_aliasing = fsr: the 3D scene is drawn smaller and FSR 3.1\n"
                       "upscales it, while post-processing, the HUD and the menus stay at the output size:\n"
                       " off: FSR at native resolution (the default)\n"
+                      " ultra_quality: 4/3x (3/4 of the width and height: 1080p at resolution_scale 2)\n"
                       " quality: 1.5x (1440p for 4K)\n"
                       " balanced: 1.7x\n"
                       " performance: 2x (1080p for 4K)")
-    .allowed({"off", "quality", "balanced", "performance"});
+    .allowed({"off", "ultra_quality", "quality", "balanced", "performance"});
 REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA",
                     "Before mcla_anti_aliasing: false (no anti-aliasing) is still taken while "
                     "mcla_anti_aliasing isn't set");
@@ -277,7 +278,13 @@ void ApplyMsaa(uint8_t* base) {
   const char* upscale = "1";
   if (anti_aliasing == "fsr") {
     const std::string mode = rex::cvar::GetFlagByName("mcla_upscaling");
-    upscale = mode == "quality" ? "1.5" : mode == "balanced" ? "1.7" : mode == "performance" ? "2" : "1";
+    // 4/3 to the digits of a double, so that the render size is exactly 3/4 of the output's
+    // (1920x1080 of 2560x1440), whatever the rounding of a shorter number.
+    upscale = mode == "ultra_quality" ? "1.3333333333333333"
+              : mode == "quality"     ? "1.5"
+              : mode == "balanced"    ? "1.7"
+              : mode == "performance" ? "2"
+                                      : "1";
   }
   if (applied_upscale != upscale) {
     rex::cvar::SetFlagByName("temporal_aa_upscale", upscale);
