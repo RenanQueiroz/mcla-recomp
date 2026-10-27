@@ -280,12 +280,15 @@ static class GameSettings
              + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
     };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
-        [new("Automatic (Vulkan on integrated AMD and Intel graphics, Direct3D 12 otherwise)", "any"),
+        [new("Automatic (Vulkan on Intel and AMD RDNA integrated graphics, Direct3D 12 otherwise)", "any"),
          new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any")
     {
-        Info = "Which graphics system the game uses. Automatic picks Vulkan on integrated AMD graphics (a "
-             + "Ryzen with Radeon graphics, which share the CPU's memory) and on Intel graphics, and Direct3D 12 "
-             + "on AMD graphics cards and on NVIDIA. On an NVIDIA GeForce RTX 5080 the two are within a few "
+        Info = "Which graphics system the game uses. Automatic picks Vulkan on Intel graphics and on AMD's "
+             + "integrated graphics of the RDNA generation (the Radeon graphics of a Ryzen 7000 or 9000 "
+             + "processor, which share the CPU's memory), and Direct3D 12 on NVIDIA, on AMD graphics cards and "
+             + "on AMD's older integrated Vega graphics (the Ryzen 5000G and before: a Ryzen 7 5700G showed the HUD, "
+             + "the menus and parts of the city missing on Vulkan; Vega is not tried here). "
+             + "On an NVIDIA GeForce RTX 5080 the two are within a few "
              + "percent in the city, and Direct3D 12 is 10 to 15% faster in races at 3×; on an AMD Ryzen "
              + "9800X3D's integrated Radeon, Vulkan is 6 to 10% faster at the game's own resolution; on a "
              + "Radeon RX 6600 XT a user found Direct3D 12 20 to 25% faster (Vulkan's GPU command thread costs "

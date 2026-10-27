@@ -1,6 +1,7 @@
 #include "generated/default/mcla_init.h"
 
 #include "mcla_app.h"
+#include "automatic_api.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -287,25 +288,32 @@ bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
 #ifdef _WIN32
 // --- Automatic graphics API (mcla_gpu_backend = any) -----------------------------------
 //
-// Vulkan on AMD's integrated GPUs (the ones that share the CPU's memory) and on Intel's;
-// Direct3D 12 on AMD's discrete cards, on NVIDIA and when nothing is known. Which GPU: the
+// Vulkan on Intel's GPUs and on AMD's integrated GPUs of the RDNA generation (the ones that
+// share the CPU's memory and whose smallest wave is 32 lanes); Direct3D 12 on AMD's discrete
+// cards, on AMD's integrated GCN (Vega) GPUs, on NVIDIA and when nothing is known. The rule
+// itself is src/automatic_api.h (apart from Windows, so a test can run it). Which GPU: the
 // one Direct3D 12 would take (the SDK's d3d12_adapter: the adapter of that number, else
 // the first one that isn't software), whatever API is then used for it. A software adapter
 // (Windows' WARP: d3d12_adapter = -2, or its number) is Direct3D 12's, its vendor being
 // Microsoft's, neither AMD's nor Intel's: Vulkan has no device for it, so the recommendation
 // is Direct3D 12; a number that names no adapter gets none (the launcher, ShaderStamp.cs,
 // answers the same for all of these).
-//  - AMD integrated, measured on a Ryzen 7 9800X3D's Radeon: Vulkan 6 to 10% faster at the
-//    game's own resolution, GPU time per frame 6 to 9% less (launcher/dev/gpu-weak-2026-10-27.md).
-//    Integrated is Direct3D 12's own answer, D3D12_FEATURE_DATA_ARCHITECTURE.UMA, which
-//    holds for an APU however much memory its BIOS sets aside for it (a size would not).
+//  - AMD integrated, RDNA, measured on a Ryzen 7 9800X3D's Radeon (RDNA 2): Vulkan 6 to 10%
+//    faster at the game's own resolution, GPU time per frame 6 to 9% less
+//    (launcher/dev/gpu-weak-2026-10-27.md). Integrated is Direct3D 12's own answer,
+//    D3D12_FEATURE_DATA_ARCHITECTURE.UMA, which holds for an APU however much memory its BIOS
+//    sets aside for it (a size would not); RDNA is told by D3D12_FEATURE_DATA_D3D12_OPTIONS1's
+//    WaveLaneCountMin, 32 (GCN reports 64).
+//  - AMD integrated, GCN (Vega: the Ryzen 3000G to 5000G APUs): Direct3D 12. A user's
+//    Ryzen 7 5700G (Vega 8) had the HUD, the menus and parts of the city missing on Vulkan
+//    (fork issue #14). Not tried here: no Vega GPU was available.
 //  - AMD discrete: upstream issue #7 (RX 6600 XT, i5-10400) has Direct3D 12 20 to 25% faster,
 //    Vulkan's GPU command thread costing more CPU. Not tried here.
 //  - Intel: the SDK takes a slower path of rasterizer-ordered views for render targets on
 //    Direct3D 12 and Vulkan uses ordinary framebuffer ones. Not measured: no Intel GPU.
 //  - NVIDIA: Vulkan is no faster in races (the RTX 5080).
-// The launcher's Graphics API setting repeats the rule (launcher/src/GpuApi.cs) so that it
-// can mark the API recommended for the player's GPU; this and that must agree. Vulkan
+// The launcher's Graphics API setting repeats the rule (launcher/src/ShaderStamp.cs) so that
+// it can mark the API recommended for the player's GPU; this and that must agree. Vulkan
 // needs vulkan-1.dll and, for Automatic, a Vulkan device that is the same GPU (matched by
 // LUID, else by vendor and device id): the SDK takes Vulkan's first device otherwise.
 // Choosing the API (launcher, pause menu, --mcla_gpu_backend) skips the decision; only the
@@ -320,31 +328,33 @@ struct AutomaticBackend {
 };
 AutomaticBackend g_automatic;
 
-constexpr UINT kVendorAmd = 0x1002;
-constexpr UINT kVendorIntel = 0x8086;
-
-// Direct3D 12's answer for an adapter: does the GPU share the CPU's memory (an APU)?
-bool AdapterIsUma(IDXGIAdapter1* adapter) {
+// Direct3D 12's answers for an adapter (src/automatic_api.h): does the GPU share the CPU's
+// memory (an APU), and what is the smallest wave it runs (32 on RDNA, 64 on GCN)? A device
+// that can't be made, or a query that fails, leaves the answer 0 / false: Direct3D 12.
+void ReadAdapterFacts(IDXGIAdapter1* adapter, mcla::automatic_api::AdapterFacts& facts) {
   HMODULE module = LoadLibraryW(L"d3d12.dll");  // (stays loaded: the SDK loads it again)
   if (!module) {
-    return false;
+    return;
   }
   const auto create_device =
       reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(module, "D3D12CreateDevice"));
   if (!create_device) {
-    return false;
+    return;
   }
   ID3D12Device* device = nullptr;
   if (FAILED(create_device(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))) || !device) {
-    return false;
+    return;
   }
   D3D12_FEATURE_DATA_ARCHITECTURE architecture{};
-  const bool uma =
-      SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &architecture,
-                                            sizeof(architecture))) &&
-      architecture.UMA;
+  facts.uma = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &architecture,
+                                                    sizeof(architecture))) &&
+              architecture.UMA;
+  D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1{};
+  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1,
+                                            sizeof(options1)))) {
+    facts.wave_lane_count_min = options1.WaveOps ? options1.WaveLaneCountMin : 0;
+  }
   device->Release();
-  return uma;
 }
 
 // The index among Vulkan's physical devices of the GPU with this LUID (else vendor and
@@ -435,11 +445,12 @@ static void DecideAutomaticBackend(bool automatic) {
   if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
     return;
   }
-  // The adapter Direct3D 12 would take. Only an AMD one is asked for its architecture (an
-  // Intel one is Vulkan's whatever it is, anything else Direct3D 12's).
+  // The adapter Direct3D 12 would take. Only an AMD one is asked what it is (its
+  // architecture and smallest wave): an Intel one is Vulkan's whatever it is, anything else
+  // Direct3D 12's.
   DXGI_ADAPTER_DESC1 chosen{};
   bool have_chosen = false;
-  bool uma = false;
+  mcla::automatic_api::AdapterFacts facts;
   IDXGIAdapter1* adapter = nullptr;
   for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
     DXGI_ADAPTER_DESC1 desc{};
@@ -447,8 +458,11 @@ static void DecideAutomaticBackend(bool automatic) {
     const bool candidate =
         described && (adapter_option >= 0 ? int(i) == adapter_option
                                           : !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE));
-    if (candidate && desc.VendorId == kVendorAmd) {
-      uma = AdapterIsUma(adapter);
+    if (candidate) {
+      facts.vendor = desc.VendorId;
+      if (desc.VendorId == mcla::automatic_api::kVendorAmd) {
+        ReadAdapterFacts(adapter, facts);
+      }
     }
     adapter->Release();
     adapter = nullptr;
@@ -463,16 +477,11 @@ static void DecideAutomaticBackend(bool automatic) {
     return;
   }
 
-  const bool vulkan_gpu =
-      chosen.VendorId == kVendorIntel || (chosen.VendorId == kVendorAmd && uma);
+  const bool vulkan_gpu = mcla::automatic_api::PrefersVulkan(facts);
   char name[128] = {};
   WideCharToMultiByte(CP_UTF8, 0, chosen.Description, -1, name, int(sizeof(name)) - 1, nullptr,
                       nullptr);
-  const char* kind = chosen.VendorId == kVendorAmd
-                         ? (uma ? "AMD integrated graphics" : "AMD discrete graphics")
-                     : chosen.VendorId == kVendorIntel ? "Intel graphics"
-                     : chosen.VendorId == 0x10DE       ? "NVIDIA graphics"
-                                                       : "graphics";
+  const char* kind = mcla::automatic_api::KindOf(facts);
   if (!vulkan_gpu) {
     g_automatic.recommended = "d3d12";
     if (automatic) {

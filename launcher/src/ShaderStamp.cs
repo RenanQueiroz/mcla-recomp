@@ -206,7 +206,8 @@ static class ShaderStamp
             if (api != askedApi && !sameAsResolved) return "the graphics API changed";
             // "any" then and now: what Automatic comes to depends on the GPU and on the game's version
             // (a cache made when it was Direct3D 12 for every GPU is not for the Vulkan it is now on
-            // AMD's integrated GPUs and Intel's).
+            // AMD's RDNA integrated GPUs and Intel's, nor one made when Vega's integrated GPUs were
+            // Vulkan's for the Direct3D 12 they are now).
             if (api == "any" && askedApi == "any" && JsonText(storage, "api")?.ToLowerInvariant() is { } resolved)
             {
                 var adapterOption = int.TryParse(Setting("d3d12_adapter", arguments, toml), NumberStyles.Integer, CultureInfo.InvariantCulture, out var chosen) ? chosen : -1;
@@ -296,16 +297,19 @@ static class DisplayDrivers
         return list;
     }
 
-    // What the game's Automatic graphics API gives (src/mcla_app.cpp, DecideAutomaticBackend; this
-    // and that must agree): Vulkan on Intel graphics and on AMD's integrated ones, Direct3D 12 on
-    // AMD's discrete cards, on NVIDIA and on anything else. The GPU is the one Direct3D 12 would
+    // What the game's Automatic graphics API gives (src/mcla_app.cpp, DecideAutomaticBackend, and the
+    // rule itself in src/automatic_api.h; this and that must agree): Vulkan on Intel graphics and on
+    // AMD's integrated ones of the RDNA generation, Direct3D 12 on AMD's discrete cards, on AMD's
+    // integrated GCN (Vega) ones, on NVIDIA and on anything else. The GPU is the one Direct3D 12 would
     // take: the adapter d3d12_adapter names (-1: the first that isn't software, -2: software), as
     // DXGI lists them. AMD's integrated ones are told by Direct3D 12's own answer (the
     // architecture's UMA flag, from a device made for the adapter), which holds however much
-    // memory the BIOS sets aside for the GPU. Vulkan also needs vulkan-1.dll (the game also
-    // needs a Vulkan device for that GPU, which only it can see). A software adapter (WARP, by -2
-    // or by its number) is "d3d12" as in the game: its vendor is neither AMD's nor Intel's. "vulkan",
-    // "d3d12", or null when the adapter can't be read or the number names none. Asked once for each option.
+    // memory the BIOS sets aside for the GPU, and RDNA from GCN by the smallest wave the device
+    // reports (D3D12_FEATURE_DATA_D3D12_OPTIONS1.WaveLaneCountMin: 32 on RDNA, 64 on GCN). Vulkan also
+    // needs vulkan-1.dll (the game also needs a Vulkan device for that GPU, which only it can see).
+    // A software adapter (WARP, by -2 or by its number) is "d3d12" as in the game: its vendor is
+    // neither AMD's nor Intel's. "vulkan", "d3d12", or null when the adapter can't be read or the
+    // number names none. Asked once for each option.
     public static string? AutomaticApi(int adapterOption)
     {
         lock (automaticApi)
@@ -317,6 +321,19 @@ static class DisplayDrivers
 
     static readonly Dictionary<int, string?> automaticApi = [];
     const uint VendorAmd = 0x1002, VendorIntel = 0x8086;
+    const uint RdnaWaveLaneCountMin = 32;
+
+    /// The rule, from what is known of the adapter (as AdapterFacts in src/automatic_api.h): Vulkan on
+    /// Intel, and on AMD's integrated GPUs (UMA) whose smallest wave is 32 lanes (RDNA; GCN, Vega
+    /// included, reports 64: a Ryzen 7 5700G showed the HUD, the menus and parts of the city missing
+    /// on Vulkan, fork issue #14). Unknown facts (0) mean Direct3D 12.
+    public static bool PrefersVulkan(uint vendor, bool uma, uint waveLaneCountMin) =>
+        vendor == VendorIntel || (vendor == VendorAmd && uma && waveLaneCountMin == RdnaWaveLaneCountMin);
+
+    /// What Automatic comes to for such an adapter: "vulkan" when the rule says so and vulkan-1.dll
+    /// is there (vulkanAvailable), else "d3d12".
+    public static string AutomaticApiFor(uint vendor, bool uma, uint waveLaneCountMin, bool vulkanAvailable) =>
+        PrefersVulkan(vendor, uma, waveLaneCountMin) && vulkanAvailable ? "vulkan" : "d3d12";
 
     static string? ReadAutomaticApi(int adapterOption)
     {
@@ -333,10 +350,12 @@ static class DisplayDrivers
                     {
                         if (adapter.GetDesc1(out var desc) < 0) continue;
                         if (adapterOption >= 0 ? (int)i != adapterOption : (desc.Flags & 2) != 0) continue;
-                        if (desc.VendorId != VendorIntel && !(desc.VendorId == VendorAmd && IsUma(adapter))) return "d3d12";
-                        if (!NativeLibrary.TryLoad("vulkan-1.dll", out var vulkan)) return "d3d12";
-                        NativeLibrary.Free(vulkan);
-                        return "vulkan";
+                        // Only AMD's adapters are asked what they are (an Intel one is Vulkan's whatever it is).
+                        var (uma, wave) = desc.VendorId == VendorAmd ? ReadAmdFacts(adapter) : (false, 0u);
+                        if (!PrefersVulkan(desc.VendorId, uma, wave)) return "d3d12";
+                        var vulkanAvailable = NativeLibrary.TryLoad("vulkan-1.dll", out var vulkan);
+                        if (vulkanAvailable) NativeLibrary.Free(vulkan);
+                        return AutomaticApiFor(desc.VendorId, uma, wave, vulkanAvailable);
                     }
                     finally
                     {
@@ -357,15 +376,16 @@ static class DisplayDrivers
         return null;
     }
 
-    // Whether Direct3D 12 says the adapter's GPU shares the CPU's memory (an APU). A device that
-    // can't be made at feature level 11_0 counts as not.
-    static bool IsUma(IDXGIAdapter1 adapter)
+    // What Direct3D 12 says of an adapter's GPU: whether it shares the CPU's memory (an APU), and the
+    // smallest wave it runs (0 when the device doesn't say). A device that can't be made at feature
+    // level 11_0, or a query that fails, counts as not and 0.
+    static (bool Uma, uint WaveLaneCountMin) ReadAmdFacts(IDXGIAdapter1 adapter)
     {
         var unknown = Marshal.GetIUnknownForObject(adapter);
         try
         {
             var deviceId = new Guid("189819f1-1db6-4b57-be54-1821339b85f7");  // ID3D12Device
-            if (D3D12CreateDevice(unknown, 0xB000 /* D3D_FEATURE_LEVEL_11_0 */, ref deviceId, out var device) < 0 || device == IntPtr.Zero) return false;
+            if (D3D12CreateDevice(unknown, 0xB000 /* D3D_FEATURE_LEVEL_11_0 */, ref deviceId, out var device) < 0 || device == IntPtr.Zero) return (false, 0);
             // The calls are made through the device's vtable: IUnknown (3 entries: Release is 2),
             // ID3D12Object (GetPrivateData, SetPrivateData, SetPrivateDataInterface, SetName: 4), then
             // ID3D12Device's GetNodeCount, CreateCommandQueue, CreateCommandAllocator,
@@ -374,10 +394,16 @@ static class DisplayDrivers
             var vtable = Marshal.ReadIntPtr(device);
             try
             {
-                var check = Marshal.GetDelegateForFunctionPointer<CheckFeatureSupportFn>(Marshal.ReadIntPtr(vtable, 13 * IntPtr.Size));
+                var checkPointer = Marshal.ReadIntPtr(vtable, 13 * IntPtr.Size);
+                var check = Marshal.GetDelegateForFunctionPointer<CheckFeatureSupportFn>(checkPointer);
                 var data = new D3D12_FEATURE_DATA_ARCHITECTURE();
-                const int D3D12_FEATURE_ARCHITECTURE = 1;
-                return check(device, D3D12_FEATURE_ARCHITECTURE, ref data, (uint)Marshal.SizeOf<D3D12_FEATURE_DATA_ARCHITECTURE>()) >= 0 && data.UMA != 0;
+                const int D3D12_FEATURE_ARCHITECTURE = 1, D3D12_FEATURE_D3D12_OPTIONS1 = 8;
+                var uma = check(device, D3D12_FEATURE_ARCHITECTURE, ref data, (uint)Marshal.SizeOf<D3D12_FEATURE_DATA_ARCHITECTURE>()) >= 0 && data.UMA != 0;
+                var checkOptions = Marshal.GetDelegateForFunctionPointer<CheckOptions1Fn>(checkPointer);
+                var options = new D3D12_FEATURE_DATA_D3D12_OPTIONS1();
+                var wave = checkOptions(device, D3D12_FEATURE_D3D12_OPTIONS1, ref options, (uint)Marshal.SizeOf<D3D12_FEATURE_DATA_D3D12_OPTIONS1>()) >= 0 && options.WaveOps != 0
+                    ? options.WaveLaneCountMin : 0u;
+                return (uma, wave);
             }
             finally
             {
@@ -396,6 +422,10 @@ static class DisplayDrivers
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate int CheckFeatureSupportFn(IntPtr self, int feature, ref D3D12_FEATURE_DATA_ARCHITECTURE data, uint size);
 
+    // The same function (CheckFeatureSupport) with the other feature's data.
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int CheckOptions1Fn(IntPtr self, int feature, ref D3D12_FEATURE_DATA_D3D12_OPTIONS1 data, uint size);
+
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate uint ReleaseFn(IntPtr self);
 
@@ -406,6 +436,17 @@ static class DisplayDrivers
         public int TileBasedRenderer;
         public int UMA;
         public int CacheCoherentUMA;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct D3D12_FEATURE_DATA_D3D12_OPTIONS1
+    {
+        public int WaveOps;
+        public uint WaveLaneCountMin;
+        public uint WaveLaneCountMax;
+        public uint TotalLaneCount;
+        public int ExpandedComputeResourceStates;
+        public int Int64ShaderOps;
     }
 
     [DllImport("dxgi.dll")]
