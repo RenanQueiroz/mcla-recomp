@@ -1,11 +1,11 @@
 diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
-index 2b0940c..7fbf1ab 100644
+index 34d061e..4bc489a 100644
 --- a/include/rex/graphics/d3d12/render_target_cache.h
 +++ b/include/rex/graphics/d3d12/render_target_cache.h
-@@ -220,6 +220,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
-   };
+@@ -224,6 +224,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   // a nearest-neighbour stretch (single-sampled sources only), null where there is none.
    static const ResolveDirectShaderCode
-       kResolveDirectShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
+       kResolveDirectStretchShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
 +  static const ResolveDirectShaderCode
 +      kResolveDirectBatchedShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
  
@@ -24,26 +24,26 @@ index 9e98ea8..022ed02 100644
  
  // GPU Textures
 diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
-index 7d98a4e..060c4d8 100644
+index b4acc6a..b11e50d 100644
 --- a/include/rex/graphics/vulkan/render_target_cache.h
 +++ b/include/rex/graphics/vulkan/render_target_cache.h
-@@ -300,6 +300,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
-   };
+@@ -304,6 +304,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // a nearest-neighbour stretch (single-sampled sources only), null where there is none.
    static const ResolveDirectShaderCode
-       kResolveDirectShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
+       kResolveDirectStretchShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
 +  static const ResolveDirectShaderCode
 +      kResolveDirectBatchedShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
  
    // On the fragment shader interlock path, the render pass key is used purely
    // for passing parameters to pipeline setup - there's always only one render
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index 5150ff5..c4de683 100644
+index b1045de..4292b0d 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
-@@ -127,6 +127,22 @@ namespace shaders {
- #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_scaled_cs.h"
- #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_msaa_cs.h"
- #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_msaa_scaled_cs.h"
+@@ -135,6 +135,22 @@ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_stretch_scaled_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_stretch_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_stretch_scaled_cs.h"
 +#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_cs.h"
 +#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_scaled_cs.h"
 +#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_msaa_cs.h"
@@ -63,7 +63,7 @@ index 5150ff5..c4de683 100644
  }  // namespace shaders
  
  const D3D12RenderTargetCache::ResolveCopyShaderCode
-@@ -253,6 +269,67 @@ const D3D12RenderTargetCache::ResolveDirectShaderCode
+@@ -292,6 +308,67 @@ const D3D12RenderTargetCache::ResolveDirectShaderCode
          {},
  };
  
@@ -131,7 +131,7 @@ index 5150ff5..c4de683 100644
  const uint32_t D3D12RenderTargetCache::kTransferUsedRootParameters[size_t(
      TransferRootSignatureIndex::kCount)] = {
      // kColor
-@@ -1001,7 +1078,9 @@ bool D3D12RenderTargetCache::Initialize() {
+@@ -1040,7 +1117,9 @@ bool D3D12RenderTargetCache::Initialize() {
          }
          for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
            for (size_t j = 0; j < 2; ++j) {
@@ -20579,14 +20579,13 @@ index 0000000..d20c4ee
 +    0x00000000, 0x00100E46, 0x00000009, 0x0100003E,
 +};
 diff --git a/src/graphics/shaders/resolve_direct.xesli b/src/graphics/shaders/resolve_direct.xesli
-index 0558881..8b2bafc 100644
+index 5d1db17..e4983c1 100644
 --- a/src/graphics/shaders/resolve_direct.xesli
 +++ b/src/graphics/shaders/resolve_direct.xesli
-@@ -35,6 +35,15 @@
- // used is a dummy (null on Direct3D 12).
- //
- // XE_RESOLVE_DIRECT_SOURCE_MSAA: the source is multisampled.
-+//
+@@ -43,6 +43,14 @@
+ // drawn into the top-left render-size part of the render target is resolved as an
+ // output-size picture, every output pixel the one the squeezed pixel under its centre
+ // drew. Only the shaders made with it read the constants.
 +// XE_RESOLVE_DIRECT_BATCHED_LOADS: a thread issues the loads of all the samples
 +// it converts (4 or 8 pixels) one after another before it uses any of them,
 +// then converts. Without it every load of a loop iteration is waited for before
@@ -20598,7 +20597,7 @@ index 0558881..8b2bafc 100644
  
  #ifndef XENIA_GPU_SHADERS_RESOLVE_DIRECT_XESLI_
  #define XENIA_GPU_SHADERS_RESOLVE_DIRECT_XESLI_
-@@ -336,6 +345,146 @@ uint XeResolveDirectLoad32bppSample(XeResolveInfo resolve_info,
+@@ -359,6 +367,146 @@ uint XeResolveDirectLoad32bppSample(XeResolveInfo resolve_info,
    return packed;
  }
  
@@ -20745,7 +20744,7 @@ index 0558881..8b2bafc 100644
  // A 64bpp sample in its EDRAM representation.
  uint2_xe XeResolveDirectLoad64bppSample(XeResolveInfo resolve_info,
                                          XeResolveDirectSourceInfo source_info,
-@@ -358,46 +507,116 @@ uint2_xe XeResolveDirectLoad2Pixels32bpp(XeResolveInfo resolve_info,
+@@ -381,46 +529,116 @@ uint2_xe XeResolveDirectLoad2Pixels32bpp(XeResolveInfo resolve_info,
                                           XeResolveDirectSourceInfo source_info,
                                           uint2_xe edram_sample,
                                           uint pixel_stride_samples) {
@@ -20889,7 +20888,7 @@ index 0558881..8b2bafc 100644
  }
  
  // 4 64bpp pixels, 0 and 1 in packed_01, 2 and 3 in packed_23.
-@@ -407,16 +626,30 @@ void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
+@@ -430,16 +648,30 @@ void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
                                       uint pixel_stride_samples,
                                       out_param_xe(uint4_xe, packed_01),
                                       out_param_xe(uint4_xe, packed_23)) {
@@ -20929,7 +20928,7 @@ index 0558881..8b2bafc 100644
  }
  
  #ifndef XE_RESOLVE_CLEAR
-@@ -554,6 +787,115 @@ void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
+@@ -577,6 +809,115 @@ void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
      }
    }
  
@@ -21045,7 +21044,7 @@ index 0558881..8b2bafc 100644
    void XeResolveDirectLoad4RGBAColors(
        XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
        uint2_xe edram_sample, out_param_xe(float4_xe, pixel_0),
-@@ -565,18 +907,44 @@ void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
+@@ -588,18 +929,44 @@ void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
      pixel_1 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
      pixel_2 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
      pixel_3 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
@@ -51367,10 +51366,10 @@ index 0000000..ed44ba0
 +    0x00004C7A, 0x000200F8, 0x00004C7A, 0x000100FD, 0x00010038,
 +};
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index c7d1540..7010898 100644
+index 41b23c7..d6e82a4 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
-@@ -142,6 +142,22 @@ namespace shaders {
+@@ -150,6 +150,22 @@ namespace shaders {
  #include "../shaders/vulkan_spirv/resolve_direct_full_64bpp_scaled_cs.h"
  #include "../shaders/vulkan_spirv/resolve_direct_full_64bpp_msaa_cs.h"
  #include "../shaders/vulkan_spirv/resolve_direct_full_64bpp_msaa_scaled_cs.h"
@@ -51393,7 +51392,7 @@ index c7d1540..7010898 100644
  }  // namespace shaders
  
  // The same for an EDRAM larger than the console's (resolve_edram4096.xesli).
-@@ -268,6 +284,67 @@ const VulkanRenderTargetCache::ResolveDirectShaderCode
+@@ -307,6 +323,67 @@ const VulkanRenderTargetCache::ResolveDirectShaderCode
          {},
  };
  
@@ -51461,7 +51460,7 @@ index c7d1540..7010898 100644
  const VulkanRenderTargetCache::TransferPipelineLayoutInfo
      VulkanRenderTargetCache::kTransferPipelineLayoutInfos[size_t(
          TransferPipelineLayoutIndex::kCount)] = {
-@@ -917,7 +994,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+@@ -956,7 +1033,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
        }
        for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
          for (size_t j = 0; j < 2; ++j) {
