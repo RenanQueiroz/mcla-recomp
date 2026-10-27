@@ -254,11 +254,28 @@ try {
     $marker = Get-Item "$sdk\.mcla-patched" -Force
     $recompiler = Get-Item "$install\bin\rexglue.exe" -Force -ErrorAction SilentlyContinue
     if (-not $recompiler -or $recompiler.LastWriteTime -lt $marker.LastWriteTime) {
+        # The SDK's precompiled headers keep the Windows SDK and Visual Studio
+        # headers they were made with, and a new Windows SDK does not make them
+        # stale to the build (the old headers are still there), so files then
+        # mix two Windows SDKs and fail (issue #21). The build folder records
+        # what it was made with and starts again when that changes; one with
+        # no record starts again only if the SDK was never installed.
+        $sdkBuild = "$sdk\out\build\win-amd64"
+        $toolchainFile = "$sdkBuild\mcla-toolchain.txt"
+        $toolchain = "Windows SDK $((NewestWindowsSdk).Name), $env:VCToolsInstallDir"
+        if (Test-Path $sdkBuild) {
+            $recorded = if (Test-Path $toolchainFile) { (Get-Content $toolchainFile -Raw).Trim() } else { $null }
+            if (($recorded -and $recorded -ne $toolchain) -or (-not $recorded -and -not $recompiler)) {
+                "the Windows SDK or Visual Studio changed since the SDK build folder was made; starting it again"
+                Remove-Item -Recurse -Force $sdkBuild
+            }
+        }
         Push-Location $sdk
         try {
             # The compilers by full path; a build folder configured earlier
             # with another Clang is then configured again from scratch.
             Logged "sdk-configure" { cmake --preset win-amd64 -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF "-DCMAKE_C_COMPILER=$env:MCLA_CC" "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX" }
+            Set-Content $toolchainFile $toolchain
             Logged "sdk-build" { cmake --build out\build\win-amd64 --config Release }
             Logged "sdk-install" { cmake --install out\build\win-amd64 --config Release }
         } finally { Pop-Location }
