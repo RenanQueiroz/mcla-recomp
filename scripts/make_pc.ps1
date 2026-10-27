@@ -437,6 +437,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-guest-atomics-lock-free.patch"; File = "src\core\mutex.cpp"; Adds = "guest_atomics_lock_free" }
     @{ Patch = "rexglue-resolve-direct-batched-loads.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "resolve_direct_batched_loads" }
     @{ Patch = "rexglue-xma-decoder-fixes.patch"; File = "src\audio\xma_context.cpp"; Adds = "xma_race_fixes" }
+    @{ Patch = "rexglue-alpha-to-mask-tolerance.patch"; File = "src\graphics\flags.cpp"; Adds = "alpha_to_mask_tolerance" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }

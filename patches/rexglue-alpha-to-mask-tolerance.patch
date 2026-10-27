@@ -1,0 +1,64 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 022ed02..f9b8da6 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -42,6 +42,7 @@ REXCVAR_DECLARE(bool, native_stencil_value_output);
+ REXCVAR_DECLARE(bool, native_stencil_value_output_d3d12_intel);
+ REXCVAR_DECLARE(bool, gamma_render_target_as_unorm16);
+ REXCVAR_DECLARE(bool, native_2x_msaa);
++REXCVAR_DECLARE(double, alpha_to_mask_tolerance);
+ REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
+ REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
+ REXCVAR_DECLARE(bool, direct_host_resolve);
+diff --git a/src/graphics/flags.cpp b/src/graphics/flags.cpp
+index e2983a4..cc84c32 100644
+--- a/src/graphics/flags.cpp
++++ b/src/graphics/flags.cpp
+@@ -16,6 +16,11 @@
+ REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
+                     "Allow invalid fetch constants");
+ REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
++REXCVAR_DEFINE_DOUBLE(alpha_to_mask_tolerance, 0.00195, "GPU",
++                      "Alpha to mask: an alpha this far under a coverage threshold still passes "
++                      "it (about half a step of 8-bit alpha); 0 compares exactly (next start)")
++    .range(0.0, 0.1)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
+ REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
+                     "Convert float24 depth in pixel shader");
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_om.cpp b/src/graphics/pipeline/shader/dxbc_translator_om.cpp
+index 44ee9da..b19e29a 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator_om.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_om.cpp
+@@ -1706,7 +1706,7 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMaskSample(
+   dxbc::Src temp_src(dxbc::Src::R(temp).Select(temp_component));
+   // Calculate the threshold.
+   a_.OpMAd(temp_dest, threshold_offset, dxbc::Src::LF(-threshold_offset_scale),
+-           dxbc::Src::LF(threshold_base));
++           dxbc::Src::LF(threshold_base - float(REXCVAR_GET(alpha_to_mask_tolerance))));
+   // Check if alpha of oC0 is at or greater than the threshold (handling NaN
+   // according to the Direct3D 11.3 functional specification, as not covered).
+   a_.OpGE(temp_dest, dxbc::Src::R(system_temps_color_[0], dxbc::Src::kWWWW), temp_src);
+diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+index b118c3f..78de1cd 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+@@ -16,6 +16,7 @@
+ #include <SPIRV/GLSL.std.450.h>
+ 
+ #include <rex/assert.h>
++#include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/render_target/cache.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/graphics/util/draw.h>
+@@ -651,7 +652,9 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+                                                   uint32_t host_sample_index, float threshold_base,
+                                                   float threshold_offset_scale) -> spv::Id {
+           spv::Id sample_threshold = builder_->createBinOp(
+-              spv::OpFSub, type_float_, builder_->makeFloatConstant(threshold_base),
++              spv::OpFSub, type_float_,
++              builder_->makeFloatConstant(threshold_base -
++                                          float(REXCVAR_GET(alpha_to_mask_tolerance))),
+               builder_->createBinOp(spv::OpFMul, type_float_, alpha_to_coverage_offset_float,
+                                     builder_->makeFloatConstant(threshold_offset_scale)));
+           spv::Id sample_covered = builder_->createBinOp(spv::OpFOrdGreaterThanEqual, type_bool_,

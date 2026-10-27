@@ -218,6 +218,7 @@ rexglue-fsr-upscaling.patch include/rex/graphics/command_processor.h TaaResolveS
 rexglue-guest-atomics-lock-free.patch src/core/mutex.cpp guest_atomics_lock_free
 rexglue-resolve-direct-batched-loads.patch src/graphics/pipeline/render_target/cache.cpp resolve_direct_batched_loads
 rexglue-xma-decoder-fixes.patch src/audio/xma_context.cpp xma_race_fixes
+rexglue-alpha-to-mask-tolerance.patch src/graphics/flags.cpp alpha_to_mask_tolerance
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW
