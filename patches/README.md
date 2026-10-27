@@ -48,6 +48,7 @@ git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
+git apply ../../patches/rexglue-resolve-readback-rules.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
@@ -1434,6 +1435,22 @@ Then checked on the longer route and on the RTX 5080 (2026-10-27): on the Radeon
 | Change | Files | Affects |
 |---|---|---|
 | The command thread waits for the submission thread before it spins or waits for commands | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12, only with threaded submission on |
+
+## rexglue-resolve-readback-rules.patch
+
+**Why.** Custom vinyls (the layers made in the vinyl editor) show only in the editor and disappear when the player leaves it (issue #11; the same in Xenia, and in Xenia Canary the setting `readback_resolve` fixes it). The likely reason is that the game reads a render-to-texture result on the CPU (Canary's compatibility list labels this game `gpu-readback`, "GPU-written data read on CPU"), and the emulation keeps resolved data on the GPU unless `readback_resolve` copies it back into guest memory. That setting (`none`, `fast`, `some`, `full`) applies to every resolve of every frame, and `full` waits for the GPU after each, so it is too slow to leave on for this one use.
+
+**What it adds.** A way to read back only the resolves that matter, with the GPU and the CPU untouched for the rest:
+- `readback_resolve_rules` (string, default empty = off; changes during play): with `readback_resolve` off or on, a resolve that matches a rule is read back in the rule's mode (`full`, immediate and exact, unless the rule says `mode=fast` or `mode=some`). Rules are separated by `;`, a rule is `key=value` pairs separated by `,`, all of which must hold: `addr=LO-HI` (the memory the resolve wrote touches that range of guest physical addresses), `len=LO-HI` (bytes written), `pitch=` and `height=` (the destination's, in pixels), `fmt=N` (its colour format), `src=N` (the copy's source: colour target 0 to 3, depth is 4), `phase=N` (the title's last render phase marker, which needs the title's markers of every phase), `mode=`. A range is `N`, `LO-HI`, `LO-` or `-HI`, inclusive, in decimal or `0x` hex. With the setting empty and `readback_resolve=none`, a resolve takes the code it always took.
+- `resolve_log_frames` (development, default 0): `set resolve_log_frames 3` logs every resolve of the next three frames (address, length, destination pitch, height and format, source, render phase, the mode used and the rule that matched), to find what to put in a rule.
+- Both backends (D3D12 and Vulkan) take the mode of a resolve from the same function (`CommandProcessor::GetReadbackResolveModeFor`); the guest markers' frame and phase are kept for it.
+
+**Status.** Written without a way to run it (the GPU was busy for the whole session): see `launcher/dev/vinyls-2026-10-27.md` for what is checked, what the first runs are for, and what the rules for the vinyls are once known.
+
+| Change | Files | Affects |
+|---|---|---|
+| The rules, the log, the per-resolve mode, the marker state | `include/rex/graphics/command_processor.h`, `include/rex/graphics/flags.h`, `src/graphics/command_processor.cpp` | D3D12, Vulkan |
+| IssueCopy takes the readback path when rules or the log are there to apply; the mode of the resolve | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12; Vulkan |
 
 ## rexglue-upstream-storage-flush.patch
 

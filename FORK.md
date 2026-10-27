@@ -243,6 +243,7 @@ git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
+git apply ../../patches/rexglue-resolve-readback-rules.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
