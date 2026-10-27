@@ -134,6 +134,26 @@ with either toolchain's game). They are built with MSVC with the C runtime linke
 in, so a PC needs no Visual C++ runtime for them either; a DLL that is there and
 doesn't load is reported unavailable and the game goes on with MSAA.
 
+## FSR 3.1 upscaling
+
+`patches/rexglue-fsr-upscaling.patch` (after `rexglue-frame-generation-nonwindows.patch` in the order above; it edits files the
+anti-aliasing and frame generation patches edit) lets the 3D scene be drawn at a smaller size and upscaled by FSR 3.1 while the HUD, the menus
+and the post-processing stay at the output size: the pause menu's ANTI ALIASING row has FSR ULTRA Q. (4/3x: exactly 1080p of a 2x output), QUALITY, BALANCED and PERFORM. after FSR 3.1
+NATIVE AA (`mcla_upscaling`, off by default; `src/perf_options.cpp`, `src/settings_menu.cpp`), the launcher an FSR upscaling setting next to
+Anti-aliasing (`launcher/src/GameSettings.cs`: a combo of its own, where the pause menu folds it into the anti-aliasing row). The SDK side is
+the viewport and scissor squeezed into the corner of the output-sized render targets, the scene's resolves stretched back to the full size
+(eight new direct-resolve shader variants, generated: they are most of the patch's size, `launcher/dev/hdr/build_shaders.py` makes them), a
+gather pass that gives FSR the render-size colour, depth and motion vectors, a texture LOD bias and a pixel-position scale for the squeezed
+draws, and frame generation's depth. With the setting off (the default) nothing runs but the gate's checks; one system constant is added to
+the translated shaders' constants block, so the drivers compile each pipeline once more after an update (the launcher's shader preparation
+does it). Built and measured on Windows with an RTX 5080 (both APIs) and the integrated Radeon of a Ryzen 7 9800X3D (D3D12 at 720p and 1440p output, Vulkan at 1440p); Linux and the PS5 are not
+built or run there (marked UNTESTED in the menu). KNOWN-ISSUES.md has the costs and limits.
+
+The same patch builds the SDK presenter's own scaling filters, CAS and FSR 1 (`present_effect`), on Windows: it only defines `REX_HAS_FIDELITYFX_SDK`
+for the presenter and the graphics plugin, which upstream does only with its whole FidelityFX fetch, and the launcher has a Screen scaling filter
+setting (Bilinear, the default, FSR 1, CAS) for a picture that is smaller or larger than the window, for example 2x on a 1080p screen
+(`launcher/src/GameSettings.cs`; read at start). KNOWN-ISSUES.md and `patches/README.md` say what each does.
+
 ## Testing so far
 
 Everything here was built and measured on **Windows only, with an NVIDIA RTX 5080**
@@ -243,6 +263,7 @@ git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
 git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
+git apply ../../patches/rexglue-fsr-upscaling.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch

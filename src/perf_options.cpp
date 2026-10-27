@@ -47,8 +47,18 @@ REXCVAR_DEFINE_STRING(mcla_anti_aliasing, "msaa", "MCLA",
                       "Anti-aliasing:\n"
                       " off: none\n"
                       " msaa: the game's own 2x multisampling (the default)\n"
-                      " fsr: AMD FSR 3.1 at native resolution, temporal (no MSAA)")
+                      " fsr: AMD FSR 3.1, temporal (no MSAA), at native resolution or, with mcla_upscaling,\n"
+                      "       drawing the scene smaller and upscaling it")
     .allowed({"off", "msaa", "fsr"});
+REXCVAR_DEFINE_STRING(mcla_upscaling, "off", "MCLA",
+                      "FSR upscaling, with mcla_anti_aliasing = fsr: the 3D scene is drawn smaller and FSR 3.1\n"
+                      "upscales it, while post-processing, the HUD and the menus stay at the output size:\n"
+                      " off: FSR at native resolution (the default)\n"
+                      " ultra_quality: 4/3x (3/4 of the width and height: 1080p at resolution_scale 2)\n"
+                      " quality: 1.5x (1440p for 4K)\n"
+                      " balanced: 1.7x\n"
+                      " performance: 2x (1080p for 4K)")
+    .allowed({"off", "ultra_quality", "quality", "balanced", "performance"});
 REXCVAR_DEFINE_BOOL(mcla_msaa, true, "MCLA",
                     "Before mcla_anti_aliasing: false (no anti-aliasing) is still taken while "
                     "mcla_anti_aliasing isn't set");
@@ -261,6 +271,28 @@ void ApplyMsaa(uint8_t* base) {
     }
     applied_temporal = temporal;
   }
+  // FSR upscaling (the SDK's temporal_aa_upscale, rexglue-fsr-upscaling.patch): the ratio
+  // of mcla_upscaling while FSR is the anti-aliasing, 1 (native) otherwise. Set when it
+  // changes, so that a manual temporal_aa_upscale (development pads) stays as it is.
+  static std::string applied_upscale;
+  const char* upscale = "1";
+  if (anti_aliasing == "fsr") {
+    const std::string mode = rex::cvar::GetFlagByName("mcla_upscaling");
+    // 4/3 to the digits of a double, so that the render size is exactly 3/4 of the output's
+    // (1920x1080 of 2560x1440), whatever the rounding of a shorter number.
+    upscale = mode == "ultra_quality" ? "1.3333333333333333"
+              : mode == "quality"     ? "1.5"
+              : mode == "balanced"    ? "1.7"
+              : mode == "performance" ? "2"
+                                      : "1";
+  }
+  if (applied_upscale != upscale) {
+    rex::cvar::SetFlagByName("temporal_aa_upscale", upscale);
+    if (!applied_upscale.empty() || std::strcmp(upscale, "1") != 0) {
+      REXLOG_INFO("perf options: FSR upscaling {}", std::strcmp(upscale, "1") != 0 ? upscale : "off");
+    }
+    applied_upscale = upscale;
+  }
   const int want = anti_aliasing == "msaa" ? 1 : 0;
   if (want == applied) {
     held = 0;
@@ -427,6 +459,13 @@ bool MclaFsrNextStart() {
 
 bool MclaFsrAvailable() {
   return FsrOffered();
+}
+
+// Whether to offer FSR's upscaling levels: FSR can run now, and the GPU plugin has not
+// said that the scene can't be drawn smaller here (rasterizer-ordered-view render
+// targets, or it gave up after a resolve it couldn't handle).
+bool MclaUpscalingAvailable() {
+  return FsrAvailable() && rex::cvar::GetFlagByName("temporal_aa_upscale_available") != "no";
 }
 
 void MclaMigrateAntiAliasing() {

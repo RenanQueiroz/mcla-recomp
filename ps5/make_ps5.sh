@@ -213,6 +213,7 @@ rexglue-content-header-padding.patch src/system/xam/content_manager.cpp Written 
 rexglue-low-latency.patch src/ui/low_latency.cpp LowLatency::OnFrameStart
 rexglue-frame-generation-nonwindows.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp frame_generation_pacing
 rexglue-threaded-submission-d3d12-idle-wait.patch src/graphics/d3d12/command_processor.cpp d3d12_threaded_submission_idle_wait
+rexglue-fsr-upscaling.patch include/rex/graphics/command_processor.h TaaResolveStretch
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW

@@ -880,7 +880,8 @@ in front. A real controller keeps working alongside it.
   sticks, waits in time, engine frames or both (`wait 300ms 18f`: until both
   have passed, for menus at low frame rates), `wait_until` / `press_until` a
   condition (`left_title`, `loading`, `roam`, or a guest memory word),
-  screenshots, recording and playback. A line that fails (a condition timing
+  screenshots (`shot` saves the picture the game drew, before the presenter; `screen` the game window as the
+  screen shows it, with the presenter's scaling filter, Windows, display on), recording and playback. A line that fails (a condition timing
   out, an included script failing) ends the script, and with
   `--mcla_pad_exit_on_end` the game; `devrun.py` then reports the run as
   failed. `set <option> <value>` changes an
