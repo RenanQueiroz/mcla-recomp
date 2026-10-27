@@ -33,10 +33,27 @@ SHADERS = {
     "taa_luma_snapshot.cs": GPU,
     "taa_reactive_mcla.cs": GPU,
     "taa_debug_view.cs": GPU,
+    # rexglue-fsr-upscaling.patch: the direct resolves that stretch, and the gather pass.
+    "resolve_direct_fast_32bpp_stretch.cs": GPU,
+    "resolve_direct_fast_32bpp_stretch_scaled.cs": GPU,
+    "resolve_direct_fast_64bpp_stretch.cs": GPU,
+    "resolve_direct_fast_64bpp_stretch_scaled.cs": GPU,
+    # ... and the "full" ones the scene needs (format conversions: the HDR colour resolve with its exponent bias,
+    # 64bpp, and the sun-shadow mask, 32bpp).
+    "resolve_direct_full_32bpp_stretch.cs": GPU,
+    "resolve_direct_full_32bpp_stretch_scaled.cs": GPU,
+    "resolve_direct_full_64bpp_stretch.cs": GPU,
+    "resolve_direct_full_64bpp_stretch_scaled.cs": GPU,
+    "taa_upscale_gather_mcla.cs": GPU,
 }
 # Built for Vulkan only.
 VULKAN_ONLY = {"hdr_rt_copy.cs", "hdr_rt_copy_4xmsaa.cs", "fg_depth_copy.cs"}
 INCLUDES = [("src/ui/shaders/hdr_output.xesli", "ui/shaders"),
+            ("src/graphics/shaders/resolve_direct.xesli", "gpu/shaders"),
+            ("src/graphics/shaders/resolve_direct_fast_32bpp.xesli", "gpu/shaders"),
+            ("src/graphics/shaders/resolve_direct_fast_64bpp.xesli", "gpu/shaders"),
+            ("src/graphics/shaders/resolve_direct_full_32bpp.xesli", "gpu/shaders"),
+            ("src/graphics/shaders/resolve_direct_full_64bpp.xesli", "gpu/shaders"),
             ("src/graphics/shaders/hdr_rt_copy.cs.xesl", "gpu/shaders"),
             ("src/graphics/shaders/hdr_refresh.cs.xesl", "gpu/shaders")]
 
