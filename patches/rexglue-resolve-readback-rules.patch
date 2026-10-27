@@ -1,8 +1,16 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 22504b3..d4a8c9e 100644
+index 22504b3..b123952 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
-@@ -46,6 +46,27 @@ enum class ReadbackResolveMode {
+@@ -19,6 +19,7 @@
+ #include <queue>
+ #include <string>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include <rex/graphics/register_file.h>
+@@ -46,6 +47,27 @@ enum class ReadbackResolveMode {
    kFull,
  };
  
@@ -30,7 +38,7 @@ index 22504b3..d4a8c9e 100644
  struct SwapState {
    // Lock must be held when changing data in this structure.
    std::mutex mutex;
-@@ -600,6 +621,29 @@ class CommandProcessor {
+@@ -600,6 +622,37 @@ class CommandProcessor {
    // Shared memexport readback enable state with backend legacy-flag override support.
    bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
  
@@ -50,8 +58,16 @@ index 22504b3..d4a8c9e 100644
 +
 +  std::string readback_rules_text_;
 +  std::vector<ReadbackRule> readback_rules_;
++  // The resolve log's window: resolve_log_frames counts the title's frames (the
++  // frame marker) when the title writes them, else swap commands (which are
++  // far more than frames for this title). resolve_log_new (log each distinct
++  // resolve once) keeps the signatures it has logged.
++  bool ResolveLogWindowOpen() const;
++  bool resolve_log_by_frames_ = false;
 +  uint32_t resolve_log_until_ = 0;
 +  uint32_t resolve_log_count_ = 0;
++  std::unordered_set<uint64_t> resolve_log_seen_;
++  bool resolve_log_new_was_on_ = false;
 +  // The title's last frame and render phase markers (GuestMarkerKind::kFrameBegin
 +  // and kPhase), for the rules' "phase" and the log.
 +  uint32_t guest_marker_frame_ = 0;
@@ -61,20 +77,21 @@ index 22504b3..d4a8c9e 100644
    system::KernelState* kernel_state_ = nullptr;
    GraphicsSystem* graphics_system_ = nullptr;
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
-index 9e98ea8..ea023db 100644
+index 9e98ea8..48f8ac5 100644
 --- a/include/rex/graphics/flags.h
 +++ b/include/rex/graphics/flags.h
-@@ -28,6 +28,8 @@ REXCVAR_DECLARE(int32_t, draw_resolution_scale_y);
+@@ -28,6 +28,9 @@ REXCVAR_DECLARE(int32_t, draw_resolution_scale_y);
  REXCVAR_DECLARE(bool, resolve_resolution_scale_fill_half_pixel_offset);
  REXCVAR_DECLARE(bool, draw_resolution_scaled_texture_offsets);
  REXCVAR_DECLARE(std::string, readback_resolve);
 +REXCVAR_DECLARE(std::string, readback_resolve_rules);
 +REXCVAR_DECLARE(int32_t, resolve_log_frames);
++REXCVAR_DECLARE(bool, resolve_log_new);
  REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
  REXCVAR_DECLARE(bool, readback_memexport);
  REXCVAR_DECLARE(bool, readback_memexport_fast);
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index 6ca1a88..d2115c1 100644
+index 6ca1a88..bd96ce5 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -12,8 +12,11 @@
@@ -89,7 +106,7 @@ index 6ca1a88..d2115c1 100644
  
  #include <fmt/format.h>
  
-@@ -91,6 +94,26 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
+@@ -91,6 +94,35 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
      .allowed({"none", "fast", "some", "full"})
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -109,14 +126,23 @@ index 6ca1a88..d2115c1 100644
 +REXCVAR_DEFINE_INT32(resolve_log_frames, 0, "GPU",
 +                     "Development: log every resolve of the next N frames (address, length, "
 +                     "destination pitch, height and format, source, render phase, the mode used "
-+                     "and the rule that matched); resets to 0 when the frames are counted")
-+    .range(0, 3600)
++                     "and the rule that matched); resets to 0 when the frames are counted. "
++                     "Frames are the title's own (its frame marker, render markers on) when it "
++                     "writes them, else swap commands")
++    .range(0, 100000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(resolve_log_new, false, "GPU",
++                    "Development: log each distinct resolve (address, length, pitch, height, "
++                    "format, source, render phase) the first time it happens after this is set, "
++                    "which finds what runs once (a texture built at a load) among what runs "
++                    "every frame")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
  REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                      "When draw resolution scaling is active, sample from the center of each "
                      "scaled block during resolve readback downscale")
-@@ -151,6 +174,136 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
+@@ -151,6 +183,136 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
    return ReadbackResolveMode::kDisabled;
  }
  
@@ -253,13 +279,19 @@ index 6ca1a88..d2115c1 100644
  }  // namespace
  
  CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
-@@ -233,6 +386,75 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
+@@ -233,6 +395,115 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
                                           : ReadbackResolveMode::kDisabled;
  }
  
++bool CommandProcessor::ResolveLogWindowOpen() const {
++  // Signed difference: the counters wrap.
++  return resolve_log_by_frames_ ? int32_t(resolve_log_until_ - guest_marker_frame_) > 0
++                                : int32_t(resolve_log_until_ - counter_) > 0;
++}
++
 +bool CommandProcessor::IsResolveReadbackSelective() {
 +  return !REXCVAR_GET(readback_resolve_rules).empty() || REXCVAR_GET(resolve_log_frames) > 0 ||
-+         counter_ < resolve_log_until_;
++         REXCVAR_GET(resolve_log_new) || ResolveLogWindowOpen();
 +}
 +
 +ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
@@ -275,14 +307,27 @@ index 6ca1a88..d2115c1 100644
 +  }
 +  const int32_t log_request = REXCVAR_GET(resolve_log_frames);
 +  if (log_request > 0) {
-+    resolve_log_until_ = counter_ + uint32_t(log_request);
++    resolve_log_by_frames_ = guest_marker_frame_ != 0;
++    resolve_log_until_ =
++        (resolve_log_by_frames_ ? guest_marker_frame_ : counter_) + uint32_t(log_request);
 +    resolve_log_count_ = 0;
 +    REXCVAR_SET(resolve_log_frames, 0);
-+    REXGPU_INFO("resolve log: the next {} frames (swap counter {} to {})", log_request, counter_,
-+                resolve_log_until_);
++    REXGPU_INFO("resolve log: the next {} {} (from {} to {})", log_request,
++                resolve_log_by_frames_ ? "title frames" : "swap commands (no frame markers)",
++                resolve_log_by_frames_ ? guest_marker_frame_ : counter_, resolve_log_until_);
 +  }
-+  const bool logging = counter_ < resolve_log_until_;
-+  if (readback_rules_.empty() && !logging) {
++  const bool log_new = REXCVAR_GET(resolve_log_new);
++  if (log_new != resolve_log_new_was_on_) {
++    resolve_log_new_was_on_ = log_new;
++    resolve_log_seen_.clear();
++    if (log_new) {
++      resolve_log_count_ = 0;
++    }
++    REXGPU_INFO("resolve log: {} the first occurrence of each distinct resolve",
++                log_new ? "logging" : "no longer logging");
++  }
++  const bool logging_window = ResolveLogWindowOpen();
++  if (readback_rules_.empty() && !logging_window && !log_new) {
 +    return mode;
 +  }
 +
@@ -310,18 +355,39 @@ index 6ca1a88..d2115c1 100644
 +  if (matched >= 0) {
 +    mode = readback_rules_[size_t(matched)].mode;
 +  }
++  bool logging = logging_window;
++  const char* log_tag = "";
++  if (log_new) {
++    // FNV-1a over what tells one resolve from another.
++    uint64_t signature = 1469598103934665603ull;
++    const uint64_t parts[] = {written_address,
++                              written_length,
++                              uint64_t(copy_dest_pitch.copy_dest_pitch),
++                              uint64_t(copy_dest_pitch.copy_dest_height),
++                              uint64_t(copy_dest_info.copy_dest_format),
++                              uint64_t(copy_control.copy_src_select),
++                              guest_marker_phase_};
++    for (const uint64_t part : parts) {
++      signature = (signature ^ part) * 1099511628211ull;
++    }
++    if (resolve_log_seen_.size() < 200000 && resolve_log_seen_.insert(signature).second) {
++      logging = true;
++      log_tag = " [new]";
++    }
++  }
 +  if (logging) {
 +    static const char* const kModeNames[] = {"off", "fast", "some", "full"};
 +    REXGPU_INFO(
 +        "resolve {}: swap {} guest frame {} phase 0x{:X} address 0x{:08X} length {} pitch {} "
-+        "height {} format {} source {} -> {}{}",
++        "height {} format {} source {} -> {}{}{}",
 +        resolve_log_count_++, counter_, guest_marker_frame_, guest_marker_phase_, written_address,
 +        written_length, uint32_t(copy_dest_pitch.copy_dest_pitch),
 +        uint32_t(copy_dest_pitch.copy_dest_height), uint32_t(copy_dest_info.copy_dest_format),
 +        uint32_t(copy_control.copy_src_select), kModeNames[uint32_t(mode)],
 +        matched >= 0 ? fmt::format(" (rule {}: {})", matched,
 +                                   readback_rules_[size_t(matched)].text)
-+                     : std::string());
++                     : std::string(),
++        log_tag);
 +  }
 +  return mode;
 +}
@@ -329,7 +395,7 @@ index 6ca1a88..d2115c1 100644
  bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
    if (legacy_readback_memexport_cvar_name_ &&
        rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
-@@ -1070,6 +1292,12 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -1070,6 +1341,12 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
  }
  
  void CommandProcessor::OnGuestMarker(uint32_t kind, [[maybe_unused]] uint32_t value) {
