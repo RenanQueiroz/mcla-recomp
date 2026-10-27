@@ -1442,25 +1442,38 @@ Then checked on the longer route and on the RTX 5080 (2026-10-27): on the Radeon
 
 **What it does.** With `resolve_direct_batched_loads` (default on; restart to change) the direct resolve pipelines are built from the same sources with `XE_RESOLVE_DIRECT_BATCHED_LOADS` (`src/graphics/shaders/resolve_direct_batched_*.cs.xesl`: the fast 32bpp and 64bpp and the full 32bpp and 64bpp copies, the ones this game uses, 16 shaders for each API; the full 8bpp and 16bpp copies keep the earlier shaders):
 - a thread issues the loads of the pixels it converts, 4 or 8, in one run of instructions with nothing between them (the float view for colour up to 7e3 and for depth, the integer view for the integer formats, both for depth and stencil), and converts afterwards;
-- the copies that average take their samples two at a time (one or two iterations for 1, 2 or 4 samples), the second sample's loads issued with the first's, and add them in the same order as before.
+- the copies that average take their samples two at a time (one or two iterations for 1, 2 or 4 samples), the second sample's loads issued with the first's;
+- and where all the raw values of the second sample's pixels are bit for bit the first's (most pixels of a multisampled picture: both samples are the same), the second conversion and unpacking is not done and the first's result is used again. The conversion is a function of the raw bits and of nothing else, so this is exact; it is the only change to the arithmetic, which is otherwise the original code in the original order.
 
-Everything after the loads is the original code, so the result is the same, bit for bit. `false` builds the pipelines of the earlier shaders. The new shaders are larger, as the conversions are there once for every pixel loaded (56 KB of DXBC for the full 32bpp copy against 19 KB).
+Everything after the loads is the original code, so the result is the same, bit for bit (checked against the EDRAM buffer path, below). `false` builds the pipelines of the earlier shaders. The new shaders are larger, as the conversions are there once for every pixel loaded (56 KB of DXBC for the full 32bpp copy against 19 KB; the patch is 5.1 MB, mostly the shaders' bytecode headers, which `launcher/dev/build_resolve_shaders.py` rebuilds from the sources and `--check` verifies).
 
-Measured on Windows, D3D12, the Radeon above, with the launcher's settings (2x MSAA), `--hdr=off`, GPU timestamps (`gpu-timestamps.sdk.patch`, `resolve-split-timestamps.sdk.patch`), free roam, median of ten frames. First version (the loads of a thread batched; the samples of the averaging copies still one after the other), four runs in the order off, on, on, off, 65 s each (`launcher/dev/gpu-weak-2026-10-27.md`):
+Measured on Windows, the integrated Radeon above (2 compute units), with the launcher's settings (2x MSAA), `--hdr=off`, GPU timestamps (`gpu-timestamps.sdk.patch`, `resolve-split-timestamps.sdk.patch`), free roam and driving, median of ten (Vulkan: twelve) frames, runs next to each other in the order off, on, on, off (this GPU has slow hours in which everything takes 1.4 times as long: runs from different hours are not compared; `launcher/dev/gpu-weak-2026-10-27.md`).
 
-| Per frame, ms | Off | On |
-|---|---|---|
-| Frame (swap to swap), free roam | 39.73, 39.46 | 36.91, 36.75 (-7%) |
-| Frame, drive | 38.39, 38.46 | 35.91, 35.89 (-6.5%) |
-| Resolves | 8.50, 8.38 | 5.76, 5.77 |
-| 1280x720 depth, 2x MSAA, two a frame | 0.865, 0.697 | 0.487, 0.342 |
-| The four 640x640 4x MSAA depth cascades | 0.782, 0.703, 0.690, 0.628 | 0.414, 0.350, 0.350, 0.286 |
-| 1280x720 colour, 7e3 to 8_8_8_8 (the shadow mask) | 1.31 | 1.22 |
-| 1280x720 colour, 10:10:10:2 to 16_16_16_16F (the HDR scene) | 1.25 | 1.08 to 1.12 |
+*Direct3D 12, native resolution* (the final shaders, 65 s runs; the first off run was in a slow hour and is left out; frame is swap to swap):
 
-The averaging copies gained little from that: they are bound by the arithmetic of the 7e3 conversion and unpacking, done for every sample of every pixel, which two compute units get through at about 0.3 trillion operations a second. Loading two samples together (a run in a slow state of the GPU, where everything took 1.4 times as long, gave the same ratios as the first version) did not change that. The next step is to skip the second sample's conversion where it equals the first's (exact: most pixels of a multisampled picture have the same samples); it is not in this patch yet (`launcher/dev/gpu-weak-2026-10-27.md`).
+| Per frame, ms | Off | On, run 1 | On, run 2 |
+|---|---|---|---|
+| Frame, free roam | 39.24 | 36.34 (-7.4%) | 36.74 (-6.4%) |
+| Frame, drive | 38.20 | 34.94 (-8.5%) | 35.43 (-7.2%) |
+| Resolves, free roam | 8.38 | 5.59 | 5.73 |
+| 1280x720 depth, 2x MSAA, two a frame | 0.810, 0.676 | 0.483, 0.343 | 0.478, 0.345 |
+| The four 640x640 4x MSAA depth cascades | 0.749, 0.706, 0.682, 0.636 | 0.403, 0.353, 0.332, 0.281 | 0.398, 0.369, 0.343, 0.296 |
+| 1280x720 colour, 7e3 to 8_8_8_8 (the shadow mask) | 1.294 | 1.034 | 1.041 |
+| 1280x720 colour, 10:10:10:2 to 16_16_16_16F (the HDR scene) | 1.234 | 1.100 | 1.082 |
 
-Not done yet: the bit-exact comparison with the EDRAM buffer path (`launcher/dev/direct-resolve-validate.sdk.patch` applies to the tree, with the setting on and off), the D3D12 debug layer and Vulkan validation, and the frame times at 2x and on Vulkan; `launcher/dev/gpu-weak-2026-10-27.md` says where each stands.
+The first version (the loads of a thread batched, the samples of the averaging copies one after the other) gave 8.50 and 8.38 ms of resolves off against 5.76 and 5.77 on, a frame of 39.7 and 39.5 off against 36.9 and 36.8, the shadow mask at 1.22 and the HDR colour at 1.08 to 1.12 ms: the depth copies gained what they could from it, the two averaging colour copies are bound by the arithmetic of the 7e3 conversion and unpacking, for every sample of every pixel, which two compute units get through at about 0.3 trillion operations a second. Loading two samples together did not change that (one run in a slow hour, with the same ratios). Skipping the second conversion took the shadow mask from 1.22 to 1.03 ms and left the HDR colour where it was (its pixels differ more between samples), 0.1 to 0.2 ms of the frame in all, which is under what two runs can tell apart; it is kept because it is exact by construction and checked (below), and costs nothing where the samples differ.
+
+*Vulkan, native resolution* (the same shaders as SPIR-V, off, on, on-with-`vulkan_texture_load_storage_copy`, off-with-it): resolves 7.27 to 5.46 ms in free roam (7.24 to 5.44 driving), frame 35.70 to 33.89 ms (-5.1%; driving 35.23 to 33.63, -4.5%).
+
+*Direct3D 12, 2x resolution* (one run each, on then off, the scaled resolve buffer): resolves 37.41 to 26.41 ms in free roam (37.19 to 25.86 driving, -29 to -30%), GPU time 142.6 to 139.1 ms (137.0 to 132.4 driving), but the frame the same, 141.6 against 141.7 ms (139.0 against 142.5 driving): the draws, the texture loads and the post chain took 2 to 4 ms longer in the run with the patch, as if the stall had moved to the work that follows the resolves, or one run was in a slightly slower hour. One pair of runs is not enough to say which; no gain at 2x is claimed (no loss either: the frame is within 2.5% in both segments).
+
+*RTX 5080*, the GPU timestamps, off then on, 1x and 3x, Direct3D 12 and Vulkan (the card is bound by the game thread at 1x, 6.8 ms): resolves 0.32 and 0.30 ms at 1x, 1.17 and 1.02 ms at 3x on Direct3D 12 (-13%), 0.26 and 0.27 ms (1x), 0.97 and 0.92 ms (3x) on Vulkan; frame 6.83 and 6.83 ms (1x), 8.52 and 8.43 ms (3x) on Direct3D 12, 6.79 and 6.92 ms (1x), 8.13 and 7.89 ms (3x) on Vulkan. No regression: the resolve column is equal or lower in every pair (the Vulkan GPU totals at 1x move by a millisecond either way between two runs of the same code).
+
+*Memory placement* (the question whether the resolves wait for where the shared memory lives; Direct3D 12, 1x, batched on): the shared memory as one committed buffer instead of the reserved, tiled one (`d3d12_tiled_shared_memory=false`) 36.33 ms against 36.82 and 36.91 for the default, textures committed instead of placed in heaps (`d3d12_texture_heaps=false`) 37.95 ms: neither is worth anything (both under 5%), so nothing was implemented for it.
+
+*Bit-exactness against the EDRAM buffer path* (`launcher/dev/direct-resolve-validate.sdk.patch`, `direct_resolve_validate=true`: every Nth direct resolve is also done through the EDRAM buffer and the two results compared): the first try of this check, on the Radeon, never ran its game (the folder of the build under test had no `mcla.exe`), so the comparison of the final shaders is the open item: `launcher/dev/gpu-weak-2026-10-27.md` says where it stands. Earlier versions of the direct resolve were compared on the RTX 5080 (`rexglue-direct-resolve.patch`).
+
+*Debug layers* (the final shaders, Direct3D 12 debug layer on the Radeon and the RTX 5080 at 1x and the RTX at 3x, 22,561 lines of output): 0 errors, 0 corruption messages; the warnings are the ones the earlier patches had (initial states of buffers ignored, blend factors with MIN and MAX, live objects at exit), nothing about a resolve pipeline, a descriptor or a barrier. Vulkan validation layers, the Radeon and the RTX 5080 at 1x: `VUID-vkCmdEndQuery-None-07007` and `-01923` twice each, `Undefined-Value-ShaderOutputNotConsumed-DynamicRendering` (the earlier runs' ones), and on the RTX `UNASSIGNED-Threading-MultipleThreads-Read` ten times, for `vkSetLatencyMarkerNV` and `vkLatencySleepNV` against `vkQueuePresentKHR` on the same swapchain (Reflex, the extension's own specification allows it, see `rexglue-low-latency.patch`). Synchronization validation was not run on this patch.
 
 Built and run on Windows only, with an NVIDIA RTX 5080 and the Radeon above; not run on Intel or the PS5 (the Vulkan shaders are the same sources).
 
