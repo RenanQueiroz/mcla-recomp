@@ -52,12 +52,13 @@ REXCVAR_DEFINE_BOOL(mcla_vinyl_readback, true, "MCLA",
                     "the game's own code copies it from (the SDK's readback_resolve_rules; used unless that "
                     "option is set itself). Costs nothing outside that moment (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(mcla_vulkan_depth_convert, true, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_vulkan_depth_convert, false, "MCLA",
                     "Vulkan: convert the console's 24-bit float depth in the pixel shader (the SDK's "
                     "depth_float24_convert_in_pixel_shader; used unless that option is set itself). "
-                    "Without it a soft blur covers a car's plate and rear lights where the HUD's "
-                    "speedometer is while the camera is turned round the car (fork issue 11). Costs GPU "
-                    "time that grows with the resolution scale (next start)")
+                    "Without it, a soft blur can cover a car's plate and rear lights where the HUD's "
+                    "speedometer box is while the camera is turned round a moving car (fork issue "
+                    "11). Off by default: it costs 21% of the frame at 3x on an RTX 5080 and 33% at "
+                    "1x on a Radeon iGPU (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_anti_aliasing, "msaa", "MCLA",
                       "Anti-aliasing:\n"
