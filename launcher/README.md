@@ -988,6 +988,10 @@ during a build:
   `--tmp_frame_log_quiet=true` (timestamps only) and, on D3D12 at 1x and
   2x, `--d3d12_threaded_submission_split_draws=0`; phases and per-draw
   labels exist on D3D12 only, categories and passes on both APIs.
+- `dither-2026-10-27.md` (fork issue #8, the lattice of dots on opaque geometry: alpha to mask with an alpha of 1 - epsilon, fixed by
+  `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
+  mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
+  `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
 
 ## Scripted controller input (unattended runs)
 
