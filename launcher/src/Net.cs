@@ -572,12 +572,9 @@ static class NetClient
             return new NetworkFailure(NetText.Failed(connect.Stage, connect.Host, hop, connect.Reason, proxy: !string.Equals(connect.Host, host, StringComparison.OrdinalIgnoreCase)), connect.Stage, op, ex);
         if (timedOut || ex is OperationCanceledException or TimeoutException)
         {
-            var reason = op.Stage switch
-            {
-                NetStage.Lookup => $"didn't answer within {limit.TotalSeconds:0.#} s",
-                NetStage.Connect => $"didn't answer within {limit.TotalSeconds:0.#} s",
-                _ => $"connected but didn't answer within {limit.TotalSeconds:0.#} s",
-            };
+            var reason = op.Stage <= NetStage.Connect
+                ? $"didn't answer within {limit.TotalSeconds:0.#} s"
+                : $"connected but didn't answer within {limit.TotalSeconds:0.#} s";
             return new NetworkFailure(NetText.Failed(NetStage.Answer, host, hop, reason), NetStage.Answer, op, ex);
         }
         if (chain.OfType<AuthenticationException>().FirstOrDefault() is { } auth)
@@ -613,11 +610,11 @@ static class NetClient
             return new NetworkFailure($"{Capital(host)} refused the request because this internet address has used up its limit of requests (GitHub allows 60 an hour without signing in).{when}",
                 NetStage.Status, op, status: code) { RateLimited = true, RetryAt = at };
         }
-        var proxyAsk = code == HttpStatusCode.ProxyAuthenticationRequired;
-        var text = proxyAsk
-            ? "the proxy asks for a sign-in (407) that Windows didn't give it"
-            : $"{(int)code} {response.ReasonPhrase}".Trim();
+        var text = $"{(int)code} {response.ReasonPhrase}".Trim();
         op.Log($"status {text} from {host}");
+        if (code == HttpStatusCode.ProxyAuthenticationRequired)
+            return new NetworkFailure("The proxy this PC uses asks for a sign-in (407 Proxy Authentication Required), and the Windows login wasn't accepted. Ask whoever runs the proxy, or try without it.",
+                NetStage.Status, op, status: code);
         return new NetworkFailure(NetText.Failed(NetStage.Status, host, hop, text) + (code == HttpStatusCode.NotFound ? "" : " Try again in a while."),
             NetStage.Status, op, status: code, retriable: code != HttpStatusCode.NotFound);
 

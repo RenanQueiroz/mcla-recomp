@@ -445,7 +445,7 @@ static class Program
             Check(f is { RateLimited: false } && f.Plain.Contains("403"), "another 403 is not called a rate limit", f?.Plain);
             server.Handler = (ctx, _) => Reply(ctx, 407);
             f = await Fail($"{server.Url}/x", client);
-            Check(f != null && f.Plain.Contains("proxy asks for a sign-in"), "407 says the proxy wants a sign-in", f?.Plain);
+            Check(f != null && f.Plain.Contains("asks for a sign-in"), "407 says the proxy wants a sign-in", f?.Plain);
         }
 
         Section("reading the body");
