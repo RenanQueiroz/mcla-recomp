@@ -587,7 +587,9 @@ sealed record Activity(string Step, string Detail, double? Percent)
     static readonly Dictionary<string, string> Steps = new(StringComparer.OrdinalIgnoreCase)
     {
         ["install-clang"] = "Downloading Clang",
+        ["install-windows-sdk"] = "Installing the Windows SDK",
         ["sdk-clone"] = "Downloading the ReXGlue SDK",
+        ["sdk-submodules"] = "Completing the ReXGlue SDK download",
         ["sdk-configure"] = "Configuring the SDK build",
         ["sdk-build"] = "Building the ReXGlue SDK",
         ["sdk-install"] = "Installing the SDK",
