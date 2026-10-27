@@ -361,6 +361,7 @@ Costs and limits:
 - **Shrinking (2x on a 1080p screen):** FSR 1 has nothing to enlarge and takes the CAS path, so FSR 1 and CAS are the same single pass, a sharpening resample, while bilinear just shrinks the picture. At the same size bilinear changes nothing and FSR 1 and CAS only sharpen.
 - **Not with HDR or frame generation:** HDR output and frame generation always scale bilinearly (the filters are made for SDR values; the frame generation pacer paints in the present callback, which has no intermediate passes).
 - **Windows only:** Linux and the PS5 keep bilinear (not built there). `fsr2` and `fsr3`, the SDK's experimental temporal paths, are not offered: they need FidelityFX's runtime linked into the presenter.
+- **Checked** on an RTX 5080 with both APIs, enlarging the 1x and 2x pictures to a 2880x1620 window: FSR 1 is clearly the sharpest, CAS a little sharper than bilinear, with no artefacts seen (`patches/README.md` has the numbers). Shrinking (2x on a 1080p screen) and the GPU time weren't measured.
 
 ## Frame generation in the settings (2026-10-24)
 
