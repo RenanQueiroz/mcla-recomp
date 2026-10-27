@@ -146,7 +146,7 @@ the viewport and scissor squeezed into the corner of the output-sized render tar
 gather pass that gives FSR the render-size colour, depth and motion vectors, a texture LOD bias and a pixel-position scale for the squeezed
 draws, and frame generation's depth. With the setting off (the default) nothing runs but the gate's checks; one system constant is added to
 the translated shaders' constants block, so the drivers compile each pipeline once more after an update (the launcher's shader preparation
-does it). Built and measured on Windows with an RTX 5080 (both APIs); the integrated Radeon has not been measured with it yet; Linux and the PS5 are not
+does it). Built and measured on Windows with an RTX 5080 (both APIs) and the integrated Radeon of a Ryzen 7 9800X3D (D3D12 at 720p and 1440p output, Vulkan at 1440p); Linux and the PS5 are not
 built or run there (marked UNTESTED in the menu). KNOWN-ISSUES.md has the costs and limits.
 
 ## Testing so far
