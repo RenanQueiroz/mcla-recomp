@@ -248,7 +248,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Register writes in bulk | `--gpu_regwrite_bulk=false` | |
 | Shared-memory request fast path | `--shared_memory_request_fast_path=false` | With hot pages on, `--shared_memory_request_fast_path_with_hot_pages=false` turns off only that part. |
 | Batched GPU counters | `--gpu_batch_perf_counters=false` | |
-| Timer queue sleeps | `--timer_queue_blocking_wait=false` | |
+| Timer queue sleeps | `--timer_queue_blocking_wait=false` | `--timer_queue_hr_wait=false` turns off only the high-resolution timer for timers due within 20 ms (Windows). |
 | D3D12 threaded submission | `--d3d12_threaded_submission=false` | `--d3d12_threaded_submission_split_draws` (default 1000, 0 for never) splits long submissions. |
 | D3D12 placed texture heaps | `--d3d12_texture_heaps=false` | Textures created from then on are separate allocations again. |
 | Vulkan uploads before the render pass | `--vulkan_hoist_shared_memory_uploads=false` | |
