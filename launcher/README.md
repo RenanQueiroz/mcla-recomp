@@ -639,11 +639,17 @@ with an i5-10400 was 20 to 25% faster on Direct3D 12 (fork issue #7: Vulkan's GP
 thread costs more CPU), so cards stay on Direct3D 12 (not tried here: no AMD card was
 available). On Intel graphics Direct3D 12 uses the SDK's slower rasterizer-ordered-view
 path for the render targets, which Vulkan does not need, so Automatic takes Vulkan there
-too (not measured: there was no Intel GPU to try it on). The GPU is the one Direct3D 12
-would use (`d3d12_adapter`, else the first physical adapter), and the choice needs
-`vulkan-1.dll` and a Vulkan device that is that GPU (the game points `vulkan_device` at it);
+too (not measured: there was no Intel GPU to try it on). The GPU is the one the game uses
+(`d3d12_adapter` where something sets it; else the GPU Windows' graphics settings give
+`mcla.exe`; else the high-performance GPU, which on a laptop with integrated and dedicated
+graphics is not the one Windows lists first: `KNOWN-ISSUES.md`, "The game ran on the integrated
+graphics on PCs with two GPUs"; `mcla_prefer_dedicated_gpu=false` in *More mcla.exe options*
+takes the first adapter, as before), and the choice needs `vulkan-1.dll` and a Vulkan device
+that is that GPU (the game points `vulkan_device` at it, also when Vulkan is picked by hand);
 picking an API here, in the pause menu or with `--mcla_gpu_backend` skips all of it
-(`dev\gpu-weak-2026-10-27.md`). A shader cache prepared before this change was made for
+(`dev\gpu-weak-2026-10-27.md`, `dev\gpu-choice-2026-10-27.md`; the launcher repeats the choice of
+the GPU in `ShaderStamp.cs`, with the entry of Windows' graphics settings for `mcla.exe` in the game's
+folder). A shader cache prepared before this change was made for
 Direct3D 12: the launcher sees that Automatic now means Vulkan on AMD's RDNA integrated and
 Intel graphics and prepares the shaders again before the next Play. Since D3D12's textures are placed in
 shared heaps, both are about as smooth in the map zoom-out after the title

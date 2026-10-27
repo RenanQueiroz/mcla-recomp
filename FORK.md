@@ -163,7 +163,11 @@ the 9800X3D's integrated AMD Radeon graphics (RDNA 2, both backends); none of it
 built or run on a discrete AMD card, on Vega-based Ryzen graphics (the Automatic graphics API
 takes Direct3D 12 there since a Ryzen 7 5700G user's report, fork issue #14: the HUD, the menus
 and parts of the city missing on Vulkan), on Intel graphics, on Linux, or on the PS5 yet. It needs
-testing there before anyone relies on it.
+testing there before anyone relies on it. The choice of the GPU on a PC with two (Windows' graphics
+settings for the exe, else the high-performance GPU, instead of the first adapter Windows lists:
+`src/gpu_choice.h`, `launcher/dev/gpu-choice-2026-10-27.md`) was tried on a desktop with an RTX 5080
+and the Ryzen's integrated Radeon, where Windows lists the RTX first; a laptop where Windows lists the
+integrated GPU first is covered by a test with made-up adapters only.
 
 ## Building and playing
 
