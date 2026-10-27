@@ -87,13 +87,16 @@ static class Program
 
         public Server()
         {
-            var port = Random.Shared.Next(20000, 60000);
+            // A port Windows just handed out, new for every try: Windows reserves ports in blocks of
+            // 100 (Hyper-V, WinNAT; `netsh int ipv4 show excludedportrange`), so counting up from a
+            // random one could stay inside a block for all its tries (CI run 40586188064).
+            var port = ClosedPort();
             HttpListener? started = null;
             for (var tries = 0; started == null; tries++)
             {
                 var candidate = new HttpListener();
                 try { candidate.Prefixes.Add($"http://127.0.0.1:{port}/"); candidate.Start(); started = candidate; }
-                catch (HttpListenerException) when (tries < 50) { candidate.Close(); port = port >= 65000 ? 20000 : port + 1; }
+                catch (HttpListenerException) when (tries < 50) { candidate.Close(); port = ClosedPort(); }
             }
             listener = started;
             Port = port;
