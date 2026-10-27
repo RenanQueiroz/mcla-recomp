@@ -1,9 +1,9 @@
 diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
 new file mode 100644
-index 0000000..c478033
+index 0000000..022e720
 --- /dev/null
 +++ b/include/rex/audio/audio_dump.h
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,148 @@
 +/**
 + * @file        audio/audio_dump.h
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -69,6 +69,8 @@ index 0000000..c478033
 +  std::atomic<uint64_t> pump_us_max{0};
 +  std::atomic<uint64_t> pump_gap_max_us{0};   // longest time between two callbacks of one client
 +  std::atomic<uint64_t> pump_late{0};         // callbacks that started over 8 ms after the previous one
++  std::atomic<uint64_t> pump_over_4ms{0};     // callbacks that took over 4 ms (the frame period is 5.33 ms)
++  std::atomic<uint64_t> pump_over_8ms{0};     // callbacks that took over 8 ms: more than a whole frame
 +  // The SDL output
 +  std::atomic<uint64_t> sdl_callbacks{0};
 +  std::atomic<uint64_t> sdl_frames{0};        // guest frames played
@@ -295,10 +297,10 @@ index d55f16a..5d2f1e6 100644
      xma_context.cpp
 diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
 new file mode 100644
-index 0000000..884fcab
+index 0000000..01b3d8f
 --- /dev/null
 +++ b/src/audio/audio_dump.cpp
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,343 @@
 +/**
 + * @file        audio/audio_dump.cpp
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -358,7 +360,8 @@ index 0000000..884fcab
 +  uint64_t xma_work_inline = 0, xma_work_worker = 0, xma_work_us = 0, xma_work_slow = 0, xma_kicks = 0,
 +           xma_frames = 0, xma_decode_errors = 0, xma_recheck_abort = 0, xma_stalled_loops = 0,
 +           xma_cas_retries = 0, wrote_rd = 0, wrote_valid = 0, wrote_other = 0, pump_count = 0,
-+           pump_us = 0, pump_late = 0, sdl_callbacks = 0, sdl_frames = 0, sdl_underruns = 0;
++           pump_us = 0, pump_late = 0, pump_over_4ms = 0, pump_over_8ms = 0, sdl_callbacks = 0, sdl_frames = 0,
++           sdl_underruns = 0;
 +};
 +
 +Snapshot Take() {
@@ -381,6 +384,8 @@ index 0000000..884fcab
 +  s.pump_count = ld(c.pump_count);
 +  s.pump_us = ld(c.pump_us);
 +  s.pump_late = ld(c.pump_late);
++  s.pump_over_4ms = ld(c.pump_over_4ms);
++  s.pump_over_8ms = ld(c.pump_over_8ms);
 +  s.sdl_callbacks = ld(c.sdl_callbacks);
 +  s.sdl_frames = ld(c.sdl_frames);
 +  s.sdl_underruns = ld(c.sdl_underruns);
@@ -399,8 +404,8 @@ index 0000000..884fcab
 +  REXAPU_INFO(
 +      "audio stats {} t={:.1f}s | xma: kicks={} work inline={} worker={} avg_us={} max_us={} slow(>2ms)={} "
 +      "frames={} errors={} recheck_abort={} stalled={} cas_retry={} | game wrote during a decode: "
-+      "read_offset={} valid={} other={} | pump: n={} avg_us={} max_us={} gap_max_us={} late(>8ms)={} | "
-+      "sdl: callbacks={} frames={} underruns={} queue_min={}",
++      "read_offset={} valid={} other={} | pump: n={} avg_us={} max_us={} gap_max_us={} late(>8ms)={} "
++      "over4ms={} over8ms={} | sdl: callbacks={} frames={} underruns={} queue_min={}",
 +      label, static_cast<double>(NowUs()) / 1e6, now.xma_kicks - prev.xma_kicks,
 +      now.xma_work_inline - prev.xma_work_inline, now.xma_work_worker - prev.xma_work_worker,
 +      Div(now.xma_work_us - prev.xma_work_us, works), work_max, now.xma_work_slow - prev.xma_work_slow,
@@ -409,7 +414,8 @@ index 0000000..884fcab
 +      now.xma_cas_retries - prev.xma_cas_retries, now.wrote_rd - prev.wrote_rd,
 +      now.wrote_valid - prev.wrote_valid, now.wrote_other - prev.wrote_other,
 +      now.pump_count - prev.pump_count, Div(now.pump_us - prev.pump_us, now.pump_count - prev.pump_count),
-+      pump_max, gap_max, now.pump_late - prev.pump_late, now.sdl_callbacks - prev.sdl_callbacks,
++      pump_max, gap_max, now.pump_late - prev.pump_late, now.pump_over_4ms - prev.pump_over_4ms,
++      now.pump_over_8ms - prev.pump_over_8ms, now.sdl_callbacks - prev.sdl_callbacks,
 +      now.sdl_frames - prev.sdl_frames, now.sdl_underruns - prev.sdl_underruns,
 +      queue_min == ~0ull ? 0 : queue_min);
 +}
@@ -639,7 +645,7 @@ index 0000000..884fcab
 +
 +}  // namespace rex::audio::dump
 diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
-index 7a711a8..6cdcec8 100644
+index 7a711a8..5e6f922 100644
 --- a/src/audio/audio_system.cpp
 +++ b/src/audio/audio_system.cpp
 @@ -11,6 +11,7 @@
@@ -725,7 +731,7 @@ index 7a711a8..6cdcec8 100644
        uint32_t client_callback = clients_[index].callback;
        uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
        global_lock.unlock();
-@@ -146,8 +177,27 @@ void AudioSystem::WorkerThreadMain() {
+@@ -146,8 +177,33 @@ void AudioSystem::WorkerThreadMain() {
          }
          SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
          uint64_t args[] = {client_callback_arg};
@@ -749,11 +755,17 @@ index 7a711a8..6cdcec8 100644
 +          dump::Add(dump::C().pump_count, 1);
 +          dump::Add(dump::C().pump_us, us);
 +          dump::Max(dump::C().pump_us_max, us);
++          if (us > 4000) {
++            dump::Add(dump::C().pump_over_4ms, 1);
++          }
++          if (us > 8000) {
++            dump::Add(dump::C().pump_over_8ms, 1);
++          }
 +        }
          if (diag_pump_count < 10) {
            REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
          }
-@@ -214,6 +264,8 @@ void AudioSystem::Shutdown() {
+@@ -214,6 +270,8 @@ void AudioSystem::Shutdown() {
      worker_thread_.reset();
    }
  
@@ -762,7 +774,7 @@ index 7a711a8..6cdcec8 100644
    // Destroy all active client drivers (closes SDL audio devices, stopping
    // callback threads) before the semaphores they reference are destroyed.
    for (size_t i = 0; i < kMaximumClientCount; i++) {
-@@ -230,7 +282,7 @@ void AudioSystem::Shutdown() {
+@@ -230,7 +288,7 @@ void AudioSystem::Shutdown() {
  X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, size_t* out_index) {
    REXAPU_DEBUG("AudioSystem::RegisterClient: callback={:08X} callback_arg={:08X}", callback,
                 callback_arg);
@@ -771,7 +783,7 @@ index 7a711a8..6cdcec8 100644
  
    auto index = FindFreeClient();
    assert_true(index >= 0);
-@@ -252,6 +304,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+@@ -252,6 +310,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
    memory::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
  
    clients_[index] = {driver, callback, callback_arg, ptr, true};
@@ -779,7 +791,7 @@ index 7a711a8..6cdcec8 100644
  
    if (out_index) {
      *out_index = index;
-@@ -270,7 +323,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+@@ -270,7 +329,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
      submit_count++;
    }
  
@@ -788,7 +800,7 @@ index 7a711a8..6cdcec8 100644
    assert_true(index < kMaximumClientCount);
    assert_true(clients_[index].driver != NULL);
    (clients_[index].driver)->SubmitFrame(samples_ptr);
-@@ -279,7 +332,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+@@ -279,7 +338,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
  void AudioSystem::UnregisterClient(size_t index) {
    SCOPE_profile_cpu_f("apu");
  
