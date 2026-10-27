@@ -45,6 +45,7 @@ set(MCLA_SOURCES
     src/warp_fix.cpp
     src/button_prompts.cpp
     src/settings_menu.cpp
+    src/save_wait.cpp
     src/display_gamma.cpp
     src/render_markers.cpp
     src/sampling_profiler.cpp

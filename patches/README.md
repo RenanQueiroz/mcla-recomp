@@ -1206,6 +1206,8 @@ Windows is the only platform it has run on. Linux and the PS5 offer it, untested
 
 **What it changes.** The format is recorded when the pipeline is made, so the pipeline is made again only when the swapchain's format changes.
 
+**PS5:** applied by `ps5/make_ps5.sh` as well, with the patches after it. Tested by upstream on a PS5 Pro (firmware 13.42) in its own build, which doesn't have the fork's other patches: the game runs without visible problems, at about the same frame rate as without it. Not run on the console with the fork's build.
+
 **Measured** on Windows, Vulkan, RTX 5080 and Ryzen 7 9800X3D, with a present log, as frames shown. The private measurement builds had the fix behind a switch, so each pair is the same build; one run each.
 - Fork `a6ee6d9`, race timedemo at 3×:
   - The paint on the GPU command thread: 4.18 → 0.20 ms.
@@ -1219,7 +1221,7 @@ Windows is the only platform it has run on. Linux and the PS5 offer it, untested
 
 **Checked** on fork main with this patch (Windows, RTX 5080), with `launcher/dev/scripts/display-switches.pad` and the validation layers on. HDR off and on and fullscreen on and off, with no overlay, the F4 overlay and the console, on Vulkan with IMMEDIATE and with FIFO. Both runs ended by itself and swaps rose at every step. Every guest frame was presented in every step, the ones after each HDR switch (a new swapchain format) included, and with the overlays open, where the UI thread now presents 240 times a second. The validation layers reported nothing about pipelines or render passes. The present semaphore reuse they did report (`VUID-vkQueueSubmit-pSignalSemaphores-00067`, from before this patch) is the next patch's. On the race at 3× they reported nothing, in either way of painting.
 
-**Upstream:** belongs with the Vulkan performance changes (PR 4).
+**Upstream:** merged there as PR 23 (from the fork's `pr/02-paint-pipeline-format`), so it is in upstream's `main`. Upstream's copy of the patch is made for an SDK with only its own patches, so its hunk sits earlier in the file and its comment is worded differently; the change is the same lines. This copy is the one the fork's scripts apply and record (an SDK that has it keeps it; a changed file would have to be applied afresh).
 
 | Change | Files | Affects |
 |---|---|---|
