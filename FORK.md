@@ -154,8 +154,9 @@ builds and plays from then on.
 Two toolchains build it (`-Toolchain`, README.md, "Windows"): `msvc`, the
 default, is the project's Clang 20.1.8 with Visual Studio Build Tools' headers
 and libraries (Build Tools 2022 version 17.1 or newer, and a Windows SDK newer
-than 10.0.19041, which `make_pc.ps1` installs if it is not there); `mingw` is llvm-mingw 20250709 (the same Clang version, with lld,
-libc++ and the mingw-w64 headers, on Windows' own UCRT), downloaded into
+than 10.0.19041, which `make_pc.ps1` installs if it is not there); `mingw` is
+llvm-mingw 20250709 (the same Clang version, with lld, libc++ and the mingw-w64
+headers, on Windows' own UCRT), downloaded into
 `tools\` from its release page and checked against a pinned SHA-256, with no
 Microsoft compiler and no administrator rights. Each keeps its own SDK build
 (`third_party\rexglue-sdk\out\build` and `out\install`, `win-amd64` and
