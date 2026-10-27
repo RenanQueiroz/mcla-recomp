@@ -68,7 +68,8 @@ REXCVAR_DEFINE_INT32(mcla_pump_sleep_max_ms, -1, "MCLA",
                      "each round with a Sleep of what is left of 7 ms, in whole milliseconds (4 to 5 ms in the "
                      "city), which keeps the frame rate near 143 a second whenever the rest of the frame is "
                      "faster. -1 leaves the game's own Sleep; 0 or more caps its argument at that many "
-                     "milliseconds (0 is a Sleep(0)). Takes effect at once; for experiments")
+                     "milliseconds (0 is a Sleep(0)). Takes effect at once; for experiments: with 4 logical "
+                     "processors it starved the audio worker (504 to 859 underruns), so it stays off")
     .range(-1, 16);
 REXCVAR_DEFINE_BOOL(mcla_poll_stats, false, "MCLA",
                     "Development: log how the main thread's waits for a ring slot ended, every 10 "
