@@ -2,8 +2,9 @@
 #
 #   .\scripts\make_pc.ps1 -Iso C:\path\to\your.iso
 #
-# Needs Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 (C++
-# workload) and Clang 20. Whatever is missing, the script offers to install
+# Needs Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 version
+# 17.1 or newer (C++ workload), a Windows SDK newer than 10.0.19041 and
+# Clang 20. Whatever is missing, the script offers to install
 # (winget, and Clang from the LLVM project's releases); README.md
 # lists them for doing it by hand. With -Toolchain mingw it needs no Microsoft
 # compiler: Clang, lld, libc++ and the mingw-w64 headers come in one download
@@ -451,6 +452,28 @@ if ($root.Length -gt 148) {
     Fail "this folder's path is $($root.Length) characters long, and git cannot clone the SDK into one over 148. Move the whole folder somewhere with a shorter path (for example C:\Games\mcla-recomp) and run this again."
 }
 
+# A first clone that was cut short leaves submodules missing, or with files
+# that were never checked out, and the clone is skipped on the next run once
+# the SDK's .git exists (issue #21). Fetch what is missing and put back files
+# missing from a submodule; changed files (an applied patch) are left alone.
+function RepairSubmodules {
+    Logged "sdk-submodules" { git -C $sdk submodule update --init --recursive }
+    $ErrorActionPreference = "Continue"
+    foreach ($line in @(git -C $sdk submodule status --recursive)) {
+        $path = Join-Path $sdk ($line.Substring(1).Split(' ')[1])
+        $missing = @(git -C $path ls-files --deleted)
+        if ($missing.Count -eq 0) { continue }
+        "restoring $($missing.Count) missing files in $path"
+        # A list file without a byte order mark: Windows PowerShell 5.1 puts
+        # one in front of text piped to a program, and git takes it as part
+        # of the first path.
+        $list = "$logs\sdk-missing-files.txt"
+        [IO.File]::WriteAllLines($list, [string[]]$missing)
+        git -C $path checkout --pathspec-from-file=$list 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "could not restore the files missing in $path; delete third_party\rexglue-sdk and run this again" }
+    }
+}
+
 Push-Location $root
 try {
     $lastOptions = Get-BuildOptions $root
@@ -476,9 +499,41 @@ try {
     $mingwUrl = "https://github.com/mstorsjo/llvm-mingw/releases/download/$mingwVersion/$mingwName.zip"
     $mingwSha256 = "82babcd6aae4dc3606e8e0471d816989c384b4bf86a139f184a8b4a1b2c2758d"
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    # Visual Studio 2022 17.1 or newer: the SDK uses std::byteswap, which
+    # Microsoft's C++ library has from that version on. With an older one
+    # (VS 2019, or an early 2022) the SDK build fails with "no member named
+    # 'byteswap' in namespace 'std'".
+    $vcTools = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
     function HasBuildTools {
         if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
-        [bool](& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+        [bool](& $vswhere -products * -requires $vcTools -version "[17.1," -property installationPath)
+    }
+    # The newest Visual Studio with the C++ tools of any version, to name an
+    # install that is there but too old.
+    function OldBuildTools {
+        if (-not (Test-Path -LiteralPath $vswhere)) { return "" }
+        $found = @(& $vswhere -products * -requires $vcTools -sort -format json | ConvertFrom-Json) | Select-Object -First 1
+        if ($found) { "$($found.displayName) ($($found.installationVersion))" } else { "" }
+    }
+    # A Windows SDK new enough for the SDK's Direct3D 12 code: 10.0.19041 and
+    # older lack D3D12_FEATURE_DATA_D3D12_OPTIONS8, and the SDK build fails on
+    # it (issue #21). Clang takes the newest one installed, so that is the one
+    # checked; the version is returned to name it when it is too old.
+    $windowsSdk = "10.0.26100"
+    function NewestWindowsSdk {
+        # Both registry views can name a Windows Kits folder, and one may hold
+        # no headers (a 64-bit entry next to the SDK in Program Files (x86)),
+        # so every one is searched.
+        $kits = @(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.KitsRoot10 }) + "${env:ProgramFiles(x86)}\Windows Kits\10\" | Where-Object { $_ } | Select-Object -Unique
+        $versions = @($kits | ForEach-Object { Get-ChildItem "$_\Include" -Directory -ErrorAction SilentlyContinue } |
+            Where-Object { $_.Name -match '^10\.[0-9.]+$' -and (Test-Path -LiteralPath "$($_.FullName)\um\d3d12.h") } |
+            Sort-Object { [version]$_.Name })
+        if ($versions) { $versions[-1] } else { $null }
+    }
+    function HasWindowsSdk {
+        $newest = NewestWindowsSdk
+        $newest -and (Select-String -Quiet -SimpleMatch "D3D12_FEATURE_DATA_D3D12_OPTIONS8" -LiteralPath "$($newest.FullName)\um\d3d12.h")
     }
     # Whether a path is the folder or inside it (-ToolsDir, which may be empty).
     function InFolder([string]$path, [string]$folder) {
@@ -561,6 +616,7 @@ try {
             if ($env:MCLA_MINGW_ROOT -ne "$root\tools\$mingwName" -and -not (InFolder $env:MCLA_MINGW_ROOT $ToolsDir)) { $list += "llvm-mingw" }
         } else {
             if (-not (HasBuildTools)) { $list += "Visual Studio Build Tools" }
+            elseif (-not (HasWindowsSdk)) { $list += "Windows SDK" }
             # Only the project's own Clang counts: another one on the path may not
             # find the Microsoft headers (issue #9). One in -ToolsDir is the user's choice.
             if (-not (Test-Path -LiteralPath "$root\tools\$llvmName\bin\clang.exe") -and
@@ -596,6 +652,14 @@ try {
     }
     if ($missing) {
         "missing: $($missing -join ', ')"
+        $old = OldBuildTools
+        if ($missing -contains "Visual Studio Build Tools" -and $old) {
+            "$old is installed, but the build needs Visual Studio 2022 version 17.1 or newer. Update it in the Visual Studio Installer, or let this install Build Tools 2022 next to it."
+        }
+        $sdkFound = NewestWindowsSdk
+        if ($missing -contains "Windows SDK" -and $sdkFound) {
+            "Windows SDK $($sdkFound.Name) is installed, but the build needs a newer one; this installs Windows SDK $windowsSdk next to it."
+        }
         if ($required -and -not $InstallTools -and $nonInteractive) {
             # llvm-mingw alone is fetched without asking: a download into tools\ that is
             # checked against its pinned SHA-256, needing no administrator rights and
@@ -611,13 +675,13 @@ try {
             $answer = if ($mingw) {
                 Read-Host "Install them now? Programs come from winget (CMake's installer may ask for administrator rights), the compiler (llvm-mingw, about 170 MB, no administrator rights) from its release page, checked against a pinned SHA-256; the Vulkan SDK asks for administrator rights. [y/N]"
             } else {
-                Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights, and so does the Vulkan SDK. [y/N]"
+                Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights, and so do the Windows SDK and the Vulkan SDK. [y/N]"
             }
             if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in README.md) and run this again, or run with -InstallTools" }
         }
         $ids = @{ "Git" = "Git.Git"; "CMake" = "Kitware.CMake"; "Ninja" = "Ninja-build.Ninja"; "Python" = "Python.Python.3.12" }
         # winget is for what comes from winget: not for llvm-mingw (a download) or Clang.
-        $fromWinget = @($missing | Where-Object { $ids.ContainsKey($_) -or $_ -eq "Visual Studio Build Tools" -or $_ -eq "Vulkan SDK" })
+        $fromWinget = @($missing | Where-Object { $ids.ContainsKey($_) -or $_ -eq "Visual Studio Build Tools" -or $_ -eq "Windows SDK" -or $_ -eq "Vulkan SDK" })
         if ($fromWinget -and -not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install $($fromWinget -join ', ') by hand (README.md, 'Windows')" }
         foreach ($name in $missing) {
             if ($ids.ContainsKey($name)) {
@@ -629,6 +693,9 @@ try {
                     winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements `
                         --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
                 }
+            } elseif ($name -eq "Windows SDK") {
+                "installing Windows SDK $windowsSdk (this takes a while)"
+                Logged "install-windows-sdk" { winget install --id "Microsoft.WindowsSDK.$windowsSdk" -e --accept-source-agreements --accept-package-agreements }
             } elseif ($name -eq "Clang") {
                 "downloading Clang $llvmVersion (about 900 MB) into tools\"
                 New-Item -ItemType Directory -Force "$root\tools" | Out-Null
@@ -741,6 +808,8 @@ try {
                 Logged "sdk-clone" { git clone --recursive --branch $sdkTag https://github.com/rexglue/rexglue-sdk.git $sdk }
             }
             if ((git -C $sdk rev-parse HEAD) -ne $sdkCommit) { Fail "the SDK checkout is not $sdkTag ($sdkCommit)" }
+            RepairSubmodules
+            if (-not (Test-Path -LiteralPath "$sdk\thirdparty\FFmpeg\config.h")) { Fail "the SDK download is incomplete (thirdparty\FFmpeg); delete third_party\rexglue-sdk and run this again" }
             Patch "sdk-patch" $sdk "$root\patches\rexglue-v0.10.0-mcla.patch"
             Patch "sdk-patch-ffmpeg" "$sdk\thirdparty\FFmpeg" "$root\patches\rexglue-ffmpeg-ps5-config.patch"
             # Git on Windows checks out symbolic links as small text files holding
@@ -816,6 +885,22 @@ try {
                     Sort-Object { [version]$_.Name } | Select-Object -Last 1
                 if ($vulkanSdk) { $env:VULKAN_SDK = $vulkanSdk.FullName }
             }
+            # msvc: the SDK's precompiled headers keep the Windows SDK and Visual Studio
+            # headers they were made with, and a new Windows SDK does not make them
+            # stale to the build (the old headers are still there), so files then mix
+            # two Windows SDKs and fail (issue #21). The build folder records what it
+            # was made with and starts again when that changes; one with no record
+            # starts again only if the SDK was never installed (so an SDK built before
+            # this stays as it is). Not with mingw, which uses neither.
+            $toolchainFile = "$sdk\out\build\$sdkBuildName\mcla-toolchain.txt"
+            $toolchainNow = "Windows SDK $((NewestWindowsSdk).Name), $env:VCToolsInstallDir"
+            if (-not $mingw -and (Test-Path -LiteralPath "$sdk\out\build\$sdkBuildName")) {
+                $toolchainThen = if (Test-Path -LiteralPath $toolchainFile) { (Get-Content -LiteralPath $toolchainFile -Raw).Trim() } else { $null }
+                if (($toolchainThen -and $toolchainThen -ne $toolchainNow) -or (-not $toolchainThen -and -not $recompiler)) {
+                    "the Windows SDK or Visual Studio changed since the SDK build folder was made; starting it again"
+                    RemoveFolder "$sdk\out\build\$sdkBuildName"
+                }
+            }
             Push-Location $sdk
             try {
                 # The compilers by full path; a build folder configured earlier
@@ -829,6 +914,7 @@ try {
                 # DLLs at run time (step 5 says where they come from).
                 if ($mingw) { $sdkConfigure += "-DREXGLUE_FSR_SOURCE_DIR=$($root.Replace('\', '/'))/third_party/fidelityfx-not-built-with-mingw" }
                 Logged "sdk-configure" { cmake --preset win-amd64 @sdkConfigure -DREXGLUE_USE_VULKAN=ON -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FSR=ON "-DCMAKE_C_COMPILER=$env:MCLA_CC" "-DCMAKE_CXX_COMPILER=$env:MCLA_CXX" }
+                if (-not $mingw) { Set-Content -LiteralPath $toolchainFile $toolchainNow }
                 Logged "sdk-build" { cmake --build out\build\$sdkBuildName --config Release }
                 Logged "sdk-install" { cmake --install out\build\$sdkBuildName --config Release }
             } finally { Pop-Location }
@@ -916,7 +1002,7 @@ try {
             # runtime is part of it), and stops there. The same as running
             # make_pc.ps1 -Toolchain msvc -Until sdk by hand. Not for a prebuilt SDK: its
             # bundle has the DLLs, or nothing here makes them.
-            if (-not $theirs -and -not $SdkBundle -and (HasBuildTools) -and
+            if (-not $theirs -and -not $SdkBundle -and (HasBuildTools) -and (HasWindowsSdk) -and
                 (Test-Path -LiteralPath "$root\tools\$llvmName\bin\clang.exe")) {
                 "FSR: FidelityFX's runtime is made by the msvc toolchain, which is here: building its SDK once for it (make_pc.ps1 -Toolchain msvc -Until sdk)"
                 $ErrorActionPreference = "Continue"

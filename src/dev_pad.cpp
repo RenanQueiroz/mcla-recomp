@@ -123,7 +123,7 @@ REXCVAR_DEFINE_BOOL(mcla_freeze, false, "MCLA",
                     "world stands still while frames are still drawn; for comparing frames "
                     "of one moment (A/B of rendering options, temporal AA convergence)");
 
-bool MclaSaveInProgress();  // src/mcla_app.cpp
+bool MclaSaveInProgress();  // src/save_wait.cpp
 
 namespace {
 

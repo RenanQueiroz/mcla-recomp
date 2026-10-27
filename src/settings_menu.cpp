@@ -57,7 +57,7 @@ const char* g_mcla_settings_path = nullptr;
 bool MclaRelaunchGame();  // src/mcla_app.cpp
 #endif
 #if !REX_PLATFORM_PS5
-void MclaWaitForSaves();  // src/mcla_app.cpp
+void MclaWaitForSaves();  // src/save_wait.cpp
 #endif
 bool MclaSingleTileAvailable();  // src/render_perf.cpp
 int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
