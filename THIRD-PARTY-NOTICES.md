@@ -24,6 +24,10 @@ Ported from it:
   carries both notices.
 - `launcher/dev/dropped-patches/unchanged-fetch-constants-keep-bindings.patch`:
   the approach of its patch 0032, measured and not used.
+- `patches/rexglue-xma-decoder-fixes.patch`: the idea of its patch 0105
+  (`0105-xma-unreadable-input-and-locked-contexts.patch`): `Work()` looks at the
+  context again once it has the lock, and `Release()` clears a pending kick. The
+  code is written for this fork; its input-buffer validation is not taken.
 
 ```
 MIT License
@@ -81,12 +85,53 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Xenia and xenia-canary
+## Xenia, xenia-canary and Xenia Edge
 
 The shaders the fork adds to the SDK (direct texture loads, direct resolves
 and the fixed 4x MSAA resolve) are built from Xenia's shader sources, and some
 changes follow xenia-canary's approach. Both are under Xenia's BSD-3-Clause
 licence, whose notice the ReXGlue SDK already carries in its `LICENSE`.
+
+`patches/rexglue-xma-decoder-fixes.patch` takes code and design from the XMA
+decoder of xenia-canary (<https://github.com/xenia-canary/xenia-canary>) and of
+Xenia Edge (<https://github.com/has207/xenia-edge>), both BSD-3-Clause with the
+same `LICENSE` file ("Copyright (c) 2015, Ben Vanik. All rights reserved."; the
+source files read "Copyright 2024 Xenia Canary. All rights reserved. Released
+under the BSD license"): from `src/xenia/apu/xma_context_new.cc`, the commits
+`6bef1fbed`, `7015473a7`, `aee0871dd` and `ade7e610b` of xenia-canary and
+`5dd1cdbbf` of Xenia Edge (all by Herman S.), and the design of Edge's
+`1fae8f43a` (decoding on the kicking thread). The code lands in the SDK's own
+`src/audio/xma_context.cpp`, which already carries the same copyright and
+permission notice, with the authors' comments kept and the commits named where
+the code is. The decoder it changes was itself taken into xenia-canary from the
+ReXGlue SDK in May 2026 (xenia-canary `b575c6841`).
+
+```
+Copyright (c) 2015, Ben Vanik.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the project nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL BEN VANIK BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
 
 ## AMD FidelityFX SDK (FSR 3.1)
 
