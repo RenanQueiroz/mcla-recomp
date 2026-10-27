@@ -100,6 +100,26 @@ try {
         $found = @(& $vswhere -products * -requires $vcTools -sort -format json | ConvertFrom-Json) | Select-Object -First 1
         if ($found) { "$($found.displayName) ($($found.installationVersion))" } else { "" }
     }
+    # A Windows SDK new enough for the SDK's Direct3D 12 code: 10.0.19041 and
+    # older lack D3D12_FEATURE_DATA_D3D12_OPTIONS8, and the SDK build fails on
+    # it (issue #21). Clang takes the newest one installed, so that is the one
+    # checked; the version is returned to name it when it is too old.
+    $windowsSdk = "10.0.26100"
+    function NewestWindowsSdk {
+        # Both registry views can name a Windows Kits folder, and one may hold
+        # no headers (a 64-bit entry next to the SDK in Program Files (x86)),
+        # so every one is searched.
+        $kits = @(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.KitsRoot10 }) + "${env:ProgramFiles(x86)}\Windows Kits\10\" | Where-Object { $_ } | Select-Object -Unique
+        $versions = @($kits | ForEach-Object { Get-ChildItem "$_\Include" -Directory -ErrorAction SilentlyContinue } |
+            Where-Object { $_.Name -match '^10\.[0-9.]+$' -and (Test-Path "$($_.FullName)\um\d3d12.h") } |
+            Sort-Object { [version]$_.Name })
+        if ($versions) { $versions[-1] } else { $null }
+    }
+    function HasWindowsSdk {
+        $newest = NewestWindowsSdk
+        $newest -and (Select-String -Quiet -SimpleMatch "D3D12_FEATURE_DATA_D3D12_OPTIONS8" "$($newest.FullName)\um\d3d12.h")
+    }
     function HasPython {
         if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $false }
         $ErrorActionPreference = "Continue"
@@ -122,6 +142,7 @@ try {
         # Store works from the same folder (issue #13).
         if (-not (HasPython)) { $list += "Python" }
         if (-not (HasBuildTools)) { $list += "Visual Studio Build Tools" }
+        elseif (-not (HasWindowsSdk)) { $list += "Windows SDK" }
         # Only the project's own Clang counts: another one on the path may not
         # find the Microsoft headers (issue #9).
         if (-not (Test-Path "$root\tools\$llvmName\bin\clang.exe")) { $list += "Clang" }
@@ -133,6 +154,10 @@ try {
         $old = OldBuildTools
         if ($missing -contains "Visual Studio Build Tools" -and $old) {
             "$old is installed, but the build needs Visual Studio 2022 version 17.1 or newer. Update it in the Visual Studio Installer, or let this install Build Tools 2022 next to it."
+        }
+        $sdkFound = NewestWindowsSdk
+        if ($missing -contains "Windows SDK" -and $sdkFound) {
+            "Windows SDK $($sdkFound.Name) is installed, but the build needs a newer one; this installs Windows SDK $windowsSdk next to it."
         }
         if (-not $InstallTools) {
             $answer = Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights. [y/N]"
@@ -150,6 +175,9 @@ try {
                     winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements `
                         --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
                 }
+            } elseif ($name -eq "Windows SDK") {
+                "installing Windows SDK $windowsSdk (this takes a while)"
+                Logged "install-windows-sdk" { winget install --id "Microsoft.WindowsSDK.$windowsSdk" -e --accept-source-agreements --accept-package-agreements }
             } elseif ($name -eq "Clang") {
                 "downloading Clang $llvmVersion (about 900 MB) into tools\"
                 New-Item -ItemType Directory -Force "$root\tools" | Out-Null

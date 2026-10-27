@@ -39,7 +39,7 @@ cd mcla-recomp
 .\scripts\make_pc.ps1 -Iso C:\path\to\your.iso
 ```
 
-The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 version 17.1 or newer (C++ workload) and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. It then clones and patches the ReXGlue SDK v0.10.0, builds it (the long step, once), extracts your game into `game\`, recompiles it and builds `out\build\win-amd64-release\mcla.exe`. Each step is skipped when its result is already there, so after a failure or an update you run the same command again. Logs are in `out\logs`.
+The script checks for Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 version 17.1 or newer (C++ workload), a Windows SDK newer than 10.0.19041 and the project's own Clang 20, and offers to install what is missing (answer `y`, or add `-InstallTools`); the Build Tools ask for administrator rights. It then clones and patches the ReXGlue SDK v0.10.0, builds it (the long step, once), extracts your game into `game\`, recompiles it and builds `out\build\win-amd64-release\mcla.exe`. Each step is skipped when its result is already there, so after a failure or an update you run the same command again. Logs are in `out\logs`.
 
 **Play:** double-click the **Midnight Club Los Angeles** shortcut the build leaves in the repository folder, or `mcla.exe` itself. Keep the folder where it was built; the game data is read from `game\`. An Xbox or PlayStation controller works.
 
@@ -55,6 +55,7 @@ Frames are held to the target when they are presented (`--mcla_pace_at_swap=fals
 | Step 1 fails after downloading Clang, with `unable to run program "xz -d -qq"` | Windows 10's `tar.exe` cannot unpack `.tar.xz`. Update and run `make_pc.ps1` again: it now unpacks the archive with Python when `tar.exe` cannot. |
 | Installing a tool fails with `No package found matching input criteria` | winget's package list on your PC is out of date or broken: run `winget source reset --force` in an administrator PowerShell, then `make_pc.ps1` again, or install that tool yourself (Python from python.org or the Microsoft Store works). |
 | The SDK build fails with `no member named 'byteswap' in namespace 'std'` | Your Visual Studio is older than 2022 version 17.1 (VS 2019, or an early 2022). Update it in the Visual Studio Installer, or install Build Tools 2022, then run `make_pc.ps1` again. It now checks the version in step 1. |
+| The SDK build fails with `unknown type name 'D3D12_FEATURE_DATA_D3D12_OPTIONS8'` | Your newest Windows SDK is 10.0.19041 or older. Update and run `make_pc.ps1` again: step 1 now installs Windows SDK 10.0.26100. Or add **Windows 11 SDK** to Build Tools 2022 in the Visual Studio Installer (Modify › Individual components). |
 | The SDK configure fails with `could not open 'oldnames.lib'` | Clang picked a Visual Studio without the C++ tools (for example Visual Studio 2026 installed for something else) over the one that has them. Update and run `make_pc.ps1` again: it now points Clang at an install with the C++ tools. Or add **Desktop development with C++** to that Visual Studio in the Visual Studio Installer. |
 | Step 2 fails with `config.h: No such file or directory` | The first download of the SDK was cut short. Update and run `make_pc.ps1` again: it now repairs the download. If it still fails, delete `third_party\rexglue-sdk` and run it again. |
 | `codegen failed` | `game\default.xex` is missing or not the supported release; see the end of `out\codegen.log`. |
@@ -135,7 +136,7 @@ If the game stops with `Call to invalid or unregistered function at guest addres
 ## Credits
 
 - ReXGlue SDK by Tom Clay and contributors; Xenia by Ben Vanik and contributors.
-- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from, with permission.
+- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from.
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by mihawk-99 (GPL-3): the RADV port and toolchain the PS5 version is built on.
 - XenonRecomp by hedge-dev, on which ReXGlue's analysis builds.
 - The Linux build by [@MoonFuji](https://github.com/MoonFuji).
