@@ -1,0 +1,25 @@
+# The main thread's wait for a free slot of the game's command ring, as a wait on the slot's word
+# instead of a loop of Sleep(0). Implemented in src/poll_wait.cpp (the cvar mcla_poll_wait, off by
+# default; off, both hooks do nothing and the game's loop is its own).
+#
+# The rings are at 0x82836814, 8 bytes each: the word at +0 is advanced by the main thread when it
+# has written a slot (sub_82161210), the word at +4 by the guest thread that runs sub_82144888 when it
+# is done with one (sub_82160088). sub_82148A10 waits for the next slot not to be the one at +4.
+
+# 0x82148AB0: `li r3,0` in sub_82148A10's wait loop, ahead of `bl sub_821C91B8` (Sleep(0)).
+# r31 = the context (the byte at +199 picks the ring), r30 = 0x82836814, r29 = the word at +4 as the
+# loop last read it, r26 = the loop's deadline and r3 = its last clock reading, both in microseconds.
+# true skips the Sleep(0) (the loop goes on at the `lbz` that reads the word again).
+[[midasm_hook]]
+name = "mcla_poll_wait"
+address = 0x82148AB0
+registers = ["r31", "r30", "r29", "r26", "r3"]
+jump_address_on_true = 0x82148AB8
+
+# 0x82160140: `stw r11,4(r6)` in sub_82160088, which sets the word at +4 of the first ring
+# (r6 = 0x82836814). Hooked after the store: wakes the main thread if it sleeps on the word.
+[[midasm_hook]]
+name = "mcla_poll_release"
+address = 0x82160140
+after_instruction = true
+registers = ["r6"]

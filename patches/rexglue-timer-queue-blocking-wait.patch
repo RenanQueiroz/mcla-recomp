@@ -1,8 +1,8 @@
 diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
-index 5cfea05..5a22adc 100644
+index 5cfea05..193baa7 100644
 --- a/src/core/timer_queue.cpp
 +++ b/src/core/timer_queue.cpp
-@@ -12,17 +12,154 @@
+@@ -12,17 +12,184 @@
  #include <algorithm>
  #include <forward_list>
  
@@ -36,6 +36,16 @@ index 5cfea05..5a22adc 100644
 +                    "a condition variable's timeout is cut down to whole milliseconds, so a timer due "
 +                    "in under 1 ms made the wait return at once and the thread spin until it was due: "
 +                    "a whole core with the 1 ms timestamp timer. Off restores the condition variable.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(timer_queue_hr_spin_us, 0, "Kernel",
++                     "With timer_queue_hr_wait: how many microseconds before a timer is due the "
++                     "timer thread stops sleeping and spins (with the processor's pause hint) "
++                     "until it is. The high-resolution wait wakes 0.3 ms late on average, so a "
++                     "timer that matters to the minute (the 1 ms timestamp the guest reads) is "
++                     "late by that; spinning for the last part trades some of the saved CPU for "
++                     "an exact wake-up. 0 sleeps all the way.")
++    .range(0, 1000)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +namespace {
@@ -91,7 +101,9 @@ index 5cfea05..5a22adc 100644
 +      if (remaining > std::chrono::nanoseconds::zero()) {
 +        if (remaining <= std::chrono::milliseconds(20)) {
 +          dp::sequence_t result;
-+          if (HrWait(sequence, count, sequences, remaining, &result)) {
++          const std::chrono::nanoseconds spin(
++              static_cast<int64_t>(std::clamp(REXCVAR_GET(timer_queue_hr_spin_us), 0, 1000)) * 1000);
++          if (HrWait(sequence, count, sequences, remaining, spin, &result)) {
 +            return result;
 +          }
 +        } else {
@@ -116,17 +128,20 @@ index 5cfea05..5a22adc 100644
 +  static bool Blocking() { return REXCVAR_GET(timer_queue_blocking_wait); }
 +
 +#if defined(_WIN32)
-+  // Sleeps up to `remaining` on the thread's high-resolution timer, or until a timer is queued
-+  // (signal_all_when_blocking). False if the timer could not be made. *result is what the
-+  // condition variable's wait would have returned: the least-advanced sequence, which is
-+  // before `sequence` if nothing was published.
++  // Sleeps on the thread's high-resolution timer until `spin` before `remaining` is up, or until
++  // a timer is queued (signal_all_when_blocking), then spins (pause hint) the rest of `remaining`
++  // unless something was queued. False if the timer could not be made. *result is what the
++  // condition variable's wait would have returned: the least-advanced sequence, which is before
++  // `sequence` if nothing was published.
 +  bool HrWait(dp::sequence_t sequence, size_t count,
 +              const std::atomic<dp::sequence_t>* const sequences[],
-+              std::chrono::nanoseconds remaining, dp::sequence_t* result) {
++              std::chrono::nanoseconds remaining, std::chrono::nanoseconds spin,
++              dp::sequence_t* result) {
 +    static thread_local HrTimer timer;
 +    if (!timer.handle) {
 +      return false;
 +    }
++    const auto end = std::chrono::steady_clock::now() + remaining;
 +    // The event is reset before the sequences are read: a timer queued after the read sets it
 +    // again, and the wait below then returns at once.
 +    ResetEvent(wake_event_);
@@ -134,14 +149,29 @@ index 5cfea05..5a22adc 100644
 +    if (dp::difference(*result, sequence) >= 0) {
 +      return true;
 +    }
-+    LARGE_INTEGER due;
-+    due.QuadPart = -static_cast<LONGLONG>(remaining.count() / 100);
-+    if (!SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0)) {
-+      return false;
++    if (remaining > spin) {
++      LARGE_INTEGER due;
++      due.QuadPart = -static_cast<LONGLONG>((remaining - spin).count() / 100);
++      if (!SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0)) {
++        return false;
++      }
++      const HANDLE handles[2] = {wake_event_, timer.handle};
++      WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++      *result = dp::minimum_sequence_after(sequence, count, sequences);
++      if (dp::difference(*result, sequence) >= 0) {
++        return true;
++      }
 +    }
-+    const HANDLE handles[2] = {wake_event_, timer.handle};
-+    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-+    *result = dp::minimum_sequence_after(sequence, count, sequences);
++    if (spin > std::chrono::nanoseconds::zero()) {
++      // The thread is awake and the timer nearly due: wait for it without a wake-up to be late for.
++      while (std::chrono::steady_clock::now() < end) {
++        *result = dp::minimum_sequence_after(sequence, count, sequences);
++        if (dp::difference(*result, sequence) >= 0) {
++          return true;
++        }
++        YieldProcessor();
++      }
++    }
 +    return true;
 +  }
 +
@@ -157,7 +187,7 @@ index 5cfea05..5a22adc 100644
  namespace rex::thread {
  
  using WaitItem = TimerQueueWaitItem;
-@@ -142,9 +279,9 @@ class TimerQueue {
+@@ -142,9 +309,9 @@ class TimerQueue {
    // This ring buffer will be used to introduce timers queued by the public API
    static constexpr size_t kWaitCount = 512;
    dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
