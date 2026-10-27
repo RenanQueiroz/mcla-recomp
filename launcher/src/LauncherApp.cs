@@ -82,6 +82,8 @@ sealed class LauncherApp : Component
         var (countdown, setCountdown) = UseState<int?>(null);
         // An HDR level slider being dragged: its value until the drag ends.
         var (levelDrafts, setLevelDrafts) = UseState(ImmutableDictionary<string, double>.Empty);
+        // What was typed in the Player name box (null: show the file's), spaces and all.
+        var (nameDraft, setNameDraft) = UseState<string?>(null);
         var (confirmExit, setConfirmExit) = UseState(false);
         var buildRef = UseRef<BuildRun?>(null);
         var exitingRef = UseRef(false);
@@ -364,6 +366,38 @@ sealed class LauncherApp : Component
                 setGameSettings(ReadGameSettings());
                 // A setting chosen here is the user's now: an older launcher's
                 // choices that weren't moved yet must never come over it.
+                if (!settingsRef.Current.SettingsInGameFile) updateSettings(SettingsMigration.Retire);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                setNotice($"Couldn't save the setting in {GameSettingsPath}: {ex.Message}");
+            }
+        }
+
+        // The player's name: what was typed is cleaned (PlayerName.Clean) and shown at once; the name
+        // goes into mcla.toml as it is typed, as a drop-down's choice does, and an empty box takes the
+        // line out (the game then says "User"). Not while the game runs, as for the other settings.
+        void SetPlayerName(string typed)
+        {
+            var clean = PlayerName.Clean(typed);
+            var name = PlayerName.ForFile(clean);
+            var inFile = PlayerName.In(gameSettings);
+            if (GameIsRunning())
+            {
+                setGameRunning(true);
+                return;
+            }
+            setNameDraft(clean);
+            if (name == (inFile.Length == 0 ? null : inFile)) return;
+            if (name is not null)
+            {
+                SetGameSetting(PlayerName.Key, name);
+                return;
+            }
+            try
+            {
+                GameSettingsFile.Remove(GameSettingsPath, PlayerName.Key);
+                setGameSettings(ReadGameSettings());
                 if (!settingsRef.Current.SettingsInGameFile) updateSettings(SettingsMigration.Retire);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -912,6 +946,17 @@ sealed class LauncherApp : Component
                     .IsEnabled(!gameRunning));
         }
 
+        // The Player name box: the file's name (the placeholder says "User", which the game takes while there
+        // is none), or what was typed.
+        Element PlayerNameBox() =>
+            VStack(4,
+                SettingTitle("Player name", PlayerName.Info),
+                TextBox(nameDraft ?? PlayerName.In(gameSettings), SetPlayerName, placeholderText: PlayerName.Default)
+                    .MaxLength(PlayerName.MaxLength)
+                    .AutomationName("Player name")
+                    .HAlign(HorizontalAlignment.Stretch)
+                    .IsEnabled(!gameRunning));
+
         // What Auto stands for: what Windows reports for the main display, as
         // the game reads it for its own (1,000 and 200 nits if nothing usable).
         static double AutoLevel(LevelSetting level) =>
@@ -1020,7 +1065,7 @@ sealed class LauncherApp : Component
                 VStack(2, (DisplayHdr.Main.Value?.Describe() ?? DisplayHdr.Unknown)
                     .Select((line, i) => TextBlock(line).Foreground(Theme.SecondaryText).WithKey(i.ToString())).ToArray()),
                 Subtitle("Game"),
-                Pairs(GameSettings.Game.Select(SettingCombo).ToArray()),
+                Pairs([.. GameSettings.Game.Select(SettingCombo), PlayerNameBox()]),
                 // Lines short enough for the window: in this scroll viewer a
                 // TextBlock is measured without a width limit, so it doesn't wrap.
                 VStack(2, preparing
@@ -1030,7 +1075,7 @@ sealed class LauncherApp : Component
                     ? [TextBlock("The game is running: change these in its pause menu, on the Settings tab.").Foreground(Theme.SecondaryText),
                        TextBlock("They show here again once it has closed.").Foreground(Theme.SecondaryText)]
                     : [TextBlock("These are the game's own settings, in mcla.toml next to mcla.exe. Its pause menu changes them too.").Foreground(Theme.SecondaryText),
-                       TextBlock("Resolution, Graphics API and Intro take effect when the game starts.").Foreground(Theme.SecondaryText)]),
+                       TextBlock("Resolution, Graphics API, Intro and Player name take effect when the game starts.").Foreground(Theme.SecondaryText)]),
                 Expander("Advanced",
                     VStack(16,
                         VStack(4,

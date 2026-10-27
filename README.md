@@ -76,6 +76,7 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | Graphics API | Automatic (Direct3D 12 first), Direct3D 12, Vulkan | `mcla_gpu_backend` = `any`, `d3d12` or `vulkan` | DISPLAY › GRAPHICS API (next start) |
 | Intro | Normal, Fast, Skip (hides the title logo) | `mcla_intro` = `normal`, `fast` or `skip` | CONTROLS › INTRO (next start) |
 | Button prompts | Follow the controller, Xbox, PlayStation | `mcla_button_prompts` = `auto`, `xbox` or `playstation` | CONTROLS › BUTTON PROMPTS |
+| Player name | The name the game shows for you: up to 15 letters, digits and spaces (empty: `User`, as before) | `user_name` (a text; the SDK's, `patches/rexglue-user-name.patch`) | (the launcher and `mcla.toml` only; read when the game starts) |
 
 *Display gamma* is the ramp the picture goes through on its way to the screen, as the console's display hardware applied it. The game writes sRGB-encoded colour; *TV*, the default, is the console's ramp for an HDTV (BT.709), which on a PC monitor makes the shadows darker than the game drew them (8-bit levels 64, 128 and 192 show as 48, 115 and 185). *PC monitor* leaves the game's output as it is, as an sRGB monitor expects. It changes during play, from the launcher or the pause menu ([KNOWN-ISSUES.md](KNOWN-ISSUES.md#display-gamma-for-pc-monitors-2026-10-16)).
 

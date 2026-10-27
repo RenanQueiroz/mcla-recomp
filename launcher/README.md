@@ -566,6 +566,17 @@ smoother and the ticker two and four times as fast (at a 120 FPS cap: 59, 118,
 GPS panels keep the console's pace whatever it is set to (`mcla_ui_timing_fix`,
 `KNOWN-ISSUES.md`).
 
+*Player name* (`user_name`, a text box rather than a drop-down; the SDK's, from
+`patches\rexglue-user-name.patch`) is the name of the profile the game is signed in
+as, which it shows where it shows the player's own; it was "User" for everyone. It
+takes up to 15 ASCII letters, digits and spaces, like an Xbox gamertag: the box keeps
+nothing else (and the patch ignores a name that has anything else, with a warning in
+the log, and says "User"). What is typed goes into `mcla.toml` as it is typed, spaces
+around it dropped, and an empty box removes the line. The game reads it when it
+starts, and the pause menu has no row for it. The profile's number (its XUID, so the
+folder of the save and the achievements) does not depend on the name, nor does the
+folder of the profile's own settings (`dev\player-name-2026-10-27.md` has the checks).
+
 The launcher also used to pass four SDK settings that measured faster (in-run
 A/B; the first two are ideas from
 [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined)).

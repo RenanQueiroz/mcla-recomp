@@ -1,0 +1,95 @@
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..5ef90f2 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -442,10 +442,12 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+ 
+ std::filesystem::path ContentManager::ResolveGameUserContentPath() {
+   auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
+-  auto user_name = rex::to_path(kernel_state_->user_profile()->name());
++  // The profile's folder, not its name's: it was always "User" until the name could be set
++  // (user_name), and a game's profile settings stay where it saved them when it is.
++  auto user_name = rex::to_path(std::string("User"));
+ 
+   // Per-game per-profile data location:
+-  // content_root/title_id/profile/user_name
++  // content_root/title_id/profile/User
+   return root_path_ / title_id / kGameUserContentDirName / user_name;
+ }
+ 
+diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
+index a77f5e6..587288b 100644
+--- a/src/system/xam/user_profile.cpp
++++ b/src/system/xam/user_profile.cpp
+@@ -10,23 +10,70 @@
+  */
+ 
+ #include <sstream>
++#include <string>
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/user_profile.h>
+ 
++REXCVAR_DEFINE_STRING(user_name, "User", "Runtime",
++                      "Name of the signed-in profile, the gamertag the game shows: 1 to 15 ASCII "
++                      "letters, digits and spaces. Anything else is ignored and the name is 'User'")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++namespace {
++
++// An Xbox gamertag has at most 15 characters; XamUserGetName and XamUserGetGamerTag copy at
++// most 16 with the terminator, so a longer name would be cut short.
++constexpr size_t kMaxProfileNameLength = 15;
++constexpr char kDefaultProfileName[] = "User";
++
++bool IsProfileNameCharacter(unsigned char c) {
++  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ';
++}
++
++// The name from the user_name cvar: the spaces around it dropped, then 1 to 15 ASCII letters,
++// digits and spaces, as a gamertag is made of. Anything else, and the cvar left at its default,
++// give "User", the one name the profile had before it could be set.
++std::string ProfileNameFromCvar() {
++  const std::string& setting = REXCVAR_GET(user_name);
++  const size_t first = setting.find_first_not_of(' ');
++  const size_t last = setting.find_last_not_of(' ');
++  const std::string name =
++      first == std::string::npos ? std::string() : setting.substr(first, last - first + 1);
++  bool valid = !name.empty() && name.size() <= kMaxProfileNameLength;
++  for (const char c : name) {
++    valid = valid && IsProfileNameCharacter(static_cast<unsigned char>(c));
++  }
++  if (valid) {
++    return name;
++  }
++  if (setting != kDefaultProfileName) {
++    REXSYS_WARN(
++        "user_name '{}' is not a gamertag (1 to 15 ASCII letters, digits and spaces): using '{}'",
++        setting, kDefaultProfileName);
++  }
++  return kDefaultProfileName;
++}
++
++}  // namespace
++
+ UserProfile::UserProfile() {
+   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
+   // if non-zero, it prevents the user from playing the game.
+   // "You do not have permissions to perform this operation."
++  // The XUID is the profile's identity (the folder of its saves and achievements): it never
++  // depends on the name.
+   xuid_ = 0xB13EBABEBABEBABE;
+-  name_ = "User";
++  name_ = ProfileNameFromCvar();
++  REXSYS_INFO("user profile: name '{}', XUID {:016X}", name_, xuid_);
+ 
+   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
+   // https://github.com/arkem/py360/blob/master/py360/constants.py
