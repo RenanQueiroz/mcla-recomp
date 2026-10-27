@@ -13,6 +13,8 @@
 #              or build the target again for a clean plugin
 #   -NoBuild   applies (or reverses) the patches only
 #
+# (The SDK folder is $sdkDir, not $sdk: scripts\env.ps1, dot-sourced below, has a -Sdk parameter, and PowerShell variable names are
+# not case-sensitive, so a $sdk of this script was emptied by it.)
 # Run under the shared lock (lockrun.py --lock): it is a compile. The instrumentation (all cvars and environment
 # variables are read at run time; nothing changes without them):
 #   MCLA_GT_EVERY=<s>, MCLA_GT_DIR=<folder>   one timed frame every <s> seconds as gt_<n>.csv (D3D12 and Vulkan)
@@ -24,18 +26,18 @@ param([string]$OutDir = "", [ValidateSet("mingw", "msvc")][string]$Toolchain = "
       [switch]$Reverse, [switch]$NoBuild)
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
-$sdk = "$root\third_party\rexglue-sdk"
-if (-not (Test-Path -LiteralPath "$sdk\CMakeLists.txt")) { throw "no SDK at ${sdk}: run scripts\make_pc.ps1 -Until sdk first" }
+$sdkDir = "$root\third_party\rexglue-sdk"
+if (-not (Test-Path -LiteralPath "$sdkDir\CMakeLists.txt")) { throw "no SDK at ${sdkDir}: run scripts\make_pc.ps1 -Until sdk first" }
 if (-not $OutDir) { $OutDir = "$root\out\gt" }
 if ($Layer.Count -eq 0) {
     $Layer = @("gpu-timestamps", "gpu-timestamps-vulkan", "texload-split-timestamps", "resolve-split-timestamps", "frame-log")
 }
 $env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
-$recordFile = "$sdk\.gt-layer"
+$recordFile = "$sdkDir\.gt-layer"
 $applied = @(if (Test-Path -LiteralPath $recordFile) { Get-Content -LiteralPath $recordFile } else { })
 
 function GitApply([string[]]$gitArgs, [string]$patch) {
-    & git -C $sdk apply --whitespace=nowarn @gitArgs $patch 2>&1 | Out-Host
+    & git -C $sdkDir apply --whitespace=nowarn @gitArgs $patch 2>&1 | Out-Host
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -76,17 +78,17 @@ if (-not $env:VULKAN_SDK) {
     if ($v) { $env:VULKAN_SDK = $v.FullName }
 }
 $buildName = if ($Toolchain -eq "mingw") { "win-amd64-mingw" } else { "win-amd64" }
-if (-not (Test-Path -LiteralPath "$sdk\out\build\$buildName\build.ninja")) { throw "the SDK is not built with $Toolchain ($sdk\out\build\$buildName)" }
+if (-not (Test-Path -LiteralPath "$sdkDir\out\build\$buildName\build.ninja")) { throw "the SDK is not built with $Toolchain ($sdkDir\out\build\$buildName)" }
 $start = Get-Date
-Push-Location $sdk
+Push-Location $sdkDir
 try {
     cmake --build "out\build\$buildName" --config Release --target rexgpu-xenos
     if ($LASTEXITCODE -ne 0) { throw "building rexgpu-xenos failed" }
 } finally { Pop-Location }
 # Where the plugin lands depends on the toolchain's output folder: the newest one this build wrote.
-$dll = Get-ChildItem -LiteralPath "$sdk\out" -Recurse -Filter rexgpu-xenos.dll -ErrorAction SilentlyContinue |
+$dll = Get-ChildItem -LiteralPath "$sdkDir\out" -Recurse -Filter rexgpu-xenos.dll -ErrorAction SilentlyContinue |
     Where-Object { $_.LastWriteTime -ge $start.AddSeconds(-5) } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $dll) { throw "the build wrote no rexgpu-xenos.dll (newer than $start) under $sdk\out" }
+if (-not $dll) { throw "the build wrote no rexgpu-xenos.dll (newer than $start) under $sdkDir\out" }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 Copy-Item -LiteralPath $dll.FullName -Destination "$OutDir\rexgpu-xenos.dll" -Force
 "instrumented plugin: $OutDir\rexgpu-xenos.dll ($($dll.Length) bytes, from $($dll.FullName); layer: $($applied -join ', '))"
