@@ -18,6 +18,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audio_analyze as aa  # noqa: E402
+import radio_pairs as rp  # noqa: E402
 
 
 def load_results(runs_dir, batch):
@@ -235,15 +236,17 @@ def main():
                     ctxs.append(aa.analyze_ctx(p))
                 except Exception as e:
                     ctxs.append({"file": p.name, "error": repr(e)})
+            # The radio is TWO mono contexts (one per channel, started together, streaming): pair them (radio_pairs.py). A stereo context of
+            # 20 s or more, if there is one, is kept as a fallback.
             longest = sorted((c for c in ctxs if c.get("channels") == 2 and c.get("seconds", 0) >= 20), key=lambda c: -c["seconds"])
             rep["radio_candidates"] = longest[:3]
             rep["contexts"] = len(ctxs)
-            if a.ref and batch == "A" and tag != "warm":
-                rep["reference"] = []
-                for c in longest[:2]:
-                    r = aa.ref_compare(dump / c["file"], out / "_ref" / name)
-                    r["file"] = c["file"]
-                    rep["reference"].append(r)
+            rep["radio_pairs"] = []
+            try:
+                for k, (pl, pr) in enumerate(rp.find_pairs(dump)[:3]):
+                    rep["radio_pairs"].append(rp.analyze_pair(dump, pl, pr, ref=True, tmp=out / "_ref" / name))
+            except Exception as e:  # keep the run's other numbers
+                rep["radio_pairs_error"] = repr(e)
             parsed = aa.parse_log(log)
             rep["stats_total"] = aa.summarize_stats(parsed["stats"], dump / "audio_stats_total.txt")
             rep["rates"] = aa.pump_rates(parsed["stats"])
@@ -252,8 +255,19 @@ def main():
             rep_path.write_text(json.dumps(rep, indent=1), encoding="utf-8")
             st = rep["stats_total"]
             mixr = rep.get("mix", {})
-            radio = longest[0] if longest else {}
-            ref0 = (rep.get("reference") or [{}])[0]
+            pair = (rep.get("radio_pairs") or [None])[0]
+            radio = {}
+            if pair:
+                radio = {"seconds": pair["seconds"], "balance": pair["balance"], "balance_trend": pair["balance_trend"],
+                         "clicks_per_min": pair["clicks_per_min"], "decode_vs_wall": (pair["decode_vs_wall"] or [None])[0],
+                         "balance_series_5s": pair["balance_series_5s"], "file": pair["left"] + "+" + pair["right"]}
+            elif longest:
+                radio = longest[0]
+            refs = pair.get("reference", []) if pair else []
+            mism = [r.get("mismatch_pct") for r in refs if r.get("mismatch_pct") is not None]
+            xc = (pair or {}).get("xcorr", {})
+            ref0 = {"lag_frames": (refs[0].get("ref_lag") if refs else None), "blocks_mismatched_pct": (max(mism) if mism else None),
+                    "diff_max_lsb": None, "error": (refs[0].get("ref_error") if refs else None)}
             rec.update({
                 "mix_s": mixr.get("seconds"), "gaps": mixr.get("gaps"), "gaps_per_min": mixr.get("gaps_per_min"),
                 "gap_ms_total": mixr.get("gap_ms_total"), "clicks_per_min": mixr.get("clicks_per_min"),
@@ -279,6 +293,10 @@ def main():
                 "pump_hz": rep["rates"].get("pump_hz_median"), "pump_hz_min": rep["rates"].get("pump_hz_min"),
                 "play_hz": rep["rates"].get("sdl_frames_hz_median"), "play_hz_min": rep["rates"].get("sdl_frames_hz_min"),
                 "radio_series": radio.get("balance_series_5s"), "radio_file": radio.get("file"),
+                "radio_lr_corr": xc.get("lag0_corr_median"), "radio_lr_off_lag": xc.get("windows_off_lag"),
+                "radio_first_mismatch_s": (min((r.get("first_mismatch_s") for r in refs if r.get("first_mismatch_s") is not None), default=None)
+                                           if mism and max(mism) > 1.0 else None),
+                "radio_frames_lost": sum(r.get("frames_lost_est") or 0 for r in refs) if refs else None,
                 "ref_lag": ref0.get("lag_frames"), "ref_mismatch_pct": ref0.get("blocks_mismatched_pct"),
                 "ref_diff_max_lsb": ref0.get("diff_max_lsb"), "ref_error": ref0.get("error"),
             })
@@ -286,7 +304,8 @@ def main():
 
     # ---- SUMMARY.md
     cols = ["batch", "tag", "variant", "aff", "fps_cap", "drive_fps", "exit", "mix_s", "underruns", "gaps", "gap_ms_total", "clicks_per_min", "mix_bal_step_p95",
-            "radio_s", "radio_bal_std", "radio_bal_step_p95", "radio_dropouts", "radio_clicks_per_min", "wrote_rd", "wrote_valid",
+            "radio_s", "radio_bal_std", "radio_bal_step_p95", "radio_dropouts", "radio_clicks_per_min", "radio_lr_corr", "radio_lr_off_lag",
+            "radio_frames_lost", "wrote_rd", "wrote_valid",
             "wrote_other", "work_inline", "work_worker", "work_slow", "xma_errors", "recheck_abort", "stalled", "cas_retry", "pump_late",
             "pump_gap_max_us", "pump_avg_us", "pump_over4", "pump_over8", "xma_us_per_pump", "queue_min", "ref_lag", "ref_mismatch_pct", "ref_diff_max_lsb", "error"]
     lines = ["# Audio checks: results", "", "| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]

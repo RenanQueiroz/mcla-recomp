@@ -1,9 +1,9 @@
 diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
 new file mode 100644
-index 0000000..643e995
+index 0000000..20aec01
 --- /dev/null
 +++ b/include/rex/audio/audio_dump.h
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,186 @@
 +/**
 + * @file        audio/audio_dump.h
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -83,6 +83,17 @@ index 0000000..643e995
 +  std::atomic<uint64_t> sdl_frames{0};        // guest frames played
 +  std::atomic<uint64_t> sdl_underruns{0};     // callbacks that had to put silence in because no frame was queued
 +  std::atomic<uint64_t> sdl_queue_min{~0ull}; // fewest frames queued at the start of a callback
++  // The same underruns split: before the guest mixer has delivered its first second of audio (the device starts
++  // asking before the game's mixer runs: ~50 silent frames at the start of every run) and after it (the ones that
++  // matter: silence in the middle of the game's audio, which stays in the stream as a delay).
++  std::atomic<uint64_t> sdl_underruns_steady{0};
++  std::atomic<uint64_t> sdl_silence_max{0};   // longest run of consecutive silent frames after the start
++  std::atomic<uint64_t> sdl_queue_grown{0};   // frames of queue depth added by audio_adaptive_queue
++  // How late the audio worker answers the device: the SDL callback stamps last_release_us when it gives the mixer
++  // a credit (it consumed a frame), the worker measures the time to the start of the mixer callback it then runs.
++  std::atomic<uint64_t> last_release_us{0};
++  std::atomic<uint64_t> wake_lt1{0}, wake_lt2{0}, wake_lt4{0}, wake_lt8{0}, wake_lt16{0}, wake_ge16{0};
++  std::atomic<uint64_t> wake_us_max{0};
 +};
 +Counters& C();
 +
@@ -180,7 +191,7 @@ index 0000000..643e995
 +
 +}  // namespace rex::audio::dump
 diff --git a/include/rex/audio/audio_system.h b/include/rex/audio/audio_system.h
-index 33fd32c..fd2a389 100644
+index 33fd32c..7a8441d 100644
 --- a/include/rex/audio/audio_system.h
 +++ b/include/rex/audio/audio_system.h
 @@ -12,6 +12,7 @@
@@ -191,7 +202,7 @@ index 33fd32c..fd2a389 100644
  #include <queue>
  
  #include <rex/kernel.h>
-@@ -33,6 +34,11 @@ constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
+@@ -33,6 +34,16 @@ constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
  class AudioDriver;
  class XmaDecoder;
  
@@ -200,10 +211,15 @@ index 33fd32c..fd2a389 100644
 +/// so without this every audio thread runs at the same priority as the game's busiest ones.
 +void ApplyAudioThreadPriority(system::XHostThread* host_thread);
 +
++/// audio_thread_priority 3: the calling thread joins the Windows multimedia scheduler (MMCSS, task "Pro Audio"), which
++/// keeps it ahead of ordinary threads for as long as it uses a small share of the CPU. Called by the thread itself.
++/// Does nothing on other platforms or when the level is lower.
++void EnterAudioThreadMmcss(const char* thread_name);
++
  class AudioSystem : public system::IAudioSystem {
   public:
    virtual ~AudioSystem();
-@@ -77,6 +83,12 @@ class AudioSystem : public system::IAudioSystem {
+@@ -77,6 +88,12 @@ class AudioSystem : public system::IAudioSystem {
    system::object_ref<system::XHostThread> worker_thread_;
  
    rex::thread::global_critical_region global_critical_region_;
@@ -217,10 +233,10 @@ index 33fd32c..fd2a389 100644
    struct {
      AudioDriver* driver;
 diff --git a/include/rex/audio/flags.h b/include/rex/audio/flags.h
-index c2f70ba..25c887a 100644
+index c2f70ba..095ed66 100644
 --- a/include/rex/audio/flags.h
 +++ b/include/rex/audio/flags.h
-@@ -15,3 +15,12 @@
+@@ -15,3 +15,16 @@
  
  REXCVAR_DECLARE(bool, audio_mute);
  REXCVAR_DECLARE(bool, ffmpeg_verbose);
@@ -230,11 +246,15 @@ index c2f70ba..25c887a 100644
 +REXCVAR_DECLARE(bool, xma_canary_fixes);
 +REXCVAR_DECLARE(int32_t, audio_thread_priority);
 +REXCVAR_DECLARE(bool, audio_client_lock);
++REXCVAR_DECLARE(int32_t, audio_maxqframes);
++REXCVAR_DECLARE(bool, audio_adaptive_queue);
++REXCVAR_DECLARE(int32_t, audio_adaptive_queue_step);
++REXCVAR_DECLARE(int32_t, audio_adaptive_queue_max);
 +REXCVAR_DECLARE(bool, audio_stats);
 +REXCVAR_DECLARE(std::string, audio_dump_dir);
 +REXCVAR_DECLARE(int32_t, audio_dump_max_mb);
 diff --git a/include/rex/audio/sdl/sdl_audio_driver.h b/include/rex/audio/sdl/sdl_audio_driver.h
-index f8949ca..18cd701 100644
+index f8949ca..5fd3b21 100644
 --- a/include/rex/audio/sdl/sdl_audio_driver.h
 +++ b/include/rex/audio/sdl/sdl_audio_driver.h
 @@ -16,6 +16,7 @@
@@ -245,7 +265,7 @@ index f8949ca..18cd701 100644
  #include <rex/thread.h>
  
  #include <SDL3/SDL.h>
-@@ -49,6 +50,10 @@ class SDLAudioDriver : public AudioDriver {
+@@ -49,6 +50,18 @@ class SDLAudioDriver : public AudioDriver {
    std::queue<float*> frames_queued_ = {};
    std::stack<float*> frames_unused_ = {};
    std::mutex frames_mutex_ = {};
@@ -253,6 +273,14 @@ index f8949ca..18cd701 100644
 +  // audio_dump_dir: what is handed to the device (mix.wav, 32-bit float, sdl_device_channels_ channels).
 +  dump::WavWriter mix_dump_;
 +  uint64_t underrun_count_ = 0;
++
++  // Underruns after the start, and audio_adaptive_queue (read in Initialize(); the SDL callback's thread only).
++  uint64_t frames_played_ = 0;   // guest frames played so far
++  uint64_t silence_run_ = 0;     // consecutive silent frames (after the start) in the current run
++  uint32_t queue_depth_ = 0;     // frames the mixer may run ahead (credits + queued): audio_maxqframes, plus growth
++  uint32_t queue_depth_max_ = 0;
++  uint32_t queue_step_ = 0;
++  bool adaptive_queue_ = false;
  };
  
  }  // namespace rex::audio::sdl
@@ -312,23 +340,25 @@ index 8426798..c22c332 100644
  
  }  // namespace rex::audio
 diff --git a/src/audio/CMakeLists.txt b/src/audio/CMakeLists.txt
-index d55f16a..5d2f1e6 100644
+index d55f16a..f3a23f1 100644
 --- a/src/audio/CMakeLists.txt
 +++ b/src/audio/CMakeLists.txt
-@@ -4,6 +4,7 @@
+@@ -4,7 +4,9 @@
  add_library(rexaudio OBJECT
      
      audio_driver.cpp
 +    audio_dump.cpp
      audio_system.cpp
++    audio_thread.cpp
      downmix.cpp
      xma_context.cpp
+     xma_decoder.cpp
 diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
 new file mode 100644
-index 0000000..7814eb8
+index 0000000..e6c9a7f
 --- /dev/null
 +++ b/src/audio/audio_dump.cpp
-@@ -0,0 +1,531 @@
+@@ -0,0 +1,545 @@
 +/**
 + * @file        audio/audio_dump.cpp
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -406,7 +436,8 @@ index 0000000..7814eb8
 +           xma_frames = 0, xma_decode_errors = 0, xma_recheck_abort = 0, xma_stalled_loops = 0,
 +           xma_cas_retries = 0, wrote_rd = 0, wrote_valid = 0, wrote_other = 0, pump_count = 0,
 +           pump_us = 0, pump_late = 0, pump_over_4ms = 0, pump_over_8ms = 0, sdl_callbacks = 0, sdl_frames = 0,
-+           sdl_underruns = 0;
++           sdl_underruns = 0, sdl_underruns_steady = 0, sdl_queue_grown = 0, wake_lt1 = 0, wake_lt2 = 0, wake_lt4 = 0,
++           wake_lt8 = 0, wake_lt16 = 0, wake_ge16 = 0;
 +};
 +
 +Snapshot Take() {
@@ -434,6 +465,14 @@ index 0000000..7814eb8
 +  s.sdl_callbacks = ld(c.sdl_callbacks);
 +  s.sdl_frames = ld(c.sdl_frames);
 +  s.sdl_underruns = ld(c.sdl_underruns);
++  s.sdl_underruns_steady = ld(c.sdl_underruns_steady);
++  s.sdl_queue_grown = ld(c.sdl_queue_grown);
++  s.wake_lt1 = ld(c.wake_lt1);
++  s.wake_lt2 = ld(c.wake_lt2);
++  s.wake_lt4 = ld(c.wake_lt4);
++  s.wake_lt8 = ld(c.wake_lt8);
++  s.wake_lt16 = ld(c.wake_lt16);
++  s.wake_ge16 = ld(c.wake_ge16);
 +  return s;
 +}
 +
@@ -450,14 +489,15 @@ index 0000000..7814eb8
 +                   uint64_t pump_max, uint64_t gap_max, uint64_t queue_min) {
 +  const uint64_t works = (now.xma_work_inline - prev.xma_work_inline) +
 +                         (now.xma_work_worker - prev.xma_work_worker);
-+  char buf[1536];
++  char buf[2048];
 +  std::snprintf(
 +      buf, sizeof(buf),
 +      "audio stats %s t=%.1fs | xma: kicks=%llu work inline=%llu worker=%llu avg_us=%llu max_us=%llu "
 +      "slow(>2ms)=%llu frames=%llu errors=%llu recheck_abort=%llu stalled=%llu cas_retry=%llu | game wrote "
 +      "during a decode: read_offset=%llu valid=%llu other=%llu | pump: n=%llu avg_us=%llu max_us=%llu "
 +      "gap_max_us=%llu late(>8ms)=%llu over4ms=%llu over8ms=%llu | sdl: callbacks=%llu frames=%llu "
-+      "underruns=%llu queue_min=%llu",
++      "underruns=%llu queue_min=%llu underruns_steady=%llu silence_max=%llu queue_grown=%llu | wake: lt1ms=%llu "
++      "lt2ms=%llu lt4ms=%llu lt8ms=%llu lt16ms=%llu ge16ms=%llu max_us=%llu",
 +      label, static_cast<double>(NowUs()) / 1e6, U(now.xma_kicks - prev.xma_kicks),
 +      U(now.xma_work_inline - prev.xma_work_inline), U(now.xma_work_worker - prev.xma_work_worker),
 +      U(Div(now.xma_work_us - prev.xma_work_us, works)), U(work_max),
@@ -470,7 +510,11 @@ index 0000000..7814eb8
 +      U(now.pump_late - prev.pump_late), U(now.pump_over_4ms - prev.pump_over_4ms),
 +      U(now.pump_over_8ms - prev.pump_over_8ms), U(now.sdl_callbacks - prev.sdl_callbacks),
 +      U(now.sdl_frames - prev.sdl_frames), U(now.sdl_underruns - prev.sdl_underruns),
-+      U(queue_min == ~0ull ? 0 : queue_min));
++      U(queue_min == ~0ull ? 0 : queue_min), U(now.sdl_underruns_steady - prev.sdl_underruns_steady),
++      U(g_counters.sdl_silence_max.load(std::memory_order_relaxed)), U(now.sdl_queue_grown - prev.sdl_queue_grown),
++      U(now.wake_lt1 - prev.wake_lt1), U(now.wake_lt2 - prev.wake_lt2), U(now.wake_lt4 - prev.wake_lt4),
++      U(now.wake_lt8 - prev.wake_lt8), U(now.wake_lt16 - prev.wake_lt16), U(now.wake_ge16 - prev.wake_ge16),
++      U(g_counters.wake_us_max.load(std::memory_order_relaxed)));
 +  return buf;
 +}
 +
@@ -861,7 +905,7 @@ index 0000000..7814eb8
 +
 +}  // namespace rex::audio::dump
 diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
-index 7a711a8..5e6f922 100644
+index 7a711a8..76b2573 100644
 --- a/src/audio/audio_system.cpp
 +++ b/src/audio/audio_system.cpp
 @@ -11,6 +11,7 @@
@@ -872,14 +916,16 @@ index 7a711a8..5e6f922 100644
  #include <rex/audio/audio_system.h>
  #include <rex/audio/flags.h>
  #include <rex/audio/xma/decoder.h>
-@@ -27,6 +28,15 @@
+@@ -27,6 +28,17 @@
  REXCVAR_DEFINE_INT32(
      audio_maxqframes, 8, "Audio",
      "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
 +REXCVAR_DEFINE_INT32(audio_thread_priority, 0, "Audio",
 +                     "Host priority of the audio worker and the XMA decoder thread: 0 = normal (the "
-+                     "kernel's thread priorities are ignored), 1 = above normal, 2 = highest. Restart")
-+    .range(0, 2)
++                     "kernel's thread priorities are ignored), 1 = above normal, 2 = highest, 3 = highest "
++                     "and registered with the Windows multimedia scheduler (MMCSS, \"Pro Audio\"), which "
++                     "keeps the thread ahead of ordinary ones while it stays light. Restart")
++    .range(0, 3)
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +REXCVAR_DEFINE_BOOL(audio_client_lock, false, "Audio",
 +                    "The audio client table has a lock of its own instead of the global critical region, so "
@@ -888,7 +934,7 @@ index 7a711a8..5e6f922 100644
  
  // As with normal Microsoft, there are like twelve different ways to access
  // the audio APIs. Early games use XMA*() methods almost exclusively to touch
-@@ -46,11 +56,29 @@ namespace {
+@@ -46,18 +58,39 @@ namespace {
  constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
  }  // namespace
  
@@ -918,7 +964,18 @@ index 7a711a8..5e6f922 100644
  
    queued_frames_ = std::min(
        static_cast<uint32_t>(kMaximumQueuedFrames),
-@@ -75,9 +103,11 @@ AudioSystem::~AudioSystem() {
+       std::max(static_cast<uint32_t>(REXCVAR_GET(audio_maxqframes)), static_cast<uint32_t>(4)));
+ 
++  // audio_adaptive_queue may raise the number of credits later (up to the deepest queue it allows).
++  const uint32_t semaphore_max =
++      REXCVAR_GET(audio_adaptive_queue) ? static_cast<uint32_t>(kMaximumQueuedFrames) : queued_frames_;
+   for (size_t i = 0; i < kMaximumClientCount; ++i) {
+-    client_semaphores_[i] = rex::thread::Semaphore::Create(0, queued_frames_);
++    client_semaphores_[i] = rex::thread::Semaphore::Create(0, semaphore_max);
+     assert_not_null(client_semaphores_[i]);
+     wait_handles_[i] = client_semaphores_[i].get();
+   }
+@@ -75,9 +108,11 @@ AudioSystem::~AudioSystem() {
    if (xma_decoder_) {
      xma_decoder_->Shutdown();
    }
@@ -930,7 +987,7 @@ index 7a711a8..5e6f922 100644
    X_STATUS result = xma_decoder_->Setup(kernel_state);
    if (result) {
      return result;
-@@ -92,6 +122,7 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
+@@ -92,11 +127,13 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
  
    worker_thread_->set_name("Audio Worker");
    worker_thread_->Create();
@@ -938,7 +995,13 @@ index 7a711a8..5e6f922 100644
  
    return X_STATUS_SUCCESS;
  }
-@@ -134,7 +165,7 @@ void AudioSystem::WorkerThreadMain() {
+ 
+ void AudioSystem::WorkerThreadMain() {
++  EnterAudioThreadMmcss("Audio Worker");
+   // Initialize driver and ringbuffer.
+   Initialize();
+ 
+@@ -134,7 +171,7 @@ void AudioSystem::WorkerThreadMain() {
      if (result.first == rex::thread::WaitResult::kSuccess) {
        auto index = result.second;
  
@@ -947,13 +1010,28 @@ index 7a711a8..5e6f922 100644
        uint32_t client_callback = clients_[index].callback;
        uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
        global_lock.unlock();
-@@ -146,8 +177,33 @@ void AudioSystem::WorkerThreadMain() {
+@@ -146,8 +183,48 @@ void AudioSystem::WorkerThreadMain() {
          }
          SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
          uint64_t args[] = {client_callback_arg};
 +        const bool stats = dump::StatsEnabled();
 +        const uint64_t pump_start_us = stats ? dump::NowUs() : 0;
 +        if (stats) {
++          // How long the device's request waited for this callback to start (the SDL callback stamps the time it
++          // freed a slot of the queue).
++          const uint64_t released_us = dump::C().last_release_us.load(std::memory_order_relaxed);
++          if (released_us && pump_start_us >= released_us) {
++            const uint64_t wake_us = pump_start_us - released_us;
++            dump::Counters& c = dump::C();
++            dump::Add(wake_us < 1000 ? c.wake_lt1
++                      : wake_us < 2000 ? c.wake_lt2
++                      : wake_us < 4000 ? c.wake_lt4
++                      : wake_us < 8000 ? c.wake_lt8
++                      : wake_us < 16000 ? c.wake_lt16
++                                        : c.wake_ge16,
++                      1);
++            dump::Max(c.wake_us_max, wake_us);
++          }
 +          // Time since this client's previous callback: the guest mixer is due every 5.33 ms.
 +          if (last_pump_us_[index]) {
 +            const uint64_t gap = pump_start_us - last_pump_us_[index];
@@ -981,7 +1059,7 @@ index 7a711a8..5e6f922 100644
          if (diag_pump_count < 10) {
            REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
          }
-@@ -214,6 +270,8 @@ void AudioSystem::Shutdown() {
+@@ -214,6 +291,8 @@ void AudioSystem::Shutdown() {
      worker_thread_.reset();
    }
  
@@ -990,7 +1068,7 @@ index 7a711a8..5e6f922 100644
    // Destroy all active client drivers (closes SDL audio devices, stopping
    // callback threads) before the semaphores they reference are destroyed.
    for (size_t i = 0; i < kMaximumClientCount; i++) {
-@@ -230,7 +288,7 @@ void AudioSystem::Shutdown() {
+@@ -230,7 +309,7 @@ void AudioSystem::Shutdown() {
  X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, size_t* out_index) {
    REXAPU_DEBUG("AudioSystem::RegisterClient: callback={:08X} callback_arg={:08X}", callback,
                 callback_arg);
@@ -999,7 +1077,7 @@ index 7a711a8..5e6f922 100644
  
    auto index = FindFreeClient();
    assert_true(index >= 0);
-@@ -252,6 +310,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+@@ -252,6 +331,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
    memory::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
  
    clients_[index] = {driver, callback, callback_arg, ptr, true};
@@ -1007,7 +1085,7 @@ index 7a711a8..5e6f922 100644
  
    if (out_index) {
      *out_index = index;
-@@ -270,7 +329,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+@@ -270,7 +350,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
      submit_count++;
    }
  
@@ -1016,7 +1094,7 @@ index 7a711a8..5e6f922 100644
    assert_true(index < kMaximumClientCount);
    assert_true(clients_[index].driver != NULL);
    (clients_[index].driver)->SubmitFrame(samples_ptr);
-@@ -279,7 +338,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+@@ -279,7 +359,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
  void AudioSystem::UnregisterClient(size_t index) {
    SCOPE_profile_cpu_f("apu");
  
@@ -1025,14 +1103,111 @@ index 7a711a8..5e6f922 100644
    assert_true(index < kMaximumClientCount);
    DestroyDriver(clients_[index].driver);
    memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
+diff --git a/src/audio/audio_thread.cpp b/src/audio/audio_thread.cpp
+new file mode 100644
+index 0000000..0657785
+--- /dev/null
++++ b/src/audio/audio_thread.cpp
+@@ -0,0 +1,54 @@
++/**
++ * @file        audio/audio_thread.cpp
++ * @brief       Host scheduling of the audio threads (fork addition)
++ *
++ * Added by the mcla-recomp fork (patches/rexglue-xma-decoder-fixes.patch).
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++
++#if defined(_WIN32)
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++#endif
++
++#include <rex/audio/audio_system.h>
++#include <rex/audio/flags.h>
++#include <rex/logging.h>
++
++namespace rex::audio {
++
++void EnterAudioThreadMmcss([[maybe_unused]] const char* thread_name) {
++#if defined(_WIN32)
++  if (REXCVAR_GET(audio_thread_priority) < 3) {
++    return;
++  }
++  // avrt.dll is loaded by hand so that nothing has to be linked for it.
++  using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
++  static const SetCharacteristics set_characteristics = []() -> SetCharacteristics {
++    HMODULE avrt = LoadLibraryW(L"avrt.dll");
++    return avrt ? reinterpret_cast<SetCharacteristics>(
++                      reinterpret_cast<void*>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW")))
++                : nullptr;
++  }();
++  if (!set_characteristics) {
++    REXAPU_WARN("audio_thread_priority 3: avrt.dll is not available, {} stays outside MMCSS", thread_name);
++    return;
++  }
++  DWORD task_index = 0;
++  HANDLE task = set_characteristics(L"Pro Audio", &task_index);
++  if (task) {
++    REXAPU_INFO("{} joined MMCSS (task \"Pro Audio\", index {})", thread_name, static_cast<uint32_t>(task_index));
++  } else {
++    REXAPU_WARN("{} could not join MMCSS (error {})", thread_name, static_cast<uint32_t>(GetLastError()));
++  }
++#endif
++}
++
++}  // namespace rex::audio
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
-index 20a2cd8..29538b6 100644
+index 20a2cd8..4e9018b 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
 +++ b/src/audio/sdl/sdl_audio_driver.cpp
-@@ -106,6 +106,11 @@ bool SDLAudioDriver::Initialize() {
+@@ -25,6 +25,26 @@
+ #include <SDL3/SDL.h>
+ 
+ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
++REXCVAR_DEFINE_BOOL(audio_adaptive_queue, false, "Audio",
++                    "When the output runs dry after the first seconds of the game's audio (the mixer was late), "
++                    "let the mixer run further ahead from then on: audio_adaptive_queue_step more frames of "
++                    "queue (5.33 ms each) per underrun, up to audio_adaptive_queue_max. A deeper queue absorbs "
++                    "a longer stall of the mixer thread without the silence (which stays in the stream as a "
++                    "delay of everything after it) at the price of that much more latency. Off = the queue "
++                    "stays audio_maxqframes deep. Restart")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(audio_adaptive_queue_step, 4, "Audio",
++                     "With audio_adaptive_queue: frames added to the queue's depth by each underrun")
++    .range(1, 32);
++REXCVAR_DEFINE_INT32(audio_adaptive_queue_max, 24, "Audio",
++                     "With audio_adaptive_queue: the deepest the queue gets, in frames (24 = 128 ms)")
++    .range(4, 64);
++
++namespace {
++// Guest frames that must have been played before a silent frame counts as an underrun in the middle of the
++// game's audio (about 1 s): before that the device is simply ahead of the game's mixer.
++constexpr uint64_t kSteadyFrames = 188;
++}  // namespace
+ 
+ namespace rex::audio::sdl {
+ 
+@@ -106,6 +126,21 @@ bool SDLAudioDriver::Initialize() {
      return false;
    }
  
++  // Same clamp as AudioSystem's queued_frames_.
++  queue_depth_ = static_cast<uint32_t>(std::clamp(REXCVAR_GET(audio_maxqframes), 4, 64));
++  adaptive_queue_ = REXCVAR_GET(audio_adaptive_queue);
++  queue_depth_max_ = std::clamp(static_cast<uint32_t>(REXCVAR_GET(audio_adaptive_queue_max)), queue_depth_, 64u);
++  queue_step_ = static_cast<uint32_t>(REXCVAR_GET(audio_adaptive_queue_step));
++  if (adaptive_queue_) {
++    REXAPU_INFO("audio_adaptive_queue: the queue starts {} frames deep and grows by {} per underrun up to {}",
++                queue_depth_, queue_step_, queue_depth_max_);
++  }
++
 +  if (dump::DumpEnabled() && !mix_dump_.is_open()) {
 +    // One driver per client; the game registers one. A second would overwrite the first's file.
 +    mix_dump_.Open(dump::Dir() + "mix.wav", 3, sdl_device_channels_, frame_frequency_, 32);
@@ -1041,7 +1216,7 @@ index 20a2cd8..29538b6 100644
    return true;
  }
  
-@@ -143,6 +148,7 @@ void SDLAudioDriver::Shutdown() {
+@@ -143,6 +178,7 @@ void SDLAudioDriver::Shutdown() {
      SDL_DestroyAudioStream(sdl_stream_);
      sdl_stream_ = nullptr;
    }
@@ -1049,7 +1224,7 @@ index 20a2cd8..29538b6 100644
    if (sdl_initialized_) {
      SDL_QuitSubSystem(SDL_INIT_AUDIO);
      sdl_initialized_ = false;
-@@ -178,15 +184,36 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -178,15 +214,61 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
    const StereoFold fold = GetStereoFold();
    const SurroundMix mix = GetSurroundMix();
    const float gain = GetOutputGain();
@@ -1079,6 +1254,31 @@ index 20a2cd8..29538b6 100644
 +                      driver->underrun_count_, static_cast<double>(dump::NowUs()) / 1e6);
 +        }
 +      }
++      if (driver->frames_played_ >= kSteadyFrames) {
++        // Silence in the middle of the game's audio. It stays in the stream: everything the mixer produces
++        // from here on plays that much later than the picture.
++        ++driver->silence_run_;
++        if (stats) {
++          dump::Add(dump::C().sdl_underruns_steady, 1);
++          dump::Max(dump::C().sdl_silence_max, driver->silence_run_);
++          if (driver->silence_run_ == 1) {
++            REXAPU_WARN("audio underrun in the middle of the game's audio at t={:.3f}s (after {} frames played)",
++                        static_cast<double>(dump::NowUs()) / 1e6, driver->frames_played_);
++          }
++        }
++        if (driver->adaptive_queue_ && driver->silence_run_ == 1 &&
++            driver->queue_depth_ < driver->queue_depth_max_) {
++          const uint32_t add = std::min(driver->queue_step_, driver->queue_depth_max_ - driver->queue_depth_);
++          if (driver->semaphore_->Release(static_cast<int32_t>(add), nullptr)) {
++            driver->queue_depth_ += add;
++            if (stats) {
++              dump::Add(dump::C().sdl_queue_grown, add);
++            }
++            REXAPU_WARN("audio_adaptive_queue: the queue is now {} frames deep ({:.0f} ms)", driver->queue_depth_,
++                        driver->queue_depth_ * 5.333);
++          }
++        }
++      }
        std::memset(data, 0, len);
 +      if (driver->mix_dump_.is_open()) {
 +        driver->mix_dump_.Write(data, len);
@@ -1086,7 +1286,7 @@ index 20a2cd8..29538b6 100644
        if (!SDL_PutAudioStreamData(stream, data, len)) {
          REXAPU_ERROR("SDL_PutAudioStreamData() failed while filling silence: {}", SDL_GetError());
          break;
-@@ -195,7 +222,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -195,7 +277,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
      } else {
        auto buffer = driver->frames_queued_.front();
        driver->frames_queued_.pop();
@@ -1097,10 +1297,12 @@ index 20a2cd8..29538b6 100644
          std::memset(data, 0, len);
        } else {
          switch (driver->sdl_device_channels_) {
-@@ -212,6 +241,15 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -212,6 +296,17 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
              break;
          }
        }
++      ++driver->frames_played_;
++      driver->silence_run_ = 0;
 +      if (stats) {
 +        dump::Add(dump::C().sdl_frames, 1);
 +      }
@@ -1113,8 +1315,18 @@ index 20a2cd8..29538b6 100644
        if (!SDL_PutAudioStreamData(stream, data, len)) {
          REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
          driver->frames_unused_.push(buffer);
+@@ -219,6 +314,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+       }
+       driver->frames_unused_.push(buffer);
+ 
++      if (stats) {
++        dump::C().last_release_us.store(dump::NowUs(), std::memory_order_relaxed);
++      }
+       auto ret = driver->semaphore_->Release(1, nullptr);
+       assert_true(ret);
+       additional_amount -= len;
 diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
-index 11b83be..a07f42f 100644
+index 11b83be..3824843 100644
 --- a/src/audio/xma_context.cpp
 +++ b/src/audio/xma_context.cpp
 @@ -10,11 +10,17 @@
@@ -1135,11 +1347,12 @@ index 11b83be..a07f42f 100644
  #include <rex/dbg.h>
  #include <rex/logging.h>
  #include <rex/memory/ring_buffer.h>
-@@ -36,10 +42,90 @@ extern "C" {
+@@ -36,10 +42,93 @@ extern "C" {
  // Credits for most of this code goes to:
  // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
  
-+// Fork changes (patches/rexglue-xma-decoder-fixes.patch). Both switches are off in the SDK's behaviour.
++// Fork changes (patches/rexglue-xma-decoder-fixes.patch). xma_canary_fixes is on by default (the SDK's decoder loses frames
++// without it, see patches/README.md); xma_race_fixes is off.
 +//
 +// xma_race_fixes: Work() against the game writing to the context it is decoding.
 +//  - The context is looked at again once the lock is held (the guest's lock/disable and release can
@@ -1162,9 +1375,11 @@ index 11b83be..a07f42f 100644
 +                    "XMA: Work() cannot overwrite what the game writes into a context meanwhile "
 +                    "(read offset kept, compare-and-swap merge, context re-checked under the lock) and "
 +                    "a kick decodes on the kicking thread only. Off = the SDK's behaviour");
-+REXCVAR_DEFINE_BOOL(xma_canary_fixes, false, "Audio",
++REXCVAR_DEFINE_BOOL(xma_canary_fixes, true, "Audio",
 +                    "XMA: the fixes Xenia Canary and Edge made to this decoder in 2026 (frames split across "
-+                    "packets, skip chains, unfinished frames at the end of the input, loop starts). "
++                    "packets, skip chains, unfinished frames at the end of the input, loop starts). Without them "
++                    "the decoder drops a whole 512-sample frame now and then in a long stream (the radio: each "
++                    "channel on its own, so left and right drift apart), which is what the SDK v0.10.0 does. "
 +                    "Off = the SDK's behaviour");
 +
  namespace rex::audio {
@@ -1226,7 +1441,7 @@ index 11b83be..a07f42f 100644
  const uint32_t XmaContext::kBitsPerPacketHeader;
  const uint32_t XmaContext::kOutputMaxSizeBytes;
  
-@@ -47,6 +133,7 @@ XmaContext::XmaContext()
+@@ -47,6 +136,7 @@ XmaContext::XmaContext()
      : work_completion_event_(rex::thread::Event::CreateAutoResetEvent(false)) {}
  
  XmaContext::~XmaContext() {
@@ -1234,7 +1449,7 @@ index 11b83be..a07f42f 100644
    if (av_context_) {
      avcodec_free_context(&av_context_);
    }
-@@ -97,12 +184,47 @@ bool XmaContext::Work() {
+@@ -97,12 +187,47 @@ bool XmaContext::Work() {
      return false;
    }
  
@@ -1282,7 +1497,7 @@ index 11b83be..a07f42f 100644
  
    if (!data.output_buffer_valid) {
      return true;
-@@ -133,10 +255,28 @@ bool XmaContext::Work() {
+@@ -133,10 +258,28 @@ bool XmaContext::Work() {
    }
  
    while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
@@ -1311,7 +1526,7 @@ index 11b83be..a07f42f 100644
        break;
      }
    }
-@@ -190,6 +330,7 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
+@@ -190,6 +333,7 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
  }
  
  void XmaContext::ResetDecoderState() {
@@ -1319,7 +1534,7 @@ index 11b83be..a07f42f 100644
    // A freed or re-initialized context is a new logical stream, so the previous
    // wave's MDCT overlap-add tail must not survive into frame 0 of the next one.
    // avcodec_flush_buffers() cannot drop it: ff_xmaframes_decoder declares no
-@@ -221,6 +362,11 @@ void XmaContext::Release() {
+@@ -221,6 +365,11 @@ void XmaContext::Release() {
    assert_true(is_allocated());
  
    set_is_allocated(false);
@@ -1331,7 +1546,7 @@ index 11b83be..a07f42f 100644
    ResetDecoderState();
    auto context_ptr = memory()->TranslateVirtual(guest_ptr());
    std::memset(context_ptr, 0, sizeof(XMA_CONTEXT_DATA));
-@@ -316,7 +462,19 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
+@@ -316,7 +465,19 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
      if (packet_frame_offset <= kMaxFrameSizeinBits) {
        return (next_packet_index * kBitsPerPacket) + packet_frame_offset;
      }
@@ -1352,7 +1567,7 @@ index 11b83be..a07f42f 100644
    }
  
    return kBitsPerPacketHeader;
-@@ -347,18 +505,42 @@ memory::RingBuffer XmaContext::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
+@@ -347,18 +508,42 @@ memory::RingBuffer XmaContext::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
  
  kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
    kPacketInfo packet_info = {};
@@ -1395,7 +1610,7 @@ index 11b83be..a07f42f 100644
        break;
      }
  
-@@ -367,10 +549,7 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
+@@ -367,10 +552,7 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
        break;
      }
  
@@ -1407,7 +1622,7 @@ index 11b83be..a07f42f 100644
  
      packet_info.frame_count_++;
  
-@@ -399,7 +578,12 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
+@@ -399,7 +581,12 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
  
  void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
                                      const XMA_CONTEXT_DATA& initial_data, uint8_t* context_ptr) {
@@ -1420,7 +1635,7 @@ index 11b83be..a07f42f 100644
  
    fresh.loop_count = data.loop_count;
    fresh.output_buffer_write_offset = data.output_buffer_write_offset;
-@@ -422,6 +606,82 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+@@ -422,6 +609,82 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
    fresh.Store(context_ptr);
  }
  
@@ -1503,7 +1718,7 @@ index 11b83be..a07f42f 100644
  void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
    if (!current_frame_remaining_subframes_) {
      return;
-@@ -459,6 +719,8 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
+@@ -459,6 +722,8 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
  
    output_rb->Write(raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
                     subframes_to_write * kOutputBytesPerBlock);
@@ -1512,7 +1727,7 @@ index 11b83be..a07f42f 100644
  
    const int8_t headroom = (current_frame_remaining_subframes_ - subframes_to_write == 0)
                                ? data->output_buffer_padding
-@@ -509,6 +771,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
+@@ -509,6 +774,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
      char errbuf[AV_ERROR_MAX_STRING_SIZE];
      av_strerror(ret, errbuf, sizeof(errbuf));
      REXAPU_ERROR("XmaContext {}: Error sending packet for decoding: {} ({})", id(), errbuf, ret);
@@ -1522,7 +1737,7 @@ index 11b83be..a07f42f 100644
      return false;
    }
    ret = avcodec_receive_frame(av_context, av_frame);
-@@ -520,6 +785,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
+@@ -520,6 +788,9 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
      char errbuf[AV_ERROR_MAX_STRING_SIZE];
      av_strerror(ret, errbuf, sizeof(errbuf));
      REXAPU_ERROR("XmaContext {}: Error during decoding: {} ({})", id(), errbuf, ret);
@@ -1532,7 +1747,7 @@ index 11b83be..a07f42f 100644
      return false;
    }
    return true;
-@@ -598,6 +866,14 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
+@@ -598,6 +869,14 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
    }
  
    kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
@@ -1547,7 +1762,7 @@ index 11b83be..a07f42f 100644
    const uint32_t packet_to_skip = skip_count + 1;
    const uint32_t next_packet_index = packet_index + packet_to_skip;
  
-@@ -666,6 +942,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
+@@ -666,6 +945,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
      carry_valid_ = false;
    }
    PreparePacket(packet_info.current_frame_size_, padding_start);
@@ -1557,7 +1772,7 @@ index 11b83be..a07f42f 100644
    const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
    if (decoded) {
      ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
-@@ -815,4 +1094,135 @@ void XmaContext::ConvertFrame(const uint8_t** samples, bool is_two_channel,
+@@ -815,4 +1097,135 @@ void XmaContext::ConvertFrame(const uint8_t** samples, bool is_two_channel,
  #endif
  }
  
@@ -1694,7 +1909,7 @@ index 11b83be..a07f42f 100644
 +
  }  // namespace rex::audio
 diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
-index a0a178d..078e512 100644
+index a0a178d..8c0ce73 100644
 --- a/src/audio/xma_decoder.cpp
 +++ b/src/audio/xma_decoder.cpp
 @@ -9,6 +9,9 @@
@@ -1707,7 +1922,7 @@ index a0a178d..078e512 100644
  #include <rex/audio/xma/context.h>
  #include <rex/audio/xma/decoder.h>
  #include <rex/cvar.h>
-@@ -133,11 +136,13 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
+@@ -133,11 +136,14 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
    worker_thread_->set_name("XMA Decoder");
  
    worker_thread_->Create();
@@ -1717,11 +1932,12 @@ index a0a178d..078e512 100644
  }
  
  void XmaDecoder::WorkerThreadMain() {
++  EnterAudioThreadMmcss("XMA Decoder");
 +  dump::MarkXmaWorkerThread();
    while (worker_running_) {
      // Okay, let's loop through XMA contexts to find ones we need to decode!
      bool did_work = false;
-@@ -291,7 +296,27 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+@@ -291,7 +297,27 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
          uint32_t context_id = base_context_id + i;
          auto& context = contexts_[context_id];
          context.Enable();
