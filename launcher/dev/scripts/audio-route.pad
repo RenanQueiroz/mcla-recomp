@@ -1,0 +1,24 @@
+# Audio checks (audio work): the start-up and the title screen (with whatever plays there), the map zoom-out, the
+# city with the radio, then a drive. Run it with --intro normal and real-time updates (no --fixed-dt: the sound
+# is real time, a timedemo would run the game's clock ahead of it). Segments (marks): title, map_zoom, free_roam,
+# drive, end. The marks are in game.log with their time, which the analysis uses to say where in the run a gap or
+# a click was (launcher/dev/audio/audio_analyze.py).
+wait 8s
+mark title
+# Stay on the title screen for the attract movie and the music before leaving it.
+wait 37s
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+# The radio plays in the car at the spawn point.
+wait 25s
+mark drive
+# Out of the car park and along the street, as drive-spawn.pad, then straight on.
+trigger rt 1 50f
+trigger rt 0.6
+stick lx 1 40f
+trigger rt 1
+wait 70s
+release all
+mark end
