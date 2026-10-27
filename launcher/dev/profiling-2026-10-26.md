@@ -73,8 +73,48 @@ A build of the SDK with counters in the timer thread (dumped every 5 s), one 65 
 event for a newly queued timer, none fell back to the condition variable, the timer was made; 1,000 callbacks a second; a wait
 was 0.33 ms late on average (0.69 ms asked; the worst, 33 ms, while the game was loading). The `rex::thread::TimerQueue` thread
 used 0.04 ms of CPU per swap in free roam (6.87 without), the whole process 17.7 ms per swap (23.5), and the frame median was
-6.85 ms in both. The alternating comparison (3 runs a side, 16 and 8 logical processors) is `ab	qab-report.txt` of the scratch
-tree's notes; its numbers are added here when it has been run.
+6.85 ms in both.
+
+The alternating comparison, D3D12, native, uncapped, the same route (free roam, standing at the spawn, driving), 1 warm-up and 3
+runs a side in turn, the game held to 16 or to 8 logical processors by a job object (the SDK resets the process affinity at start;
+this keeps the 96 MB L3, the clocks and the IPC of the 9800X3D, so it imitates the number of threads only). Frame time is the mean of
+the 3 runs' medians, per swap is the thread's CPU:
+
+| | Timer thread | Process | Frame median, base to fix | p99, base to fix |
+|---|---|---|---|---|
+| 16, free roam | 6.88 to 0.06 ms | 23.7 to 16.9 ms (-29%) | 6.874 to 6.883 ms (+0.1%) | 7.91 to 7.89 |
+| 16, standing | 6.84 to 0.03 | 23.6 to 16.6 (-30%) | 6.829 to 6.885 (+0.8%) | 7.91 to 7.96 |
+| 16, driving | 6.74 to 0.04 | 25.3 to 19.6 (-23%) | 6.854 to 6.965 (+1.6%; 3 runs each, not overlapping) | 7.93 to 8.07 |
+| 8, free roam | 6.81 to 0.04 | 24.3 to 17.1 (-30%) | 6.797 to 6.868 (+1.0%) | 7.98 to 8.04 |
+| 8, standing | 6.82 to 0.03 | 24.4 to 17.3 (-29%) | 6.811 to 6.882 (+1.0%) | 8.03 to 8.02 |
+| 8, driving | 6.69 to 0.03 | 26.3 to 20.4 (-22%) | 6.834 to 7.001 (+2.4%) | 8.22 to 8.29 |
+
+The saving in CPU is real and large (a whole core), and the frame is not shorter: where most is going on (driving, the job threads
+busy) it is 1.6 to 2.4% longer, with the main thread's CPU +3% and +6% and the job threads' +23% and +7% there. The wait is 0.33 ms
+late on average, so the guest's tick count is up to 1.3 ms old instead of 1 ms; `timer_queue_hr_spin_us` keeps the thread awake
+for the last part of the wait to find out whether that lateness is the cause.
+
+## Upper bounds for two codegen costs (2026-10-27)
+
+Timing-only builds, not exact: `nocsr` makes the SSE flush-mode switch (`ldmxcsr`) do nothing, `nolock` makes the global lock around the
+guest's atomics do nothing. D3D12, native, uncapped, 16 logical processors, 3 runs a side; CPU of the render guest thread per swap
+(free roam / standing / driving): base 3.71 / 3.84 / 3.97 ms; `nocsr` 3.49 / 3.55 / 3.75 (-6 / -7 / -5%); `nolock` 3.58 / 3.57 / 3.65
+(-3 / -7 / -8%); the process 23.8 / 23.5 / 26.1 ms, `nocsr` -4 / -2 / -3%, `nolock` -3 / -2 / -6%. The frame time did not change in
+either (-0.5 to +0.1%). So the lock is worth removing (`rexglue-guest-atomics-lock-free.patch`). For `ldmxcsr`: the code generator
+already tracks the flush mode through a function (it writes `disableFlushModeUnconditional` or `enableFlushModeUnconditional` only
+where it knows the mode is the other one, and the checked `disableFlushMode` / `enableFlushMode`, a compare against the register's
+shadow, where it does not), so every `ldmxcsr` that runs is a change of mode that the next instruction needs: the scalar floating-point
+unit and the vector unit are one MXCSR here and have different denormal rules on the console. Removing one is not exact unless the
+instruction between does not care, and which do cannot be told statically (a denormal operand or result is what shows). What is left
+is not removing switches but not needing them (running a scalar operation in the vector mode when neither operand nor result is a
+denormal, with a check for it): a change to every floating-point builder, for at most the 5 to 7% of the render thread measured above.
+Not done.
+
+## `execute_unclipped_draw_vs_on_cpu` on and off (2026-10-27)
+
+D3D12, native, uncapped, 3 runs a side, 16 and 8 logical processors (the fork's PC default is on): the GPU command thread's CPU per
+swap with it off, against on: -6 / +2 / -7% at 16 (free roam / standing / driving) and -9 / -1 / -3% at 8, the frame time -0.3 to +0.6%
+(the spread of the runs is +-0.3%): nothing to choose between them at native resolution. The setting stays as it is.
 
 ## The GPU command thread, with names (P1 windows, DLLs rebuilt with line tables and the same code)
 

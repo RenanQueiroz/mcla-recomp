@@ -249,6 +249,9 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Shared-memory request fast path | `--shared_memory_request_fast_path=false` | With hot pages on, `--shared_memory_request_fast_path_with_hot_pages=false` turns off only that part. |
 | Batched GPU counters | `--gpu_batch_perf_counters=false` | |
 | Timer queue sleeps | `--timer_queue_blocking_wait=false` | `--timer_queue_hr_wait=false` turns off only the high-resolution timer for timers due within 20 ms (Windows). |
+| Guest atomics without the global lock | `--guest_atomics_lock_free=false` | Takes effect at the next start. |
+| Timer queue spin tail | `--timer_queue_hr_spin_us=0` (the default) | Microseconds before a timer is due at which the timer thread stops sleeping and spins (Windows). |
+| Main thread waits for a ring slot on a timer | `--mcla_poll_wait=true` turns it on | Off by default; `--mcla_poll_spin_us` and `--mcla_poll_tail_us` tune it. |
 | D3D12 threaded submission | `--d3d12_threaded_submission=false` | `--d3d12_threaded_submission_split_draws` (default 1000, 0 for never) splits long submissions. |
 | D3D12 placed texture heaps | `--d3d12_texture_heaps=false` | Textures created from then on are separate allocations again. |
 | Vulkan uploads before the render pass | `--vulkan_hoist_shared_memory_uploads=false` | |
