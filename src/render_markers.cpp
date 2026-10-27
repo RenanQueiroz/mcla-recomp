@@ -54,6 +54,8 @@ REXCVAR_DEFINE_BOOL(mcla_render_markers, true, "MCLA",
 REXCVAR_DEFINE_BOOL(mcla_render_markers_all_phases, false, "MCLA",
                     "Development: also mark the start of every render phase");
 
+uint32_t MclaRenderPhasesToSkip();  // src/perf_options.cpp
+
 namespace {
 
 // The SDK's GuestMarkerKind (include/rex/graphics/command_processor.h).
@@ -156,8 +158,32 @@ extern "C" REX_FUNC(sub_822C0980) {
 
 // The render phase loop; what is drawn after it in the frame (Bink movies) is
 // over the finished picture.
+//
+// It draws the phases that are set in the renderer's mask of enabled phases
+// (renderer + 448: the game's own "noshadows" clears some, and so does
+// src/perf_options.cpp for shadows off), read after the loop starts, so
+// clearing bits here leaves those phases out of this frame: their draws, and the
+// resolves into the textures that later phases sample, which keep what they had.
+// The bits are put back afterwards.
 extern "C" REX_FUNC(sub_822E6408) {
+  constexpr uint32_t kRendererPhaseEnableMask = 448;
+  const uint32_t renderer = ctx.r3.u32;
+  uint32_t left_out = 0;
+  if (renderer >= 0x10000 && g_render_thread.load() == ThisThread()) {
+    const uint32_t skip = MclaRenderPhasesToSkip();
+    if (skip) {
+      const uint32_t mask = LoadBe32(base, renderer + kRendererPhaseEnableMask);
+      left_out = mask & skip;
+      if (left_out) {
+        StoreBe32(base, renderer + kRendererPhaseEnableMask, mask & ~left_out);
+      }
+    }
+  }
   __imp__sub_822E6408(ctx, base);
+  if (left_out) {
+    StoreBe32(base, renderer + kRendererPhaseEnableMask,
+              LoadBe32(base, renderer + kRendererPhaseEnableMask) | left_out);
+  }
   EmitMarker(ctx, base, kRenderEnd, g_frame);
 }
 

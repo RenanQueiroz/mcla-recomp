@@ -64,6 +64,9 @@ int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
 bool MclaFsrAvailable();  // src/perf_options.cpp
 bool MclaFsrNextStart();  // src/perf_options.cpp
 bool MclaUpscalingAvailable();  // src/perf_options.cpp
+#if REX_PLATFORM_WIN32
+const char* MclaRecommendedBackend();  // src/mcla_app.cpp
+#endif
 
 namespace {
 
@@ -677,6 +680,8 @@ constexpr const char* kFsrNextStartLabel = "FSR 3.1 (NEXT START)";
 constexpr int kAntiAliasingCount = int(sizeof(kAntiAliasingValues) / sizeof(kAntiAliasingValues[0]));
 constexpr double kSharpness[] = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
 constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
+// How often an off-screen pass is drawn (src/perf_options.cpp): 0 is every frame.
+constexpr double kPassIntervals[] = {0.0, 2.0, 4.0, 8.0};
 constexpr double kTrafficDistances[] = {250.0, 325.0, 400.0};
 
 const ItemDef kPerformanceItems[] = {
@@ -698,6 +703,12 @@ const ItemDef kPerformanceItems[] = {
     {"PM_MxFastCarShadows", ItemKind::kToggle, "mcla_fast_car_shadows", "SIMPLE CAR SHADOWS"},
     {"PM_MxImpostors", ItemKind::kToggle, "mcla_foliage_impostors", "DISTANT TREES"},
     {"PM_MxFsBlur", ItemKind::kToggle, "mcla_fullscreen_blur", "FULLSCREEN BLUR"},
+    {"PM_MxFarShadows", ItemKind::kNumberChoice, "mcla_far_shadow_interval", "FAR SHADOW UPDATES",
+     nullptr, nullptr, kPassIntervals, 4, "EVERY %.0f FRAMES", "EVERY FRAME"},
+    {"PM_MxEnvMap", ItemKind::kNumberChoice, "mcla_env_map_interval", "ENVIRONMENT MAP UPDATES",
+     nullptr, nullptr, kPassIntervals, 4, "EVERY %.0f FRAMES", "EVERY FRAME"},
+    {"PM_MxReflection", ItemKind::kNumberChoice, "mcla_reflection_interval", "REFLECTION UPDATES",
+     nullptr, nullptr, kPassIntervals, 4, "EVERY %.0f FRAMES", "EVERY FRAME"},
     {"PM_MxAntiAliasing", ItemKind::kStringChoice, "mcla_anti_aliasing", "ANTI ALIASING",
      kAntiAliasingValues, kAntiAliasingLabels, nullptr, kAntiAliasingCount},
     {"PM_MxFsrSharpness", ItemKind::kNumberChoice, "temporal_aa_sharpness", "FSR SHARPNESS",
@@ -731,7 +742,8 @@ const MenuDef kMenus[] = {
      int(sizeof(kControlItems) / sizeof(kControlItems[0]))},
 };
 constexpr int kMenuCount = int(sizeof(kMenus) / sizeof(kMenus[0]));
-constexpr int kMaxRows = 16;
+// (The list scrolls: its row count is the submenu's own, the arrays below only have to be as long.)
+constexpr int kMaxRows = 24;
 
 // An option the game reads only when it starts (kRequiresRestart).
 bool RestartOnly(const char* option) {
@@ -934,6 +946,16 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
         const std::string why = rex::ui::Presenter::GetFrameGenerationStatus().why;
         return why.empty() ? "OFF (UNAVAILABLE)" : "OFF (" + why + ")";
       }
+#if REX_PLATFORM_WIN32
+      if (!std::strcmp(item.option, "mcla_gpu_backend")) {
+        // The API recommended for this GPU (src/mcla_app.cpp), so that the default isn't ignored.
+        const char* recommended = MclaRecommendedBackend();
+        if (recommended && !std::strcmp(item.values[index], recommended)) {
+          return std::string(item.value_labels[index]) + " (RECOMMENDED)";
+        }
+        return item.value_labels[index];
+      }
+#endif
       if (IsLowLatencyItem(item)) {
         const rex::ui::LowLatency::Status status = rex::ui::LowLatency::GetStatus();
         if (status.state != rex::ui::LowLatency::State::kAvailable) {

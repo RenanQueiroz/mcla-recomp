@@ -4,6 +4,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
@@ -17,7 +19,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <d3d12.h>
+#include <dxgi.h>
 #include <shellapi.h>
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
 #endif
 
 #include <fmt/format.h>
@@ -51,6 +57,7 @@ void MclaSaveMenuSettings();  // src/settings_menu.cpp
 bool MclaPrepareShadersIsRequested();  // src/shader_prepare.cpp
 void MclaShaderStorageAfterPreload(rex::Runtime* runtime);
 void MclaMigrateAntiAliasing();  // src/perf_options.cpp
+void MclaApplyPreset();  // src/perf_options.cpp
 
 #ifdef _WIN32
 // The pause menu's RESTART GAME (src/settings_menu.cpp) starts the game again
@@ -277,6 +284,231 @@ bool MclaApp::ConstructRuntime(const rex::PathConfig& paths) {
   return rex::ReXApp::ConstructRuntime(paths);
 }
 
+#ifdef _WIN32
+// --- Automatic graphics API (mcla_gpu_backend = any) -----------------------------------
+//
+// Vulkan on AMD's integrated GPUs (the ones that share the CPU's memory) and on Intel's;
+// Direct3D 12 on AMD's discrete cards, on NVIDIA and when nothing is known. Which GPU: the
+// one Direct3D 12 would take (the SDK's d3d12_adapter: the adapter of that number, else
+// the first one that isn't software), whatever API is then used for it. A software adapter
+// (Windows' WARP: d3d12_adapter = -2, or its number) is Direct3D 12's, its vendor being
+// Microsoft's, neither AMD's nor Intel's: Vulkan has no device for it, so the recommendation
+// is Direct3D 12; a number that names no adapter gets none (the launcher, ShaderStamp.cs,
+// answers the same for all of these).
+//  - AMD integrated, measured on a Ryzen 7 9800X3D's Radeon: Vulkan 6 to 10% faster at the
+//    game's own resolution, GPU time per frame 6 to 9% less (launcher/dev/gpu-weak-2026-10-27.md).
+//    Integrated is Direct3D 12's own answer, D3D12_FEATURE_DATA_ARCHITECTURE.UMA, which
+//    holds for an APU however much memory its BIOS sets aside for it (a size would not).
+//  - AMD discrete: upstream issue #7 (RX 6600 XT, i5-10400) has Direct3D 12 20 to 25% faster,
+//    Vulkan's GPU command thread costing more CPU. Not tried here.
+//  - Intel: the SDK takes a slower path of rasterizer-ordered views for render targets on
+//    Direct3D 12 and Vulkan uses ordinary framebuffer ones. Not measured: no Intel GPU.
+//  - NVIDIA: Vulkan is no faster in races (the RTX 5080).
+// The launcher's Graphics API setting repeats the rule (launcher/src/GpuApi.cs) so that it
+// can mark the API recommended for the player's GPU; this and that must agree. Vulkan
+// needs vulkan-1.dll and, for Automatic, a Vulkan device that is the same GPU (matched by
+// LUID, else by vendor and device id): the SDK takes Vulkan's first device otherwise.
+// Choosing the API (launcher, pause menu, --mcla_gpu_backend) skips the decision; only the
+// recommendation, for the pause menu, is still worked out.
+namespace {
+
+struct AutomaticBackend {
+  bool decided = false;
+  bool vulkan = false;        // what Automatic does
+  int vulkan_device = -1;     // that GPU's index among Vulkan's devices (-1: unknown)
+  const char* recommended = nullptr;  // "vulkan" or "d3d12" for the GPU, nullptr if unknown
+};
+AutomaticBackend g_automatic;
+
+constexpr UINT kVendorAmd = 0x1002;
+constexpr UINT kVendorIntel = 0x8086;
+
+// Direct3D 12's answer for an adapter: does the GPU share the CPU's memory (an APU)?
+bool AdapterIsUma(IDXGIAdapter1* adapter) {
+  HMODULE module = LoadLibraryW(L"d3d12.dll");  // (stays loaded: the SDK loads it again)
+  if (!module) {
+    return false;
+  }
+  const auto create_device =
+      reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(module, "D3D12CreateDevice"));
+  if (!create_device) {
+    return false;
+  }
+  ID3D12Device* device = nullptr;
+  if (FAILED(create_device(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))) || !device) {
+    return false;
+  }
+  D3D12_FEATURE_DATA_ARCHITECTURE architecture{};
+  const bool uma =
+      SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &architecture,
+                                            sizeof(architecture))) &&
+      architecture.UMA;
+  device->Release();
+  return uma;
+}
+
+// The index among Vulkan's physical devices of the GPU with this LUID (else vendor and
+// device id); -1 if none. -2: Vulkan can't be used (no vulkan-1.dll or no instance).
+int FindVulkanDevice(UINT vendor, UINT device_id, const LUID& luid) {
+  HMODULE module = LoadLibraryW(L"vulkan-1.dll");  // (stays loaded: the SDK loads it again)
+  if (!module) {
+    return -2;
+  }
+  const auto get_instance_proc =
+      reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(module, "vkGetInstanceProcAddr"));
+  if (!get_instance_proc) {
+    return -2;
+  }
+  const auto create_instance =
+      reinterpret_cast<PFN_vkCreateInstance>(get_instance_proc(nullptr, "vkCreateInstance"));
+  if (!create_instance) {
+    return -2;
+  }
+  VkApplicationInfo application{};
+  application.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+  application.pApplicationName = "mcla";
+  application.apiVersion = VK_API_VERSION_1_1;
+  VkInstanceCreateInfo instance_info{};
+  instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+  instance_info.pApplicationInfo = &application;
+  VkInstance instance = VK_NULL_HANDLE;
+  if (create_instance(&instance_info, nullptr, &instance) != VK_SUCCESS || !instance) {
+    return -2;
+  }
+  const auto destroy_instance = reinterpret_cast<PFN_vkDestroyInstance>(
+      get_instance_proc(instance, "vkDestroyInstance"));
+  const auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+      get_instance_proc(instance, "vkEnumeratePhysicalDevices"));
+  const auto get_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+      get_instance_proc(instance, "vkGetPhysicalDeviceProperties"));
+  const auto get_properties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+      get_instance_proc(instance, "vkGetPhysicalDeviceProperties2"));
+  int found = -1;
+  int by_ids = -1;
+  uint32_t count = 0;
+  if (enumerate && get_properties && enumerate(instance, &count, nullptr) == VK_SUCCESS &&
+      count) {
+    std::vector<VkPhysicalDevice> devices(count);
+    if (enumerate(instance, &count, devices.data()) >= VK_SUCCESS) {
+      for (uint32_t i = 0; i < count && found < 0; ++i) {
+        VkPhysicalDeviceProperties properties{};
+        get_properties(devices[i], &properties);
+        if (get_properties2) {
+          VkPhysicalDeviceIDProperties ids{};
+          ids.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+          VkPhysicalDeviceProperties2 properties2{};
+          properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+          properties2.pNext = &ids;
+          get_properties2(devices[i], &properties2);
+          if (ids.deviceLUIDValid && std::memcmp(ids.deviceLUID, &luid, sizeof(luid)) == 0) {
+            found = int(i);
+          }
+        }
+        if (by_ids < 0 && properties.vendorID == vendor && properties.deviceID == device_id) {
+          by_ids = int(i);
+        }
+      }
+    }
+  }
+  if (destroy_instance) {
+    destroy_instance(instance, nullptr);
+  }
+  return found >= 0 ? found : by_ids;
+}
+
+}  // namespace
+
+// Works out the rule above once: what Automatic does, which Vulkan device that is, and
+// the API to recommend for the GPU. `automatic` is whether the player left the API on
+// Automatic (only then is Vulkan's device looked for and the decision logged).
+static void DecideAutomaticBackend(bool automatic) {
+  if (g_automatic.decided) {
+    return;
+  }
+  g_automatic.decided = true;
+  const int adapter_option = std::atoi(rex::cvar::GetFlagByName("d3d12_adapter").c_str());
+  if (adapter_option == -2) {  // WARP
+    g_automatic.recommended = "d3d12";
+    return;
+  }
+  IDXGIFactory1* factory = nullptr;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
+    return;
+  }
+  // The adapter Direct3D 12 would take. Only an AMD one is asked for its architecture (an
+  // Intel one is Vulkan's whatever it is, anything else Direct3D 12's).
+  DXGI_ADAPTER_DESC1 chosen{};
+  bool have_chosen = false;
+  bool uma = false;
+  IDXGIAdapter1* adapter = nullptr;
+  for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+    DXGI_ADAPTER_DESC1 desc{};
+    const bool described = SUCCEEDED(adapter->GetDesc1(&desc));
+    const bool candidate =
+        described && (adapter_option >= 0 ? int(i) == adapter_option
+                                          : !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE));
+    if (candidate && desc.VendorId == kVendorAmd) {
+      uma = AdapterIsUma(adapter);
+    }
+    adapter->Release();
+    adapter = nullptr;
+    if (candidate) {
+      chosen = desc;
+      have_chosen = true;
+      break;
+    }
+  }
+  factory->Release();
+  if (!have_chosen) {
+    return;
+  }
+
+  const bool vulkan_gpu =
+      chosen.VendorId == kVendorIntel || (chosen.VendorId == kVendorAmd && uma);
+  char name[128] = {};
+  WideCharToMultiByte(CP_UTF8, 0, chosen.Description, -1, name, int(sizeof(name)) - 1, nullptr,
+                      nullptr);
+  const char* kind = chosen.VendorId == kVendorAmd
+                         ? (uma ? "AMD integrated graphics" : "AMD discrete graphics")
+                     : chosen.VendorId == kVendorIntel ? "Intel graphics"
+                     : chosen.VendorId == 0x10DE       ? "NVIDIA graphics"
+                                                       : "graphics";
+  if (!vulkan_gpu) {
+    g_automatic.recommended = "d3d12";
+    if (automatic) {
+      REXLOG_INFO("graphics API: Direct3D 12 (Automatic: {} '{}')", kind, name);
+    }
+    return;
+  }
+  // Vulkan, if it can be had: a driver, and a Vulkan device that is this GPU.
+  const int device = automatic ? FindVulkanDevice(chosen.VendorId, chosen.DeviceId,
+                                                  chosen.AdapterLuid)
+                               : (LoadLibraryW(L"vulkan-1.dll") ? 0 : -2);
+  if (device < 0) {
+    g_automatic.recommended = "d3d12";
+    if (automatic) {
+      REXLOG_INFO(
+          "graphics API: Direct3D 12 (Automatic: {} '{}', but {})", kind, name,
+          device == -2 ? "Vulkan is not available" : "Vulkan lists no device for it");
+    }
+    return;
+  }
+  g_automatic.recommended = "vulkan";
+  if (automatic) {
+    g_automatic.vulkan = true;
+    g_automatic.vulkan_device = device;
+    REXLOG_INFO("graphics API: Vulkan (Automatic: {} '{}', Vulkan device {})", kind, name,
+                device);
+  }
+}
+
+// The API recommended for the player's GPU, "vulkan" or "d3d12" (nullptr if the GPU isn't
+// known); the pause menu marks it.
+const char* MclaRecommendedBackend() {
+  return g_automatic.recommended;
+}
+#endif
+
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   config.audio_factory = &CreateMclaAudioSystem;
   // Every controller is player one. The SDK's default gives each pad its own
@@ -306,6 +538,12 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // back to the plugin's default, as the SDK would do next; if that fails too,
   // the SDK tries once more and reports it.
   std::string backend = REXCVAR_GET(mcla_gpu_backend);
+#ifdef _WIN32
+  DecideAutomaticBackend(backend == "any");
+  if (backend == "any" && g_automatic.vulkan) {
+    backend = "vulkan";
+  }
+#endif
   if (backend != "any") {
     config.graphics = rex::system::LoadGpuPlugin("xenos", backend);
     if (!config.graphics) {
@@ -318,6 +556,16 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   }
   ApplyPcDefaults();
   MclaMigrateAntiAliasing();
+  MclaApplyPreset();
+#ifdef _WIN32
+  // Automatic took Vulkan for the GPU Direct3D 12 would use: Vulkan's own choice (its first
+  // device) must be that GPU too. A vulkan_device given by hand wins.
+  if (g_automatic.vulkan && g_automatic.vulkan_device >= 0 &&
+      rex::cvar::GetFlagSource("vulkan_device") == rex::cvar::Source::kDefault &&
+      !rex::cvar::SetDefaultValue("vulkan_device", std::to_string(g_automatic.vulkan_device))) {
+    REXLOG_WARN("graphics API: vulkan_device = {} not taken", g_automatic.vulkan_device);
+  }
+#endif
 
   // Development: scripted controller input (src/dev_pad.cpp), off by default.
   MclaDevPadConfigure(config);

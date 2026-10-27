@@ -546,12 +546,42 @@ instead of 93 to 94% (`dev\single-tile-edram-2026-10-16.md`). Off, the scene is
 drawn as on the console. With `--edram_tiles=2048` there is no room for one tile:
 the pause menu's row says UNAVAILABLE and nothing changes either way.
 
-*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which
-tries Direct3D 12 first, `d3d12` or `vulkan`). Every setting and SDK patch here
-works on both. On this machine, in scripted runs, Vulkan matches D3D12 at native
-resolution; at 3x the two are within a few percent in the city (Vulkan slightly
-ahead in free roam), and D3D12 is 10 to 15% faster in the race benchmark
-(`dev\direct-resolve-2026-10-15.md`). Since D3D12's textures are placed in
+*Graphics preset* (`mcla_preset`: `custom`, the default, or `low`) is a starting point for a weak
+graphics card: Low-end makes anti-aliasing and the full-screen blur default to off, the far
+sun shadows (`mcla_far_shadow_interval`) to being drawn every 2nd frame and the
+environment map of the cars (`mcla_env_map_interval`) every 4th, the picture of the last
+time kept in between; an option set by hand (the Anti-aliasing setting here, the pause
+menu's PERFORMANCE rows, `mcla.toml`) keeps its value. On the integrated Radeon of the
+Ryzen 9800X3D (Direct3D 12, native resolution) the passes and the blur are worth 1.6 ms
+of 36.8 and anti-aliasing off another 2.5 to 2.9 ms (29% at 2x), 11 to 12% together
+(free roam 36.8 to 32.3 ms, driving 35.8 to 31.7 ms; `dev\gpu-weak-2026-10-27.md` has
+each option's saving and what was left out: the
+reflection view every 2nd frame saves 0.3 ms, too little for a reflection that lags).
+
+*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is
+Vulkan on AMD's integrated graphics and on Intel graphics and Direct3D 12 on AMD graphics
+cards and NVIDIA, `d3d12` or `vulkan`). The setting marks the one Automatic picks for
+your GPU "(recommended)", as does the pause menu's row, so that the default is not ignored.
+Every setting and SDK patch here works on both. On the RTX 5080 of this machine, in
+scripted runs, Vulkan matches D3D12 at native resolution; at 3x the two are within a
+few percent in the city (Vulkan slightly ahead in free roam), and D3D12 is 10 to 15%
+faster in the race benchmark (`dev\direct-resolve-2026-10-15.md`), so NVIDIA stays on
+D3D12. On the Ryzen 9800X3D's integrated Radeon Vulkan is 6 to 10% faster at native
+resolution (35.7 against 39.5 ms a frame in free roam, three runs each; 2.6% at 2x) and
+the GPU time per frame is 6 to 9% less, so Automatic takes it there. An integrated AMD GPU
+is one that Direct3D 12 says shares the CPU's memory (the architecture's UMA), whatever size
+of memory the BIOS sets aside for it; a Radeon graphics card is not one: a user's RX 6600 XT
+with an i5-10400 was 20 to 25% faster on Direct3D 12 (fork issue #7: Vulkan's GPU command
+thread costs more CPU), so cards stay on Direct3D 12 (not tried here: no AMD card was
+available). On Intel graphics Direct3D 12 uses the SDK's slower rasterizer-ordered-view
+path for the render targets, which Vulkan does not need, so Automatic takes Vulkan there
+too (not measured: there was no Intel GPU to try it on). The GPU is the one Direct3D 12
+would use (`d3d12_adapter`, else the first physical adapter), and the choice needs
+`vulkan-1.dll` and a Vulkan device that is that GPU (the game points `vulkan_device` at it);
+picking an API here, in the pause menu or with `--mcla_gpu_backend` skips all of it
+(`dev\gpu-weak-2026-10-27.md`). A shader cache prepared before this change was made for
+Direct3D 12: the launcher sees that Automatic now means Vulkan on AMD's integrated and
+Intel graphics and prepares the shaders again before the next Play. Since D3D12's textures are placed in
 shared heaps, both are about as smooth in the map zoom-out after the title
 (`dev\d3d12-zoomout-2026-10-15.md`).
 
@@ -862,6 +892,25 @@ during a build:
   ownership range or resolve area that crosses tile 2,048 (with the console's
   EDRAM, the ranges that wrap around), with a count every 5,000. Goes on top of
   `rexglue-edram-size.patch`.
+- `gt-build.ps1` and `gt-phases.py` (2026-10-26): the GPU timestamp layer as one
+  reusable tool. The five `*timestamps*.sdk.patch` and `frame-log.sdk.patch`
+  files were rebased onto the SDK of v0.1.2 (`git apply` takes them in this
+  order, without fuzz: gpu-timestamps, gpu-timestamps-vulkan,
+  texload-split-timestamps, resolve-split-timestamps, frame-log).
+  `gt-build.ps1` applies them to `third_party\rexglue-sdk` (recorded in
+  `.gt-layer`; `-Reverse` takes them out again), rebuilds only the
+  `rexgpu-xenos` target and copies the plugin to `out\gt`, to put next to a
+  normal `mcla.exe` and DLLs of the same build. `gt-phases.py <dir>` reads
+  the timed frames (`<label>_<n>_gt.csv` from `set tmp_frame_log <label>` in
+  a pad, or `gt_<n>.csv` from `MCLA_GT_EVERY`) and prints the GPU time by
+  render phase (the game's phase markers: pre-passes, scene, post, tone map,
+  HUD), by category (draws, EDRAM transfers, resolves, texture loads,
+  uploads, and the split steps) and, with `--draws` and a text-log frame next
+  to them, by shader and draw size. Run frames with
+  `--mcla_render_markers_all_phases=true`, `--tmp_frame_log_dir=<folder>`,
+  `--tmp_frame_log_quiet=true` (timestamps only) and, on D3D12 at 1x and
+  2x, `--d3d12_threaded_submission_split_draws=0`; phases and per-draw
+  labels exist on D3D12 only, categories and passes on both APIs.
 
 ## Scripted controller input (unattended runs)
 

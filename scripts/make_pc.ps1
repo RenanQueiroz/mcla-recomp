@@ -434,6 +434,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-threaded-submission-d3d12-idle-wait.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_threaded_submission_idle_wait" }
     @{ Patch = "rexglue-fsr-upscaling.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaResolveStretch" }
     @{ Patch = "rexglue-guest-atomics-lock-free.patch"; File = "src\core\mutex.cpp"; Adds = "guest_atomics_lock_free" }
+    @{ Patch = "rexglue-resolve-direct-batched-loads.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "resolve_direct_batched_loads" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }

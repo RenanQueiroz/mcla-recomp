@@ -195,7 +195,9 @@ static class GameSettings
              + "the fastest and the most jagged. Pick MSAA for the console's look, FSR if shimmer bothers you "
              + "more than a little softness, and Off only if your graphics card is struggling. All three "
              + "switch during play in the pause menu; FSR takes a moment to start the first time.",
-        DefaultFrom = file => file.TryGetValue("mcla_msaa", out var raw) && SettingValues.Same(SettingValues.Parse(raw), false)
+        DefaultFrom = file =>
+            (file.TryGetValue("mcla_msaa", out var raw) && SettingValues.Same(SettingValues.Parse(raw), false))
+            || (file.TryGetValue("mcla_preset", out var preset) && SettingValues.Same(SettingValues.Parse(preset), "low"))
             ? "off" : null,
         // FSR only where its runtime for the graphics API in use was built
         // (the Vulkan one needs the Vulkan SDK at build time); otherwise the
@@ -228,6 +230,20 @@ static class GameSettings
         var dll = SettingValues.Same(api, "vulkan") ? "amd_fidelityfx_vk.dll" : "amd_fidelityfx_dx12.dll";
         return File.Exists(Path.Combine(Paths.BuildDir, dll));
     }
+    // mcla_preset (src/perf_options.cpp): a starting point for a weak GPU. Low-end makes the
+    // detail options below default to their cheap values (anti-aliasing off among them, which
+    // the file's own mcla_anti_aliasing still overrides); the others are the pause menu's.
+    public static readonly GameSetting Preset = new("mcla_preset", "Graphics preset",
+        [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low")], "custom")
+    {
+        Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the far sun shadows every "
+             + "2nd frame and the environment map of the cars every 4th (the picture of the last time is kept "
+             + "in between). On an integrated Radeon that is about 12% less frame time at the game's own "
+             + "resolution (32.3 instead of 36.8 ms in free roam): 4% from the shadows, the map and the "
+             + "blur, and 7 to 8% from leaving anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
+             + "integrated graphics. An option you set by hand (Anti-aliasing here, or the pause menu's "
+             + "PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
+    };
     // temporal_aa_sharpness (the SDK's): FSR's own sharpening (RCAS) after it.
     public static readonly GameSetting FsrSharpness = new("temporal_aa_sharpness", "FSR sharpness",
         [new("Off", 0.0), new("0.2 (default)", 0.2), new("0.4", 0.4), new("0.6", 0.6), new("0.8", 0.8),
@@ -264,13 +280,27 @@ static class GameSettings
              + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
     };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
-        [new("Automatic (Direct3D 12 first)", "any"), new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any")
+        [new("Automatic (Vulkan on integrated AMD and Intel graphics, Direct3D 12 otherwise)", "any"),
+         new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any")
     {
-        Info = "Which graphics system the game uses; Automatic tries Direct3D 12 first. On the PC it was "
-             + "measured on, the two are within a few percent in the city, and Direct3D 12 is 10 to 15% faster "
-             + "in races at 3×. Try Vulkan if Direct3D 12 gives you trouble. Takes effect the next time the "
-             + "game starts.",
+        Info = "Which graphics system the game uses. Automatic picks Vulkan on integrated AMD graphics (a "
+             + "Ryzen with Radeon graphics, which share the CPU's memory) and on Intel graphics, and Direct3D 12 "
+             + "on AMD graphics cards and on NVIDIA. On an NVIDIA GeForce RTX 5080 the two are within a few "
+             + "percent in the city, and Direct3D 12 is 10 to 15% faster in races at 3×; on an AMD Ryzen "
+             + "9800X3D's integrated Radeon, Vulkan is 6 to 10% faster at the game's own resolution; on a "
+             + "Radeon RX 6600 XT a user found Direct3D 12 20 to 25% faster (Vulkan's GPU command thread costs "
+             + "more CPU). Intel graphics are not measured: Direct3D 12 uses a slower path for them in the SDK, "
+             + "which Vulkan doesn't need. The one marked (recommended) is the one Automatic picks for your "
+             + "graphics card. Pick one to override. Takes effect the next time the game starts.",
     };
+    /// The setting with (recommended) after the API Automatic picks on this PC (DisplayDrivers.AutomaticApi;
+    /// null: not known, nothing is marked).
+    public static GameSetting GraphicsApiFor(string? recommended) =>
+        recommended is null ? GraphicsApi : GraphicsApi with
+        {
+            Choices = [GraphicsApi.Choices[0],
+                       .. GraphicsApi.Choices.Skip(1).Select(c => SettingValues.Same(c.Value, recommended) ? c with { Label = c.Label + " (recommended)" } : c)],
+        };
     public static readonly GameSetting Intro = new("mcla_intro", "Intro",
         [new("Normal", "normal"), new("Fast", "fast"), new("Skip (hides the title logo)", "skip")], "normal")
     {
@@ -425,9 +455,9 @@ static class GameSettings
     }
 
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
-                                            uint gpuVendor = 0) =>
-        [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, AntiAliasing, Upscaling, FrameGeneration,
-         LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApi];
+                                            uint gpuVendor = 0, string? recommendedApi = null) =>
+        [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
+         FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Intro, Prompts];

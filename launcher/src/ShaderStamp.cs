@@ -8,8 +8,9 @@
 // setup wizard too.
 //
 // What it doesn't notice, because the launcher can't tell from here (the player runs More >
-// Prepare shaders): a graphics API left on "any" that the game resolves differently than before
-// (the plugin failing to load); a switch between two adapters that both stay installed (Windows'
+// Prepare shaders): a graphics API left on "any" that the game resolves differently than the
+// launcher expects (the plugin failing to load, no Vulkan device for the GPU); a switch between
+// two adapters that both stay installed (Windows'
 // graphics preference); a storage format change without a new pack (the game then refuses the
 // pack, which no preparation fixes).
 using System.Diagnostics;
@@ -203,6 +204,14 @@ static class ShaderStamp
             // "any" then, an explicit API now: the same API as the one it came to, is no change.
             var sameAsResolved = askedApi == "any" && api == JsonText(storage, "api")?.ToLowerInvariant();
             if (api != askedApi && !sameAsResolved) return "the graphics API changed";
+            // "any" then and now: what Automatic comes to depends on the GPU and on the game's version
+            // (a cache made when it was Direct3D 12 for every GPU is not for the Vulkan it is now on
+            // AMD's integrated GPUs and Intel's).
+            if (api == "any" && askedApi == "any" && JsonText(storage, "api")?.ToLowerInvariant() is { } resolved)
+            {
+                var adapterOption = int.TryParse(Setting("d3d12_adapter", arguments, toml), NumberStyles.Integer, CultureInfo.InvariantCulture, out var chosen) ? chosen : -1;
+                if (DisplayDrivers.AutomaticApi(adapterOption) is { } automatic && automatic != resolved) return "the graphics API changed";
+            }
 
             var scaleText = (Setting("resolution_scale", arguments, toml) ?? "1").Trim();
             var askedScaleText = (JsonText(asked, "resolution_scale") ?? "1").Trim();
@@ -285,6 +294,118 @@ static class DisplayDrivers
             Debug.WriteLine($"display drivers: {ex.Message}");
         }
         return list;
+    }
+
+    // What the game's Automatic graphics API gives (src/mcla_app.cpp, DecideAutomaticBackend; this
+    // and that must agree): Vulkan on Intel graphics and on AMD's integrated ones, Direct3D 12 on
+    // AMD's discrete cards, on NVIDIA and on anything else. The GPU is the one Direct3D 12 would
+    // take: the adapter d3d12_adapter names (-1: the first that isn't software, -2: software), as
+    // DXGI lists them. AMD's integrated ones are told by Direct3D 12's own answer (the
+    // architecture's UMA flag, from a device made for the adapter), which holds however much
+    // memory the BIOS sets aside for the GPU. Vulkan also needs vulkan-1.dll (the game also
+    // needs a Vulkan device for that GPU, which only it can see). A software adapter (WARP, by -2
+    // or by its number) is "d3d12" as in the game: its vendor is neither AMD's nor Intel's. "vulkan",
+    // "d3d12", or null when the adapter can't be read or the number names none. Asked once for each option.
+    public static string? AutomaticApi(int adapterOption)
+    {
+        lock (automaticApi)
+        {
+            if (!automaticApi.TryGetValue(adapterOption, out var api)) automaticApi[adapterOption] = api = ReadAutomaticApi(adapterOption);
+            return api;
+        }
+    }
+
+    static readonly Dictionary<int, string?> automaticApi = [];
+    const uint VendorAmd = 0x1002, VendorIntel = 0x8086;
+
+    static string? ReadAutomaticApi(int adapterOption)
+    {
+        if (adapterOption == -2) return "d3d12";
+        try
+        {
+            var factoryId = typeof(IDXGIFactory1).GUID;
+            if (CreateDXGIFactory1(ref factoryId, out var factory) < 0 || factory == null) return null;
+            try
+            {
+                for (uint i = 0; factory.EnumAdapters1(i, out var adapter) >= 0 && adapter != null; ++i)
+                {
+                    try
+                    {
+                        if (adapter.GetDesc1(out var desc) < 0) continue;
+                        if (adapterOption >= 0 ? (int)i != adapterOption : (desc.Flags & 2) != 0) continue;
+                        if (desc.VendorId != VendorIntel && !(desc.VendorId == VendorAmd && IsUma(adapter))) return "d3d12";
+                        if (!NativeLibrary.TryLoad("vulkan-1.dll", out var vulkan)) return "d3d12";
+                        NativeLibrary.Free(vulkan);
+                        return "vulkan";
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(adapter);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(factory);
+            }
+        }
+        catch (Exception ex) when (ex is COMException or DllNotFoundException or EntryPointNotFoundException or InvalidCastException
+                                       or MarshalDirectiveException or SEHException)
+        {
+            Debug.WriteLine($"automatic api: {ex.Message}");
+        }
+        return null;
+    }
+
+    // Whether Direct3D 12 says the adapter's GPU shares the CPU's memory (an APU). A device that
+    // can't be made at feature level 11_0 counts as not.
+    static bool IsUma(IDXGIAdapter1 adapter)
+    {
+        var unknown = Marshal.GetIUnknownForObject(adapter);
+        try
+        {
+            var deviceId = new Guid("189819f1-1db6-4b57-be54-1821339b85f7");  // ID3D12Device
+            if (D3D12CreateDevice(unknown, 0xB000 /* D3D_FEATURE_LEVEL_11_0 */, ref deviceId, out var device) < 0 || device == IntPtr.Zero) return false;
+            // The calls are made through the device's vtable: IUnknown (3 entries: Release is 2),
+            // ID3D12Object (GetPrivateData, SetPrivateData, SetPrivateDataInterface, SetName: 4), then
+            // ID3D12Device's GetNodeCount, CreateCommandQueue, CreateCommandAllocator,
+            // CreateGraphicsPipelineState, CreateComputePipelineState and CreateCommandList (6):
+            // CheckFeatureSupport is entry 13 (ID3D12Device is not an ID3D12DeviceChild).
+            var vtable = Marshal.ReadIntPtr(device);
+            try
+            {
+                var check = Marshal.GetDelegateForFunctionPointer<CheckFeatureSupportFn>(Marshal.ReadIntPtr(vtable, 13 * IntPtr.Size));
+                var data = new D3D12_FEATURE_DATA_ARCHITECTURE();
+                const int D3D12_FEATURE_ARCHITECTURE = 1;
+                return check(device, D3D12_FEATURE_ARCHITECTURE, ref data, (uint)Marshal.SizeOf<D3D12_FEATURE_DATA_ARCHITECTURE>()) >= 0 && data.UMA != 0;
+            }
+            finally
+            {
+                Marshal.GetDelegateForFunctionPointer<ReleaseFn>(Marshal.ReadIntPtr(vtable, 2 * IntPtr.Size))(device);
+            }
+        }
+        finally
+        {
+            Marshal.Release(unknown);
+        }
+    }
+
+    [DllImport("d3d12.dll")]
+    static extern int D3D12CreateDevice(IntPtr adapter, int minimumFeatureLevel, ref Guid riid, out IntPtr device);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int CheckFeatureSupportFn(IntPtr self, int feature, ref D3D12_FEATURE_DATA_ARCHITECTURE data, uint size);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate uint ReleaseFn(IntPtr self);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct D3D12_FEATURE_DATA_ARCHITECTURE
+    {
+        public uint NodeIndex;
+        public int TileBasedRenderer;
+        public int UMA;
+        public int CacheCoherentUMA;
     }
 
     [DllImport("dxgi.dll")]
