@@ -6,7 +6,7 @@ A fork of [holdmysocks/mcla-recomp](https://github.com/holdmysocks/mcla-recomp),
 
 ## Testing so far
 
-Everything this fork adds was built and measured on **Windows only**, with an **NVIDIA RTX 5080** and a **Ryzen 7 9800X3D**, on both Direct3D 12 and Vulkan. None of it has been built or run on AMD or Intel graphics, on Linux or on the PS5 yet. If you try it on other hardware, please report how it went in the [fork's issues](https://github.com/RenanQueiroz/mcla-recomp/issues), whether it works or not.
+Everything this fork adds was built and measured on **Windows only**, with an **NVIDIA RTX 5080** and a **Ryzen 7 9800X3D**, on both Direct3D 12 and Vulkan. It has also been run on the Ryzen's integrated AMD Radeon graphics (both APIs, 720p to 4K), where the white or grey flashes on AMD with Direct3D 12 were found and fixed in v0.1.3, but not on a discrete AMD card, on Intel graphics, on Linux or on the PS5 yet. If you try it on other hardware, please report how it went in the [fork's issues](https://github.com/RenanQueiroz/mcla-recomp/issues), whether it works or not.
 
 ## Status
 
@@ -355,7 +355,7 @@ If you hand this to an AI agent: it needs your disc image's path and the console
 
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) covers each of the fork's changes: what it fixes, how it was checked and what is not verified. In short:
 
-- Nothing of the fork has been tried on AMD or Intel graphics, on Linux or on the PS5. On Vulkan, the compute texture copies and the direct texture loads are on with NVIDIA only by default (`--vulkan_texture_load_storage_copy=on` tries them elsewhere). D3D12's texture heaps take video memory in 256 MB steps, which matters most on cards with little of it.
+- On AMD graphics the fork has only been run on the Ryzen 7 9800X3D's integrated Radeon (D3D12 and Vulkan), not on a discrete AMD card; it hasn't been tried on Intel graphics, on Linux or on the PS5. On Vulkan, the compute texture copies and the direct texture loads are on with NVIDIA only by default (`--vulkan_texture_load_storage_copy=on` tries them elsewhere). D3D12's texture heaps take video memory in 256 MB steps, which matters most on cards with little of it.
 - On a first run, in new places, or after a driver update, objects can be missing for a moment while their shaders compile, where the game used to hold the frame until they were ready. With the shader pack (added at every start, compiled by the launcher before Play when needed) that is left only for what the fork's test sessions didn't reach.
 - The HUD's gauges and the song title under the speedometer move in the same steps. At *HUD updates* 60 per second (the default) the needles are smooth and the title scrolls twice its original speed; at 30, the console's pace, the title scrolls at its original speed and the needles move 30 times a second; at 120 the title scrolls four times as fast.
 - Not verified by hand: the motorcycle lean (it needs a bike in play).

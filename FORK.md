@@ -152,8 +152,9 @@ built or run there (marked UNTESTED in the menu). KNOWN-ISSUES.md has the costs 
 ## Testing so far
 
 Everything here was built and measured on **Windows only, with an NVIDIA RTX 5080**
-(and a Ryzen 7 9800X3D), on the D3D12 and Vulkan backends. None of it has been
-built or run on AMD or Intel graphics, on Linux, or on the PS5 yet. It needs
+(and a Ryzen 7 9800X3D), on the D3D12 and Vulkan backends. It has also been run on
+the 9800X3D's integrated AMD Radeon graphics (both backends); none of it has been
+built or run on a discrete AMD card or on Intel graphics, on Linux, or on the PS5 yet. It needs
 testing there before anyone relies on it.
 
 ## Building and playing
@@ -254,6 +255,7 @@ git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
+git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
 git apply ../../patches/rexglue-fsr-upscaling.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
