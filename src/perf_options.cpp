@@ -43,6 +43,22 @@ REXCVAR_DEFINE_BOOL(mcla_foliage_impostors, true, "MCLA",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_fullscreen_blur, true, "MCLA", "The full-screen blur pass (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+// Graphics fixes the game applies as defaults of SDK options (MclaApplyGraphicsFixDefaults, below).
+REXCVAR_DEFINE_BOOL(mcla_vinyl_readback, true, "MCLA",
+                    "Custom vinyls on the opponents' and other cars outside the vinyl editor (fork issues "
+                    "11 and 14): the texture the game builds for them (a 512x512 render target with its "
+                    "mip chain, drawn when a car loads) is read back into the guest's memory, which "
+                    "the game's own code copies it from (the SDK's readback_resolve_rules; used unless that "
+                    "option is set itself). Costs nothing outside that moment (next start)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_vulkan_depth_convert, true, "MCLA",
+                    "Vulkan: convert the console's 24-bit float depth in the pixel shader (the SDK's "
+                    "depth_float24_convert_in_pixel_shader; used unless that option is set itself). "
+                    "Without it a soft blur covers a car's plate and rear lights where the HUD's "
+                    "speedometer is while the camera is turned round the car (fork issue 11). Costs GPU "
+                    "time that grows with the resolution scale (next start)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_anti_aliasing, "msaa", "MCLA",
                       "Anti-aliasing:\n"
                       " off: none\n"
@@ -434,6 +450,32 @@ void MclaMigrateAntiAliasing() {
       !REXCVAR_GET(mcla_msaa)) {
     rex::cvar::SetDefaultValue("mcla_anti_aliasing", "off");
     REXLOG_INFO("perf options: anti-aliasing off (mcla_msaa = false)");
+  }
+}
+
+// The readback rules of the custom-vinyl texture: the game bakes a car's vinyls into a 512x512 8_8_8_8
+// render target (guest address 0x050A0000, 1 MB) with its mip chain (256x256 at 0x051A0000 down to 32x4 at
+// 0x051F7000), resolved in the UI phase 113 times while a race of 8 cars loads (launcher/dev/vinyls-2026-10-27.md).
+// Nothing else in the city, the menus or a race has that size. The class rule finds the base level if the
+// address moves; the address rule adds the chain.
+static const char* const kVinylReadbackRules = "len=1048576,pitch=512,height=512,fmt=6;addr=0x051A0000-0x051F7FFF";
+
+void MclaApplyGraphicsFixDefaults(bool vulkan) {
+  auto apply = [](const char* name, const char* value) {
+    const bool user_set = rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault;
+    if (!rex::cvar::SetDefaultValue(name, value)) {
+      REXLOG_WARN("graphics fixes: {} = {} not taken (this SDK has no such option)", name, value);
+    } else if (user_set) {
+      REXLOG_INFO("graphics fixes: {} = {} set by the user", name, rex::cvar::GetFlagByName(name));
+    } else {
+      REXLOG_INFO("graphics fixes: {} = {}", name, value);
+    }
+  };
+  if (REXCVAR_GET(mcla_vinyl_readback)) {
+    apply("readback_resolve_rules", kVinylReadbackRules);
+  }
+  if (vulkan && REXCVAR_GET(mcla_vulkan_depth_convert)) {
+    apply("depth_float24_convert_in_pixel_shader", "true");
   }
 }
 

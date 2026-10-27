@@ -77,6 +77,7 @@ uint64_t Ps5FaultCount();
 extern const char* g_mcla_settings_path;  // src/settings_menu.cpp
 void MclaWaitForSaves();                   // src/save_wait.cpp
 void MclaMigrateAntiAliasing();            // src/perf_options.cpp
+void MclaApplyGraphicsFixDefaults(bool vulkan);  // src/perf_options.cpp
 // src/shader_prepare.cpp
 void MclaShaderStorageBeforeLaunch(rex::Runtime* runtime, rex::ui::Window* window,
                                    bool then_play);
@@ -578,6 +579,9 @@ int main() {
   rex::cvar::SetDefaultValue("mcla_shader_pack", (root / "shaderpack" / "545407F8.shaderpack").string());
   // An older mcla_msaa = false in the settings file still means no anti-aliasing.
   MclaMigrateAntiAliasing();
+  // The custom vinyls' readback and the Vulkan depth conversion (src/perf_options.cpp): defaults of SDK options, as on the PC.
+  // Untested on the console (the PC's Vulkan is where they were measured).
+  MclaApplyGraphicsFixDefaults(true);
   // FSR 3.1 (rexglue-temporal-aa.patch) and its frame generation
   // (rexglue-frame-generation.patch) are untested on the console: the Vulkan
   // device gets the features they use only when the game starts with one of
