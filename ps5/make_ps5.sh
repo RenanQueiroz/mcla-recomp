@@ -212,6 +212,7 @@ rexglue-shader-storage-prepare.patch src/graphics/shader_storage_progress.h Shad
 rexglue-content-header-padding.patch src/system/xam/content_manager.cpp Written as zeros.
 rexglue-low-latency.patch src/ui/low_latency.cpp LowLatency::OnFrameStart
 rexglue-frame-generation-nonwindows.patch src/ui/vulkan/vulkan_presenter_frame_generation.cpp frame_generation_pacing
+rexglue-fsr-upscaling.patch include/rex/graphics/command_processor.h TaaResolveStretch
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW

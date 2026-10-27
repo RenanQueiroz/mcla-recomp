@@ -134,6 +134,21 @@ with either toolchain's game). They are built with MSVC with the C runtime linke
 in, so a PC needs no Visual C++ runtime for them either; a DLL that is there and
 doesn't load is reported unavailable and the game goes on with MSAA.
 
+## FSR 3.1 upscaling
+
+`patches/rexglue-fsr-upscaling.patch` (after `rexglue-frame-generation-nonwindows.patch` in the order above; it edits files the
+anti-aliasing and frame generation patches edit) lets the 3D scene be drawn at a smaller size and upscaled by FSR 3.1 while the HUD, the menus
+and the post-processing stay at the output size: the pause menu's ANTI ALIASING row has FSR QUALITY, BALANCED and PERFORM. after FSR 3.1
+NATIVE AA (`mcla_upscaling`, off by default; `src/perf_options.cpp`, `src/settings_menu.cpp`), the launcher an FSR upscaling setting next to
+Anti-aliasing (`launcher/src/GameSettings.cs`: a combo of its own, where the pause menu folds it into the anti-aliasing row). The SDK side is
+the viewport and scissor squeezed into the corner of the output-sized render targets, the scene's resolves stretched back to the full size
+(eight new direct-resolve shader variants, generated: they are most of the patch's size, `launcher/dev/hdr/build_shaders.py` makes them), a
+gather pass that gives FSR the render-size colour, depth and motion vectors, a texture LOD bias and a pixel-position scale for the squeezed
+draws, and frame generation's depth. With the setting off (the default) nothing runs but the gate's checks; one system constant is added to
+the translated shaders' constants block, so the drivers compile each pipeline once more after an update (the launcher's shader preparation
+does it). Built and measured on Windows with an RTX 5080 (both APIs); the integrated Radeon has not been measured with it yet; Linux and the PS5 are not
+built or run there (marked UNTESTED in the menu). KNOWN-ISSUES.md has the costs and limits.
+
 ## Testing so far
 
 Everything here was built and measured on **Windows only, with an NVIDIA RTX 5080**
@@ -239,6 +254,7 @@ git apply ../../patches/rexglue-shader-storage-prepare.patch
 git apply ../../patches/rexglue-content-header-padding.patch
 git apply ../../patches/rexglue-low-latency.patch
 git apply ../../patches/rexglue-frame-generation-nonwindows.patch
+git apply ../../patches/rexglue-fsr-upscaling.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
