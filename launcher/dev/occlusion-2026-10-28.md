@@ -1,13 +1,13 @@
 # The sun's glare and the occlusion queries, 2026-10-28
 
-In every run of the fork (and of upstream), early in the session the SDK switched its host occlusion queries off and fed the game a fake sample count of 1,000, with the log line
+In every run of the fork's builds that logged it, early in the session the SDK switched its host occlusion queries off and fed the game a fake sample count of 1,000, with the log line
 `D3D12: occlusion query end at <addr> (swap N) found the query of another buffer: host occlusion queries off (begins 1, ends 1: 0 with a host result, 0 cut, 0 without one)`
 (the line is from the diagnostic of the unmerged branch `fix/rain-scaled`, whose `occlusion_query_log` and counters this note's patch carries on). It happens at 1x and 2x, on D3D12 and on Vulkan.
 Nothing of this was run in a game session by the author of the patch: it is read from code and old logs, compiled in CI, and its measurements are a chain that has not been queued yet.
 
 ## What the game does with the count (read: recompiled code, `SP\raintrace\asm.py`)
 
-- One user was found: the sun. `sub_822DD720` (called by `sub_823069C0`; render phase `0x02000000` according to the earlier investigation, which the SDK's log now shows) calls `sub_822DD088` with the global object at `0x827E1048`.
+- One user was found: the sun. `sub_822DD720` (called by `sub_823069C0`; render phase `0x02000000` according to the earlier investigation, which the SDK's log with `occlusion_query_log` will show) calls `sub_822DD088` with the global object at `0x827E1048`.
   The object holds: `+0` the last count (samples), `+4` the ratio as a float, `+12` which of two query objects is in use (0 or 1, flipped every frame), `+16` and `+20` the two query objects,
   `+24` the expected count (1,250 in every run so far), `+28`, `+36`, `+40`, `+44` floats (20, 700, 200, 45), `+32` / `+33` flags.
 - Each frame it reads the query object it used two frames earlier (`sub_82179720` = GetData: true only when the query has finished), keeps `+0` if it has not, computes
@@ -47,6 +47,8 @@ Its `occlusion_query` has four modes, `fake`, `fast` (the default), `fast-alt` a
 - That the host counts what the console counts. Two things could add samples inside the query: draws of the render target cache (ownership transfers, clears) when the sun's draw changes the render targets, and 4x MSAA / 2x resolution scale. The result lines log the samples on the host and the samples told to the game (the count divided by the scale squared) and the number of guest draws in the query (the sun's quad should be 1). A ratio over 1 at the first peeks, or a count far from 1,250 with the sun in full view, means this.
 - That the sun's position in the view can be reached by the pad: the chain turns the camera round the car with the right stick at three times of day (16.5, 17.5, 18.5 h, the world's time poked as the dither pad of issue #8 does); if no step has a ratio over 0 the sun was never in view.
 - The cost (the chain measures it: PresentMon, A B B A), the Vulkan path on any GPU but the RTX 5080, Linux, the PS5.
+- The other occlusion mechanism: `PM4_VIZ_QUERY` (the console's visibility tests: draws predicated on a viz query, and "survey" draws with `kill_pix_post_hi_z`). The SDK fakes it as always visible (`ExecutePacketType3_VIZ_QUERY` sets the status bit at the end and logs `Begin viz query ID` / `End viz query ID`) and drops the survey draws; the predication is not implemented.
+  `frame-structure-2026-10-16.md` lists "24 point draws with no target (occlusion queries for the glows)" in phase `0x20000000`, which may be this path (not identified). None of the earlier logs in `SP\rain17fix\runs` has a viz query line (a day city and a rainy night race at 2x), so the game may not use it there. The chain's SUMMARY lists the viz lines of every run.
 - Other users: the `users` run (the whole session: title, zoom-out, free roam, the arcade race Sunset and Vine, the pause menu) lists every record with its render phase.
 
 ## The chain (SP\occl; `chain.ps1`, one exclusive hold of at most 45 minutes, results by `summarize.py`)
