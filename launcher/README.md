@@ -998,6 +998,7 @@ during a build:
   `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
+- `rain-readback-2026-10-28.md` (fork issue #17, the rain not drawn at resolution scale 2x and 3x: the rain's drops are simulated on the GPU and fetched as vertex data, which the scaled resolve does not write to the shared memory; the fix is a readback rule, `mcla_rain_readback`), `rain-trace.sdk.patch` (an SDK layer, for `gt-build.ps1 -Layer rain-trace` or `git apply`: `tmp_draw_trace` logs what the GPU did with chosen draws and their vertex bytes, `tmp_draw_skip`, `tmp_draw_trace_nodepth`, `tmp_draw_trace_reupload`; both APIs).
 
 ## Scripted controller input (unattended runs)
 
