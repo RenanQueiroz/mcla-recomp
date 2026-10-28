@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include <rex/chrono/clock.h>
@@ -254,6 +255,383 @@ void MclaTickSettingsMenu();
 // src/sampling_profiler.cpp: the frame counts of its windows.
 void MclaProfileCountSwap();
 void MclaProfileCountUpdate();
+#ifdef _WIN32
+// src/mcla_app.cpp: whether the GPU plugin loaded is Vulkan's.
+bool MclaGraphicsIsVulkan();
+#endif
+
+// Reflex sleep assist. With NVIDIA Reflex holding the frame-rate cap on Direct3D 12, the driver's
+// wait before each frame (NvAPI_D3D_Sleep, inside LowLatency::OnFrameStart) is a busy wait: the
+// profile of the update thread shows the performance counter, the driver's own frames and short
+// sleeps (ZwDelayExecution) for the whole wait, 6.4 to 6.9 ms of CPU a frame at a cap of 60 FPS
+// and about 15 ms at 30 (cpu3 and handoff analyses). On Vulkan the same wait is a semaphore
+// (vkLatencySleepNV) and costs no CPU, so this is for Direct3D 12 only.
+//
+// With mcla_reflex_sleep_assist the update thread first waits on a high-resolution waitable
+// timer until the margin (mcla_reflex_sleep_margin_us, 1.5 ms) before the moment the driver's
+// wait would end, and then calls the driver as before, which spins only the last stretch.
+//
+// The deadline. The documentation says only that the minimum frame interval (NV_SET_SLEEP_MODE_
+// PARAMS::minimumIntervalUs, set by the low latency code to 1,000,000 / the cap) is enforced
+// and that NvAPI_D3D_Sleep is where the driver sleeps for it and for the latency reduction
+// (the Vulkan text for the same field says: the interval between presents of a swapchain).
+// It does not say which two events the interval is measured between, and the latency
+// reduction can move the end of the wait. So the deadline is a model, checked on every frame
+// it is used for:
+//   - the model is the previous start plus the interval: the time the previous call of
+//     LowLatency::OnFrameStart returned plus 1,000,000 / the cap (the same integer division the
+//     driver was told). In steady state the starts are one interval apart, so the model is
+//     exact when the driver measures start to start, and off by how much the work of one frame
+//     differs from the driver's estimate of it when it measures from the presents;
+//   - it is used only while the driver holds the cap (LowLatency::DriverLimits(): the mode was
+//     taken, an interval is set, and the last wait was made), never without a cap (the driver's
+//     own pacing then has no known deadline: not engaged), never on Vulkan, never with
+//     low_latency_limiter = fork (the game's own limiter holds the cap), never with frame
+//     generation (the game's own limiter holds it too), and only after 16 passes in a row at
+//     the same cap;
+//   - the timer wait ends the margin before the model's deadline, so the model may be late by
+//     the margin: that also covers the timer's lateness (0.3 ms on average);
+//   - the check: after the timer, the driver's call is timed. If it returned at once (under 200
+//     us) although the model said it had at least 700 us to wait, the driver's deadline is
+//     earlier than the model's and the timer may have delayed the frame's start: the margin is
+//     widened by 0.5 ms (up to 4 ms) and narrows again by 0.125 ms after 64 frames without it.
+//     8 troubles (that or a timer that woke over 1 ms late) among the last 32 frames switch
+//     the assist off for 10 s, and it starts again with the model checked from the beginning.
+// A frame whose work already took longer than the interval minus the margin makes no timer wait.
+//
+// It moves where the wait is spent (the timer instead of the driver's spin) and nothing the game
+// computes: the engine timer still reads the time after the wait, and the simulation step is the
+// elapsed time as before. The one change to a frame's timing is a start later than the driver's
+// choice, by at most how much the widened margin was short: seen as "too tight" in the log.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+REXCVAR_DEFINE_BOOL(mcla_reflex_sleep_assist, false, "MCLA",
+                    "With NVIDIA Reflex holding the frame-rate cap on Direct3D 12 (Windows): the "
+                    "update thread waits on a high-resolution timer until mcla_reflex_sleep_margin_us "
+                    "before the moment the driver's wait would end, so the driver's busy wait "
+                    "covers only the last stretch (6.4 to 6.9 ms of CPU a frame at a cap of 60 FPS "
+                    "otherwise). Timing only. Off is the driver's own wait");
+REXCVAR_DEFINE_INT32(mcla_reflex_sleep_margin_us, 1500, "MCLA",
+                     "With mcla_reflex_sleep_assist: microseconds before the driver's expected "
+                     "deadline at which the timer wait ends and the driver takes over. It covers "
+                     "the timer's lateness (0.3 ms on average) and how far the driver's own "
+                     "deadline is from the model; widened by itself when the driver's wait after "
+                     "the timer comes back at once")
+    .range(1000, 8000);
+
+#ifdef _WIN32
+namespace {
+
+class ReflexSleepAssist {
+ public:
+  // On the frame thread, in the frame-start hook, before LowLatency::OnFrameStart. `fps` is the
+  // cap now (0: uncapped), which is the one the driver is told in this pass.
+  void Before(int32_t fps) {
+    assisted_ = false;
+    enabled_ = REXCVAR_GET(mcla_reflex_sleep_assist);
+    if (!enabled_) {
+      Reset();
+      return;
+    }
+    const uint64_t now = NowMicros();
+    const char* why = Gate(fps, now);
+    Note(why, now);
+    if (why) {
+      streak_ = 0;
+      engaged_ = false;
+      return;
+    }
+    if (fps != fps_) {
+      fps_ = fps;
+      streak_ = 0;
+    }
+    if (streak_ < kWarmPasses) {
+      ++streak_;
+      return;
+    }
+    const uint64_t period = 1'000'000ull / uint64_t(fps);
+    const uint64_t margin = Margin();
+    if (!engaged_) {
+      engaged_ = true;
+      stats_ = Stats();
+      stats_since_us_ = now;
+      REXLOG_INFO(
+          "Reflex sleep assist: on at {} FPS (Direct3D 12): a timer wait until {} us before the "
+          "driver's deadline (the previous start plus {} us), then NVIDIA Reflex's own wait",
+          fps, margin, period);
+    }
+    const uint64_t deadline = prev_return_us_ + period;
+    if (deadline <= now + margin + kMinWaitUs) {
+      ++stats_.idle;  // the frame's work used the time already: the driver waits what is left
+      MaybeReport(fps, now);
+      return;
+    }
+    const uint64_t wake = deadline - margin;
+    const uint64_t wait_us = std::min<uint64_t>(wake - now, period);
+    LARGE_INTEGER due;
+    due.QuadPart = -static_cast<LONGLONG>(wait_us * 10);  // 100 ns units, relative
+    if (SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
+      WaitForSingleObject(timer_, static_cast<DWORD>(wait_us / 1000 + 4));
+    } else {
+      ++stats_.timer_errors;
+      return;
+    }
+    call_us_ = NowMicros();
+    wake_us_ = wake;
+    deadline_us_ = deadline;
+    assisted_ = true;
+    stats_.timer_wait_us += call_us_ - now;
+    MaybeReport(fps, call_us_);
+  }
+
+  // Right after LowLatency::OnFrameStart returned.
+  void After() {
+    if (!enabled_) {
+      return;
+    }
+    const uint64_t returned = NowMicros();
+    if (assisted_) {
+      const int64_t driver_us = int64_t(returned) - int64_t(call_us_);
+      const int64_t expected_us = int64_t(deadline_us_) - int64_t(call_us_);
+      const int64_t late_us = int64_t(call_us_) - int64_t(wake_us_);
+      const int64_t against_model = int64_t(returned) - int64_t(deadline_us_);
+      ++stats_.assisted;
+      stats_.driver_wait_us += uint64_t(std::max<int64_t>(driver_us, 0));
+      stats_.model_error_sum += against_model;
+      stats_.model_error_min = std::min(stats_.model_error_min, against_model);
+      stats_.model_error_max = std::max(stats_.model_error_max, against_model);
+      bool trouble = false;
+      if (late_us > kLateWakeUs) {
+        trouble = true;
+        ++stats_.late;
+      } else if (expected_us >= kExpectedUs && driver_us < kImmediateUs) {
+        // The driver had nothing to wait for although the model said it had: its deadline is
+        // earlier than the model's, and the timer may have held the frame back.
+        trouble = true;
+        ++stats_.tight;
+        extra_us_ = std::min<int64_t>(extra_us_ + kWidenUs, kMaxExtraUs);
+        calm_ = 0;
+      } else if (++calm_ >= 64) {
+        calm_ = 0;
+        extra_us_ = std::max<int64_t>(extra_us_ - kNarrowUs, 0);
+      }
+      trouble_history_ = (trouble_history_ << 1) | (trouble ? 1u : 0u);
+      if (CountBits(trouble_history_) >= 8) {
+        holdoff_until_us_ = returned + kHoldOffUs;
+        REXLOG_WARN(
+            "Reflex sleep assist: the driver's waits do not fit the model (8 of the last 32 "
+            "frames were too tight or woke late; since the last report {} too tight and {} late "
+            "wake-ups, margin widened by {} us); off for 10 s, then checked from the start",
+            stats_.tight, stats_.late, extra_us_);
+        trouble_history_ = 0;
+        extra_us_ = 0;
+        engaged_ = false;
+        streak_ = 0;
+      }
+    }
+    prev_return_us_ = returned;
+  }
+
+ private:
+  static constexpr uint32_t kWarmPasses = 16;       // passes at one cap before the first timer wait
+  static constexpr uint64_t kMinWaitUs = 500;       // no timer wait for less than this
+  static constexpr int64_t kImmediateUs = 200;      // the driver's call returned at once
+  static constexpr int64_t kExpectedUs = 700;       // ... although the model gave it this long
+  static constexpr int64_t kLateWakeUs = 1000;      // the timer woke this late
+  static constexpr int64_t kWidenUs = 500;
+  static constexpr int64_t kNarrowUs = 125;
+  static constexpr int64_t kMaxExtraUs = 4000;
+  static constexpr uint64_t kHoldOffUs = 10'000'000;
+  static constexpr uint64_t kReportUs = 10'000'000;
+
+  struct Stats {
+    uint64_t assisted = 0;        // passes with a timer wait
+    uint64_t idle = 0;            // passes with nothing to wait for
+    uint64_t tight = 0;           // the driver's call came back at once after the timer
+    uint64_t late = 0;            // the timer woke over 1 ms late
+    uint64_t timer_errors = 0;
+    uint64_t timer_wait_us = 0;   // total
+    uint64_t driver_wait_us = 0;  // total, the driver's call after the timer
+    int64_t model_error_sum = 0;  // the return against the model's deadline
+    int64_t model_error_min = INT64_MAX;
+    int64_t model_error_max = INT64_MIN;
+  };
+
+  static uint32_t CountBits(uint32_t v) {
+    uint32_t n = 0;
+    for (; v; v &= v - 1) {
+      ++n;
+    }
+    return n;
+  }
+
+  uint64_t Margin() const {
+    const int64_t base = std::clamp<int64_t>(REXCVAR_GET(mcla_reflex_sleep_margin_us), 1000, 8000);
+    return uint64_t(base + extra_us_);
+  }
+
+  void Reset() {
+    prev_return_us_ = 0;
+    streak_ = 0;
+    engaged_ = false;
+    extra_us_ = 0;
+    calm_ = 0;
+    trouble_history_ = 0;
+    pending_why_.clear();
+    logged_why_.clear();
+  }
+
+  // Null when the assist may run; else why not. Text starting with '(' is a state not worth a line.
+  const char* Gate(int32_t fps, uint64_t now) {
+    if (MclaGraphicsIsVulkan()) {
+      return "Vulkan: its wait before the frame is a semaphore, not a spin (not applicable)";
+    }
+    if (now < holdoff_until_us_) {
+      return "(off for a while: the driver's waits did not fit the model)";
+    }
+    if (!rex::ui::LowLatency::DriverLimits()) {
+      return WhyDriverDoesNotHold(fps, now);
+    }
+    if (fps <= 0) {
+      return "no frame-rate cap: the driver's own pacing has no known deadline";
+    }
+    const int64_t base = std::clamp<int64_t>(REXCVAR_GET(mcla_reflex_sleep_margin_us), 1000, 8000);
+    const uint64_t period = 1'000'000ull / uint64_t(fps);
+    if (period < uint64_t(base) + 3000) {
+      return "the cap's interval is too short for the margin";
+    }
+    if (period < uint64_t(base + extra_us_) + 3000) {
+      // The margin widened so far that nothing is left to wait: start again from the base.
+      holdoff_until_us_ = now + kHoldOffUs;
+      extra_us_ = 0;
+      return "(off for a while: the margin had to be widened past the cap's interval)";
+    }
+    if (!EnsureTimer()) {
+      return "no high-resolution waitable timer (Windows 10 1803 or later)";
+    }
+    if (!prev_return_us_) {
+      return "(first pass)";
+    }
+    return nullptr;
+  }
+
+  // Checked at most every 2 s: it takes the low latency lock and copies strings.
+  const char* WhyDriverDoesNotHold(int32_t fps, uint64_t now) {
+    if (!diagnosis_.empty() && now - diagnosed_us_ < 2'000'000) {
+      return diagnosis_.c_str();
+    }
+    diagnosed_us_ = now;
+    const auto status = rex::ui::LowLatency::GetStatus();
+    if (status.state == rex::ui::LowLatency::State::kUnknown) {
+      diagnosis_ = "(no latency reducer yet)";
+    } else if (status.state == rex::ui::LowLatency::State::kUnavailable) {
+      diagnosis_ = "no latency reducer: " + status.name + " is unavailable (" + status.why + ")";
+    } else if (status.name != "NVIDIA REFLEX") {
+      diagnosis_ = status.name + " is not NVIDIA Reflex (not applicable, untested)";
+    } else if (!status.active) {
+      diagnosis_ = "NVIDIA Reflex is off or given up (low_latency, or the wait took too long)";
+    } else if (rex::cvar::GetFlagByName("low_latency_limiter") == "fork") {
+      diagnosis_ = "low_latency_limiter is fork: the game's own limiter holds the cap";
+    } else if (rex::cvar::GetFlagByName("frame_generation") != "off" &&
+               rex::ui::Presenter::GetFrameGenerationStatus().state !=
+                   rex::ui::Presenter::FrameGenerationState::kUnavailable) {
+      diagnosis_ = "frame generation is on: the game's own limiter holds the cap";
+    } else if (fps <= 0) {
+      diagnosis_ = "no frame-rate cap: the driver's own pacing has no known deadline";
+    } else {
+      diagnosis_ = "(the driver does not hold the cap yet)";
+    }
+    return diagnosis_.c_str();
+  }
+
+  // One line per reason, once it has lasted 3 s (the start-up and the loading screens pass through
+  // several); the same reason is logged again after the assist has run in between.
+  void Note(const char* why, uint64_t now) {
+    if (!why) {
+      pending_why_.clear();
+      logged_why_.clear();
+      return;
+    }
+    if (why[0] == '(' || logged_why_ == why) {
+      return;
+    }
+    if (pending_why_ != why) {
+      pending_why_ = why;
+      pending_since_us_ = now;
+      return;
+    }
+    if (now - pending_since_us_ >= 3'000'000) {
+      logged_why_ = why;
+      REXLOG_INFO("Reflex sleep assist: not running: {}", why);
+    }
+  }
+
+  void MaybeReport(int32_t fps, uint64_t now) {
+    if (now - stats_since_us_ < kReportUs) {
+      return;
+    }
+    const Stats& s = stats_;
+    if (s.assisted) {
+      REXLOG_INFO(
+          "Reflex sleep assist: {} timer waits and {} frames with nothing to wait for in {:.1f} s at "
+          "{} FPS: timer wait {:.0f} us on average, the driver's wait after it {:.0f} us, its "
+          "return against the model (previous start plus interval) {:+.0f} us on average (from "
+          "{:+d} to {:+d}), margin {} us (widened by {}), {} too tight, {} late wake-ups, {} timer "
+          "errors",
+          s.assisted, s.idle, double(now - stats_since_us_) / 1e6, fps,
+          double(s.timer_wait_us) / double(s.assisted), double(s.driver_wait_us) / double(s.assisted),
+          double(s.model_error_sum) / double(s.assisted), s.model_error_min, s.model_error_max,
+          Margin(), extra_us_, s.tight, s.late, s.timer_errors);
+    }
+    stats_ = Stats();
+    stats_since_us_ = now;
+  }
+
+  bool EnsureTimer() {
+    if (!timer_ && !timer_failed_) {
+      timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                      TIMER_ALL_ACCESS);
+      if (!timer_) {
+        timer_failed_ = true;
+        REXLOG_WARN(
+            "Reflex sleep assist: no high-resolution waitable timer (error {}); the driver does "
+            "the whole wait",
+            GetLastError());
+      }
+    }
+    return timer_ != nullptr;
+  }
+
+  HANDLE timer_ = nullptr;
+  bool timer_failed_ = false;
+  uint64_t prev_return_us_ = 0;  // when the previous LowLatency::OnFrameStart returned
+  int32_t fps_ = -1;
+  uint32_t streak_ = 0;          // passes in a row the assist could run at this cap
+  bool engaged_ = false;
+  int64_t extra_us_ = 0;         // the margin widened by what the check found
+  uint32_t calm_ = 0;
+  uint32_t trouble_history_ = 0;
+  uint64_t holdoff_until_us_ = 0;
+  // The pass in progress.
+  bool enabled_ = false;
+  bool assisted_ = false;
+  uint64_t call_us_ = 0;
+  uint64_t wake_us_ = 0;
+  uint64_t deadline_us_ = 0;
+  Stats stats_;
+  uint64_t stats_since_us_ = 0;
+  // The log.
+  std::string diagnosis_;
+  uint64_t diagnosed_us_ = 0;
+  std::string pending_why_;
+  uint64_t pending_since_us_ = 0;
+  std::string logged_why_;
+};
+
+}  // namespace
+#endif
 
 // Low latency (NVIDIA Reflex, AMD Anti-Lag 2): the frame starts at the top of the engine timer,
 // on the update thread, before the timer reads the time: the driver's wait comes before the
@@ -273,7 +651,15 @@ void mcla_frame_start(PPCRegister& r3) {
     }
     const int32_t fps = EffectiveFps();
     rex::ui::LowLatency::SetFrameLimit(fps > 0 ? uint32_t(fps) : 0);
+#ifdef _WIN32
+    // Reflex's busy wait on Direct3D 12 is cut to its last stretch by a timer wait first (above).
+    static ReflexSleepAssist sleep_assist;
+    sleep_assist.Before(fps);
+#endif
     rex::ui::LowLatency::OnFrameStart();
+#ifdef _WIN32
+    sleep_assist.After();
+#endif
     last_start_us = NowMicros();  // after the driver's wait
   }
 }
