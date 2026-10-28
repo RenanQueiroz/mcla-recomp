@@ -1,5 +1,5 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 828d462..f307e7f 100644
+index 828d462..71656fc 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -13,6 +13,7 @@
@@ -10,7 +10,7 @@ index 828d462..f307e7f 100644
  #include <functional>
  #include <memory>
  #include <mutex>
-@@ -685,6 +686,78 @@ class CommandProcessor {
+@@ -685,6 +686,79 @@ class CommandProcessor {
                                            uint32_t count);
    virtual bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, uint32_t packet,
                                                    uint32_t count);
@@ -23,8 +23,9 @@ index 828d462..f307e7f 100644
 +  // the sentinel with the CPU, which a late count written to the record could undo); the host
 +  // query between them is read back without waiting (as the memexport fast readback does). At the
 +  // end event the game is told the newest real count the host has delivered so far (the fake count
-+  // before the first), a few frames old by the depth of the host's GPU queue; the count of this
-+  // very query is written to the record only if the record still holds that guess.
++  // before the first), a few milliseconds old (the time the host GPU needs for the submission the
++  // query is in); the count of this very query is written to the record only if the record still
++  // holds that guess.
 +  // The host side is the backends' (the defaults: no host queries, the fake count only).
 +  virtual bool HostOcclusionQueriesUsable() const { return false; }
 +  // Starts a host query at this point of the command stream; false: none was started.
@@ -89,7 +90,7 @@ index 828d462..f307e7f 100644
    bool ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet, const char* opcode_name,
                                uint32_t viz_query_condition, uint32_t count_remaining);
    bool ExecutePacketType3_DRAW_INDX(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
-@@ -798,6 +871,69 @@ class CommandProcessor {
+@@ -798,6 +872,69 @@ class CommandProcessor {
    // name (for explicit-override compatibility).
    const char* legacy_readback_memexport_cvar_name_ = nullptr;
  
@@ -113,7 +114,7 @@ index 828d462..f307e7f 100644
 +    uint32_t draws_recorded;  // of them, host draws recorded
 +    uint32_t swap_counter;    // counter_ at the end event
 +    uint64_t event_number;    // number of the end event
-+    uint64_t guess_zpass;     // the ZPass pair written at the end event (0: none was)
++    uint64_t guess_zpass;     // the ZPass pair the record held after the end event
 +    int64_t end_time_us;      // steady clock at the end event
 +  };
 +  struct OcclusionStats {
