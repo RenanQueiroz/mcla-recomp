@@ -988,6 +988,20 @@ during a build:
   `--tmp_frame_log_quiet=true` (timestamps only) and, on D3D12 at 1x and
   2x, `--d3d12_threaded_submission_split_draws=0`; phases and per-draw
   labels exist on D3D12 only, categories and passes on both APIs.
+- `gpu-round2-2026-10-27.md` (2026-10-27): the transfers that the next draw rewrites
+  (`rexglue-skip-overwritten-transfers.patch`), the barriers before the depth resolves
+  (`rexglue-d3d12-depth-resolve-read-state.patch`) and what is known about the cost of the
+  converted clear rectangles. Three more layers for `gt-build.ps1 -Layer`, after
+  `frame-log` (the order matters): `overwrite-poison.sdk.patch` (`TMPOVW`: `tmp_overwrite_poison`
+  fills the part of a range that the cut does not transfer with a junk pattern, so a cut that was
+  not complete shows in a picture; `tmp_overwrite_log` logs `TMPOVW: CUT|kept ... line N` for every
+  analysed draw), `clear-split-timestamps.sdk.patch` (`TMPCS`: the barriers and the call of every
+  converted clear timed apart, labelled with the render target, the rectangle and the host texture's
+  size; `MCLA_RT_HEIGHT_CAP=<rows>` caps the host render targets' height, Direct3D 12, diagnosis
+  only) and `clear-by-drawing.sdk.patch` (`TMPCD`: `MCLA_CLEAR_BY_DRAWING=1` draws the clear
+  rectangle with a pixel shader instead of `ClearRenderTargetView`, Direct3D 12). They go on the SDK
+  with both patches in (`gt-build.ps1 -Layer gpu-timestamps,...`); `gt-build.ps1 -ToolsDir` names
+  the tools folder of a build made with another options file.
 
 ## Scripted controller input (unattended runs)
 

@@ -260,6 +260,8 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Unclipped draws' vertex shaders on the CPU (PC default) | `--execute_unclipped_draw_vs_on_cpu=false` | The SDK's default. |
 | Clear rectangles as host clears | `--clear_rectangle_draws=false` | |
 | Direct resolves | `--direct_host_resolve=false` | |
+| No copy into what a draw rewrites completely | `--skip_overwritten_transfers=false` | The tone map and the post-processing passes: the render target cache no longer copies the old contents of their range into the target before the draw. |
+| Depth read state for resolves (D3D12) | `--d3d12_depth_resolve_read_state=false` | Takes effect at once. A depth render target is read by a resolve in the depth read state too, which keeps it compressed on the Radeon. |
 | Single-tile rendering | `--mcla_single_tile=false` | Or the launcher's *Single tile rendering*, or PERFORMANCE › SINGLE TILE RENDERING in the pause menu, which takes effect at once. |
 | The 4,096-tile EDRAM (PC and PS5 default) | `--edram_tiles=2048` | The SDK's default, the console's size; single-tile rendering then has no room and is off (its pause menu row says UNAVAILABLE). On the PS5, `edram_tiles = 2048` in `/data/mcla/mcla.toml`. |
 | Resolved textures decoded straight in | `--texture_load_direct=false` | Takes effect at once; turning it back on needs a restart. |
