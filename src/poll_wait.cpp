@@ -98,7 +98,7 @@ REXCVAR_DEFINE_BOOL(mcla_pump_wake_on_demand, false, "MCLA",
                     "Has no effect while mcla_pump_sleep_max_ms is 0 or more");
 REXCVAR_DEFINE_BOOL(mcla_pump_wake_early, false, "MCLA",
                     "With mcla_pump_wake_on_demand: the main thread also wakes the frame-pacing thread as soon as it has "
-                    "published a slot of the command ring (the last statement of the game's world update), while that thread "
+                    "published a slot of the command ring (the last statement of the game's function sub_82161210), while that thread "
                     "is waiting and its last wait was ended early, so that the round that frees the slot runs while the main "
                     "thread does the rest of its frame and the slot is free when it asks for it: the wake-up and the round "
                     "are off its critical path. The thread's rounds still come once a frame; nothing changes under a frame-rate "
@@ -694,7 +694,7 @@ bool mcla_poll_tick(PPCRegister& r3) {
   return cap < 0 && REXCVAR_GET(mcla_pump_wake_on_demand) && PumpWait(asked);
 }
 
-// The main thread, right after it publishes a slot of the ring: the last statement of the game's world update (sub_82161210,
+// The main thread, right after it publishes a slot of the ring: the last statement of the game's sub_82161210 (a loop over entities,
 // the hook of config/handoff_trace.toml), which makes the ring full for it until the pump thread frees a slot. With
 // mcla_pump_wake_early the pump thread, if it is waiting and its last wait was ended early (the regime where the main thread
 // waits for it: the frame is shorter than its rhythm), is woken now instead of when the main thread asks, so that the round
