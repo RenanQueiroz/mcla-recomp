@@ -69,6 +69,10 @@ REXCVAR_DEFINE_INT32(mcla_profile_hz, 1000, "MCLA",
     .range(0, 4000);
 REXCVAR_DEFINE_INT32(mcla_profile_depth, 24, "MCLA", "Frames kept per sample (1: the pc only)")
     .range(1, 64);
+REXCVAR_DEFINE_BOOL(mcla_profile_exact_leaf, false, "MCLA",
+                    "The innermost frame of a stack in rexgpu-xenos.dll or rexruntime.dll keeps the exact "
+                    "address (module:rva) instead of the function's start, so a report can say which source "
+                    "line of a function the time is in (a build with line tables; the file gets larger)");
 REXCVAR_DEFINE_STRING(mcla_profile_segment, "", "MCLA",
                       "Setting this starts a profile window named by the value");
 REXCVAR_DEFINE_STRING(mcla_profile_thread_log, "", "MCLA",
@@ -394,7 +398,19 @@ std::string SegmentPath(const std::string& path, const std::string& label) {
   return path + "." + label;
 }
 
-std::string FrameKey(uint64_t pc) {
+// mcla_profile_exact_leaf: whether the innermost frame in this module keeps its exact address.
+bool ExactLeafModule(const ModuleInfo& m) {
+  if (!REXCVAR_GET(mcla_profile_exact_leaf) || m.system) {
+    return false;
+  }
+  std::string lower = m.path;
+  for (char& c : lower) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return lower.find("rexgpu") != std::string::npos || lower.find("rexruntime") != std::string::npos;
+}
+
+std::string FrameKey(uint64_t pc, bool leaf = false) {
   const ModuleInfo* m = FindModule(pc);
   char buffer[64];
   if (!m) {
@@ -410,7 +426,9 @@ std::string FrameKey(uint64_t pc) {
         return buffer;
       }
     }
-    rva = rf->BeginAddress;
+    if (!(leaf && ExactLeafModule(*m))) {
+      rva = rf->BeginAddress;
+    }
   }
   const size_t index = static_cast<size_t>(m - g_modules.data());
   std::snprintf(buffer, sizeof buffer, "%zu:%x", index, rva);
@@ -558,6 +576,7 @@ void RunWindow(const std::string& out_path, const std::string& label, int second
   };
   std::map<std::pair<uint32_t, std::string>, Hit> hits;
   std::unordered_map<uint64_t, std::string> frame_cache;
+  std::unordered_map<uint64_t, std::string> leaf_cache;  // the innermost frame may keep its exact address
   std::string stack;
   std::vector<uint32_t> rec_stack(recs.size());
   for (size_t ri = 0; ri < recs.size(); ++ri) {
@@ -565,9 +584,10 @@ void RunWindow(const std::string& out_path, const std::string& label, int second
     stack.clear();
     for (uint32_t k = 0; k < r.length; ++k) {
       const uint64_t pc = pool[r.offset + k];
-      auto it = frame_cache.find(pc);
-      if (it == frame_cache.end()) {
-        it = frame_cache.emplace(pc, FrameKey(pc)).first;
+      auto& cache = k == 0 ? leaf_cache : frame_cache;
+      auto it = cache.find(pc);
+      if (it == cache.end()) {
+        it = cache.emplace(pc, FrameKey(pc, k == 0)).first;
       }
       if (k) {
         stack += ';';
