@@ -1,9 +1,9 @@
 diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
 new file mode 100644
-index 0000000..20aec01
+index 0000000..f9166da
 --- /dev/null
 +++ b/include/rex/audio/audio_dump.h
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,191 @@
 +/**
 + * @file        audio/audio_dump.h
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -96,6 +96,11 @@ index 0000000..20aec01
 +  std::atomic<uint64_t> wake_us_max{0};
 +};
 +Counters& C();
++
++/// Silent frames the output has played in the middle of the game's audio (after its first second), counted always,
++/// not only with audio_stats: the game's wake-on-demand watchdog (mcla_pump_wake_on_demand, src/poll_wait.cpp) polls it
++/// and goes back to the game's own pacing when it rises. One relaxed load.
++uint64_t SteadyUnderruns();
 +
 +inline void Add(std::atomic<uint64_t>& a, uint64_t v) {
 +  a.fetch_add(v, std::memory_order_relaxed);
@@ -355,10 +360,10 @@ index d55f16a..f3a23f1 100644
      xma_decoder.cpp
 diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
 new file mode 100644
-index 0000000..e6c9a7f
+index 0000000..296c021
 --- /dev/null
 +++ b/src/audio/audio_dump.cpp
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,549 @@
 +/**
 + * @file        audio/audio_dump.cpp
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -649,6 +654,10 @@ index 0000000..e6c9a7f
 +
 +Counters& C() {
 +  return g_counters;
++}
++
++uint64_t SteadyUnderruns() {
++  return g_counters.sdl_underruns_steady.load(std::memory_order_relaxed);
 +}
 +
 +bool StatsEnabled() {
@@ -1164,7 +1173,7 @@ index 0000000..0657785
 +
 +}  // namespace rex::audio
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
-index 20a2cd8..4e9018b 100644
+index 20a2cd8..06cb35d 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
 +++ b/src/audio/sdl/sdl_audio_driver.cpp
 @@ -25,6 +25,26 @@
@@ -1258,8 +1267,8 @@ index 20a2cd8..4e9018b 100644
 +        // Silence in the middle of the game's audio. It stays in the stream: everything the mixer produces
 +        // from here on plays that much later than the picture.
 +        ++driver->silence_run_;
++        dump::Add(dump::C().sdl_underruns_steady, 1);  // always: SteadyUnderruns() is polled by the game
 +        if (stats) {
-+          dump::Add(dump::C().sdl_underruns_steady, 1);
 +          dump::Max(dump::C().sdl_silence_max, driver->silence_run_);
 +          if (driver->silence_run_ == 1) {
 +            REXAPU_WARN("audio underrun in the middle of the game's audio at t={:.3f}s (after {} frames played)",

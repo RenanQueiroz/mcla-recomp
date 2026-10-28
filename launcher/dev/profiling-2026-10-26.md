@@ -131,7 +131,9 @@ to 5.37 ms (-5%), process 36.19 to 35.85 (-1%).
   +1.9% in the standing and driving segments). The tail removed the lateness (counters in the timer thread: wake-ups 306 us late on
   average without it, 6,898 of 59,633 more than 500 us late; 38 us with it, 274 of 54,774) and the frame stayed longer, so the
   late wake-up is not the cause; what is, is not known. `timer_queue_hr_wait` therefore defaults to off (v0.1.3's behaviour,
-  one core spinning in the llvm-mingw builds); the option and the tail stay for a machine that needs the core.
+  one core spinning in the llvm-mingw builds) at 16 and 8 logical processors; the option and the tail stay for a machine that needs
+  the core. Since 2026-10-27 the game turns it on by itself with 5 or fewer logical processors, where it is a large win (section
+  "The timer queue and the frame-pacing thread by processor count" below).
 - **Lock-free atomics: kept on.** It passes everywhere, the render thread uses 3 to 12% less CPU, the frame is 0.1 to 0.7% shorter
   (the race 0.2%). The shipped combination (this on, the timer wait off, the poll wait off) against the v0.1.3 SDK, 5 runs a
   side, is in the next section.
@@ -227,6 +229,169 @@ the same shape as the 40 s run above, 19% of the waits end on a freed slot. With
 word at +4 was stored 5,821 times by `sub_82160088` and the word at +0 5,768 times by `sub_82161210`, and no store to the flag
 byte at `0x82836810` was counted at all: the game's own loop never gave up on a slot in that run, while with the ring wait on
 four in five waits run to the deadline. How those two agree is not explained yet.
+
+## Wake on demand: the frame-pacing thread comes round when the main thread waits for it (2026-10-27)
+
+The finding above (the thread that frees the command ring's slots sleeps out 7 ms per round, and its round rate is the frame rate) gives
+the uncapped game a ceiling of about 143 to 145 FPS on a CPU whose frame is faster than 7 ms. Capping that `Sleep`
+(`mcla_pump_sleep_max_ms`) lifts the ceiling (202 and 239 FPS at 16 logical processors) but runs the thread all the time, costs CPU
+at 30 and 60 FPS with no gain, and starved the audio worker at 4 logical processors. `mcla_pump_wake_on_demand` (`src/poll_wait.cpp`,
+`config/poll_wait.toml`; on by itself with 6 or more logical processors, see the A/B below) does it only when it is needed:
+
+- the hook `mcla_poll_tick` (`0x821449C8`, after the load of the `Sleep` argument in `sub_82144888`) now returns a bool, and
+  `jump_address_on_true = 0x821449D0` skips the game's `bl sub_821C91B8`; nothing reads the `Sleep`'s result. With the option on the
+  hook does the wait itself: `WaitForSingleObject` on a manual-reset event with the `Sleep`'s argument (scaled like `XThread::Delay`
+  scales it), after clearing the event; the thread marks itself as waiting around it. A `Sleep(0)` is left to the game.
+- the hook `mcla_poll_wait` (`0x82148AB0`, in the main thread's wait for a free slot, `sub_82148A10`) is called every turn of that loop whether or
+  not `mcla_poll_wait` is on; it now sets the event when the thread is waiting and the ring is the first one (the one `sub_82160088` frees; the byte at
+  `+199` of the context picks it). So the round comes at once when the main thread has run out of work and waits for it, and
+  otherwise the thread keeps its 7 ms rhythm: nothing sets the event while a frame takes the main thread longer than the rhythm, or while a
+  frame-rate cap holds the main thread back, so a CPU that cannot exceed 145 FPS and the 30, 60 and 120 FPS caps see no change.
+- the audio watchdog: the SDL driver's steady underrun counter (silent frames after the game's first second of audio) is now counted
+  always (`rex::audio::dump::SteadyUnderruns()`, `patches/rexglue-xma-decoder-fixes.patch`), and the thread checks it once a round; a rise less than
+  two seconds after a round that came early turns the option off for the rest of the session with one warning in the log (an underrun with no
+  early round in the last two seconds is not its doing and is ignored). `--mcla_pump_wake_test_trip_s=N` trips it N seconds after the first early
+  round, to test the way back (development).
+- `mcla_pump_sleep_max_ms` stays as a development option; with it set (0 or more) the wake does nothing. The dev pad's `state` reply has
+  `pump_early=N` next to `pump_rounds=N`; `--mcla_poll_stats` logs the waits, the early ones and how often the ring wait saw the thread waiting.
+
+Checked so far (single runs under the shared lock, so they say how it behaves, not how much): the city route of
+`launcher/dev/scripts/wake-ab.pad` at 16 logical processors with the option on ran at 239 to 240 FPS uncapped (frame median 4.15 to 4.17 ms,
+p99 4.8 ms; the thread's rounds equal the frames, every one of them early) and held the caps (120.0, 60.0 and 30.0 swaps a second, no early round
+under a cap, the game clock 1.002 to 1.003 s a second); the ring wait only ever saw ring 0 with the thread waiting; with the watchdog tripped by
+`--mcla_pump_wake_test_trip_s=20` the frame rate fell back to 146 FPS and the log said so. The same trip under the exclusive lock (2026-10-27, one
+run, 16 logical processors): the thread had ended 4,530 waits early when it tripped; after it, roam 146.0 and drive 145.9 swaps a second (frame median
+6.83 and 6.81 ms, p99 7.85 and 7.89), the caps 120.0, 60.0 and 30.0, the game clock 1.002 to 1.003, 0 steady underruns and 0 late audio wakes.
+
+### The A/B
+
+D3D12, native, `launcher/dev/scripts/wake-ab.pad` (the title screen, then the city: free roam for 12 s and driving for 14 s, uncapped, then
+caps of 120, 60 and 30 FPS set with `set mcla_fps`, 12 s measured each after 3 s of settling), real-time steps, the game limited to 16, 8, 6 and 4
+logical processors (the harness sets the process's affinity mask to 0xFFFF, 0xFF, 0x3F and 0xF), the same build with
+`--mcla_pump_wake_on_demand=false` ("off", the game's own Sleep) and `=true` ("on"), 1 warm-up and 3 runs a side in turn (rotated), every run with
+`--audio_stats` (every 2 s) and `--mcla_poll_stats`, under the exclusive lock with the display woken before and checked after every run (on at both
+ends of all of them). Means of the 3 runs; "to" is off to on, in brackets the change; the process's CPU is the time of all its threads per second.
+The checks: RULE (the frame median at most +1.0% and p99 at most +3.0% longer on every segment, as for the other options), GAIN (free roam and
+driving at least 3% shorter where the base reached 142 FPS, i.e. where the Sleep is what holds it), AUDIO (no steady underrun in any run of the
+variant and the watchdog never tripped), CAPS (swaps a second within 1% of 120, 60 and 30) and CLOCK (the game clock within 0.01 s/s of 1.000).
+
+| Logical processors | Segment | Frame median, ms | p99, ms | Swaps a second | Process CPU, ms a second | Pump rounds a second | Game clock |
+|---|---|---|---|---|---|---|---|
+| 16 | free roam | 6.819 to 4.176 (-38.8%) | 7.94 to 4.84 (-39.1%) | 146.0 to 239.4 (+64.0%) | 3356 to 3928 (+17.1%) | 146 to 239 | 1.003 / 1.003 |
+|  | driving | 6.822 to 4.151 (-39.2%) | 7.87 to 4.80 (-38.9%) | 145.7 to 240.1 (+64.7%) | 3292 to 3922 (+19.1%) | 146 to 240 | 1.003 / 1.003 |
+|  | cap 120 | 8.341 to 8.338 (-0.0%) | 8.90 to 8.92 (+0.3%) | 120.0 to 120.0 (-0.0%) | 2511 to 2545 (+1.3%) | 145 to 153 | 1.002 / 1.002 |
+|  | cap 60 | 16.665 to 16.664 (-0.0%) | 17.34 to 17.22 (-0.7%) | 60.0 to 60.0 (+0.0%) | 2095 to 2061 (-1.6%) | 145 to 153 | 1.003 / 1.003 |
+|  | cap 30 | 33.331 to 33.324 (-0.0%) | 33.94 to 33.96 (+0.0%) | 30.0 to 30.0 (-0.0%) | 1851 to 1787 (-3.5%) | 145 to 153 | 1.002 / 1.002 |
+| 8 | free roam | 6.836 to 4.278 (-37.4%) | 8.12 to 5.69 (-29.8%) | 145.6 to 230.1 (+58.1%) | 3442 to 4110 (+19.4%) | 146 to 230 | 1.002 / 1.003 |
+|  | driving | 6.828 to 4.183 (-38.7%) | 8.10 to 5.25 (-35.1%) | 145.8 to 238.2 (+63.4%) | 3417 to 4220 (+23.5%) | 146 to 238 | 1.003 / 1.003 |
+|  | cap 120 | 8.336 to 8.327 (-0.1%) | 9.08 to 9.14 (+0.7%) | 120.0 to 120.0 (-0.0%) | 2657 to 2563 (-3.5%) | 145 to 154 | 1.002 / 1.003 |
+|  | cap 60 | 16.662 to 16.665 (+0.0%) | 17.35 to 17.38 (+0.2%) | 60.0 to 60.0 (+0.0%) | 2092 to 2122 (+1.4%) | 145 to 153 | 1.002 / 1.002 |
+|  | cap 30 | 33.338 to 33.326 (-0.0%) | 34.03 to 34.09 (+0.2%) | 30.0 to 30.0 (+0.0%) | 1744 to 1781 (+2.1%) | 145 to 153 | 1.002 / 1.002 |
+| 6 | free roam | 6.863 to 4.494 (-34.5%) | 8.12 to 6.21 (-23.5%) | 145.6 to 217.4 (+49.3%) | 3590 to 4093 (+14.0%) | 146 to 218 | 1.003 / 1.003 |
+|  | driving | 6.838 to 4.247 (-37.9%) | 8.31 to 6.04 (-27.3%) | 145.6 to 232.4 (+59.6%) | 3464 to 4263 (+23.1%) | 146 to 233 | 1.002 / 1.003 |
+|  | cap 120 | 8.341 to 8.329 (-0.2%) | 9.16 to 9.14 (-0.2%) | 120.0 to 120.0 (-0.0%) | 2593 to 2606 (+0.5%) | 145 to 153 | 1.002 / 1.002 |
+|  | cap 60 | 16.661 to 16.660 (-0.0%) | 17.39 to 17.45 (+0.4%) | 60.0 to 60.0 (-0.0%) | 2102 to 2129 (+1.3%) | 145 to 154 | 1.002 / 1.002 |
+|  | cap 30 | 33.332 to 33.331 (-0.0%) | 34.16 to 34.25 (+0.3%) | 30.0 to 30.0 (-0.0%) | 1865 to 1796 (-3.7%) | 145 to 154 | 1.002 / 1.002 |
+| 4 | free roam | 7.013 to 6.295 (-10.2%) | 29.64 to 25.30 (-14.7%) | 118.6 to 137.5 (+15.9%) | 3764 to 3770 (+0.2%) | 119 to 140 | 1.003 / 1.003 |
+|  | driving | 6.872 to 6.340 (-7.8%) | 29.91 to 29.58 (-1.1%) | 116.1 to 128.9 (+11.1%) | 3760 to 3796 (+0.9%) | 117 to 133 | 1.003 / 1.003 |
+|  | cap 120 | 8.303 to 8.296 (-0.1%) | 22.31 to 26.61 (+19.3%) | 117.0 to 116.1 (-0.8%) | 2797 to 2807 (+0.4%) | 139 to 144 | 1.003 / 1.003 |
+|  | cap 60 | 16.629 to 16.628 (-0.0%) | 41.37 to 41.35 (-0.1%) | 59.0 to 59.0 (-0.1%) | 2365 to 2345 (-0.8%) | 137 to 143 | 1.003 / 1.003 |
+|  | cap 30 | 33.317 to 33.329 (+0.0%) | 64.26 to 64.55 (+0.4%) | 30.0 to 30.0 (-0.1%) | 2108 to 2025 (-3.9%) | 133 to 139 | 1.003 / 1.002 |
+
+| Logical processors | Steady underruns, off / on (3 runs each) | Late wake-ups of the audio worker (8 ms or more) a run, off / on |
+|---|---|---|
+| 16 | 0 0 0 / 0 0 0 | 0 0 0 / 0 0 0 |
+| 8 | 0 0 0 / 0 0 0 | 0 0 0 / 0 0 0 |
+| 6 | 0 0 0 / 0 0 0 | 0 0 0 / 3 0 3 |
+| 4 | 0 0 0 / 0 2 0 | 329 303 329 / 252 330 249 |
+
+(Late wake-ups: the audio worker's wake-ups 8 ms or more late, per run; "steady underruns" are the silent frames after the game's first second
+of audio.) The 6-logical "on" runs had 3 late wake-ups in two of the three runs, none in the third.
+
+- **16, 8 and 6 logical processors: every check passes.** Uncapped, the city goes from 146 to 217-240 swaps a second (+49 to +65%; free roam
+  6.8 ms a frame to 4.2-4.5, driving 6.8 to 4.2) and the p99 frame is 23 to 39% shorter. In the uncapped segments every round of the thread is early (the early
+  wakes a second equal its rounds, which equal the swaps) and under a cap none is: the caps hold (120.0, 60.0, 30.0 swaps a second, the frame within 0.2% and the p99 within
+  -0.7 to +0.7%). The game clock stays at 1.002 to 1.003 s a second in every segment (real-time steps). No steady underrun in the 18 runs
+  and the watchdog never tripped. The process's CPU a second is +14 to +24% uncapped (it makes 49 to 65% more frames, so per frame it is 23 to 29%
+  less) and -3.7 to +2.1% under the caps. Under the caps the thread's rounds run 5 to 6% faster than with the game's own Sleep (153 against 145 a second): the
+  event's timeout ends about 0.33 ms sooner than the Sleep's; no CPU cost showed (process CPU within the above).
+- **4 logical processors: it fails.** Uncapped, only +16% and +11% (118.6 to 137.5 and 116.1 to 128.9 swaps a second; the frame median -10.2% and
+  -7.8%): the CPU is the limit there, not the Sleep. One of the three "on" runs (r2) had 2 steady underruns, 2 silent frames, while the thread was
+  coming round early: the watchdog tripped and the log says so ("pump wake on demand: the audio output ran dry (2 silent frames) while the thread
+  was coming round early; the frame-pacing thread goes back to the game's own Sleep for the rest of this session"); the thread went back to the game's own Sleep for the rest of that run.
+  The p99 at the 120 cap is 19.3% longer (22.3 to 26.6 ms) and the cap does not hold either way (117.0 and 116.1 swaps a second; the 60 cap 59.0 in both). The audio
+  worker's late wake-ups (8 ms or more) are 252 to 330 a run with it and 303 to 329 without. So RULE (cap 120), AUDIO and CAPS fail, and the option is not used there.
+  With the missing core of the timer thread (next section) the 4-logical machine is helped by the other option instead.
+- **Speed check** (`launcher/dev/scripts/cpup-speed.pad`, 16 logical processors, real-time steps, one run a side, the car driven for 14 s of wall time): the engine
+  frames equal the swaps, the game clock runs at 1.002 s a second without and 1.003 with the option, and the car covers the same ground (a path of 31.3 and
+  31.0 units, 2.24 and 2.21 a second along it; the engine step falls from a mean of 6.86 to 4.17 ms), so the game is not faster or slower for
+  playing at 240 instead of 146 FPS. In that pad's 8 s windows under the caps the swaps were 120.2, 60.2 and 30.5 a second without and 122.6, 60.7 and 30.8
+  with the option; the windows start while the cap takes hold (the 5.2 early wakes a second at the 120 cap are the first uncapped moments), and the A/B above,
+  which measures 12 s after 3 s of settling, has 120.0, 60.0 and 30.0.
+- **The default** is on at 6 or more logical processors and off at 5 or fewer (section "The timer queue and the frame-pacing thread by processor count").
+  The count is the process's affinity mask, which is how the harness limits the game, so the A/B above is what a player with that many processors gets.
+
+## The timer queue and the frame-pacing thread by processor count (2026-10-27)
+
+The two options above each win on one side of a processor count and lose on the other, so the game chooses by the number of logical processors the
+process may run on (the popcount of the process's affinity mask, which includes a job object's limit; when the mask is the whole processor group, all
+groups' processors, for a machine with more than 64). `MclaApp::ApplyPcDefaults` (`src/mcla_app.cpp`, Windows) sets, as the options' defaults
+(`rex::cvar::SetDefaultValue`: a value from the command line, an environment variable or `mcla.toml` wins, and nothing is saved):
+
+| Logical processors | `mcla_pump_wake_on_demand` | `timer_queue_hr_wait` |
+|---|---|---|
+| 6 or more | on | off |
+| 5 or fewer | off | on |
+
+and logs one line: `CPU: 4 logical processors: timer queue high-resolution wait on, pump wake on demand off (automatic; 5 or fewer)`, with
+`(set by the player)` after a value that was. Both cvars are read where they are used (the timer thread at every wait, the pump thread at every
+round), so the default set at the start is in effect for the whole run. Linux and the PS5 keep both off.
+
+**The timer queue at 6 and 4 logical processors.** The same harness as the wake A/B (D3D12, native, the city route with the caps, 1 warm-up and 3 runs a
+side, exclusive lock, display awake), `timer_queue_hr_wait` false ("off", v0.1.3's behaviour) and true ("on"), `mcla_pump_wake_on_demand` off in both. The
+last column is the timer thread's CPU in ms per swap.
+
+| Logical processors | Segment | Frame median, ms | p99, ms | Swaps a second | Process CPU, ms a second | Timer thread, ms a swap |
+|---|---|---|---|---|---|---|
+| 6 | free roam | 6.867 to 6.898 (+0.4%) | 8.05 to 8.22 (+2.1%) | 145.8 to 144.2 (-1.1%) | 3561 to 2467 (-30.7%) | 6.79 to 0.03 |
+|  | driving | 6.828 to 6.943 (+1.7%) | 8.27 to 8.22 (-0.7%) | 145.9 to 143.5 (-1.7%) | 3478 to 2370 (-31.9%) | 6.80 to 0.04 |
+|  | cap 120 | 8.336 to 8.336 (-0.0%) | 9.11 to 8.94 (-1.9%) | 120.0 to 120.0 (+0.0%) | 2578 to 1544 (-40.1%) | 8.32 to 0.03 |
+|  | cap 60 | 16.663 to 16.668 (+0.0%) | 17.27 to 17.26 (-0.0%) | 60.0 to 60.0 (-0.0%) | 2096 to 1119 (-46.6%) | 16.63 to 0.06 |
+|  | cap 30 | 33.324 to 33.322 (-0.0%) | 34.29 to 33.94 (-1.0%) | 30.0 to 30.0 (-0.0%) | 1749 to 867 (-50.4%) | 30.71 to 0.19 |
+| 4 | free roam | 7.011 to 7.053 (+0.6%) | 26.77 to 9.82 (-63.3%) | 123.1 to 144.0 (+17.0%) | 3798 to 2939 (-22.6%) | 7.07 to 0.04 |
+|  | driving | 6.885 to 6.835 (-0.7%) | 30.40 to 11.91 (-60.8%) | 117.5 to 142.7 (+21.4%) | 3739 to 2771 (-25.9%) | 7.50 to 0.03 |
+|  | cap 120 | 8.295 to 8.338 (+0.5%) | 23.77 to 9.13 (-61.6%) | 117.0 to 120.0 (+2.6%) | 2830 to 1651 (-41.7%) | 8.26 to 0.05 |
+|  | cap 60 | 16.648 to 16.668 (+0.1%) | 39.11 to 17.35 (-55.6%) | 59.2 to 60.0 (+1.3%) | 2340 to 1113 (-52.4%) | 16.66 to 0.06 |
+|  | cap 30 | 33.328 to 33.316 (-0.0%) | 63.02 to 34.18 (-45.8%) | 30.0 to 30.0 (+0.0%) | 2058 to 862 (-58.1%) | 32.35 to 0.18 |
+
+| Logical processors | Steady underruns, off / on (3 runs each) | Late wake-ups of the audio worker (8 ms or more) a run, off / on |
+|---|---|---|
+| 6 | 0 0 0 / 0 0 0 | 3 2 1 / 0 0 0 |
+| 4 | 0 0 0 / 0 0 0 | 301 307 276 / 25 16 23 |
+
+- **At 4 logical processors the high-resolution wait is a large win and passes every check.** The timer thread's CPU falls from the whole frame time per
+  swap (one core) to 0.03 to 0.19 ms, and the process's by 23 to 58%. The median frame does not move (+0.6% and -0.7% uncapped) but the long frames go:
+  p99 26.8 and 30.4 ms to 9.8 and 11.9 ms (-63% and -61%), the swaps a second 123.1 and 117.5 to 144.0 and 142.7 (+17.0% and +21.4%), the 120 FPS cap
+  now held (117.0 to 120.0), the 60 cap 59.2 to 60.0, the p99 at the caps 46 to 62% shorter. The audio worker's wake-ups 8 ms or more late fall from
+  about 300 to about 20 a run. No steady underrun either way. (The "off" runs of this and of the wake A/B agree: 116 to 123 swaps a second.)
+- **At 6 it fails the rule narrowly** (RULE and GAIN): the frame +0.4% and +1.7% in free roam and driving (145.8 and 145.9 to 144.2 and 143.5 swaps a second),
+  p99 +2.1% and -0.7%, for 31 to 50% less CPU (-31% and -32% uncapped, -40 to -50% at the caps) and the late wake-ups 3 2 1 to 0 0 0. Earlier, at 16 and 8, it made the frame 1 to
+  2.4% longer (above), so it stays off from 6 up.
+- **The line at 6**: wake on demand passes at 6 (+49 to +60% FPS, no audio problem) and fails at 4; the high-resolution wait passes at 4 and fails at 6. Neither
+  was measured at 5, which follows the 4 (5 or fewer). Nothing turns both on at once: they were not measured together.
+- **The automatic default, checked in the game** (the exe built from this branch; no flag for either option; `wake-ab.pad`, D3D12; the `CPU:` line is
+  in the game's log). 16 logical processors, one run under the shared lock: `CPU: 16 logical processors: timer queue high-resolution wait off, pump wake on
+  demand on (automatic; 6 or more)`; free roam and driving 237.9 and 240.0 swaps a second (the A/B's "on": 239.4 and 240.1), the caps 120.0, 60.0 and 30.0, the
+  thread's wakes early in the uncapped segments only. With `--mcla_pump_wake_on_demand=false` the line says `pump wake on demand off (set by the player)` and
+  the game runs at 146.2 and 146.0 (the shipped Sleep). 4 logical processors, exclusive lock, 1 warm-up and 2 runs a side, the automatic default ("on") against
+  `--timer_queue_hr_wait=false` ("off"): `CPU: 4 logical processors: timer queue high-resolution wait on, pump wake on demand off (automatic; 5 or fewer)`,
+  and with the flag `timer queue high-resolution wait off (set by the player)`. The default is the measured "on": uncapped 120.9 and 117.1 to 144.3 and
+  142.4 swaps a second (+19.4% and +21.6%), p99 27.0 and 31.5 ms to 9.5 and 12.6 ms (-65% and -60%), the 120 cap 115.5 to 120.0, the 60 cap 59.2 to 60.0,
+  the process's CPU -23 to -58%, the audio worker's late wake-ups 340 and 288 a run to 19 and 21; one "off" run had a steady underrun (1 silent frame), no "on" run. 6 logical processors, the boundary: `CPU: 6 logical processors: timer queue
+  high-resolution wait off, pump wake on demand on (automatic; 6 or more)`.
+
+**Not verified**: the numbers are one CPU (a Ryzen 7 9800X3D, 8 cores, 16 threads) limited by affinity, so the 4 and 6 logical-processor runs have its fast cores and cache,
+not a slower or a 4-core CPU's; processor counts other than 16, 8, 6 and 4; both options together; the PS5 and Linux (neither built nor run with the options).
 
 ## Upper bounds for two codegen costs (2026-10-27)
 

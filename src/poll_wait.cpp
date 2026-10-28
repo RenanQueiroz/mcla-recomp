@@ -26,17 +26,31 @@
 // in five do not (they end at the deadline).
 //
 // The same loop ends each round with a Sleep (see mcla_poll_tick and mcla_pump_sleep_max_ms).
+//
+// Wake on demand (mcla_pump_wake_on_demand): that Sleep is what holds the uncapped game near 145 frames a
+// second, because one round of the loop frees exactly one slot, so the main thread, once its own work takes
+// less than the 7 ms of the loop's rhythm, waits for the next round. The Sleep becomes a wait on an event
+// with the same timeout (mcla_poll_tick skips the game's call); the main thread's ring wait (mcla_poll_wait, the
+// hook is in the game's loop whether or not the option of that name is on) sets the event when it finds the
+// ring full and the thread is waiting, so the round comes at once. While the main thread has no need of the
+// thread (a frame takes it longer than the rhythm, or the frame rate is capped below it) nothing sets the
+// event and the thread keeps its 7 ms. The audio watchdog turns it off for the rest of the session when the
+// audio output runs dry while the thread was coming round early (the SDK's steady underrun counter).
 
 #include "generated/default/mcla_init.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 
+#include <rex/audio/audio_dump.h>
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -71,6 +85,20 @@ REXCVAR_DEFINE_INT32(mcla_pump_sleep_max_ms, -1, "MCLA",
                      "milliseconds (0 is a Sleep(0)). Takes effect at once; for experiments: with 4 logical "
                      "processors it starved the audio worker (504 to 859 underruns), so it stays off")
     .range(-1, 16);
+REXCVAR_DEFINE_BOOL(mcla_pump_wake_on_demand, false, "MCLA",
+                    "The frame-pacing thread (the loop of sub_82144888, which frees the command ring's slots and "
+                    "sleeps out 7 ms per round) waits on an event instead of sleeping, and the main thread sets the "
+                    "event when it is waiting for a ring slot: the thread comes round at once when the main thread "
+                    "has nothing else to do, and keeps its 7 ms rhythm otherwise. Lifts the 143 to 145 frames a "
+                    "second that the uncapped game was held to on a CPU whose frame takes less than 7 ms; changes "
+                    "nothing where the frame takes longer, or under a frame-rate cap below that. A steady audio "
+                    "underrun while it runs turns it off for the rest of the session. Off is the game's own Sleep. "
+                    "Has no effect while mcla_pump_sleep_max_ms is 0 or more");
+REXCVAR_DEFINE_INT32(mcla_pump_wake_test_trip_s, 0, "MCLA",
+                     "Development: with mcla_pump_wake_on_demand, this many seconds after the first early wake the "
+                     "audio watchdog trips as if the audio had run dry (0 = never), to test the way back to the "
+                     "game's own Sleep")
+    .range(0, 3600);
 REXCVAR_DEFINE_BOOL(mcla_poll_stats, false, "MCLA",
                     "Development: log how the main thread's waits for a ring slot ended, every 10 "
                     "seconds");
@@ -102,6 +130,17 @@ struct Stats {
   std::atomic<int64_t> last_log_ns{0};
 };
 Stats g_stats;
+
+// mcla_pump_wake_on_demand.
+struct Wake {
+  std::atomic<bool> pump_waiting{false};  // the pump thread is inside its wait: the main thread may set the event
+  std::atomic<bool> off{false};           // the audio watchdog tripped: the game's own Sleep from now on
+  std::atomic<uint64_t> waits{0}, early{0}, timed_out{0}, signals{0}, other_ring{0}, ring_calls{0};
+  std::atomic<int64_t> first_early_ns{0}, last_early_ns{0};
+  uint64_t steady_seen = 0;  // the pump thread's alone
+  bool announced = false;    // the pump thread's alone
+};
+Wake g_wake;
 
 float GuestFloat(uint32_t ea);
 uint8_t GuestByte(uint32_t ea);
@@ -149,6 +188,13 @@ void MaybeLog() {
     // loop gives its timing scope (the string at 0x82003778).
     REXLOG_INFO("poll tick: the loop's callback is {:#010x}, its timing scope is \"{}\"", GuestWord(0x828366D0),
                 GuestString(0x82003778, 48));
+    if (REXCVAR_GET(mcla_pump_wake_on_demand)) {
+      REXLOG_INFO(
+          "poll tick: wake on demand{}: {} waits, {} ended early (the main thread set the event), {} ran out; the ring wait "
+          "saw the thread waiting {} times, {} of them for another ring, and set the event {} times",
+          g_wake.off.load() ? " (OFF: the audio watchdog tripped)" : "", g_wake.waits.load(), g_wake.early.load(),
+          g_wake.timed_out.load(), g_wake.ring_calls.load(), g_wake.other_ring.load(), g_wake.signals.load());
+    }
   }
 }
 
@@ -185,6 +231,163 @@ std::string GuestString(uint32_t ea, size_t max) {
     text += (c >= 0x20 && c < 0x7F) ? c : '?';
   }
   return text;
+}
+
+// ---- mcla_pump_wake_on_demand ---------------------------------------------------------------------------------------------
+// The event the pump thread waits on in place of its Sleep, and what sets it.
+#if defined(_WIN32)
+HANDLE PumpWakeEvent() {
+  static HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // manual reset
+  return event;
+}
+bool PumpWakeUsable() {
+  return PumpWakeEvent() != nullptr;
+}
+void PumpWakeReset() {
+  ResetEvent(PumpWakeEvent());
+}
+void PumpWakeSet() {
+  SetEvent(PumpWakeEvent());
+}
+bool PumpWakeWait(uint32_t ms) {  // true: the event was set; false: the time ran out
+  return WaitForSingleObject(PumpWakeEvent(), ms) == WAIT_OBJECT_0;
+}
+#else
+std::mutex g_pump_wake_mutex;
+std::condition_variable g_pump_wake_cv;
+bool g_pump_wake_is_set = false;
+bool PumpWakeUsable() {
+  return true;
+}
+void PumpWakeReset() {
+  std::lock_guard<std::mutex> lock(g_pump_wake_mutex);
+  g_pump_wake_is_set = false;
+}
+void PumpWakeSet() {
+  {
+    std::lock_guard<std::mutex> lock(g_pump_wake_mutex);
+    g_pump_wake_is_set = true;
+  }
+  g_pump_wake_cv.notify_one();
+}
+bool PumpWakeWait(uint32_t ms) {
+  std::unique_lock<std::mutex> lock(g_pump_wake_mutex);
+  return g_pump_wake_cv.wait_for(lock, std::chrono::milliseconds(ms), [] { return g_pump_wake_is_set; });
+}
+#endif
+
+int64_t SteadyNowNs() {
+  using namespace std::chrono;
+  return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// The main thread, in its ring wait (every turn of the loop of sub_82148A10): if the pump thread is waiting
+// for its next round, tell it the main thread is waiting for it. The ring is picked by the byte at +199 of
+// the context as the game's loop does; the pump thread frees the first one only.
+void WakePumpIfWaiting(PPCRegister& r31) {
+  if (!g_wake.pump_waiting.load(std::memory_order_acquire)) {
+    return;
+  }
+  uint8_t* base = GuestBase();
+  if (!base) {
+    return;
+  }
+  const uint32_t ring = (uint32_t(base[r31.u32 + 199]) >> 2) & 0x3FFFFFF8u;
+  g_wake.ring_calls.fetch_add(1, std::memory_order_relaxed);
+  if (ring != 0) {
+    g_wake.other_ring.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_wake.signals.fetch_add(1, std::memory_order_relaxed);
+  PumpWakeSet();
+}
+
+void TripWatchdog(const std::string& why) {
+  if (g_wake.off.exchange(true)) {
+    return;
+  }
+  REXLOG_WARN(
+      "pump wake on demand: {}; the frame-pacing thread goes back to the game's own Sleep for the rest of this session "
+      "({} early wakes, {} timeouts so far)",
+      why, g_wake.early.load(), g_wake.timed_out.load());
+}
+
+// The audio watchdog (the pump thread, once a round): a silent frame in the middle of the game's audio, less than
+// two seconds after a round that came early, turns the option off. A silence with no early wake in the last
+// two seconds is not this option's doing (a stall, or a frame rate where it does not act) and is ignored.
+void CheckAudio(int64_t now) {
+  const uint64_t steady = rex::audio::dump::SteadyUnderruns();
+  if (steady != g_wake.steady_seen) {
+    const uint64_t added = steady - g_wake.steady_seen;
+    g_wake.steady_seen = steady;
+    const int64_t last = g_wake.last_early_ns.load(std::memory_order_relaxed);
+    if (last != 0 && now - last < 2'000'000'000LL) {
+      TripWatchdog("the audio output ran dry (" + std::to_string(added) +
+                   " silent frames) while the thread was coming round early");
+      return;
+    }
+  }
+  const int32_t test = REXCVAR_GET(mcla_pump_wake_test_trip_s);
+  const int64_t first = g_wake.first_early_ns.load(std::memory_order_relaxed);
+  if (test > 0 && first != 0 && now - first >= static_cast<int64_t>(test) * 1'000'000'000LL) {
+    TripWatchdog("mcla_pump_wake_test_trip_s of " + std::to_string(test) + " s");
+  }
+}
+
+// The pump thread, in place of the game's Sleep(ms). Returns true when it waited (the hook then skips the game's
+// call), false to leave the Sleep to the game (off, tripped, Sleep(0), no event).
+bool PumpWait(uint32_t ms) {
+  if (ms == 0 || g_wake.off.load(std::memory_order_relaxed) || !PumpWakeUsable()) {
+    return false;
+  }
+  const int64_t now = SteadyNowNs();
+  if (!g_wake.announced) {
+    g_wake.announced = true;
+    g_wake.steady_seen = rex::audio::dump::SteadyUnderruns();
+    REXLOG_INFO(
+        "pump wake on demand: on. The frame-pacing thread's Sleep is a wait that the main thread's ring wait ends early; "
+        "a steady audio underrun while it comes round early turns it off");
+  }
+  CheckAudio(now);
+  if (g_wake.off.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  // What the game's Sleep would wait: its argument in guest milliseconds, scaled like XThread::Delay does.
+  const uint32_t wait_ms = rex::chrono::Clock::ScaleGuestDurationMillis(ms);
+  if (wait_ms == 0) {
+    return false;
+  }
+  PumpWakeReset();  // a set from an earlier wait is not this wait's
+  g_wake.pump_waiting.store(true, std::memory_order_seq_cst);
+  const bool early = PumpWakeWait(wait_ms);
+  g_wake.pump_waiting.store(false, std::memory_order_seq_cst);
+  g_wake.waits.fetch_add(1, std::memory_order_relaxed);
+  if (early) {
+    g_wake.early.fetch_add(1, std::memory_order_relaxed);
+    const int64_t stamp = SteadyNowNs();
+    int64_t zero = 0;
+    g_wake.first_early_ns.compare_exchange_strong(zero, stamp, std::memory_order_relaxed);
+    g_wake.last_early_ns.store(stamp, std::memory_order_relaxed);
+  } else {
+    g_wake.timed_out.fetch_add(1, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+// Rounds, Sleep arguments (as the game worked them out) and spacing of the freeing thread (mcla_poll_stats).
+void CountTick(uint32_t asked) {
+  const int64_t now = SteadyNowNs();
+  const int64_t last = g_stats.last_tick_ns.exchange(now, std::memory_order_relaxed);
+  if (last != 0) {
+    const uint64_t period = static_cast<uint64_t>(now - last);
+    g_stats.tick_periods.fetch_add(1, std::memory_order_relaxed);
+    g_stats.tick_period_ns_sum.fetch_add(period, std::memory_order_relaxed);
+    uint64_t seen = g_stats.tick_period_ns_max.load(std::memory_order_relaxed);
+    while (period > seen && !g_stats.tick_period_ns_max.compare_exchange_weak(seen, period)) {
+    }
+  }
+  g_stats.sleep_ms[std::min<uint32_t>(asked, 16)].fetch_add(1, std::memory_order_relaxed);
+  MaybeLog();
 }
 
 #if defined(_WIN32)
@@ -328,6 +531,7 @@ void InstallWriterTrace() {
 // reading (microseconds). True skips the Sleep(0).
 bool mcla_poll_wait(PPCRegister& r31, PPCRegister& r30, PPCRegister& r29, PPCRegister& r26,
                     PPCRegister& r3) {
+  WakePumpIfWaiting(r31);  // mcla_pump_wake_on_demand: the main thread is waiting for the thread that frees the slot
 #if defined(_WIN32)
   if (REXCVAR_GET(mcla_poll_find_writer)) {
     InstallWriterTrace();
@@ -450,8 +654,10 @@ void mcla_poll_release(PPCRegister& r6) {
 // mcla_pump_sleep_max_ms of 0 or more the argument is capped there: nothing else reads r3, the
 // Sleep is the next call. With mcla_poll_stats it counts the rounds, the Sleep arguments (as the
 // game worked them out) and the time between rounds, which is how often a slot is freed.
-void mcla_poll_tick(PPCRegister& r3) {
-#if defined(_WIN32)
+// With mcla_pump_wake_on_demand the Sleep is done here, as a wait on an event that the main thread's ring
+// wait sets (PumpWait), and the return value true skips the game's call: the hook's jump_address_on_true
+// is the instruction after it (nothing reads the Sleep's result; the loop starts its next round).
+bool mcla_poll_tick(PPCRegister& r3) {
   const uint32_t asked = r3.u32;
   const int32_t cap = REXCVAR_GET(mcla_pump_sleep_max_ms);
   if (cap >= 0 && asked > static_cast<uint32_t>(cap)) {
@@ -459,28 +665,19 @@ void mcla_poll_tick(PPCRegister& r3) {
     g_stats.sleep_capped.fetch_add(1, std::memory_order_relaxed);
   }
   g_stats.ticks.fetch_add(1, std::memory_order_relaxed);  // the dev pad's `state` reports it
-  if (!REXCVAR_GET(mcla_poll_stats)) {
-    return;
+  if (REXCVAR_GET(mcla_poll_stats)) {
+    CountTick(asked);
   }
-  using namespace std::chrono;
-  const int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
-  const int64_t last = g_stats.last_tick_ns.exchange(now, std::memory_order_relaxed);
-  if (last != 0) {
-    const uint64_t period = static_cast<uint64_t>(now - last);
-    g_stats.tick_periods.fetch_add(1, std::memory_order_relaxed);
-    g_stats.tick_period_ns_sum.fetch_add(period, std::memory_order_relaxed);
-    uint64_t seen = g_stats.tick_period_ns_max.load(std::memory_order_relaxed);
-    while (period > seen && !g_stats.tick_period_ns_max.compare_exchange_weak(seen, period)) {
-    }
-  }
-  g_stats.sleep_ms[std::min<uint32_t>(asked, 16)].fetch_add(1, std::memory_order_relaxed);
-  MaybeLog();
-#else
-  (void)r3;
-#endif
+  // With the cap set the experiment is the game's Sleep with a smaller argument, not this wait.
+  return cap < 0 && REXCVAR_GET(mcla_pump_wake_on_demand) && PumpWait(asked);
 }
 
 // Rounds the freeing thread has made since the start (src/dev_pad.cpp's `state`).
 uint64_t MclaPumpRounds() {
   return g_stats.ticks.load(std::memory_order_relaxed);
+}
+
+// Rounds that the freeing thread's wait ended early because the main thread set the event (src/dev_pad.cpp's `state`).
+uint64_t MclaPumpEarlyWakes() {
+  return g_wake.early.load(std::memory_order_relaxed);
 }
