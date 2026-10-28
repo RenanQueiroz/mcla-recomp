@@ -39,6 +39,10 @@ it say where); what it does:
   from PresentMon, free roam, on the Radeon (native resolution) and on the RTX 5080
   (native resolution and 3x); only adjacent runs are compared (the Radeon has hours
   when it runs 1.4 times slower);
+- the Direct3D 12 debug layer (`--d3d12_debug=true`, Radeon, native resolution, a short
+  pad) with the setting off and on, its messages counted: any kind of message that
+  is new or more frequent with the setting on is a lead (the hoisted barriers and
+  copies are the only new commands, and the layer checks the states they claim);
 - `--d3d12_hoist_shared_memory_uploads_stats=true` logs the runs, the hoisted
   uploads and the uploads done in place, which says how much of the uploads the
   rule lets through.
