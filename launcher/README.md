@@ -998,6 +998,10 @@ during a build:
   `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
+- `rain-2026-10-28.md` (fork issue #17, the rain gone above native resolution and the pause menu and GPS map slower than driving): what the frame logs and the
+  game's code say (the game never issues the rain's draw at 2x; the sun's visibility queries are the one scale-dependent answer it reads), the defect found in
+  the SDK's occlusion queries (`rexglue-occlusion-query-keep-open.patch`), why the pause menu draws in three tiles and `mcla_larger_tiles` makes it two, what
+  is measured and what is not (nothing of the fixes was run when it was written), and how to read the chain that tests them.
 
 ## Scripted controller input (unattended runs)
 
