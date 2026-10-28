@@ -74,7 +74,7 @@ index 1e56c4f..f39335e 100644
    uint64_t current_submission_time_ = 0;
  
 diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
-index 62b783d..98a740f 100644
+index 62b783d..11efc63 100644
 --- a/src/graphics/d3d12/texture_cache.cpp
 +++ b/src/graphics/d3d12/texture_cache.cpp
 @@ -604,8 +604,11 @@ bool D3D12TextureCache::Initialize() {
@@ -103,7 +103,25 @@ index 62b783d..98a740f 100644
    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
    DXGI_FORMAT direct_load_uav_format = GetDirectLoadUAVFormat(key, desc.Format);
    if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN) {
-@@ -1873,9 +1877,15 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1648,6 +1652,17 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+     texture->SetPlacement(heap_index, heap_offset, heap_size);
+   }
+   texture->SetDirectLoadUAVFormat(direct_load_uav_format);
++  if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN && !key.scaled_resolve) {
++    // The first few, to see that texture_load_direct_unscaled applies to anything.
++    static uint32_t direct_unscaled_logged = 0;
++    if (direct_unscaled_logged < 24) {
++      ++direct_unscaled_logged;
++      REXGPU_INFO(
++          "D3D12TextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
++          "straight in",
++          key.GetWidth(), key.GetHeight(), FormatInfo::Get(key.format)->name, key.base_page << 12);
++    }
++  }
+   return std::unique_ptr<Texture>(texture);
+ }
+ 
+@@ -1873,9 +1888,15 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    // texture_load_direct: decode straight into the texture through an unsigned
    // integer UAV, without the buffer and the copy.
    bool direct_load = false;
@@ -122,7 +140,7 @@ index 62b783d..98a740f 100644
      if (direct_load_shader != kDirectLoadShaderUnknown &&
          load_pipelines_direct_[direct_load_shader]) {
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 793f6cc..efb7ebd 100644
+index 793f6cc..b28afbd 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
 @@ -131,6 +131,13 @@ REXCVAR_DEFINE_BOOL(texture_load_direct, true, "GPU",
@@ -203,7 +221,27 @@ index 793f6cc..efb7ebd 100644
    }
  
    // Invalidate textures. Toggling individual textures between scaled and
-@@ -804,6 +846,26 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+@@ -642,7 +684,8 @@ void TextureCache::TextureKey::LogAction(const char* action) const {
+   REXGPU_TRACE(
+       "{} {} {}{}x{}x{} {} {} texture with {} {}packed mip level{}, "
+       "base at 0x{:08X} (pitch {}), mips at 0x{:08X}",
+-      action, tiled ? "tiled" : "linear", scaled_resolve ? "scaled " : "", GetWidth(), GetHeight(),
++      action, tiled ? "tiled" : "linear",
++      scaled_resolve ? "scaled " : (resolved_unscaled ? "resolved " : ""), GetWidth(), GetHeight(),
+       GetDepthOrArraySize(), GetLogDimensionName(), FormatInfo::Get(format)->name,
+       mip_max_level + 1, packed_mips ? "" : "un", mip_max_level != 0 ? "s" : "", base_page << 12,
+       pitch << 5, mip_page << 12);
+@@ -653,7 +696,8 @@ void TextureCache::Texture::LogAction(const char* action) const {
+       "{} {} {}{}x{}x{} {} {} texture with {} {}packed mip level{}, "
+       "base at 0x{:08X} (pitch {}, size 0x{:08X}), mips at 0x{:08X} (size "
+       "0x{:08X})",
+-      action, key_.tiled ? "tiled" : "linear", key_.scaled_resolve ? "scaled " : "",
++      action, key_.tiled ? "tiled" : "linear",
++      key_.scaled_resolve ? "scaled " : (key_.resolved_unscaled ? "resolved " : ""),
+       key_.GetWidth(), key_.GetHeight(), key_.GetDepthOrArraySize(), key_.GetLogDimensionName(),
+       FormatInfo::Get(key_.format)->name, key_.mip_max_level + 1, key_.packed_mips ? "" : "un",
+       key_.mip_max_level != 0 ? "s" : "", key_.base_page << 12, key_.pitch << 5, GetGuestBaseSize(),
+@@ -804,6 +848,26 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
      }
    }
  
@@ -230,7 +268,7 @@ index 793f6cc..efb7ebd 100644
    auto get_host_extent = [this, &key](uint32_t& host_width_out, uint32_t& host_height_out,
                                        uint32_t& host_depth_or_array_size_out) {
      host_width_out = key.GetWidth();
-@@ -1092,6 +1154,35 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled, uint32_t lengt
+@@ -1092,6 +1156,35 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled, uint32_t lengt
    return false;
  }
  
@@ -267,10 +305,28 @@ index 793f6cc..efb7ebd 100644
      const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
      uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index e474eb9..1ee9676 100644
+index e474eb9..1d8995c 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
-@@ -1313,8 +1313,14 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+@@ -1291,6 +1291,17 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+   std::unique_ptr<VulkanTexture> texture(new VulkanTexture(*this, key, image, allocation));
+   texture->set_storage_copy_format(storage_copy_format);
+   texture->set_image_format(formats[0]);
++  if (key.resolved_unscaled && storage_copy_format != VK_FORMAT_UNDEFINED) {
++    // The first few, to see that texture_load_direct_unscaled applies to anything.
++    static uint32_t direct_unscaled_logged = 0;
++    if (direct_unscaled_logged < 24) {
++      ++direct_unscaled_logged;
++      REXGPU_INFO(
++          "VulkanTextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
++          "straight in",
++          key.GetWidth(), key.GetHeight(), FormatInfo::Get(key.format)->name, key.base_page << 12);
++    }
++  }
+   return texture;
+ }
+ 
+@@ -1313,8 +1324,14 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
                                                    uint32_t view_format_count) {
    // Only single-level 2D (and stacked and cube) textures: the copy is of one
    // level, and 3D images would need another shader.
@@ -287,7 +343,7 @@ index e474eb9..1ee9676 100644
      return VK_FORMAT_UNDEFINED;
    }
    // The format the load writes in (as in LoadTextureDataFromResidentMemoryImpl).
-@@ -1374,7 +1380,8 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+@@ -1374,7 +1391,8 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
    if (key.scaled_resolve) {
      size_bytes *= uint64_t(draw_resolution_scale_x()) * draw_resolution_scale_y();
    }
@@ -297,7 +353,7 @@ index e474eb9..1ee9676 100644
      return VK_FORMAT_UNDEFINED;
    }
    VkFormat storage_copy_format = texel_size == 4   ? VK_FORMAT_R32_UINT
-@@ -1558,7 +1565,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1558,7 +1576,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    // copy view, without the scratch buffer and the copy.
    VkPipeline pipeline_direct = VK_NULL_HANDLE;
    VkImageView direct_load_view = VK_NULL_HANDLE;
@@ -312,7 +368,7 @@ index e474eb9..1ee9676 100644
        vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED && level_first == 0 &&
        level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d &&
        pipeline_float_convert == VK_NULL_HANDLE) {
-@@ -3385,55 +3398,59 @@ bool VulkanTextureCache::Initialize() {
+@@ -3385,55 +3409,59 @@ bool VulkanTextureCache::Initialize() {
          }
        }
      }
