@@ -437,6 +437,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-guest-atomics-lock-free.patch"; File = "src\core\mutex.cpp"; Adds = "guest_atomics_lock_free" }
     @{ Patch = "rexglue-resolve-direct-batched-loads.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "resolve_direct_batched_loads" }
     @{ Patch = "rexglue-skip-overwritten-transfers.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "skip_overwritten_transfers" }
+    @{ Patch = "rexglue-d3d12-depth-resolve-read-state.patch"; File = "src\graphics\d3d12\render_target_cache.cpp"; Adds = "d3d12_depth_resolve_read_state" }
     @{ Patch = "rexglue-xma-decoder-fixes.patch"; File = "src\audio\xma_context.cpp"; Adds = "xma_race_fixes" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
