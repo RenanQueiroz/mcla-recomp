@@ -1683,6 +1683,58 @@ The genuine dithering stays: foliage, the distant trees' billboards and the edge
 | The rules, the log, the per-resolve mode, the marker state | `include/rex/graphics/command_processor.h`, `include/rex/graphics/flags.h`, `src/graphics/command_processor.cpp` | D3D12, Vulkan |
 | IssueCopy takes the readback path when rules or the log are there to apply; the mode of the resolve | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12; Vulkan |
 
+## rexglue-render-target-max-height.patch
+
+**Why.** With host render targets, the SDK makes every render target as tall as the console's whole EDRAM from its base: `RenderTargetCache::GetRenderTargetHeight` is 2,048 tiles divided by the pitch in tiles, up to 8,192 rows (D3D12 clamps it to 16,384 scaled rows), however little of it the title draws. A 1280-pixel-wide target is 1024 or 2048 rows tall, a 128-pixel one 8,192, so each one is about 10.5 MB times the bytes a sample takes times the resolution scale squared: 42 MB at 2x and 94 MB at 3x for a 32-bit target, twice that for 64-bit colour (the game's HDR scene is R16G16B16A16_FLOAT) and for its D24FS8 depth (R32G8X24). Midnight Club: Los Angeles makes 33 to 54 such targets in a scene (computed from its frame logs, `launcher/dev/vram-2026-10-28.md`), which is 1.9 to 3.4 GB at 2x and 4.1 to 7.0 GB at 3x before any texture (fork issue #19: a 6 GB card falls to 5 FPS at 2x). The game's largest surface is 736 rows (its single tile); the frame logs show draws of 720 rows or less.
+
+**What it adds.**
+- `render_target_max_height` (uint, default 0 = off, in pixels at 1x; next start): the tallest host render target. `GetRenderTargetHeight` returns at most this many rows (a multiple of the tile height, which is 16 rows without MSAA and 8 with it, at least 2 tile rows). The same function sizes the host image, the framebuffer, the checks of clears and resolves and the estimate of what a draw uses, so nothing else assumes the old height.
+- A draw whose estimated extent (from its viewport, scissor or vertex positions: not the 8,192 of "no information") reaches past the limit is cut at it, and the cut is logged (`a draw reaches row N of a P-tile-wide, MxMSAA surface, cut at H rows by render_target_max_height`, the first 16 and every 10,000th). A title that never draws taller than the limit never sees one.
+- Both backends (the function is common). Nothing else changes with the option at 0.
+
+**Status.** Written from the SDK's code; the new lines compiled by CI (D3D12 and Vulkan sources). The saving is computed (`launcher/dev/vram-2026-10-28.md`: with a 1,024-row limit the targets of the frame logs take 929 to 1,481 MB at 2x instead of 1,929 to 3,448); the picture and the memory are measured by the `vram19` chain (the results are in the dev note). Nothing ran on Linux or the PS5.
+
+| Change | Files | Affects |
+|---|---|---|
+| The option, the limit in `GetRenderTargetHeight`, the log of cut draws | `src/graphics/pipeline/render_target/cache.cpp`, `include/rex/graphics/pipeline/render_target/cache.h` | D3D12, Vulkan |
+
+## rexglue-render-target-trim.patch
+
+**Why.** A host render target is made for each key (EDRAM base, pitch, MSAA, format) a title uses and is kept for good: `RenderTargetCache::ClearCache`, which frees the ones that own no EDRAM range, runs only on the debug request to clear the caches. A title that uses new keys over time (Midnight Club: Los Angeles opens the pause menu and the GPS map in 4x MSAA, with keys the scene never uses) ends up with the union of all its sets resident, 84 MB or more for each 64-bit target at 2x.
+
+**What it adds.**
+- `render_target_trim_seconds` (uint, default 0 = off; changes during play): at the end of a frame (checked once a second) the command processor asks `RenderTargetCache::IsTrimDue`; if a render target is not the owner of any EDRAM range, and hasn't been asked for (`GetOrCreateRenderTarget`) for this many seconds, it waits for the GPU to finish every submission (`AwaitAllQueueOperationsCompletion`, as `cache_clear_requested_` does) and `TrimUnusedRenderTargets` frees it. A render target that owns no range holds no data, so it is made again, empty, when a draw needs the key. The wait happens only when there is something to free. The log says what was freed (`freed N unused render targets (X MB), M left`).
+- With `set_trim_pressure(true)` (the next patch) the idle time is 0.
+- Every pointer to a freed target is dropped: the common code's last-update and accumulated arrays, the transfer lists, and through the virtual `OnRenderTargetsTrimmed` the implementation's: D3D12 invalidates the render targets set in the command list, Vulkan destroys its framebuffers (as `ClearCache` does). Failed creations (`nullptr` entries) are erased, so the next use tries again.
+- `RenderTarget::host_memory_bytes` and `RenderTargetCache::GetRenderTargetsHostMemoryBytes`: each backend reports the size of a target when it makes it (D3D12 from the resource description, Vulkan from the allocation).
+- Both backends.
+
+**Status.** Written from the SDK's code and its `ClearCache`; the new lines compiled by CI; run by the `vram19` chain (what was freed, when, and what a re-made target costs in the frame time are in the dev note). Nothing ran on Linux or the PS5.
+
+| Change | Files | Affects |
+|---|---|---|
+| The option, the stamp, the check and the trim, the size of a target | `src/graphics/pipeline/render_target/cache.cpp`, `include/rex/graphics/pipeline/render_target/cache.h` | D3D12, Vulkan |
+| The call at the end of a frame; the hook that drops what points at freed targets | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/d3d12/render_target_cache.cpp` and header; `src/graphics/vulkan/command_processor.cpp`, `src/graphics/vulkan/render_target_cache.cpp` and header | D3D12; Vulkan |
+
+## rexglue-gpu-memory.patch
+
+**Why.** Nothing in the SDK looks at how much video memory the process uses: a card that is too small is found out by the frame rate (D3D12 and Vulkan both let allocations spill into system memory, which the OS pages in and out). Fork issue #19 (an RTX 3060 laptop, 6 GB, at 2x: 50 to 60 FPS for 20 seconds, then 5) needed to know what the emulation holds, what the OS says the process uses and its budget, and a way to try a smaller card on a bigger one.
+
+**What it adds.**
+- `gpu_memory_log_ms` (uint, default 0 = off; changes during play): every this many milliseconds, at the end of a frame, one line `gpu memory: local_mb=.. budget_mb=.. nonlocal_mb=.. nonlocal_budget_mb=.. ballast_mb=.. emulate_mb=.. pressure=.. rt_n=.. rt_mb=.. edram_mb=.. resolve_mb=.. shared_mb=.. tex_n=.. tex_mb=..`: what the OS says the process uses of the video memory and of the system memory the GPU uses, with its budget in each (D3D12: DXGI `IDXGIAdapter3::QueryVideoMemoryInfo`; Vulkan: `VK_EXT_memory_budget` through `vkGetPhysicalDeviceMemoryProperties2`, when the device has it) and what the emulation holds: render targets (count, MB), the EDRAM buffer, the scaled resolve buffer made so far (D3D12 heaps of 16 MB, Vulkan sparse binds, or the whole buffer if sparse binding is missing), the shared memory (sparse allocations so far, or all 512 MB), the texture cache. With it set, every render target made is logged too (size, format, EDRAM base).
+- `gpu_memory_pressure_percent` (uint, default 0 = off; changes during play): when the process uses this percentage of its budget (checked every 250 ms; it ends 8 points under), the render target cache's idle time becomes 0 (`render_target_trim_seconds` must be set) and the texture cache's soft and hard limits are halved, so unused textures go sooner. Logged as `Video memory: short (...)`.
+- `gpu_memory_emulate_mb` (uint, default 0 = off; development; next start): behave as if the video memory were this many MB. The budget the pressure setting counts against becomes this size, and on D3D12 `D3D12Provider::AllocateVideoMemoryBallast` takes the difference between the real budget and it, in committed buffers of 512 MB at `D3D12_RESIDENCY_PRIORITY_MAXIMUM` (`ID3D12Device1::SetResidencyPriority`), so the OS, short of video memory, pages out the other allocations of the process as it would on a smaller card. Not on Vulkan (the size only moves the pressure threshold). The ballast is counted out of the usage the pressure setting sees.
+- Accessors: `SharedMemory::GetHostGpuMemoryBytes`, `TextureCache::GetTexturesHostMemoryBytes`, `GetTextureCount`, `GetScaledResolveHostMemoryBytes` (both backends), `RenderTargetCache::GetEdramBufferHostBytes`.
+
+**Status.** Written from the SDK's code; the new lines compiled by CI (D3D12 and Vulkan sources); run by the `vram19` chain. Whether the ballast really takes the card's memory from the game's allocations (the OS may page the ballast instead) is judged by the emulated runs' frame times (dev note). Nothing ran on Linux or the PS5.
+
+| Change | Files | Affects |
+|---|---|---|
+| The options, the monitor (`UpdateGpuMemory`), the virtual queries | `src/graphics/command_processor.cpp`, `include/rex/graphics/command_processor.h` | D3D12, Vulkan |
+| DXGI usage and budget, the ballast | `src/ui/d3d12/d3d12_provider.cpp`, `include/rex/ui/d3d12/d3d12_provider.h` | D3D12 |
+| The queries, the call at the end of a frame, the pressure response | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` and headers | D3D12; Vulkan |
+| The accessors, the halved texture limits, the log of each render target made | `include/rex/graphics/shared_memory.h`, `include/rex/graphics/pipeline/texture/cache.h`, `src/graphics/pipeline/texture/cache.cpp`, `include/rex/graphics/d3d12/texture_cache.h`, `include/rex/graphics/vulkan/texture_cache.h`, `src/graphics/vulkan/texture_cache.cpp`, `include/rex/graphics/pipeline/render_target/cache.h`, `src/graphics/pipeline/render_target/cache.cpp` | D3D12, Vulkan |
+
 ## rexglue-upstream-storage-flush.patch
 
 **Why.** Two faults in how the shader and pipeline storage (the `.xsh` and `.xpso` files under the cache root) reach the disk.
