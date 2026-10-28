@@ -19,9 +19,12 @@
 # target's colour and depth fit in it, the hook makes the tile the size of the
 # target and the count 1, so the scene is submitted and resolved once. 720p
 # with 2x MSAA needs 2 x 1,472 tiles: depth at 0 and colour at 1,472. 720p with
-# 4x MSAA needs 2 x 2,944 and keeps its three tiles (the pause menu, the GPS
-# map); without MSAA the game draws one tile by itself. With the console's
-# 2,048 tiles nothing changes. The hook also keeps a frame in two tiles between
+# 4x MSAA needs 2 x 2,944 and cannot be one tile (the pause menu, the GPS
+# map): mcla_larger_tiles draws it in two tiles of 2,048 EDRAM tiles a surface
+# (1280x512 and 1280x208) instead of the game's three of 1,024 (1280x256, 256
+# and 208): the hook makes the tile twice as tall and the count 2. Without MSAA
+# the game draws one tile by itself. With the console's 2,048 tiles nothing
+# changes. The hook also keeps a frame in two tiles between
 # one-tile frames in different MSAA modes, and leaves the tile surface cache's
 # last free slots alone (src/render_perf.cpp).
 # (launcher/dev/single-tile-2026-10-16.md and

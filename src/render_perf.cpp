@@ -20,6 +20,11 @@
 REXCVAR_DEFINE_BOOL(mcla_single_tile, true, "MCLA",
                     "Render the main scene as one tile instead of the Xbox 360's two, where the "
                     "GPU emulates an EDRAM large enough (edram_tiles = 4096)");
+REXCVAR_DEFINE_BOOL(mcla_larger_tiles, true, "MCLA",
+                    "A tiled pass that cannot be one tile (the world behind the pause menu and "
+                    "the GPS map, in 4x MSAA) is drawn in two tiles of 2,048 EDRAM tiles a "
+                    "surface instead of three of the game's 1,024. Needs mcla_single_tile and "
+                    "edram_tiles = 4096");
 REXCVAR_DEFINE_BOOL(mcla_fence_yield, true, "MCLA",
                     "Yield the CPU while the game waits on the GPU instead of spinning");
 
@@ -67,6 +72,31 @@ uint32_t OneTileSurfaceTiles(uint32_t width, uint32_t height, uint32_t msaa) {
 bool OneTileFits(uint32_t width, uint32_t height, uint32_t msaa) {
   const uint32_t surface = OneTileSurfaceTiles(width, height, msaa);
   return surface <= 2048 && 2 * surface <= HostEdramTiles();
+}
+
+// The height of the largest tile whose colour and depth surfaces (2,048 EDRAM tiles each at the
+// most, the same limit as OneTileFits') fit in the EDRAM the GPU emulates, and the number of
+// tiles of that height that the target takes. The game sizes its tiles for 1,024 tiles a
+// surface, so that both fit the console's 2,048: 1280x256 in 4x MSAA, three tiles for 720p.
+// Twice the height is 1280x512, two tiles, and needs 2 x 2,048 = 4,096. 0 when that is no
+// larger than the game's tile (the hook leaves the pass as it is).
+uint32_t LargerTileHeight(uint32_t width, uint32_t height, uint32_t msaa,
+                          uint32_t game_tile_height, uint32_t& count_out) {
+  const uint32_t tile_width = msaa > 2 ? 40 : 80;
+  const uint32_t tile_height = msaa > 1 ? 8 : 16;
+  const uint32_t tiles_per_row = TileSurfaceWidth(width) / tile_width;
+  if (!tiles_per_row || tiles_per_row > 2048) {
+    return 0;
+  }
+  const uint32_t rows = 2048 / tiles_per_row;
+  const uint32_t surface = tiles_per_row * rows;
+  const uint32_t larger = rows * tile_height;
+  if (larger <= game_tile_height || 2 * surface > HostEdramTiles()) {
+    return 0;
+  }
+  const uint32_t total = TileSurfaceHeight(height);
+  count_out = (total + larger - 1) / larger;
+  return larger;
 }
 
 // The tile surface cache of BeginTiledRendering (the loop at loc_8217A724):
@@ -189,13 +219,53 @@ void mcla_single_tile(PPCRegister& r7, PPCRegister& r8, PPCRegister& r18, PPCReg
     }
     act = false;
   }
+  // A pass that cannot be one tile (the pause menu's and the GPS map's world, in 4x MSAA) in
+  // larger tiles than the game's: two of 1280x512 instead of three of 1280x256. The same
+  // surface cache rule as for one tile.
+  uint32_t larger_height = 0;
+  uint32_t larger_count = 0;
+  if (!act && REXCVAR_GET(mcla_single_tile) && REXCVAR_GET(mcla_larger_tiles) && game_count > 2 &&
+      !OneTileFits(r28.u32, r25.u32, msaa)) {
+    larger_height = LargerTileHeight(r28.u32, r25.u32, msaa, r8.u32, larger_count);
+    if (larger_count >= game_count) {
+      larger_height = 0;
+    }
+    if (larger_height) {
+      const TileCacheLookup larger_cache =
+          LookUpTileCache(base, msaa, width, TileSurfaceHeight(larger_height), r19.u32, false);
+      if (!larger_cache.has_key && larger_cache.used >= kTileCacheSlots - 1) {
+        static bool logged_larger = false;
+        if (!logged_larger) {
+          logged_larger = true;
+          REXLOG_WARN("larger tiles: not used, {} of the tile surface cache's {} slots are taken",
+                      larger_cache.used, kTileCacheSlots);
+        }
+        larger_height = 0;
+      }
+    }
+    static uint32_t logged_larger_msaa = 0;
+    if (larger_height && logged_larger_msaa != msaa) {
+      logged_larger_msaa = msaa;
+      REXLOG_INFO(
+          "larger tiles: a {}x MSAA pass of {}x{} in {} tiles of {} rows (the game's: {} of {})",
+          msaa, r28.u32, r25.u32, larger_count, larger_height, game_count, r8.u32);
+    }
+  }
   g_last_msaa = msaa;
-  g_last_count = act ? 1 : game_count;
+  g_last_count = act ? 1 : (larger_height ? larger_count : game_count);
   if (act) {
     g_tiled_passes.store(0, std::memory_order_release);
   } else if (game_count > 1 &&
              g_tiled_passes.load(std::memory_order_acquire) < kSettlePasses * 4) {
     g_tiled_passes.fetch_add(1, std::memory_order_acq_rel);
+  }
+  if (larger_height) {
+    r8.u64 = larger_height;
+    count[0] = uint8_t(larger_count >> 24);
+    count[1] = uint8_t(larger_count >> 16);
+    count[2] = uint8_t(larger_count >> 8);
+    count[3] = uint8_t(larger_count);
+    return;
   }
   if (!act) {
     return;
