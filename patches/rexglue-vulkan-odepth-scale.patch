@@ -1,0 +1,58 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index fc3b28d..f3b4718 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -46,6 +46,7 @@ REXCVAR_DECLARE(bool, native_stencil_value_output_d3d12_intel);
+ REXCVAR_DECLARE(bool, gamma_render_target_as_unorm16);
+ REXCVAR_DECLARE(bool, native_2x_msaa);
+ REXCVAR_DECLARE(double, alpha_to_mask_tolerance);
++REXCVAR_DECLARE(bool, vulkan_odepth_float24_scale);
+ REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
+ REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
+ REXCVAR_DECLARE(bool, direct_host_resolve);
+diff --git a/src/graphics/flags.cpp b/src/graphics/flags.cpp
+index cc84c32..73c0231 100644
+--- a/src/graphics/flags.cpp
++++ b/src/graphics/flags.cpp
+@@ -21,6 +21,11 @@ REXCVAR_DEFINE_DOUBLE(alpha_to_mask_tolerance, 0.00195, "GPU",
+                       "it (about half a step of 8-bit alpha); 0 compares exactly (next start)")
+     .range(0.0, 0.1)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(vulkan_odepth_float24_scale, true, "GPU",
++                    "Vulkan, host render targets, float24 depth, no conversion in the pixel shader: a pixel "
++                    "shader's own depth output (oDepth) goes to the host's [0, 0.5] depth range as on Direct3D 12 "
++                    "(rexglue-vulkan-odepth-scale.patch); off: written as it is, twice too far (next start)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
+ REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
+                     "Convert float24 depth in pixel shader");
+diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+index 78de1cd..340815f 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+@@ -1441,6 +1441,25 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+       depth = SpirvShaderTranslator::Depth20e4To32(*builder_, depth_float24, 0, true, false,
+                                                    ext_inst_glsl_std_450_);
+       builder_->createStore(depth, output_fragment_depth_);
++    } else if (current_shader().writes_depth() && REXCVAR_GET(vulkan_odepth_float24_scale)) {
++      // Not converting, but the shader writes depth explicitly. The viewport's depth range, which
++      // GetHostViewportInfo halves for a float24 depth buffer ([0, 2) goes into [0, 1) to support
++      // reinterpretation round trips), doesn't apply to gl_FragDepth, so scale it from guest [0, 1]
++      // to host [0, 0.5] here, as the Direct3D 12 translator does
++      // (CompletePixelShader_DSV_DepthTo24Bit). Without this, the depth test of such a draw
++      // compares twice the depth with the buffer's.
++      spv::Id depth = builder_->createLoad(output_fragment_depth_, spv::NoPrecision);
++      spv::Id depth_is_float24 = builder_->createBinOp(
++          spv::OpINotEqual, type_bool_,
++          builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
++                                builder_->makeUintConstant(kSysFlag_DepthFloat24)),
++          const_uint_0_);
++      spv::Id depth_scale =
++          builder_->createTriOp(spv::OpSelect, type_float_, depth_is_float24,
++                                builder_->makeFloatConstant(0.5f), builder_->makeFloatConstant(1.0f));
++      builder_->createStore(
++          builder_->createNoContractionBinOp(spv::OpFMul, type_float_, depth, depth_scale),
++          output_fragment_depth_);
+     }
+   }
+ 

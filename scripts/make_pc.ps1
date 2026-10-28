@@ -441,6 +441,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-resolve-downscale-unit-layout.patch"; File = "src\graphics\command_processor.cpp"; Adds = "resolve_downscale_unit_layout" }
     @{ Patch = "rexglue-resolve-readback-rules.patch"; File = "src\graphics\command_processor.cpp"; Adds = "readback_resolve_rules" }
     @{ Patch = "rexglue-resolve-unscaled-copy.patch"; File = "src\graphics\command_processor.cpp"; Adds = "resolve_unscaled_copy_rules" }
+    @{ Patch = "rexglue-vulkan-odepth-scale.patch"; File = "src\graphics\flags.cpp"; Adds = "vulkan_odepth_float24_scale" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }
