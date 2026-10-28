@@ -230,16 +230,17 @@ index ad24e94..7bdd000 100644
      uint32_t stencil_write_mask : 8;                   // 8
      xenos::StencilOp stencil_front_fail_op : 3;        // 11
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
-index fc3b28d..0a990d5 100644
+index fc3b28d..394bccb 100644
 --- a/include/rex/graphics/flags.h
 +++ b/include/rex/graphics/flags.h
-@@ -35,6 +35,10 @@ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+@@ -35,6 +35,11 @@ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
  REXCVAR_DECLARE(bool, readback_memexport);
  REXCVAR_DECLARE(bool, readback_memexport_fast);
  REXCVAR_DECLARE(bool, occlusion_query_enable);
 +REXCVAR_DECLARE(bool, occlusion_query_async);
 +REXCVAR_DECLARE(bool, occlusion_query_keep_submission_open);
 +REXCVAR_DECLARE(bool, occlusion_query_force_rasterization);
++REXCVAR_DECLARE(bool, occlusion_query_depth_test_always);
 +REXCVAR_DECLARE(int32_t, occlusion_query_log);
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
@@ -318,7 +319,7 @@ index 85e9963..ea85eeb 100644
    } active_occlusion_query_;
    struct VertexBufferState {
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index bd96ce5..4f5d85e 100644
+index bd96ce5..bdc6e4a 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,6 +10,7 @@
@@ -329,7 +330,7 @@ index bd96ce5..4f5d85e 100644
  #include <cinttypes>
  #include <cmath>
  #include <cstdlib>
-@@ -85,6 +86,38 @@ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+@@ -85,6 +86,46 @@ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
  REXCVAR_DEFINE_BOOL(occlusion_query_enable, true, "GPU", "Enable host occlusion query handling")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -358,6 +359,14 @@ index bd96ce5..4f5d85e 100644
 +                    "(rexglue-occlusion-queries.patch)")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
++REXCVAR_DEFINE_BOOL(occlusion_query_depth_test_always, false, "GPU",
++                    "Development: a draw inside a guest occlusion query is drawn with a depth test "
++                    "that always passes (and never writes depth), whatever the game set. A count "
++                    "that is 0 with the game's test and above 0 with this one means the depth "
++                    "test, or the depth buffer's contents, is why it is 0 "
++                    "(rexglue-occlusion-queries.patch)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
 +REXCVAR_DEFINE_INT32(occlusion_query_log, 0, "GPU",
 +                     "Log guest occlusion queries at info level: the first N begin and end events "
 +                     "and results, every record's first use (the users of occlusion queries, with "
@@ -368,7 +377,7 @@ index bd96ce5..4f5d85e 100644
  REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
                        "Controls CPU readback of render-to-texture resolve results.\n"
                        " none: Disable readback (default)\n"
-@@ -551,6 +584,10 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -551,6 +592,10 @@ void CommandProcessor::WorkerThreadMain() {
  
          rex::thread::MaybeYield();
          loop_count++;
@@ -379,7 +388,7 @@ index bd96ce5..4f5d85e 100644
          write_ptr_index = write_ptr_index_.load();
        } while (worker_running_ && pending_fns_.empty() &&
                 (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
-@@ -963,6 +1000,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
+@@ -963,6 +1008,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
    } while (reader.read_count());
  
    OnPrimaryBufferEnd();
@@ -387,7 +396,7 @@ index bd96ce5..4f5d85e 100644
  
    return write_index;
  }
-@@ -2244,6 +2282,55 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
+@@ -2244,6 +2290,55 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
    return true;
  }
  
@@ -443,7 +452,7 @@ index bd96ce5..4f5d85e 100644
  bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                            uint32_t packet, uint32_t count) {
    // Set by D3D as BE but struct ABI is LE
-@@ -2253,25 +2340,41 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -2253,25 +2348,41 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    // Writeback initiator.
    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
  
@@ -499,7 +508,7 @@ index bd96ce5..4f5d85e 100644
        pSampleCounts->ZPass_A = fake_sample_count;
        pSampleCounts->Total_A = fake_sample_count;
      }
-@@ -2280,6 +2383,304 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -2280,6 +2391,304 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    return true;
  }
  
@@ -804,7 +813,7 @@ index bd96ce5..4f5d85e 100644
  bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
                                                const char* opcode_name, uint32_t viz_query_condition,
                                                uint32_t count_remaining) {
-@@ -2383,8 +2784,29 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -2383,8 +2792,29 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
        bool hdr_blend_overridden = HdrBeforeDraw();
        // Temporal AA: the anti-aliasing pass goes before this draw.
        taa_pending_ = TaaCheckDraw();
@@ -835,7 +844,7 @@ index bd96ce5..4f5d85e 100644
          (*register_file_)[reg::RB_BLENDCONTROL::rt_register_indices[0]] =
              hdr_saved_blend_control_;
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index d35c107..2aa9912 100644
+index d35c107..e0ae1b3 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -224,73 +224,6 @@ std::string D3D12CommandProcessor::ShaderStorageReport(bool shutdown) {
@@ -937,7 +946,7 @@ index d35c107..2aa9912 100644
  
    // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
    if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
-@@ -3178,6 +3119,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -3178,6 +3119,26 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    }
  
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
@@ -953,10 +962,18 @@ index d35c107..2aa9912 100644
 +    normalized_depth_control.zfunc = xenos::CompareFunction::kAlways;
 +    normalized_depth_control.z_write_enable = 0;
 +  }
++  if (active_occlusion_query_.valid && REXCVAR_GET(occlusion_query_depth_test_always) &&
++      is_rasterization_done && !memexport_used &&
++      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
++    // Development: the sun's draws test depth with a function that always passes.
++    normalized_depth_control.z_enable = 1;
++    normalized_depth_control.zfunc = xenos::CompareFunction::kAlways;
++    normalized_depth_control.z_write_enable = 0;
++  }
  
    // Shader modifications.
    uint32_t ps_param_gen_pos = UINT32_MAX;
-@@ -3484,6 +3437,36 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -3484,6 +3445,36 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    SetPrimitiveTopology(primitive_topology);
    // Must not call anything that may change the primitive topology from now on!
  
@@ -993,7 +1010,7 @@ index d35c107..2aa9912 100644
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
        PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
-@@ -5831,7 +5814,10 @@ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
+@@ -5831,7 +5822,10 @@ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
  }
  
  void D3D12CommandProcessor::ShutdownOcclusionQueryResources() {
@@ -1005,7 +1022,7 @@ index d35c107..2aa9912 100644
  
    if (occlusion_query_readback_ && occlusion_query_readback_mapping_) {
      occlusion_query_readback_->Unmap(0, nullptr);
-@@ -5849,35 +5835,11 @@ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out)
+@@ -5849,35 +5843,11 @@ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out)
    return true;
  }
  
@@ -1044,7 +1061,7 @@ index d35c107..2aa9912 100644
    uint32_t host_index = 0;
    if (!AcquireOcclusionQueryIndex(host_index)) {
      return false;
-@@ -5885,51 +5847,71 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
+@@ -5885,51 +5855,71 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
    if (!BeginSubmission(true)) {
      return false;
    }
@@ -1139,7 +1156,7 @@ index d35c107..2aa9912 100644
    return true;
  }
  
-@@ -5946,22 +5928,6 @@ uint64_t D3D12CommandProcessor::NormalizeOcclusionSamples(uint64_t samples) cons
+@@ -5946,22 +5936,6 @@ uint64_t D3D12CommandProcessor::NormalizeOcclusionSamples(uint64_t samples) cons
    return (samples + (scale >> 1)) / scale;
  }
  
@@ -1197,7 +1214,7 @@ index c5136c8..8565923 100644
        state_desc.DepthStencilState.DepthWriteMask =
            description.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 491594c..8b3f5de 100644
+index 491594c..11ad90f 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -741,72 +741,6 @@ std::string VulkanCommandProcessor::ShaderStorageReport(bool shutdown) {
@@ -1286,7 +1303,22 @@ index 491594c..8b3f5de 100644
      EndSubmission(false);
    }
  }
-@@ -4660,6 +4597,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4622,6 +4559,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+   }
+   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
++  if (active_occlusion_query_.valid && REXCVAR_GET(occlusion_query_depth_test_always) &&
++      is_rasterization_done && !memexport_used_vertex && !memexport_used_pixel &&
++      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
++    // Development: the sun's draws test depth with a function that always passes.
++    normalized_depth_control.z_enable = 1;
++    normalized_depth_control.zfunc = xenos::CompareFunction::kAlways;
++    normalized_depth_control.z_write_enable = 0;
++  }
+ 
+   uint32_t ps_param_gen_pos = UINT32_MAX;
+   uint32_t interpolator_mask =
+@@ -4660,6 +4605,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      }
      if (!i) {
        ++submission_draws_;
@@ -1296,7 +1328,7 @@ index 491594c..8b3f5de 100644
        // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
        if (prim_type == xenos::PrimitiveType::kRectangleList && !memexport_writes_possible &&
            !active_occlusion_query_.valid &&
-@@ -5132,6 +5072,42 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -5132,6 +5080,42 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      }
    }
  
@@ -1339,7 +1371,7 @@ index 491594c..8b3f5de 100644
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
            PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
-@@ -5819,7 +5795,10 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
+@@ -5819,7 +5803,10 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
  }
  
  void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
@@ -1351,7 +1383,7 @@ index 491594c..8b3f5de 100644
  
    const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -5854,31 +5833,12 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
+@@ -5854,31 +5841,12 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
    return true;
  }
  
@@ -1387,7 +1419,7 @@ index 491594c..8b3f5de 100644
    uint32_t host_index = 0;
    if (!AcquireOcclusionQueryIndex(host_index)) {
      return false;
-@@ -5887,52 +5847,91 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -5887,52 +5855,91 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -1492,7 +1524,7 @@ index 491594c..8b3f5de 100644
      VkMappedMemoryRange memory_range = {};
      memory_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
      memory_range.memory = occlusion_query_readback_memory_;
-@@ -5941,12 +5940,12 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -5941,12 +5948,12 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
          std::min(rex::round_up(VkDeviceSize(sizeof(uint64_t) * kMaxOcclusionQueries),
                                 vulkan_device->properties().nonCoherentAtomSize),
                   occlusion_query_readback_memory_size_);
@@ -1508,7 +1540,7 @@ index 491594c..8b3f5de 100644
    return true;
  }
  
-@@ -5963,24 +5962,6 @@ uint64_t VulkanCommandProcessor::NormalizeOcclusionSamples(uint64_t samples) con
+@@ -5963,24 +5970,6 @@ uint64_t VulkanCommandProcessor::NormalizeOcclusionSamples(uint64_t samples) con
    return (samples + (scale >> 1)) / scale;
  }
  
@@ -1533,7 +1565,7 @@ index 491594c..8b3f5de 100644
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
-@@ -6399,6 +6380,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -6399,6 +6388,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      assert_false(scratch_buffer_used_);
  
      if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
