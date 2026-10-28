@@ -1,9 +1,9 @@
 diff --git a/include/rex/handoff_trace.h b/include/rex/handoff_trace.h
 new file mode 100644
-index 0000000..7fcb78b
+index 0000000..8db3c65
 --- /dev/null
 +++ b/include/rex/handoff_trace.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,85 @@
 +#pragma once
 +/**
 + * @file        handoff_trace.h
@@ -45,6 +45,7 @@ index 0000000..7fcb78b
 +  kMutantRelease = 18,
 +  kDelayBegin = 19,      // KeDelayExecutionThread / Sleep: a = ms (not for a Sleep(0))
 +  kDelayEnd = 20,
++  kSleepZero = 21,       // a Sleep(0) (a polling loop's turn), one call in 32 per thread: a = the thread's count of them, b = 32
 +  // The command processor (src/graphics/command_processor.cpp, d3d12/command_processor.cpp)
 +  kCpIdleBegin = 40,  // out of commands: a = read index
 +  kCpIdleEnd = 41,    // a = turns of the wait loop, b = write index
@@ -252,7 +253,7 @@ index 6231b65..46b3216 100644
  
 diff --git a/src/system/handoff_trace.cpp b/src/system/handoff_trace.cpp
 new file mode 100644
-index 0000000..d342a6d
+index 0000000..70501a1
 --- /dev/null
 +++ b/src/system/handoff_trace.cpp
 @@ -0,0 +1,389 @@
@@ -428,7 +429,7 @@ index 0000000..d342a6d
 +}
 +
 +// The calling guest thread's call chain. Everything read is inside the thread's own stack, between
-+// the bounds in its PCR (r13 + 0x70 and 0x74); a frame is [r1] = the caller's r1 and, in the
++// the bounds in its PCR (r13 + 0x70 and 0x74), on 8-byte boundaries; a frame is [r1] = the caller's r1 and, in the
 +// caller's frame, at -8 from that, the return address the callee was called with.
 +void GuestChain(uint32_t ra[4]) {
 +  ra[0] = ra[1] = ra[2] = ra[3] = 0;
@@ -458,12 +459,12 @@ index 0000000..d342a6d
 +  const uint32_t lo = std::min(w0, w1);
 +  const uint32_t hi = std::max(w0, w1);
 +  uint32_t sp = ctx->r1.u32;
-+  if (lo < 0x10000 || hi - lo > (64u << 20) || sp < lo || sp >= hi || (sp & 15) != 0) {
++  if (lo < 0x10000 || hi - lo > (64u << 20) || sp < lo || sp >= hi || (sp & 7) != 0) {
 +    return;
 +  }
 +  for (int i = 1; i < 4; ++i) {
 +    const uint32_t prev = Load32(base, sp);  // the caller's frame
-+    if (prev <= sp || prev >= hi || (prev & 15) != 0 || prev - 8 < lo) {
++    if (prev <= sp || prev >= hi || (prev & 7) != 0 || prev - 8 < lo) {
 +      break;
 +    }
 +    ra[i] = Load32(base, prev - 8);
@@ -790,7 +791,7 @@ index db830e4..572a723 100644
    if (out_previous_count) {
      *out_previous_count = previous_count;
 diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
-index 2630b80..3dc7878 100644
+index 2630b80..c2e6b38 100644
 --- a/src/system/xthread.cpp
 +++ b/src/system/xthread.cpp
 @@ -18,6 +18,7 @@
@@ -801,12 +802,18 @@ index 2630b80..3dc7878 100644
  #include <rex/perf/counter.h>
  #include <rex/literals.h>
  #include <rex/logging.h>
-@@ -1013,6 +1014,19 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
+@@ -1013,6 +1014,25 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
    }
    timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
    CheckTitleTermination();
-+  // rexglue-handoff-trace.patch: not for a Sleep(0), which the game's polling loops call thousands of
-+  // times a frame; the end is recorded on every way out.
++  // rexglue-handoff-trace.patch: a Sleep(0), which the game's polling loops call thousands of times a frame, is
++  // sampled (one call in 32 on each thread, with its guest call chain); the end is recorded on every way out.
++  if (timeout_ms == 0 && rex::handoff::Active()) {
++    static thread_local uint32_t sleep_zero_calls = 0;
++    if ((++sleep_zero_calls & 31) == 0) {
++      rex::handoff::RecordGuest(rex::handoff::kSleepZero, sleep_zero_calls, 32);
++    }
++  }
 +  struct DelayTrace {
 +    bool on;
 +    ~DelayTrace() {
