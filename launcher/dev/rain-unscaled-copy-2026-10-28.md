@@ -3,9 +3,9 @@
 Report: the rain is not drawn above native 720p (`resolution_scale` 2 or 3, Direct3D 12 and Vulkan, day and night); at 1x it is. The reporter's pause-menu
 frame-rate report is another note.
 
-**State: the cause is confirmed by a trace run (2026-10-28, D3D12, RTX 5080). The fix, `resolve_unscaled_copy_rules` (an SDK patch) with the game option
-`mcla_rain_unscaled_copy`, is written and compiled by CI; it has NOT been run yet (the chain `rainfix2` runs it). Every claim below says whether it was read,
-measured or inferred.**
+**State (2026-10-28): the cause is confirmed by a trace run (D3D12, RTX 5080). The fix, `resolve_unscaled_copy_rules` (an SDK patch) with the game option
+`mcla_rain_unscaled_copy`, was run by the chains `rainfix2` (the first version) and `downscale` (the batched version that ships): the rain is back at 2x and 3x on D3D12 and
+Vulkan and no cost was measurable. Every claim below says whether it was read, measured or inferred.**
 
 ## What the earlier notes got wrong
 
@@ -104,17 +104,31 @@ buffer; the chain's fix arms show whether the shared memory has the same pairs, 
   (`copy_native` in `D3D12RenderTargetCache::Resolve`); the description says small offscreen surfaces "often break when upscaled". That would keep the 128x128 particle targets native, with exact data and no
   copy. It needs render targets of two scale classes and the transfers between them (`scale_native` in its `RenderTargetKey`), which this SDK does not have, so it is not what this patch does.
 
-## The chain and what is not known
+## What was not known when the fix was written, and what the chains showed
 
-`SP\rainfix2\chain.ps1` (the main session queues it): 2x and 3x on D3D12 and Vulkan with the fix off and on (the rain number and the picture sheets; the trace's shared-memory bytes and statistics), 1x unchanged,
-and the cost at 2x with PresentMon, A-B-B-A. Until it has run: not known that the rain comes back on either API at 2x and 3x, that the downscaled data is good enough, what it costs, that the Vulkan path
-has no validation error. Nothing was built or run for the PS5 or Linux (the same SDK code and the same defaults; CI compiles the host code for Linux).
+Not known then: that the rain comes back on either API at 2x and 3x, that the downscaled data is good enough, what it costs, that the Vulkan path works. Known now: the rain comes back on
+both APIs at 2x and 3x (the chain `rainfix2`, below, and the chain `downscale`, below the next heading); the cost is not measurable. Still not known: whether the downscaled state keeps the simulation
+right over a long rain (the runs are about 25 s), the batched version at Vulkan 3x, a weaker GPU. Nothing was built or run for the PS5 or Linux (the same SDK code and the same defaults; CI compiles the host
+code for Linux).
 
 ## What the chain `rainfix2` measured (2026-10-28, RTX 5080; `SP\rainfix2\out\SUMMARY.txt` of the session)
 
 - **The rain is back with the fix** at 2x and 3x on both APIs: the share of the smooth pixels that changed in three frames (rain 0.10 to 0.16 at 1x, none 0.003 to 0.02): D3D12 2x 0.003 without the fix and 0.159 with it, 3x 0.011 and 0.183; Vulkan 2x 0.004 and 0.177, 3x 0.017 and 0.166; 1x 0.138 (D3D12) and 0.148 (Vulkan), where the fix is not reached (no `resolve_unscaled_copy_rules` line, no copies). The trace: the rain's draw rasterised 1,915,879 pixels at 2x and 4,279,787 at 3x with the fix and 0 without. (The rain at 1x: 517,206.)
 - **The cost of the first version** (PresentMon, uncapped, fixed 1/60 s a frame, the car standing, 16 s a run): D3D12 2x A-B-B-A: GPU busy median +3.4% (5.348 against 5.175 ms), frame time median +3.3%; B-A-A-B +3.0%; all eight +3.2% (spread of equal arms 4 to 5%); with the rain's draw left out +3.4% (5.305 against 5.129 ms: the copies alone, about 0.17 ms); Vulkan 2x +2.0% GPU busy (one pair). The rain's own draw adds nothing measurable beyond that (+3.4% with it and without it).
-- **Why the copies cost that much, and the batch** (`resolve_unscaled_copy_batch`, this branch): see `patches/README.md`'s section of the patch. Whether the game issues the four resolves when it is not raining, and what the batch costs: the chain `downscale` (not run when this was written).
+- **Why the copies cost that much, and the batch** (`resolve_unscaled_copy_batch`, this branch): see `patches/README.md`'s section of the patch. Whether the game issues the four resolves when it is not raining, and what the batch costs: the chain `downscale`, below.
+
+## What the chain `downscale` measured (2026-10-28, RTX 5080; `SP\downscale\out\SUMMARY.txt`, sections 3 to 5; the build had both the batched fix and the vinyl fix)
+
+- **The rain with the batch** (the shipped version; the share of smooth pixels that changed in three frames, best pair of four, rain 0.10 to 0.16 at 1x, none 0.003 to 0.02): D3D12 2x 0.138, D3D12 3x 0.178, Vulkan 2x 0.171, all rain; the
+  four copies logged as done (23,552, 16,384 and 21,504 by the last count logged), no `not done` line. Vulkan 3x was not run with the batch.
+- **The cost** (PresentMon, uncapped, fixed 1/60 s a frame, the car standing, the rainy race). One session per API, the copies switched by the dev pad between segments of 10 s (A = copies off, Bo = first version, Bn = batch;
+  order A Bo Bn Bn Bo A Bn Bo A A Bo Bn), GPU busy median: D3D12 2x A 4.497 ms (4.167 without its first segment, which was still warming: 5.487), Bo 4.161, Bn 4.145 (equal segments differ by about 2%); Vulkan 2x
+  A 5.136 (4.901 without the first), Bo 4.794, Bn 4.762 (the whole session drifts up by 10%, so only the D3D12 session can say anything). Separate runs of 16 s on D3D12 2x (the method of `rainfix2`, two runs per arm):
+  A 5.233 and 5.033 ms, Bn 5.207 and 5.130, Bo 5.054 and 5.274; the arm medians 5.133 (A), 5.168 (Bn, +0.7%), 5.164 (Bo, +0.6%). Two runs of one arm differ by up to 4%. So: the +3.2% that `rainfix2` measured for the first version
+  was not found again, and the batch is not measurably cheaper than the first version. (Earlier chains saw this PC run at two different speeds from one run to the next; compare inside a session or a block.)
+- **Outside rain:** the four resolves (length 131,072, pitch 128, height 128, format 37) are in the resolve logs of the three rainy runs (8 lines each) and in none of the clear vinyl races at 1x, 2x and 3x on both APIs (33 distinct
+  classes each) nor in 40 s of free roam at 2x (22 classes; the weather of that run was not recorded). So the game does not issue them in the clear races, and the copies cost nothing there; a rainy free roam was not run.
+
 
 ## The development layer (`rain-trace.sdk.patch`)
 

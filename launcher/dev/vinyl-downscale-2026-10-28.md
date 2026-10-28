@@ -3,9 +3,9 @@
 The vinyl fix of 2026-10-27 (`mcla_vinyl_readback`, a rule for `readback_resolve_rules`, `launcher/dev/vinyls-2026-10-27.md`) was checked at 1x only. With
 `resolution_scale` above 1 a resolve is written to the SDK's scaled resolve buffer, and the readback first turns it back into the guest's 1x data with the compute pass
 `resolve_downscale` (`src/graphics/shaders/resolve_downscale.cs.hlsl`, `.glsl`). The vinyl texture is 512x512 `8_8_8_8` (4 bytes a pixel, with its mip chain). This note is
-about what that pass reads. **State: the cause is read in the shader and checked by arithmetic; the fix (`patches/rexglue-resolve-downscale-unit-layout.patch`, option
-`resolve_downscale_unit_layout`) is written and compiled by CI; neither the released v0.2.0 nor the fix has been looked at in a picture at 2x or 3x yet (the chain
-`downscale` does that), so it is not known how visible the fault was.**
+about what that pass reads. **State (2026-10-28): the cause is read in the shader and checked by arithmetic; the fix (`patches/rexglue-resolve-downscale-unit-layout.patch`, option
+`resolve_downscale_unit_layout`) was run in the chain `downscale` (RTX 5080, D3D12 and Vulkan): at 2x the opponents' liveries of v0.2.0 are coarse and stair-stepped and the fix's
+are smooth; 3x was not seen in a picture (the crops missed the car; last section).**
 
 ## What the pass reads (read in the shader; arithmetic)
 
@@ -44,7 +44,7 @@ runs that text for every pixel size and scale and says all guest pixels read the
 old pass. The shader headers are rebuilt with `launcher/dev/build_downscale_shaders.py`, whose `--check` rebuilds the SDK's two headers of this shader from the unchanged sources
 byte for byte (fxc 10.0.26100.0 with `/O3 /all_resources_bound`, Vulkan SDK 1.4.363.0), so the headers differ by the source change only.
 
-## The picture check (chain `downscale`; not run when this was written)
+## The picture check (chain `downscale`, run 2026-10-28)
 
 The arcade race *Sunset and Vine*, 7 opponents, Easy, clear, noon (the pad of the vinyl agent: boot, pause menu, Modes, Arcade, the options, START), pictures at the race timer
 1.5, 3.0, 4.5, 6.0 and 7.5 s (the same moment in every run: the intro camera follows the race timer), on D3D12 and Vulkan:
@@ -52,4 +52,16 @@ The arcade race *Sunset and Vine*, 7 opponents, Easy, clear, noon (the pad of th
 - crops of the opponents' liveries (the green car with the white and green livery, the 6, PIRELLI, WORK, HKS, in the pictures at 4.5 s and 7.5 s), side by side;
 - the vinyl texture itself: `dump 0xA50A0000 1048576` of the guest memory at the end of the intro (the 512x512 `8_8_8_8` base level the readback wrote), compared between the runs by
   the share of 4-byte words that equal the 1x run's, and by the share of units whose pixels 1 and 3 equal 0 and 2 (the fingerprint of the repeat).
-Read the sheets and the numbers; what is not known until then: whether v0.2.0's 2x and 3x liveries were visibly wrong, and whether the fix gives the 1x livery.
+### What it showed (RTX 5080; `SP\downscale\out\SUMMARY.txt` and the sheets `vinyl-d3d12-livery6.jpg`, `vinyl-vulkan-livery6.jpg`, `vinyl-2x-before-after.png` of that session; every run valid)
+
+- **2x, D3D12 (seen):** v0.2.0's livery of the white and green car (the 6, PIRELLI, WORK) is blocky: the letters' edges are stair-stepped. The new build with
+  `--resolve_downscale_unit_layout=false` looks the same; with the fix the edges are smooth. Crop numbers (horizontal over vertical detail, `hv`; the 1x run 0.678):
+  v0.2.0 at 2x 0.318, new build with the option off 0.443, with the fix 0.552; another moment (the car from above) 0.561 for v0.2.0 against 0.671 with the fix (1x 0.681).
+  The crops are not the same frame in every run (the camera follows the race timer but the cars are not in the same place), so the numbers show a direction, not a measurement.
+- **2x, Vulkan (seen):** the teeth of the green stripes on the hood are stair-stepped in v0.2.0 and smooth with the fix. The `hv` numbers do not separate there
+  (0.693 against 0.707, 1x 0.679): read the pictures, not the numbers.
+- **3x: not seen.** The 3x crops show a wheel and the street where the car was at 1x, and in the whole frames the car is too far off to judge the edges of a livery. 3x is known by the
+  arithmetic above only.
+- **The memory dumps** (`dump 0xA50A0000 1048576`) came out as one value in every run (black in `vinyl-dump-compare.png`; `equal 1.0`, no distinct colours), so they say
+  nothing about the pass. Why was not found (the address at that moment, or the dump comes after the texture is gone).
+- The chain also ran the rain with the batch (the rain note) and the cost of the copies (the rain note).
