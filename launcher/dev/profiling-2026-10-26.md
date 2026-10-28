@@ -316,10 +316,16 @@ of audio.) The 6-logical "on" runs had 3 late wake-ups in two of the three runs,
 - **4 logical processors: it fails.** Uncapped, only +16% and +11% (118.6 to 137.5 and 116.1 to 128.9 swaps a second; the frame median -10.2% and
   -7.8%): the CPU is the limit there, not the Sleep. One of the three "on" runs (r2) had 2 steady underruns, 2 silent frames, while the thread was
   coming round early: the watchdog tripped and the log says so ("pump wake on demand: the audio output ran dry (2 silent frames) while the thread
-  was coming round early; the frame-pacing thread goes back to the game's own Sleep for the rest of this session"); the run went on at the game's own pace.
+  was coming round early; the frame-pacing thread goes back to the game's own Sleep for the rest of this session"); the thread went back to the game's own Sleep for the rest of that run.
   The p99 at the 120 cap is 19.3% longer (22.3 to 26.6 ms) and the cap does not hold either way (117.0 and 116.1 swaps a second; the 60 cap 59.0 in both). The audio
   worker's late wake-ups (8 ms or more) are 252 to 330 a run with it and 303 to 329 without. So RULE (cap 120), AUDIO and CAPS fail, and the option is not used there.
   With the missing core of the timer thread (next section) the 4-logical machine is helped by the other option instead.
+- **Speed check** (`launcher/dev/scripts/cpup-speed.pad`, 16 logical processors, real-time steps, one run a side, the car driven for 14 s of wall time): the engine
+  frames equal the swaps, the game clock runs at 1.002 s a second without and 1.003 with the option, and the car covers the same ground (a path of 31.3 and
+  31.0 units, 2.24 and 2.21 a second along it; the engine step falls from a mean of 6.86 to 4.17 ms), so the game is not faster or slower for
+  playing at 240 instead of 146 FPS. In that pad's 8 s windows under the caps the swaps were 120.2, 60.2 and 30.5 a second without and 122.6, 60.7 and 30.8
+  with the option; the windows start while the cap takes hold (the 5.2 early wakes a second at the 120 cap are the first uncapped moments), and the A/B above,
+  which measures 12 s after 3 s of settling, has 120.0, 60.0 and 30.0.
 - **The default** is on at 6 or more logical processors and off at 5 or fewer (section "The timer queue and the frame-pacing thread by processor count").
   The count is the process's affinity mask, which is how the harness limits the game, so the A/B above is what a player with that many processors gets.
 
@@ -371,6 +377,16 @@ last column is the timer thread's CPU in ms per swap.
   2.4% longer (above), so it stays off from 6 up.
 - **The line at 6**: wake on demand passes at 6 (+49 to +60% FPS, no audio problem) and fails at 4; the high-resolution wait passes at 4 and fails at 6. Neither
   was measured at 5, which follows the 4 (5 or fewer). Nothing turns both on at once: they were not measured together.
+- **The automatic default, checked in the game** (the exe built from this branch; no flag for either option; `wake-ab.pad`, D3D12; the `CPU:` line is
+  in the game's log). 16 logical processors, one run under the shared lock: `CPU: 16 logical processors: timer queue high-resolution wait off, pump wake on
+  demand on (automatic; 6 or more)`; free roam and driving 237.9 and 240.0 swaps a second (the A/B's "on": 239.4 and 240.1), the caps 120.0, 60.0 and 30.0, the
+  thread's wakes early in the uncapped segments only. With `--mcla_pump_wake_on_demand=false` the line says `pump wake on demand off (set by the player)` and
+  the game runs at 146.2 and 146.0 (the shipped Sleep). 4 logical processors, exclusive lock, 1 warm-up and 2 runs a side, the automatic default ("on") against
+  `--timer_queue_hr_wait=false` ("off"): `CPU: 4 logical processors: timer queue high-resolution wait on, pump wake on demand off (automatic; 5 or fewer)`,
+  and with the flag `timer queue high-resolution wait off (set by the player)`. The default is the measured "on": uncapped 120.9 and 117.1 to 144.3 and
+  142.4 swaps a second (+19.4% and +21.6%), p99 27.0 and 31.5 ms to 9.5 and 12.6 ms (-65% and -60%), the 120 cap 115.5 to 120.0, the 60 cap 59.2 to 60.0,
+  the process's CPU -23 to -58%, the audio worker's late wake-ups 340 and 288 a run to 19 and 21; one "off" run had a steady underrun (1 silent frame), no "on" run. 6 logical processors, the boundary: `CPU: 6 logical processors: timer queue
+  high-resolution wait off, pump wake on demand on (automatic; 6 or more)`.
 
 **Not verified**: the numbers are one CPU (a Ryzen 7 9800X3D, 8 cores, 16 threads) limited by affinity, so the 4 and 6 logical-processor runs have its fast cores and cache,
 not a slower or a 4-core CPU's; processor counts other than 16, 8, 6 and 4; both options together; the PS5 and Linux (neither built nor run with the options).
