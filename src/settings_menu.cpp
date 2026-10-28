@@ -28,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -245,6 +246,80 @@ void SetStringTableText(const char* key, const char* text) {
   }
   std::memcpy(Membase() + buffer, text, length);
   Membase()[buffer + length] = 0;
+}
+
+// The entry of a string-table key in the hash map (HashMapLookup's node), or 0.
+uint32_t HashMapFindNode(uint32_t map, uint32_t hash) {
+  uint32_t buckets = Read32(map);
+  uint16_t bucket_count = Read16(map + 4);
+  if (!bucket_count || !buckets) {
+    return 0;
+  }
+  for (uint32_t node = Read32(buckets + 4 * (hash % bucket_count)); node; node = Read32(node + 8)) {
+    if (Read32(node) == hash) {
+      return node;
+    }
+  }
+  return 0;
+}
+
+// The buffers one key's text has had, newest at `current`.
+constexpr int kTextRing = 16;
+struct TextRing {
+  uint32_t buffer[kTextRing] = {};
+  int current = 0;
+};
+std::unordered_map<uint32_t, TextRing> g_text_rings;
+
+// SetStringTableText for the texts the rows show and change while the menu is open
+// (their labels and the values of their windows): the new text goes into another buffer
+// of the key, which the entry then points to, and the one it had is left as it was for
+// the next kTextRing changes. The game hands a text's address and length to its Flash
+// movie, which runs on the render thread and may read the text after the update thread
+// has moved on, so a text rewritten in place has a stale length for it. That crashed the
+// render thread (in a pool free, within milliseconds of the second step of the GRAPHICS
+// API row) in about a third of the runs.
+void SetRowText(const char* key, const char* text) {
+  uint32_t table = Read32(kStringTableGlobal);
+  if (!table) {
+    return;
+  }
+  size_t length = std::strlen(text);
+  if (length > 131) {
+    length = 131;
+  }
+  const uint32_t hash = HashString(key);
+  uint32_t node = HashMapFindNode(table + 16, hash);
+  if (!node) {
+    uint32_t buffer = CallGuest(kGuestMallocFn, 132u);
+    if (!buffer || !HashMapInsert(table + 16, hash, buffer)) {
+      return;
+    }
+    std::memset(Membase() + buffer, 0, 132);
+    node = HashMapFindNode(table + 16, hash);
+    if (!node) {
+      return;
+    }
+  }
+  TextRing& ring = g_text_rings[hash];
+  if (!ring.buffer[ring.current]) {
+    ring.buffer[ring.current] = Read32(node + 4);
+  }
+  const char* shown = reinterpret_cast<const char*>(Membase() + ring.buffer[ring.current]);
+  if (std::strlen(text) <= 131 && std::strncmp(shown, text, 132) == 0) {
+    return;  // as it is
+  }
+  const int next = (ring.current + 1) % kTextRing;
+  if (!ring.buffer[next]) {
+    ring.buffer[next] = CallGuest(kGuestMallocFn, 132u);
+    if (!ring.buffer[next]) {
+      return;
+    }
+  }
+  std::memcpy(Membase() + ring.buffer[next], text, length);
+  Membase()[ring.buffer[next] + length] = 0;
+  Write32(node + 4, ring.buffer[next]);
+  ring.current = next;
 }
 
 // --- The game's menu state tree ----------------------------------------------
@@ -1204,7 +1279,7 @@ void CentreRowWindow(MenuRows& rows, int i, const ItemDef& item, int index) {
     char key[96];
     WindowKey(item, slot, key, sizeof key);
     const int value = ((index + slot - 1) % count + count) % count;
-    SetStringTableText(key, ItemValueLabel(item, value).c_str());
+    SetRowText(key, ItemValueLabel(item, value).c_str());
   }
   rows.last_index[i] = index;
   Write32(rows.row[i] + kRowSelect, 1);
@@ -1216,7 +1291,7 @@ void CentreRangeWindow(MenuRows& rows, int i, const ItemDef& item, double value)
   for (int slot = 0; slot < kRowWindow; ++slot) {
     char key[96];
     WindowKey(item, slot, key, sizeof key);
-    SetStringTableText(key, RangeText(item, values[slot]).c_str());
+    SetRowText(key, RangeText(item, values[slot]).c_str());
   }
   Write32(rows.row[i] + kRowSelect, 1);
 }
@@ -1229,7 +1304,7 @@ uint32_t BuildValueSet(const ItemDef& item) {
   for (int slot = 0; slot < kRowWindow; ++slot) {
     char key[96];
     WindowKey(item, slot, key, sizeof key);
-    SetStringTableText(key, "");
+    SetRowText(key, "");
     uint32_t key_string = AllocGuestString(key);
     if (!key_string) {
       return 0;
@@ -1265,8 +1340,12 @@ bool BuildRows(int menu) {
     // The row constructor resolves its label through the string table once,
     // so the text has to exist first.
     rows.start_value[i] = OptionGet(item.option);
-    rows.label[i] = RowLabel(item, false);
-    SetStringTableText(item.key, rows.label[i].c_str());
+    // Built with the longest label the row can have, and shortened when the menu opens
+    // (UpdateRowLabels): a label that grows once the row is on screen ("(NEXT START)" to
+    // "(RESTART NEEDED)" at the first step of a restart-only row) crashed the render
+    // thread in about a third of the runs.
+    rows.label[i] = RowLabel(item, true);
+    SetRowText(item.key, rows.label[i].c_str());
     uint32_t name = AllocGuestString(item.key);
     uint32_t row = CallGuest(kGuestMallocFn, kRowObjectSize);
     if (!name || !row) {
@@ -1339,7 +1418,7 @@ void UpdateRowLabels(int menu) {
       continue;
     }
     rows.label[i] = std::move(label);
-    SetStringTableText(item.key, rows.label[i].c_str());
+    SetRowText(item.key, rows.label[i].c_str());
     CallGuest(kSetRowLabelFn, rows.row[i], rows.name[i]);
   }
 }
