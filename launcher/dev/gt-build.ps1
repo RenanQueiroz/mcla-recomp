@@ -23,7 +23,7 @@
 #   --mcla_render_markers_all_phases=true     the game's phase markers in the log
 #   --d3d12_threaded_submission_split_draws=0 one submission per frame at 1x and 2x (no mid-frame gaps)
 param([string]$OutDir = "", [ValidateSet("mingw", "msvc")][string]$Toolchain = "mingw", [string[]]$Layer = @(),
-      [switch]$Reverse, [switch]$NoBuild)
+      [switch]$Reverse, [switch]$NoBuild, [string]$ToolsDir = "")
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $sdkDir = "$root\third_party\rexglue-sdk"
@@ -32,7 +32,9 @@ if (-not $OutDir) { $OutDir = "$root\out\gt" }
 if ($Layer.Count -eq 0) {
     $Layer = @("gpu-timestamps", "gpu-timestamps-vulkan", "texload-split-timestamps", "resolve-split-timestamps", "frame-log")
 }
-$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+$env:GIT_CONFIG_COUNT = "2"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+# The SDK's sources and these patches have LF line endings: git apply must not turn a file into CRLF (autocrlf=true on Windows), or the next layer's context stops matching.
+$env:GIT_CONFIG_KEY_1 = "core.autocrlf"; $env:GIT_CONFIG_VALUE_1 = "false"
 $recordFile = "$sdkDir\.gt-layer"
 $applied = @(if (Test-Path -LiteralPath $recordFile) { Get-Content -LiteralPath $recordFile } else { })
 
@@ -77,7 +79,13 @@ foreach ($name in $Layer) {
 if ($NoBuild) { exit 0 }
 
 # The toolchain on PATH, as the build scripts do it.
-. "$root\scripts\env.ps1" -Toolchain $Toolchain
+if (-not $ToolsDir) {
+    # -Toolchain given to env.ps1 stops it from reading the tools folder of the last build: do it here
+    . "$root\scripts\mcla-lib.ps1"
+    $recorded = Get-BuildOptions $root
+    if ($recorded -and $recorded.Toolchain -eq $Toolchain) { $ToolsDir = $recorded.ToolsDir }
+}
+. "$root\scripts\env.ps1" -Toolchain $Toolchain -ToolsDir $ToolsDir
 if (-not $env:VULKAN_SDK) {
     $v = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
         Sort-Object { [version]$_.Name } | Select-Object -Last 1
