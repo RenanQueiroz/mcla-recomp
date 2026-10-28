@@ -18,6 +18,7 @@ for that function, and the host code that follows it is not guest code.
   frames, and a per-round timeline of the ten busiest threads. Sampling costs 3 to 4% of the frame rate (145 to 140 FPS).
 - `--mcla_profile_thread_log=<csv>`: every thread's CPU time once a second, for the whole run, at no cost (the figures
   of CPU per swap below come from it, from stretches without sampling).
+- `--mcla_profile_exact_leaf=true` (2026-10-28, written, not yet used on a real profile): the innermost frame of a stack in `rexgpu-xenos.dll` or `rexruntime.dll` keeps its exact address instead of its function's start, so that a report built from a DLL with line tables can say which source line of a function the time is in (`cpu3_lines.py` of the author's work folder: `UpdateBindings`, `RequestRanges`). The windows get larger; the callers' frames are unchanged.
 - `launcher/dev/scripts/cpup-roam.pad` (title, map zoom-out, 8 s of free roam, a 15 s window standing at the spawn point
   and a 15 s window driving out of the car park and on) and `cpup-race.pad` (the race benchmark of `race.pad`, a 15 s
   window from 10 s of game time after the start, `--mcla_fixed_dt 60`). The races and the Vulkan runs were done after a warm-up of the
