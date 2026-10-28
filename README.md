@@ -266,6 +266,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Clear rectangles as host clears | `--clear_rectangle_draws=false` | |
 | Direct resolves | `--direct_host_resolve=false` | |
 | Single-tile rendering | `--mcla_single_tile=false` | Or the launcher's *Single tile rendering*, or PERFORMANCE › SINGLE TILE RENDERING in the pause menu, which takes effect at once. |
+| Larger tiles for the pause menu and the GPS map (issue #17) | `--mcla_larger_tiles=false` | The world behind the pause menu, the race pause and the GPS map is drawn in 4x MSAA, which cannot be one tile (2 x 2,944 EDRAM tiles of the 4,096). With this on, it is drawn in two tiles of 2,048 tiles a surface (1280x512 and 1280x208) instead of the game's three (1280x256, 256 and 208): a third fewer draws a frame. Needs single-tile rendering and the 4,096-tile EDRAM; off, the game's three tiles. |
 | The 4,096-tile EDRAM (PC and PS5 default) | `--edram_tiles=2048` | The SDK's default, the console's size; single-tile rendering then has no room and is off (its pause menu row says UNAVAILABLE). On the PS5, `edram_tiles = 2048` in `/data/mcla/mcla.toml`. |
 | Resolved textures decoded straight in | `--texture_load_direct=false` | Takes effect at once; turning it back on needs a restart. |
 | No frame wait for new pipelines | `--async_pipeline_end_of_frame_wait=true` | Restores the wait. The old behaviour in full also needs `--async_pipeline_wait_budget_ms=0 --vulkan_async_skip_incomplete_frames_max_ms=0 --vulkan_async_placeholder_pipelines=true`. |
