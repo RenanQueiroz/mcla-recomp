@@ -35,7 +35,8 @@ The registry's data is not only `GpuPreference`: this PC's key holds `C:\Program
 The chosen adapter's `EnumAdapters1` number becomes `d3d12_adapter`'s default with `rex::cvar::SetDefaultValue` after the GPU plugin is loaded (like `vulkan_device`'s):
 the SDK takes exactly that adapter, the value is not written to `mcla.toml`, and an explicit `--d3d12_adapter=N` keeps `EnumAdapters1`'s numbering. Both options are defined
 in `rexruntime.dll` (the SDK's `rexui` objects), not in the GPU plugin, so they exist when `mcla.exe` starts and the command line, environment and `mcla.toml` values are
-already applied: `GetFlagSource` is exact when the choice is made (`[RUNS PENDING]`).
+already applied: `GetFlagSource` is exact when the choice is made (checked in the runs below: `--d3d12_adapter=1` and `--vulkan_device=0` were logged as set by the user
+and kept, and the default was taken otherwise).
 
 Whenever the API ends up Vulkan (Automatic's, or `--mcla_gpu_backend=vulkan`) and `vulkan_device` is at its default, `vulkan_device` becomes the Vulkan physical device with
 the chosen adapter's LUID (`VkPhysicalDeviceIDProperties.deviceLUID`; else vendor and device id). With `mcla_prefer_dedicated_gpu=false` only Automatic's Vulkan does that, as
@@ -51,11 +52,44 @@ switchable graphics).
 
 ## The log
 
-[RUNS PENDING: the lines as the game logged them on this PC]
+As the game logged them on this PC with no entry in Windows' graphics settings (Automatic API):
+
+```
+GPU: Windows lists 3 adapter(s), in the order of d3d12_adapter:
+GPU:   [0] 'NVIDIA GeForce RTX 5080' vendor 0x10DE device 0x2C02, 15977 MiB dedicated video memory
+GPU:   [1] 'AMD Radeon(TM) Graphics' vendor 0x1002 device 0x13C0, 485 MiB dedicated video memory
+GPU:   [2] 'Microsoft Basic Render Driver' vendor 0x1414 device 0x008C, 0 MiB dedicated video memory, software
+GPU: Windows ranks them for high performance: 0, 1, 2
+GPU: Windows ranks them for power saving: 1, 0, 2
+GPU: Windows' graphics settings have no entry for 'C:\mcv\gpusel\exe\new\mcla.exe'
+GPU: 'NVIDIA GeForce RTX 5080' (the high-performance GPU)
+graphics API: Direct3D 12 (Automatic: NVIDIA graphics 'NVIDIA GeForce RTX 5080')
+```
+
+With `GpuPreference=1;` for the exe, Windows lists the Radeon first and the choice line reads
+`GPU: 'AMD Radeon(TM) Graphics' (Windows' graphics settings ask for power saving for this app)`, then
+`graphics API: Vulkan (Automatic: AMD integrated graphics (RDNA, 32-lane waves) 'AMD Radeon(TM) Graphics', Vulkan device 0)` and `GPU: Vulkan device 0 is 'AMD Radeon(TM) Graphics'`.
 
 ## Runs
 
-- The launcher's choice on this PC (`apitest`, real adapters; `SP\gpu-choice\scripts\apitest-run.ps1`): see KNOWN-ISSUES.md. [RUNS PENDING: the game's own starts]
+- The launcher's choice on this PC (`apitest`, real adapters; `SP\gpu-choice\scripts\apitest-run.ps1`): see KNOWN-ISSUES.md.
+- The game's own starts (2026-10-27, `SP\gpu-choice\scripts\matrix.ps1`: a scratch `mcla.exe` through devrun, 40 s each, the registry value written for that exe only
+  and removed after each case, the key exactly as before every time; 21 starts):
+
+  | Case | Chosen GPU (why) | API |
+  |---|---|---|
+  | defaults; `GpuPreference=0;`; `=2;` | RTX 5080 (high-performance GPU; 0 = no preference; 2 = Windows' setting) | Automatic: Direct3D 12 |
+  | `GpuPreference=1;` | Radeon (Windows' setting asks for power saving) | Automatic: Vulkan, device 0 = the Radeon |
+  | `--mcla_gpu_backend=vulkan`; with `=1;` | RTX 5080; Radeon | Vulkan device 0 = the chosen GPU |
+  | `--mcla_gpu_backend=d3d12` with `=1;` | Radeon | Direct3D 12 on the Radeon |
+  | `--d3d12_adapter=1`, also with `=2;` and with Vulkan | Radeon (set by the user) | Vulkan device 1 = the Radeon (Automatic, or chosen) |
+  | `--vulkan_device=0` with `=1;` | Radeon; `vulkan_device = 0 set by the user` | Vulkan on the Radeon |
+  | `--mcla_prefer_dedicated_gpu=false`; with `=1;`; with `=2;` | Windows' first adapter: RTX 5080; **Radeon**; RTX 5080 | as Automatic decides on it |
+  | the build before this change, no entry; `=1;`; `=2;` | `DXGI adapter:` RTX 5080; **Radeon (Automatic Vulkan)**; RTX 5080 | |
+  | boot to free roam: defaults; `=1;`; `--mcla_gpu_backend=vulkan` | RTX 5080 (144 FPS); Radeon (29 FPS, Vulkan); RTX 5080 (Vulkan) | |
+
+  The rows in bold are the check of the workaround for older releases: Windows' per-app setting moves its GPU to `EnumAdapters1` index 0, which the old code
+  (first adapter) takes. Three starts of the first run of the matrix never started (another `mcla.exe` was running) and were run again.
 
 ## Not verified
 
