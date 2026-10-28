@@ -751,11 +751,13 @@ bool RestartOnly(const char* option) {
   return info && info->lifecycle == rex::cvar::Lifecycle::kRequiresRestart;
 }
 
-// A restart-only row says "(NEXT START)", and "(RESTART NEEDED)" once its
-// value differs from the one the game started with. SINGLE TILE RENDERING
+// A restart-only row says "(NEXT START)", always: the game scales the whole menu
+// to its widest label (the stills of a GRAPHICS API step sequence), so a label
+// that changed its width at the first step ("(RESTART NEEDED)" was longer) made
+// the menu jump bigger and back as the row was stepped. SINGLE TILE RENDERING
 // says "(UNAVAILABLE)" where the GPU emulates the console's EDRAM, too small
 // for it (src/render_perf.cpp), and doesn't change then (ItemChangeable).
-std::string RowLabel(const ItemDef& item, bool pending) {
+std::string RowLabel(const ItemDef& item) {
   std::string label = item.label;
   if (IsLowLatencyItem(item)) {
     // The vendor's feature by its name (plain text): NVIDIA REFLEX, AMD ANTI LAG 2.
@@ -765,7 +767,7 @@ std::string RowLabel(const ItemDef& item, bool pending) {
     }
   }
   if (RestartOnly(item.option)) {
-    label += pending ? " (RESTART NEEDED)" : " (NEXT START)";
+    label += " (NEXT START)";
   }
   if (std::strcmp(item.option, "mcla_single_tile") == 0 && !MclaSingleTileAvailable()) {
     label += " (UNAVAILABLE)";
@@ -798,7 +800,7 @@ bool ItemChangeable(const ItemDef& item) {
 
 // Whether the row's label can change while the menus are open.
 bool LabelChanges(const ItemDef& item) {
-  return RestartOnly(item.option) || std::strcmp(item.option, "hdr") == 0 || IsLowLatencyItem(item);
+  return std::strcmp(item.option, "hdr") == 0 || IsLowLatencyItem(item);
 }
 
 // FSR (the last anti-aliasing choice) is offered only where it can run, now or
@@ -1147,7 +1149,6 @@ struct MenuRows {
   uint32_t name[kMaxRows] = {};      // the row's string-table key, a guest string
   int last_index[kMaxRows] = {};
   std::string label[kMaxRows];       // the text its label has now
-  std::string start_value[kMaxRows];  // the option's value when the menus were built
   std::string state_key;              // MenuStateKey when the rows were last brought in line
   // kNumberRange: left or right held (Hold).
   int held_direction[kMaxRows] = {};
@@ -1264,8 +1265,7 @@ bool BuildRows(int menu) {
     const ItemDef& item = Resolve(def.items[i]);
     // The row constructor resolves its label through the string table once,
     // so the text has to exist first.
-    rows.start_value[i] = OptionGet(item.option);
-    rows.label[i] = RowLabel(item, false);
+    rows.label[i] = RowLabel(item);
     SetStringTableText(item.key, rows.label[i].c_str());
     uint32_t name = AllocGuestString(item.key);
     uint32_t row = CallGuest(kGuestMallocFn, kRowObjectSize);
@@ -1322,8 +1322,8 @@ void InstallRows(int menu, uint32_t list) {
   Write32(list + kListCountCap, count_cap);
 }
 
-// Marks a restart-only row whose value now differs from the one the game
-// started with, and HDR's when the display isn't in HDR mode. The row
+// Follows the labels that change while the menus are open: HDR's when the
+// display isn't in HDR mode, the low latency row's vendor name. The row
 // constructor caches its label, so it is set again (kSetRowLabelFn) after the
 // string-table text changes.
 void UpdateRowLabels(int menu) {
@@ -1334,7 +1334,7 @@ void UpdateRowLabels(int menu) {
     if (!LabelChanges(item)) {
       continue;
     }
-    std::string label = RowLabel(item, OptionGet(item.option) != rows.start_value[i]);
+    std::string label = RowLabel(item);
     if (label == rows.label[i] || !rows.row[i] || !rows.name[i]) {
       continue;
     }
