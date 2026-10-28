@@ -84,6 +84,14 @@ jobs:
         shell: powershell
         run: .\scripts\ci\host-compile.ps1 -SdkDir third_party\rexglue-sdk\out\install\win-amd64-mingw
 
+      # The MXCSR options of the code generator (patches/rexglue-codegen-csr-lazy.patch): each instruction that
+      # stops asking for a flush mode is run in both modes and all four rounding modes and must give the same bits;
+      # the instructions that keep asking must differ (so the test can tell); the cheap switch is compared with the
+      # old calls. Compiled with the SDK just built, run on the runner's CPU (about half a minute).
+      - name: MXCSR exactness test
+        shell: powershell
+        run: .\scripts\ci\csr-exact.ps1 -SdkDir third_party\rexglue-sdk\out\install\win-amd64-mingw -Threads 4
+
   launcher:
     name: Launcher (self-contained publish)
     runs-on: windows-2025

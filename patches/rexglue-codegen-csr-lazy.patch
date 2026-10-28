@@ -1,0 +1,306 @@
+diff --git a/include/rex/codegen/config.h b/include/rex/codegen/config.h
+index 8200139..5b92270 100644
+--- a/include/rex/codegen/config.h
++++ b/include/rex/codegen/config.h
+@@ -98,6 +98,15 @@ struct RecompilerConfig {
+   bool nonVolatileRegistersAsLocalVariables = false;
+   bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
+ 
++  /// csr_mode_free_ops: the scalar floating-point instructions that only move bits (fmr, fabs, fnabs,
++  /// fneg, lfd*, stfd*, stfiwx) or truncate (fctidz, fctiwz, fcfid) give the same result whether
++  /// denormals are flushed (VMX mode) or kept (FPU mode), so they ask for no mode and no switch is
++  /// emitted for them.
++  bool csrModeFreeOps = false;
++  /// csr_cheap_switch: a mode switch writes a constant MXCSR word when the guest's rounding mode
++  /// is "to nearest" (x86-64 hosts; other rounding modes and other hosts keep the old calls).
++  bool csrCheapSwitch = false;
++
+   // === Analysis tuning (optional) ===
+   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
+   uint32_t dataRegionThreshold = 16;  ///< Consecutive invalid instructions to mark as data region
+diff --git a/include/rex/ppc/context.h b/include/rex/ppc/context.h
+index 777023e..a3d43bb 100644
+--- a/include/rex/ppc/context.h
++++ b/include/rex/ppc/context.h
+@@ -212,6 +212,52 @@ struct FPSCRRegister {
+     }
+   }
+ 
++  // The switches the code generator emits with csr_cheap_switch (config/mcla.toml). Same MXCSR
++  // as the calls above, without building the word from the shadow: with the guest's rounding
++  // mode at "to nearest", which is where the game keeps it, the two words are constants, so the
++  // value written does not wait for the load of the shadow, and the shadow is updated by one
++  // read-modify-write. Any other rounding mode takes the old calls. The exception flags in the
++  // MXCSR come out clear instead of as the shadow had them; nothing reads them (mffs returns the
++  // rounding field only). Other CPUs keep the old calls.
++#if defined(__x86_64__) || defined(_M_X64)
++  static constexpr uint32_t kMxcsrFpuNearest = uint32_t(Platform::ExceptionMask);
++  static constexpr uint32_t kMxcsrVmxNearest =
++      uint32_t(Platform::ExceptionMask) | uint32_t(FlushMask);
++
++  inline void enableFlushModeFast() noexcept {
++    if ((csr & RoundMaskVal) == 0) [[likely]] {
++      csr |= FlushMask;
++      Platform::setcsr(kMxcsrVmxNearest);
++    } else {
++      enableFlushModeUnconditional();
++    }
++  }
++
++  inline void disableFlushModeFast() noexcept {
++    if ((csr & RoundMaskVal) == 0) [[likely]] {
++      csr &= ~FlushMask;
++      Platform::setcsr(kMxcsrFpuNearest);
++    } else {
++      disableFlushModeUnconditional();
++    }
++  }
++#else
++  inline void enableFlushModeFast() noexcept { enableFlushModeUnconditional(); }
++  inline void disableFlushModeFast() noexcept { disableFlushModeUnconditional(); }
++#endif
++
++  inline void enableFlushModeCheckedFast() noexcept {
++    if ((csr & FlushMask) != FlushMask) [[unlikely]] {
++      enableFlushModeFast();
++    }
++  }
++
++  inline void disableFlushModeCheckedFast() noexcept {
++    if ((csr & FlushMask) != 0) [[unlikely]] {
++      disableFlushModeFast();
++    }
++  }
++
+   inline void InitHost() noexcept {
+     csr = getcsr();
+     Platform::InitHostExceptions(csr);
+diff --git a/src/codegen/builders/builder_context.h b/src/codegen/builders/builder_context.h
+index 33ac6d0..9558c93 100644
+--- a/src/codegen/builders/builder_context.h
++++ b/src/codegen/builders/builder_context.h
+@@ -247,6 +247,16 @@ struct BuilderContext {
+    */
+   void emit_set_flush_mode(bool enable);
+ 
++  /**
++   * @brief For a scalar instruction that gives the same result in FPU and VMX flush mode.
++   *
++   * fmr, fabs, fnabs, fneg, lfd*, stfd*, stfiwx, fctidz, fctiwz and fcfid never read the MXCSR's
++   * flush bits (they move bits, truncate, or convert an integer: no denormal operand is read and
++   * no tiny result is written). With csr_mode_free_ops they leave the mode alone; without it they
++   * ask for FPU mode, as every scalar instruction does.
++   */
++  void emit_flush_mode_free_op();
++
+   /// Emit mid-asm hook if configured for current address
+   void emit_mid_asm_hook();
+ 
+diff --git a/src/codegen/builders/context.cpp b/src/codegen/builders/context.cpp
+index f78e0d8..2b0954c 100644
+--- a/src/codegen/builders/context.cpp
++++ b/src/codegen/builders/context.cpp
+@@ -333,13 +333,25 @@ void BuilderContext::emit_set_flush_mode(bool enable) {
+   auto newState = enable ? CSRState::VMX : CSRState::FPU;
+   if (csrState != newState) {
+     auto prefix = enable ? "enable" : "disable";
+-    auto suffix = csrState != CSRState::Unknown ? "Unconditional" : "";
+-    println("\tctx.fpscr.{}FlushMode{}();", prefix, suffix);
++    // Known to be in the other mode: switch without looking. Unknown: look at the shadow first.
++    if (config().csrCheapSwitch) {
++      auto suffix = csrState != CSRState::Unknown ? "Fast" : "CheckedFast";
++      println("\tctx.fpscr.{}FlushMode{}();", prefix, suffix);
++    } else {
++      auto suffix = csrState != CSRState::Unknown ? "Unconditional" : "";
++      println("\tctx.fpscr.{}FlushMode{}();", prefix, suffix);
++    }
+ 
+     csrState = newState;
+   }
+ }
+ 
++void BuilderContext::emit_flush_mode_free_op() {
++  if (config().csrModeFreeOps)
++    return;
++  emit_set_flush_mode(false);
++}
++
+ bool BuilderContext::has_mid_asm_hook() const {
+   return config().midAsmHooks.find(base) != config().midAsmHooks.end();
+ }
+diff --git a/src/codegen/builders/floating_point.cpp b/src/codegen/builders/floating_point.cpp
+index 1702241..8c27a2e 100644
+--- a/src/codegen/builders/floating_point.cpp
++++ b/src/codegen/builders/floating_point.cpp
+@@ -19,21 +19,21 @@ namespace rex::codegen {
+ //=============================================================================
+ 
+ bool build_fabs(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{}.u64 = {}.u64 & ~0x8000000000000000;", ctx.f(ctx.insn.operands[0]),
+               ctx.f(ctx.insn.operands[1]));
+   return true;
+ }
+ 
+ bool build_fnabs(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{}.u64 = {}.u64 | 0x8000000000000000;", ctx.f(ctx.insn.operands[0]),
+               ctx.f(ctx.insn.operands[1]));
+   return true;
+ }
+ 
+ bool build_fneg(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{}.u64 = {}.u64 ^ 0x8000000000000000;", ctx.f(ctx.insn.operands[0]),
+               ctx.f(ctx.insn.operands[1]));
+   return true;
+@@ -44,13 +44,13 @@ bool build_fneg(BuilderContext& ctx) {
+ //=============================================================================
+ 
+ bool build_fmr(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{}.f64 = {}.f64;", ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]));
+   return true;
+ }
+ 
+ bool build_fcfid(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{}.f64 = double({}.s64);", ctx.f(ctx.insn.operands[0]),
+               ctx.f(ctx.insn.operands[1]));
+   return true;
+@@ -67,7 +67,7 @@ bool build_fctid(BuilderContext& ctx) {
+ }
+ 
+ bool build_fctidz(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println(
+       "\t{0}.s64 = std::isnan({1}.f64) ? int64_t(0x8000000000000000ULL) : "
+       "({1}.f64 > double(LLONG_MAX)) ? LLONG_MAX : "
+@@ -87,7 +87,7 @@ bool build_fctiw(BuilderContext& ctx) {
+ }
+ 
+ bool build_fctiwz(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println(
+       "\t{0}.s64 = std::isnan({1}.f64) ? int64_t(0x80000000U) : "
+       "({1}.f64 >= double(INT_MAX)) ? INT_MAX : "
+diff --git a/src/codegen/builders/memory.cpp b/src/codegen/builders/memory.cpp
+index 3dd7fa5..32c8c98 100644
+--- a/src/codegen/builders/memory.cpp
++++ b/src/codegen/builders/memory.cpp
+@@ -220,7 +220,7 @@ bool build_ldarx(BuilderContext& ctx) {
+ //=============================================================================
+ 
+ bool build_lfd(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.print("\t{}.u64 = REX_LOAD_U64(", ctx.f(ctx.insn.operands[0]));
+   if (ctx.insn.operands[2] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[2]));
+@@ -229,7 +229,7 @@ bool build_lfd(BuilderContext& ctx) {
+ }
+ 
+ bool build_lfdx(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.print("\t{}.u64 = REX_LOAD_U64(", ctx.f(ctx.insn.operands[0]));
+   if (ctx.insn.operands[1] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
+@@ -259,7 +259,7 @@ bool build_lfsx(BuilderContext& ctx) {
+ 
+ bool build_lfdu(BuilderContext& ctx) {
+   // Load Floating-point Double with Update
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{} = {} + {}.u32;", ctx.ea(), static_cast<int32_t>(ctx.insn.operands[1]),
+               ctx.r(ctx.insn.operands[2]));
+   ctx.println("\t{}.u64 = REX_LOAD_U64({});", ctx.f(ctx.insn.operands[0]), ctx.ea());
+@@ -269,7 +269,7 @@ bool build_lfdu(BuilderContext& ctx) {
+ 
+ bool build_lfdux(BuilderContext& ctx) {
+   // Load Floating-point Double with Update Indexed
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{} = {}.u32 + {}.u32;", ctx.ea(), ctx.r(ctx.insn.operands[1]),
+               ctx.r(ctx.insn.operands[2]));
+   ctx.println("\t{}.u64 = REX_LOAD_U64({});", ctx.f(ctx.insn.operands[0]), ctx.ea());
+@@ -447,7 +447,7 @@ bool build_stdux(BuilderContext& ctx) {
+ //=============================================================================
+ 
+ bool build_stfd(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.print("{}", ctx.mmio_check_d_form() ? "\tREX_MM_STORE_U64(" : "\tREX_STORE_U64(");
+   if (ctx.insn.operands[2] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[2]));
+@@ -457,7 +457,7 @@ bool build_stfd(BuilderContext& ctx) {
+ }
+ 
+ bool build_stfdx(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.print("{}", ctx.mmio_check_x_form() ? "\tREX_MM_STORE_U64(" : "\tREX_STORE_U64(");
+   if (ctx.insn.operands[1] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
+@@ -467,7 +467,7 @@ bool build_stfdx(BuilderContext& ctx) {
+ 
+ bool build_stfdux(BuilderContext& ctx) {
+   // Store Floating-point Double with Update Indexed: EA = rA + rB; MEM(EA) = FRS; rA = EA
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{} = {}.u32 + {}.u32;", ctx.ea(), ctx.r(ctx.insn.operands[1]),
+               ctx.r(ctx.insn.operands[2]));
+   ctx.println("\tREX_STORE_U64({}, {}.u64);", ctx.ea(), ctx.f(ctx.insn.operands[0]));
+@@ -476,7 +476,7 @@ bool build_stfdux(BuilderContext& ctx) {
+ }
+ 
+ bool build_stfiwx(BuilderContext& ctx) {
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.print("{}", ctx.mmio_check_x_form() ? "\tREX_MM_STORE_U32(" : "\tREX_STORE_U32(");
+   if (ctx.insn.operands[1] != 0)
+     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
+@@ -506,7 +506,7 @@ bool build_stfsx(BuilderContext& ctx) {
+ 
+ bool build_stfdu(BuilderContext& ctx) {
+   // Store Floating-point Double with Update
+-  ctx.emit_set_flush_mode(false);
++  ctx.emit_flush_mode_free_op();
+   ctx.println("\t{} = {} + {}.u32;", ctx.ea(), static_cast<int32_t>(ctx.insn.operands[1]),
+               ctx.r(ctx.insn.operands[2]));
+   ctx.println("\tREX_STORE_U64({}, {}.u64);", ctx.ea(), ctx.f(ctx.insn.operands[0]));
+diff --git a/src/codegen/config.cpp b/src/codegen/config.cpp
+index 5da54a0..74b0b25 100644
+--- a/src/codegen/config.cpp
++++ b/src/codegen/config.cpp
+@@ -116,6 +116,10 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
+             hasBool("non_volatile_as_local"), "non_volatile_as_local");
+   MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
+             hasBool("generate_exception_handlers"), "generate_exception_handlers");
++  MergeBool(cfg.csrModeFreeOps, toml["csr_mode_free_ops"].value_or(false),
++            hasBool("csr_mode_free_ops"), "csr_mode_free_ops");
++  MergeBool(cfg.csrCheapSwitch, toml["csr_cheap_switch"].value_or(false),
++            hasBool("csr_cheap_switch"), "csr_cheap_switch");
+   if (hasBool("is_dll")) {
+     cfg.isDll = toml["is_dll"].value_or(false);
+   }
+diff --git a/src/codegen/project_recompiler.cpp b/src/codegen/project_recompiler.cpp
+index 240bcb0..a805110 100644
+--- a/src/codegen/project_recompiler.cpp
++++ b/src/codegen/project_recompiler.cpp
+@@ -82,6 +82,8 @@ std::string FingerprintModule(const RecompilerConfig& cfg,
+   std::vector<std::string> flags{
+       fmt::format("templates={}", EmbeddedTemplatesHash()),
+       fmt::format("generate_exception_handlers={}", cfg.generateExceptionHandlers),
++      fmt::format("csr_mode_free_ops={}", cfg.csrModeFreeOps),
++      fmt::format("csr_cheap_switch={}", cfg.csrCheapSwitch),
+       fmt::format("max_jump_extension={}", cfg.maxJumpExtension),
+       fmt::format("data_region_threshold={}", cfg.dataRegionThreshold),
+       fmt::format("max_file_size_bytes={}", REXCVAR_GET(max_file_size_bytes)),
