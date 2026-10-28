@@ -197,7 +197,8 @@ static class GameSettings
              + "switch during play in the pause menu; FSR takes a moment to start the first time.",
         DefaultFrom = file =>
             (file.TryGetValue("mcla_msaa", out var raw) && SettingValues.Same(SettingValues.Parse(raw), false))
-            || (file.TryGetValue("mcla_preset", out var preset) && SettingValues.Same(SettingValues.Parse(preset), "low"))
+            || (file.TryGetValue("mcla_preset", out var preset)
+                && (SettingValues.Same(SettingValues.Parse(preset), "low") || SettingValues.Same(SettingValues.Parse(preset), "lowest")))
             ? "off" : null,
         // FSR only where its runtime for the graphics API in use was built
         // (the Vulkan one needs the Vulkan SDK at build time); otherwise the
@@ -247,17 +248,21 @@ static class GameSettings
     }
     // mcla_preset (src/perf_options.cpp): a starting point for a weak GPU. Low-end makes the
     // detail options below default to their cheap values (anti-aliasing off among them, which
-    // the file's own mcla_anti_aliasing still overrides); the others are the pause menu's.
+    // the file's own mcla_anti_aliasing still overrides); the others are the pause menu's. Lowest is
+    // Low-end with the real-time shadows off too (mcla_shadows, a pause-menu row).
     public static readonly GameSetting Preset = new("mcla_preset", "Graphics preset",
-        [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low")], "custom")
+        [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low"),
+         new("Lowest (Low-end, and no shadows)", "lowest")], "custom")
     {
         Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the far sun shadows every "
              + "2nd frame and the environment map of the cars every 4th (the picture of the last time is kept "
              + "in between). On an integrated Radeon that is about 12% less frame time at the game's own "
              + "resolution (32.3 instead of 36.8 ms in free roam): 4% from the shadows, the map and the "
              + "blur, and 7 to 8% from leaving anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
-             + "integrated graphics. An option you set by hand (Anti-aliasing here, or the pause menu's "
-             + "PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
+             + "integrated graphics. Lowest is Low-end with the real-time shadows off as well: about 27% less "
+             + "frame time than with no preset on that Radeon (and 17% at 3x on an RTX 5080), but no sun "
+             + "shadows at all, not even the one under the car. An option you set by hand (Anti-aliasing here, "
+             + "or the pause menu's PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
     };
     // temporal_aa_sharpness (the SDK's): FSR's own sharpening (RCAS) after it.
     public static readonly GameSetting FsrSharpness = new("temporal_aa_sharpness", "FSR sharpness",

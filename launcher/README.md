@@ -612,7 +612,7 @@ instead of 93 to 94% (`dev\single-tile-edram-2026-10-16.md`). Off, the scene is
 drawn as on the console. With `--edram_tiles=2048` there is no room for one tile:
 the pause menu's row says UNAVAILABLE and nothing changes either way.
 
-*Graphics preset* (`mcla_preset`: `custom`, the default, or `low`) is a starting point for a weak
+*Graphics preset* (`mcla_preset`: `custom`, the default, `low` or `lowest`) is a starting point for a weak
 graphics card: Low-end makes anti-aliasing and the full-screen blur default to off, the far
 sun shadows (`mcla_far_shadow_interval`) to being drawn every 2nd frame and the
 environment map of the cars (`mcla_env_map_interval`) every 4th, the picture of the last
@@ -623,6 +623,10 @@ of 36.8 and anti-aliasing off another 2.5 to 2.9 ms (29% at 2x), 11 to 12% toget
 (free roam 36.8 to 32.3 ms, driving 35.8 to 31.7 ms; `dev\gpu-weak-2026-10-27.md` has
 each option's saving and what was left out: the
 reflection view every 2nd frame saves 0.3 ms, too little for a reflection that lags).
+Lowest is Low-end and the real-time shadows off too (`mcla_shadows`, the pause menu's SHADOWS row): the shadows are
+16 to 17% of the frame on every GPU measured, the largest saving left, so Lowest is 26.9% below no preset on that
+Radeon (Vulkan, native resolution, a frozen race start: Low-end 34.2 ms, 12.3% below; Lowest 28.8 ms) and 17% at 3x on an RTX 5080,
+at the price of every sun shadow, the one under the car too (`dev\aniso-2026-10-27.md`).
 
 *Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is
 Vulkan on AMD's integrated graphics of the RDNA generation and on Intel graphics and
