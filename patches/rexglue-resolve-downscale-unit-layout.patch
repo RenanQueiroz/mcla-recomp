@@ -1,13 +1,13 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 828d462..3fe732c 100644
+index 828d462..0f9ef92 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -715,6 +715,15 @@ class CommandProcessor {
    // implementations.
    SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
  
-+  // 1 when the resolve downscale pass (readback_resolve and readback_resolve_rules
-+  // use it, and anything else that turns a scaled resolve back into 1x data) is
++  // 1 when the resolve downscale pass (the resolve readback uses it, and
++  // anything else that turns a scaled resolve back into 1x data) is
 +  // to find the pixels of a resolution-scaled resolve by the scaled layout's own
 +  // addressing, 0 for the pass's original addressing (resolve_downscale_unit_layout;
 +  // rexglue-resolve-downscale-unit-layout.patch). The backends' downscale
@@ -55,7 +55,7 @@ index 85e9963..269d255 100644
    bool EnsureSwapFxaaSourceImage(uint32_t width, uint32_t height);
    void DestroySwapFxaaSourceImage();
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index bd96ce5..f6cb45d 100644
+index bd96ce5..b6ec251 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -138,6 +138,17 @@ REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
@@ -64,7 +64,7 @@ index bd96ce5..f6cb45d 100644
  
 +REXCVAR_DEFINE_BOOL(resolve_downscale_unit_layout, true, "GPU",
 +                    "When draw resolution scaling is active, the pass that turns a scaled resolve "
-+                    "back into the 1x data (readback_resolve and readback_resolve_rules) finds "
++                    "back into the 1x data (the resolve readback of the title's textures) finds "
 +                    "each guest pixel's host pixel by the scaled resolve layout's own addressing "
 +                    "(host pixels are kept in N x 1 sub-units, column-major, inside one guest "
 +                    "unit of N pixels). Off: the pass's original addressing (the pixel's byte "
