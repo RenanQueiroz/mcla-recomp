@@ -24,7 +24,8 @@ if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -For
 New-Item -ItemType Directory -Force $Work | Out-Null
 
 $exe = "$Work\csr_exact.exe"
-& $env:MCLA_CXX -std=c++23 -O3 -msse4.1 -Wall -Wextra -Wno-unused-parameter "-I$include" "$PSScriptRoot\csr-exact\csr_exact.cpp" -o $exe
+# (quoted: PowerShell 5.1 splits an unquoted -msse4.1 into -msse4 and .1)
+& $env:MCLA_CXX "-std=c++23" "-O3" "-msse4.1" "-Wall" "-Wextra" "-Wno-unused-parameter" "-I$include" "$PSScriptRoot\csr-exact\csr_exact.cpp" "-o" $exe
 if ($LASTEXITCODE -ne 0) { throw "csr_exact.cpp does not compile" }
 foreach ($dll in "libc++.dll", "libunwind.dll") {
     Copy-Item -LiteralPath "$env:MCLA_MINGW_ROOT\x86_64-w64-mingw32\bin\$dll" -Destination $Work -Force
