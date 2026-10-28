@@ -444,6 +444,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }
     @{ Patch = "rexglue-upstream-linux-wine.patch"; File = "src\core\dynlib_win.cpp"; Adds = "GetModuleHandleExW" }
     @{ Patch = "rexglue-upstream-small-fixes.patch"; File = "include\rex\system\xam\user_profile.h"; Adds = "Settings are owned, and replaced, through" }
+    @{ Patch = "rexglue-gpu-float-constants-run-copy.patch"; File = "include\rex\graphics\util\draw.h"; Adds = "CopyUsedFloatConstants" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

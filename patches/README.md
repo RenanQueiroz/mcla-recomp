@@ -59,6 +59,7 @@ git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
 git apply ../../patches/rexglue-upstream-small-fixes.patch
+git apply ../../patches/rexglue-gpu-float-constants-run-copy.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -1755,6 +1756,20 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 |---|---|---|
 | Binary profile settings: no `memcpy` into an empty vector; virtual destructor | `src/kernel/xam/xam_user.cpp`, `include/rex/system/xam/user_profile.h` | all platforms |
 | Texture fetch exponent bias from fetch constant word 3 | `src/graphics/pipeline/shader/spirv_translator_fetch.cpp` | Vulkan (all platforms) |
+
+## rexglue-gpu-float-constants-run-copy.patch
+
+**Why.** A draw's float constants go into its constant buffer one constant at a time: for every constant the shader uses (a bit in its bitmap) the loop finds the bit, clears it and copies 16 bytes. A shader that uses 60 constants runs the loop 60 times, twice a draw (vertex and pixel), and in a profile of the GPU command thread (D3D12, `launcher/dev/profiling-2026-10-26.md`) `UpdateBindings`, where the loops are, is the function with the most time of its own in the thread: 3.2% of it in the city (0.23 ms a frame; its 12% in the race includes its callees). How much of that is these loops is not known (the profile has no lines); this patch is the experiment that tells.
+
+**What it adds.** `draw_util::CopyUsedFloatConstants` (`include/rex/graphics/util/draw.h`): the same copy with a run of consecutive constants in use done as one `memcpy` (the bitmap's runs are found with `countr_zero` and `countr_one`). The bytes written are the same, in the same order. Cvar `gpu_float_constants_run_copy` (default **off** until it is measured; changes during play): on uses the helper, off keeps the loop. Both backends (D3D12's `UpdateBindings` and Vulkan's constant buffer update).
+
+**Status.** Written 2026-10-28, branch `cpu/command-thread`; compiled by CI only (the `Host code against the SDK` job), **not run and not measured**. The measurement is in-run: a dev pad run that sets the cvar on and off every few seconds in the same scene and compares the GPU command thread's CPU per frame between the windows (`scratchpad` chain of the `cpu3` work, `launcher/dev/scripts/cpu3-toggle.pad`). Built for Windows (D3D12, Vulkan); nothing was built or run on Linux or the PS5.
+
+| Change | Files | Affects |
+|---|---|---|
+| `CopyUsedFloatConstants` | `include/rex/graphics/util/draw.h` | D3D12, Vulkan |
+| The cvar | `src/graphics/command_processor.cpp` | D3D12, Vulkan |
+| The constant buffer updates call it | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12; Vulkan (PC, PS5) |
 
 ## rexglue-mingw.patch
 
