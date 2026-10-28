@@ -1014,6 +1014,8 @@ during a build:
   rectangle with a pixel shader instead of `ClearRenderTargetView`, Direct3D 12). They go on the SDK
   with both patches in (`gt-build.ps1 -Layer gpu-timestamps,...`); `gt-build.ps1 -ToolsDir` names
   the tools folder of a build made with another options file.
+- `texload-direct-unscaled-2026-10-28.md` (`rexglue-texture-load-direct-unscaled.patch`, texture loads without the copy at native resolution: the baseline loads per frame, the design, how it is measured) and
+  `check_texload_scale1.py` (needs numpy: the scaled load shaders' guest addressing at a scale of 1 against the unscaled one, which that patch relies on).
 
 ## Scripted controller input (unattended runs)
 
