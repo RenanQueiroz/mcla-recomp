@@ -999,6 +999,10 @@ during a build:
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
 
+### The hand-off trace
+
+`--handoff_trace=true` records time-stamped events at the points where the game's threads wait for each other (guest kernel waits and signals with the guest call chain, the GPU command thread's waits, the swap, the Direct3D 12 submission thread, and a few of the game's own: the engine timer, the update thread's ring-slot wait, the thread that frees the slots, the render thread's loop) and writes them to `--handoff_trace_file=<file>` at exit or when `handoff_trace_dump` is set; `--handoff_trace_run=false` at the start and `set handoff_trace_run true|false` in a pad script record only the stretches the script opens (`set handoff_trace_label <name>` names the next one). `handoff_trace.py <file>` (`python -I launcher\dev\handoff_trace.py`; `--gen <generated\default folder>` for the names of the guest functions) prints, per window, the update thread's frame period, the time a frame spends in each wait and who ended it, who waits for whom, the critical path of the average, the median and the longest frame, and the numbers of the ring-slot hand-off (event set to round, round to freed slot, freed slot to the update thread leaving its wait), the GPU command thread and the render thread. `scripts/handoff-city.pad` and `handoff-race.pad` record 6 s windows (roam, drive and a 60 FPS cap; the race uncapped and at 60) with marks around them, so that the same script without `--handoff_trace` gives the frame times to compare. See `patches/README.md`, `rexglue-handoff-trace.patch`, and `launcher/dev/handoff-2026-10-28.md`.
+
 ## Scripted controller input (unattended runs)
 
 A development tool of this fork only; it is never part of an upstream pull

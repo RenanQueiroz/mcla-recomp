@@ -300,7 +300,9 @@ def resolve_wakers(spans, signals):
             continue
         ts = keys[s.obj]
         j = bisect.bisect_right(ts, s.e) - 1
-        while j >= 0 and ts[j] >= s.b - 2.0:
+        # a signal recorded up to 200 us before the wait's own record may still have been the one that ended it: the
+        # signalling thread can be descheduled between recording the signal and setting the object
+        while j >= 0 and ts[j] >= s.b - 200.0:
             t, th, ra = lst[j]
             if th != s.thr:
                 s.waker, s.wake_t = th, t

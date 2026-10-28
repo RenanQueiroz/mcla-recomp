@@ -1757,6 +1757,29 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | Binary profile settings: no `memcpy` into an empty vector; virtual destructor | `src/kernel/xam/xam_user.cpp`, `include/rex/system/xam/user_profile.h` | all platforms |
 | Texture fetch exponent bias from fetch constant word 3 | `src/graphics/pipeline/shader/spirv_translator_fetch.cpp` | Vulkan (all platforms) |
 
+## rexglue-handoff-trace.patch
+
+**Why.** The profile of the city (`launcher/dev/profiling-2026-10-26.md`) showed the update and render threads close to serialized and the update thread idling in a ring-slot wait, but a sampler cannot say what one thread waited for or who ended it. This is a development tool, off unless `--handoff_trace=true`: a time-stamped event at each point where a thread waits for another or wakes it, into a buffer in memory, written to a file; `launcher/dev/handoff_trace.py` turns the file into per-window frame structure and the critical path of a frame.
+
+**What it records** (the numbers are in `include/rex/handoff_trace.h`, file format version 1):
+- Guest kernel objects, with the guest call chain of the caller (the link register and the return addresses of the next three PPC stack frames, read only inside the thread's own stack): `XObject::Wait` (begin and end; a wait with a timeout of 0 is one event), `WaitMultiple`, `SignalAndWait`, `XEvent::Set` and `Pulse`, `XSemaphore::ReleaseSemaphore`, `XMutant::ReleaseMutant`, `XThread::Delay` (not for a `Sleep(0)`, which the game's polling loops call thousands of times a frame). The object is its guest handle.
+- The command processor (`src/graphics/command_processor.cpp`): the idle wait for the write pointer (and how many turns it took), `ExecutePrimaryBuffer` (read and write index), `UpdateWritePointer` (on the guest's thread), the swap packet's `IssueSwap`, and a `WAIT_REG_MEM` packet that does not match at once. Direct3D 12 (`src/graphics/d3d12/command_processor.cpp`): the wait for the queue when a frame opens (`CheckSubmissionFence`), the hand-over of a command list to the submission thread, what the submission thread does with it, and the command processor's wait for that thread.
+- The game's own events (`src/handoff_trace.h`, the hooks of `config/handoff_trace.toml`): the engine timer, the swap, the update thread's ring-slot wait (`sub_82148A10`: begin, end, turns of its `Sleep(0)` loop), the slot it publishes (`sub_82161210`), a round of the thread that frees the slots (`sub_82144888`, `sub_82160088`), that thread's wait (`mcla_pump_wake_on_demand`) and the update thread's wake-up of it, the render thread's loop (`sub_82305E38`), its frame function, the update thread's start of that frame (`sub_82305D00`) and its check for the last one (`sub_823057E8`), and the frame-rate limiter's wait.
+
+**Options** (the SDK's, all `Development`): `handoff_trace` (restart; off), `handoff_trace_events` (the buffer, in millions of 40-byte events; 6), `handoff_trace_file` (where it is written; `handoff-trace.hotrace`), `handoff_trace_run` (whether events are recorded now; setting it to true opens a window and to false closes it, so that a script records only the stretches it wants: start with `--handoff_trace_run=false`), `handoff_trace_label` (the name of the next window), `handoff_trace_dump` (setting it to true writes the file and stops the recording; the buffer is also written at exit). When the buffer is full recording stops and the rest is counted as dropped.
+
+**Cost.** Off: every call is one function call and two loads (a guest wait, signal or command-processor step: a few nanoseconds); no memory is allocated. On: about 60 ns an event (one atomic add, one clock read, 40 bytes written) and the buffer (240 MB of address space at the default; pages are touched as it fills). The frame time with it on against off is measured with `launcher/dev/scripts/handoff-city.pad` (the windows are bracketed by marks): see `launcher/dev/handoff-2026-10-28.md` (not measured when this was written).
+
+**Not covered.** Guest code that spins on memory another thread writes (the update thread's ring-slot wait is traced by the game's hooks; any other spin shows as running time). Linux and the PS5 build: the code compiles there (the clock is `std::chrono::steady_clock`) but was not built or run; the guest call chain is read on every platform, it only looks at memory inside the thread's own stack.
+
+**Upstream:** not offered (a development tool).
+
+| Change | Files | Affects |
+|---|---|---|
+| The buffer, the options, the file | `include/rex/handoff_trace.h`, `src/system/handoff_trace.cpp` (new), `src/system/CMakeLists.txt` | all platforms |
+| Guest kernel waits and signals | `src/system/xobject.cpp`, `xevent.cpp`, `xsemaphore.cpp`, `xmutant.cpp`, `xthread.cpp` | all platforms |
+| Command processor events | `src/graphics/command_processor.cpp`, `src/graphics/d3d12/command_processor.cpp` | all platforms (the Direct3D 12 events: Windows) |
+
 ## rexglue-mingw.patch
 
 **Why.** Builds the SDK, `rexglue.exe` and the game with llvm-mingw 20250709 (Clang 20.1.8, lld, libc++ and mingw-w64 on Windows' UCRT), so that a PC needs no Microsoft compiler (`scripts\make_pc.ps1 -Toolchain mingw`). Found by building the SDK that way: every change is small, and guarded or without effect for the Microsoft toolchain (checked: the msvc build's `mcla.exe`, `rexruntime.dll`, `rexgpu-xenos.dll` and the code `rexglue codegen` writes are unchanged). A game built this way was compared with the msvc build's (the same Clang version, 62 scripted runs on both APIs, 2026-10-24): the same pictures, saves and behaviour, and frame times within the benchmarks' own spread.
