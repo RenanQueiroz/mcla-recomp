@@ -444,7 +444,7 @@ class ReflexSleepAssist {
   static constexpr int64_t kNarrowUs = 125;
   static constexpr int64_t kMaxExtraUs = 4000;
   static constexpr uint64_t kHoldOffUs = 10'000'000;
-  static constexpr uint64_t kReportUs = 10'000'000;
+  static constexpr uint64_t kReportUs = 5'000'000;
 
   struct Stats {
     uint64_t assisted = 0;        // passes with a timer wait

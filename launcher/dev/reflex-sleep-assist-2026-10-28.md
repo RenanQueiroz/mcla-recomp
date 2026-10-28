@@ -46,7 +46,7 @@ NVAPI interval is measured, and how much the latency reduction moves the end of 
 - a frame whose own work already used the time until the deadline minus the margin makes no timer wait.
 
 The log (`game.log`): `Reflex sleep assist: on at N FPS ...` once when it starts running; `not running: <reason>` once per reason
-that lasts 3 s (Vulkan, no Reflex, no cap, limiter fork, frame generation, no timer); every 10 s while it runs a line with the number
+that lasts 3 s (Vulkan, no Reflex, no cap, limiter fork, frame generation, no timer); every 5 s while it runs a line with the number
 of timer waits, the average timer wait, the average wait left to the driver, the driver's return against the model (mean, min,
 max), the margin, and the counts of too-tight frames and late wake-ups; a warning when it switches itself off.
 
@@ -64,7 +64,9 @@ compares it with the assist.
 One exclusive hold of at most 40 minutes (a chain script kept outside the repository): the build of this branch, then Direct3D 12, RTX 5080, native
 resolution, HDR off, the pad `launcher/dev/scripts/reflex-ab.pad` (standing in the city: uncapped 8 s, then a cap of 60 for 10 s,
 then 30 for 12 s, set during the run), at 16 logical processors and at 4 (affinity 0xF), three variants (off, assist,
-`low_latency_limiter=fork`), three runs each per logical count in the order A B C C B A A B C, plus a warm-up run first.
+`low_latency_limiter=fork`), three runs each per logical count in the order A B C C B A A B C, plus a warm-up run first. Every
+run has `--hdr=off --low_latency_debug=2 --audio_stats=true`, PresentMon and the present log on; the only differences are the
+variant's option. The CPU is read from the game's threads (1 Hz) with PresentMon running beside it (the same for all variants).
 
 Per run and segment: the process' CPU per swap and the Main thread's (`threads.csv`, 1 Hz, interpolated to the marks); the frame
 median and 99th percentile, the swap interval's standard deviation and the share of intervals more than 1 ms off the cap's period
