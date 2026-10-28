@@ -179,7 +179,7 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
 +  } tmpgt_end{this};
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
-   if (readback_mode == ReadbackResolveMode::kDisabled) {
+   if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective()) {
 diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
 --- a/src/graphics/vulkan/deferred_command_buffer.cpp
 +++ b/src/graphics/vulkan/deferred_command_buffer.cpp
@@ -237,7 +237,7 @@ diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/r
  namespace rex::graphics::vulkan {
  
  // Generated with `xb buildshaders`.
-@@ -2073,8 +2095,34 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+@@ -2260,8 +2282,34 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
        RenderTarget* const* depth_and_color_render_targets =
            last_update_accumulated_render_targets();
  
@@ -350,7 +350,7 @@ diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture
  namespace rex::graphics::vulkan {
  
  // Generated with `xb buildshaders`.
-@@ -1403,6 +1424,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+@@ -1405,6 +1426,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
  
  bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                 bool load_mips) {

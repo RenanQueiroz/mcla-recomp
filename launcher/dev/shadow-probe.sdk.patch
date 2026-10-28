@@ -1,0 +1,194 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -13,6 +13,10 @@
+ 
+ #include <rex/cvar.h>
+ 
++// TMPSP (shadow-probe.sdk.patch): set by a backend's command processor; puts a label into the GPU
++// timestamps (the argument is the command processor).
++extern void (*g_sp_mark_hook)(void*, const char*);
++
+ // GPU Core
+ REXCVAR_DECLARE(bool, vsync);
+ REXCVAR_DECLARE(bool, clear_memory_page_state);
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -110,6 +110,26 @@ bool TmpFlSwap(std::string* label_out) {
+   return true;
+ }
+ 
++// TMPSP: shadow-pass probe (launcher/dev/shadow-probe.sdk.patch). tmp_sp_mode perturbs the depth-only
++// draws of the four sun-shadow cascades (render phases 0x20..0x100, a 4x MSAA D24S8 depth target, no
++// colour written) to find what their GPU time is bound by. The picture is wrong while it is on: only the
++// GPU timestamps are read. A bit mask:
++//    1  no rasterization (an empty scissor: the vertex work and the primitive setup remain)
++//    2  the viewport 16 times smaller in each direction (the pixel work almost gone, the geometry kept)
++//    4  one triangle per draw (what a draw costs by itself: state, bindings, uploads)
++//    8  no depth and no stencil writes
++//   16  half of the triangles of each draw
++//   32  no stencil test or write (the depth write stays)
++//   64  only every tmp_sp_decimate-th draw is issued (the others are left out)
++REXCVAR_DEFINE_INT32(tmp_sp_mode, 0, "GPU",
++                     "TMPSP: perturbs the sun-shadow cascade draws (bit mask, command_processor.cpp)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_INT32(tmp_sp_decimate, 4, "GPU",
++                     "TMPSP: with bit 64, one draw in this many is issued")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++// Set by the backends: puts a label into the GPU timestamps (the argument is the command processor).
++void (*g_sp_mark_hook)(void*, const char*) = nullptr;
++
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+ REXCVAR_DEFINE_INT32(shader_storage_progress, 0, "GPU",
+                      "While stored pipelines are created at start, print a progress line on "
+@@ -2358,6 +2378,27 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+   return true;
+ }
+ 
++namespace {  // TMPSP
++struct SpSaved {
++  bool perturbed = false;
++  uint32_t draw_initiator = 0, depth_control = 0, screen_scissor_br = 0, viewport[4] = {};
++};
++bool g_sp_mark_pending = false;
++// Is this one of the sun-shadow cascade draws: a triangle list into the 4x MSAA D24S8 depth target with
++// no colour written, in a cascade's render phase.
++bool SpIsCascadeDraw(const RegisterFile& regs, uint32_t phase, xenos::PrimitiveType prim) {
++  if (prim != xenos::PrimitiveType::kTriangleList) return false;
++  if (phase != 0x20 && phase != 0x40 && phase != 0x80 && phase != 0x100) return false;
++  if (regs.Get<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k4X) return false;
++  if (regs.Get<reg::RB_DEPTH_INFO>().depth_format != xenos::DepthRenderTargetFormat::kD24S8) {
++    return false;
++  }
++  if (regs[XE_GPU_REG_RB_COLOR_MASK] & 0xFFFF) return false;
++  const auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
++  return depth_control.z_enable && depth_control.z_write_enable;
++}
++}  // namespace
++
+ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
+                                               const char* opcode_name, uint32_t viz_query_condition,
+                                               uint32_t count_remaining) {
+@@ -2455,14 +2496,93 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+       // TODO(Triang3l || JoelLinn): Handle this properly in the render
+       // backends.
+ 
++      // TMPSP: the shadow-pass probe (tmp_sp_mode), see the top of this file.
++      SpSaved sp_saved;
++      bool sp_issue = true;
++      const int32_t sp_mode = REXCVAR_GET(tmp_sp_mode);
++      uint32_t sp_draw_count = vgt_draw_initiator.num_indices;
++      if (sp_mode &&
++          SpIsCascadeDraw(*register_file_, guest_marker_phase_, vgt_draw_initiator.prim_type)) {
++        static uint32_t sp_draw_index = 0;
++        static uint32_t sp_marked_phase = 0;
++        static int32_t sp_marked_mode = -1;
++        if (guest_marker_phase_ != sp_marked_phase || sp_mode != sp_marked_mode) {
++          sp_marked_phase = guest_marker_phase_;
++          sp_marked_mode = sp_mode;
++          sp_draw_index = 0;
++          g_sp_mark_pending = true;
++        }
++        RegisterFile& regs_rw = *register_file_;
++        sp_saved.perturbed = true;
++        sp_saved.draw_initiator = regs_rw[XE_GPU_REG_VGT_DRAW_INITIATOR];
++        sp_saved.depth_control = regs_rw[XE_GPU_REG_RB_DEPTHCONTROL];
++        sp_saved.screen_scissor_br = regs_rw[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR];
++        sp_saved.viewport[0] = regs_rw[XE_GPU_REG_PA_CL_VPORT_XSCALE];
++        sp_saved.viewport[1] = regs_rw[XE_GPU_REG_PA_CL_VPORT_XOFFSET];
++        sp_saved.viewport[2] = regs_rw[XE_GPU_REG_PA_CL_VPORT_YSCALE];
++        sp_saved.viewport[3] = regs_rw[XE_GPU_REG_PA_CL_VPORT_YOFFSET];
++        if (sp_mode & 64) {
++          const uint32_t every = uint32_t(std::max<int32_t>(1, REXCVAR_GET(tmp_sp_decimate)));
++          if (sp_draw_index++ % every != 0) sp_issue = false;
++        }
++        if (sp_mode & 1) {
++          // An empty scissor: the screen scissor's bottom right at the origin collapses it.
++          regs_rw[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR] = 0;
++        }
++        if (sp_mode & 2) {
++          for (uint32_t viewport_reg :
++               {uint32_t(XE_GPU_REG_PA_CL_VPORT_XSCALE), uint32_t(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
++                uint32_t(XE_GPU_REG_PA_CL_VPORT_YSCALE), uint32_t(XE_GPU_REG_PA_CL_VPORT_YOFFSET)}) {
++            float value;
++            std::memcpy(&value, &regs_rw[viewport_reg], sizeof(float));
++            value *= 1.0f / 16.0f;
++            std::memcpy(&regs_rw[viewport_reg], &value, sizeof(float));
++          }
++        }
++        if (sp_mode & (4 | 16)) {
++          uint32_t count = vgt_draw_initiator.num_indices;
++          count = (sp_mode & 4) ? std::min<uint32_t>(count, 3) : (count / 2) / 3 * 3;
++          count = std::max<uint32_t>(count, 3);
++          reg::VGT_DRAW_INITIATOR changed = vgt_draw_initiator;
++          changed.num_indices = count;
++          regs_rw[XE_GPU_REG_VGT_DRAW_INITIATOR] = changed.value;
++          sp_draw_count = count;
++        }
++        if (sp_mode & (8 | 32)) {
++          reg::RB_DEPTHCONTROL depth_control;
++          depth_control.value = sp_saved.depth_control;
++          depth_control.stencil_enable = 0;
++          if (sp_mode & 8) depth_control.z_write_enable = 0;
++          regs_rw[XE_GPU_REG_RB_DEPTHCONTROL] = depth_control.value;
++        }
++      }
+       bool major_mode_explicit =
+           xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
+       // HDR output: the UI layer (may change the alpha blend for this draw).
+       bool hdr_blend_overridden = HdrBeforeDraw();
+       // Temporal AA: the anti-aliasing pass goes before this draw.
+       taa_pending_ = TaaCheckDraw();
+-      draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+-                                 is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
++      if (sp_issue) {  // TMPSP
++        if (is_indexed) index_buffer_info.count = sp_draw_count;
++        draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, sp_draw_count,
++                                   is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
++      }
++      if (sp_saved.perturbed) {  // TMPSP
++        RegisterFile& regs_rw = *register_file_;
++        regs_rw[XE_GPU_REG_VGT_DRAW_INITIATOR] = sp_saved.draw_initiator;
++        regs_rw[XE_GPU_REG_RB_DEPTHCONTROL] = sp_saved.depth_control;
++        regs_rw[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR] = sp_saved.screen_scissor_br;
++        regs_rw[XE_GPU_REG_PA_CL_VPORT_XSCALE] = sp_saved.viewport[0];
++        regs_rw[XE_GPU_REG_PA_CL_VPORT_XOFFSET] = sp_saved.viewport[1];
++        regs_rw[XE_GPU_REG_PA_CL_VPORT_YSCALE] = sp_saved.viewport[2];
++        regs_rw[XE_GPU_REG_PA_CL_VPORT_YOFFSET] = sp_saved.viewport[3];
++        if (g_sp_mark_pending && g_sp_mark_hook) {
++          g_sp_mark_pending = false;
++          char label[48];
++          std::snprintf(label, sizeof(label), "SPM=%d phase=%X", int(sp_mode), guest_marker_phase_);
++          g_sp_mark_hook(this, label);
++        }
++      }
+       if (hdr_blend_overridden) {
+         (*register_file_)[reg::RB_BLENDCONTROL::rt_register_indices[0]] =
+             hdr_saved_blend_control_;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -4037,6 +4037,9 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
+ 
+ bool D3D12CommandProcessor::IssueCopy() {
+   TmpPixScope tmppix(deferred_command_list_, "<resolve", ">resolve");
++  g_sp_mark_hook = [](void* cp, const char* text) {  // TMPSP
++    TmpGtMark(static_cast<D3D12CommandProcessor*>(static_cast<CommandProcessor*>(cp))->deferred_command_list_, text);
++  };
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -5527,6 +5527,9 @@ bool VulkanCommandProcessor::IssueCopy() {
+       if (g_vkgt_active && cp->submission_open_) TmpGtMark(cp->deferred_command_buffer_, ">resolve");
+     }
+   } tmpgt_end{this};
++  g_sp_mark_hook = [](void* cp, const char* text) {  // TMPSP
++    TmpGtMark(static_cast<VulkanCommandProcessor*>(static_cast<CommandProcessor*>(cp))->deferred_command_buffer_, text);
++  };
+ 
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
+   if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective()) {

@@ -998,6 +998,12 @@ during a build:
   `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
+- `shadow-probe.sdk.patch` (SDK, D3D12 and Vulkan, `TMPSP`; the layer after `frame-log` for `gt-build.ps1 -Layer`): `tmp_sp_mode` (a bit mask, hot-reloaded, set from a pad)
+  perturbs the depth-only draws of the four sun-shadow cascades so that their GPU time can be split into what it is bound by: 1 no rasterization (an empty
+  scissor: vertex work and primitive setup remain), 2 the viewport 16 times smaller (the pixel work almost gone), 4 one triangle per draw (what a draw costs by
+  itself), 8 no depth or stencil writes, 16 half of the triangles, 32 no stencil, 64 only every `tmp_sp_decimate`-th draw. The picture is wrong while a bit is on;
+  the GPU timestamps carry an `SPM=<mode> phase=<bit>` label at the first perturbed draw of each cascade. `gpu-timestamps-vulkan.sdk.patch` and `frame-log.sdk.patch`
+  were rebased onto the resolve readback rules (`rexglue-resolve-readback-rules.patch`) for it.
 
 ## Scripted controller input (unattended runs)
 
