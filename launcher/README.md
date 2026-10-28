@@ -547,7 +547,8 @@ textures sharp where they are seen at a slant, and it switches during play too (
 texture with mip levels and linear filtering; *Game default* applies none and leaves each texture at what the game itself asks for (a tally of the city and of a race found
 nothing for 35 to 36% of those textures, 4× for 27 to 52%, 8× for 8% and 16× for 3 to 26%). The row is after *FSR upscaling* in the Graphics list; 1× (trilinear) is not offered, as
 *Off* is trilinear for all but the textures that ask for a point mip filter. Nothing in the shader preparation depends on it (the samplers are not part of a pipeline).
-`devniso-2026-10-27.md` has the numbers.
+It costs next to nothing (none measurable on an RTX 5080 at 3×; 16× against *Off* is 0.5 to 0.6 ms, 1.3 to 1.5%, on the integrated Radeon of a Ryzen 9800X3D at native resolution),
+so it is not part of the Low-end preset. `devniso-2026-10-27.md` has the tables.
 
 *Frame generation* (`frame_generation`, off by default) is AMD FSR 3.1's: one
 generated frame between each two the game renders (the pause menu's DISPLAY >

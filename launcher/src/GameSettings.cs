@@ -235,8 +235,9 @@ static class GameSettings
         Info = "Keeps textures sharp where they are seen at a slant: the road stretching away from the car, "
              + "the pavement, the sides of buildings. Without it they turn to a smear a little way off. 4× (the "
              + "default) is clearly sharper than Off; 8× and 16× sharpen the far end of a road further. "
-             + "Game default is what the game itself asks for, which is the console's own. Changes during play "
-             + "in the pause menu (PERFORMANCE).",
+             + "Game default is what the game itself asks for, which is the console's own. It costs next to nothing: "
+             + "no measurable difference between Off and 16× on an RTX 5080 at 4K, and about 1% (0.5 ms of 38) on an integrated "
+             + "Radeon at the game's own resolution. Changes during play in the pause menu (PERFORMANCE).",
     };
     static bool FsrRuntimeBuilt(IReadOnlyDictionary<string, string> file)
     {
