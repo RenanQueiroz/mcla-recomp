@@ -32,7 +32,9 @@ if (-not $OutDir) { $OutDir = "$root\out\gt" }
 if ($Layer.Count -eq 0) {
     $Layer = @("gpu-timestamps", "gpu-timestamps-vulkan", "texload-split-timestamps", "resolve-split-timestamps", "frame-log")
 }
-$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+$env:GIT_CONFIG_COUNT = "2"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+# The SDK's sources and these patches have LF line endings: git apply must not turn a file into CRLF (autocrlf=true on Windows), or the next layer's context stops matching.
+$env:GIT_CONFIG_KEY_1 = "core.autocrlf"; $env:GIT_CONFIG_VALUE_1 = "false"
 $recordFile = "$sdkDir\.gt-layer"
 $applied = @(if (Test-Path -LiteralPath $recordFile) { Get-Content -LiteralPath $recordFile } else { })
 
