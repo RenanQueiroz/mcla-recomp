@@ -1,0 +1,20 @@
+# Options of the code generator itself, for all of the generated C++ (patches/rexglue-codegen-csr-lazy.patch).
+# Both are off unless set to true here, and each one changes the generated code: a build runs codegen and
+# compiles every generated file again. Off, the generated code is what it was before the patch existed.
+#
+# The game switches the CPU's flush mode (MXCSR: denormals kept for the scalar floating-point instructions,
+# flushed to zero for the vector ones, as the console's two units do) with `ldmxcsr`, which costs the render
+# thread 5 to 7% of its CPU time (upper bound, launcher/dev/profiling-2026-10-26.md: a build with the
+# instruction left out). These two options make fewer and cheaper switches without changing a result.
+
+# fmr, fabs, fnabs, fneg, lfd*, stfd*, stfiwx, fctidz, fctiwz and fcfid never read the flush bits (they move
+# bits, truncate, or convert an integer), so they run in whichever mode the code is in and no longer force
+# the scalar mode, and the switch back to the vector mode that followed it. Checked bit for bit in both modes,
+# in all four rounding modes, by scripts/ci/csr-exact.ps1.
+csr_mode_free_ops = false
+
+# A switch writes a constant MXCSR word when the guest's rounding mode is "to nearest" (where the game keeps
+# it), instead of building the word from the shadow in the context and passing it through the stack; any other
+# rounding mode, and any CPU but x86-64, keeps the old code. The value written differs from the old one only in
+# the exception flag bits, which nothing reads.
+csr_cheap_switch = false
