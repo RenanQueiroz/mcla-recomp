@@ -998,6 +998,8 @@ during a build:
   `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
+- `texload-direct-unscaled-2026-10-28.md` (`rexglue-texture-load-direct-unscaled.patch`, texture loads without the copy at native resolution: the baseline loads per frame, the design, how it is measured) and
+  `check_texload_scale1.py` (needs numpy: the scaled load shaders' guest addressing at a scale of 1 against the unscaled one, which that patch relies on).
 
 ## Scripted controller input (unattended runs)
 
