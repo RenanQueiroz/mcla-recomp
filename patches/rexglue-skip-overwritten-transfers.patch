@@ -126,7 +126,7 @@ index 4292b0d..8fc2945 100644
      } break;
      case Path::kPixelShaderInterlock: {
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
-index 5d22593..79904d1 100644
+index 5d22593..e23291a 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
 +++ b/src/graphics/pipeline/render_target/cache.cpp
 @@ -11,6 +11,7 @@
@@ -163,7 +163,7 @@ index 5d22593..79904d1 100644
    auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
    xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
    assert_true(msaa_samples <= xenos::MsaaSamples::k4X);
-@@ -754,11 +767,33 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -754,11 +767,34 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
    // draw with whatever contents currently are in the render target in this
    // case).
  
@@ -171,6 +171,7 @@ index 5d22593..79904d1 100644
 +  // there is no need to transfer what's there into them. Looked for only if a
 +  // transfer would happen (the analysis runs the vertex shader on the CPU).
 +  if (!interlock_barrier_only && pixel_shader && is_rasterization_done &&
++      regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kRectangleList &&
 +      REXCVAR_GET(skip_overwritten_transfers)) {
 +    bool transfers_needed = false;
 +    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
@@ -198,7 +199,7 @@ index 5d22593..79904d1 100644
    }
  
    if (interlock_barrier_only) {
-@@ -1323,6 +1358,222 @@ bool RenderTargetCache::ClearRectangleDraw(bool is_rasterization_done, const Sha
+@@ -1323,6 +1359,222 @@ bool RenderTargetCache::ClearRectangleDraw(bool is_rasterization_done, const Sha
    return true;
  }
  
