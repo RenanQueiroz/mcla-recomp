@@ -44,6 +44,7 @@ from pathlib import Path
 EV_NAMES = {
     1: "mark", 10: "wait_begin", 11: "wait_end", 12: "wait_poll", 13: "wait_multi_begin", 14: "wait_multi_end",
     15: "signal_and_wait", 16: "event_set", 17: "sem_release", 18: "mutant_release", 19: "delay_begin", 20: "delay_end",
+    21: "sleep_zero",
     40: "cp_idle_begin", 41: "cp_idle_end", 42: "cp_exec_begin", 43: "cp_exec_end", 44: "cp_wptr", 45: "cp_swap_begin",
     46: "cp_swap_end", 47: "d3d_fence_begin", 48: "d3d_fence_end", 49: "submit_queue", 50: "submit_begin", 51: "submit_end",
     52: "submit_await_begin", 53: "submit_await_end", 54: "cp_waitreg_begin", 55: "cp_waitreg_end",
@@ -239,6 +240,8 @@ def build(tr):
             open_[(th, "wait")] = (t, b, 0xFFFFFFFF, c, ra)
         elif e in (16, 17, 18):
             signals[("h", a)].append((t, th, ra))
+        elif e == 21:
+            points["sleep_zero"].append((t, th, a, b, ra))   # one Sleep(0) in 32 on a thread, with its guest call chain
         elif e == 44:
             signals[("wptr",)].append((t, th, ra))
             points["cp_wptr"].append((t, th, a, b))
@@ -583,6 +586,24 @@ class Report:
                     n += 1
             w(f"      the update thread's check for the render thread's last frame blocked {n} of {len(dones)} times, {tot / max(1, len(dones)):.0f} us on average over all checks")
 
+    # ---- polling loops
+    def polling_section(self, lo, hi, nframes, w):
+        """Sleep(0) calls by thread and call site: every guest polling loop that gives its time slice up goes through
+        XThread::Delay(0); the trace keeps one call in 32 with its guest call chain."""
+        per = collections.defaultdict(lambda: collections.Counter())
+        for t, th, a, b, ra in self.points.get("sleep_zero", []):
+            if lo <= t < hi:
+                per[th][self.site(ra)] += b
+        if not per:
+            w("  Polling loops (Sleep(0)): none recorded in this window.")
+            return
+        w("  Polling loops: Sleep(0) calls a frame by thread and call site (sampled 1 in 32, so a multiple of 32 over the window; the ring-slot wait of the update thread is one of them):")
+        for th, sites in sorted(per.items(), key=lambda kv: -sum(kv[1].values()))[:6]:
+            total = sum(sites.values())
+            w(f"      {self.tname(th)}: {total / nframes:.0f} calls a frame")
+            for site, n in sites.most_common(4):
+                w(f"          {n / nframes:8.0f} a frame  {site}")
+
     # ---- hand-off numbers
     def handoff_section(self, lo, hi, nframes, w):
         upd = self.update_thread()
@@ -722,6 +743,8 @@ class Report:
             res = self.critical_section(lo, hi, w)
             w("")
             self.handoff_section(lo, hi, nframes, w)
+            w("")
+            self.polling_section(lo, hi, nframes, w)
             if upd is not None and res and self.args.timeline:
                 frames, per_frame = res
                 order = sorted(range(len(frames)), key=lambda i: per_frame[i][0])
