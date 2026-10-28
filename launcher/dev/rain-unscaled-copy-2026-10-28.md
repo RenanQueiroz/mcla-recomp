@@ -110,6 +110,12 @@ buffer; the chain's fix arms show whether the shared memory has the same pairs, 
 and the cost at 2x with PresentMon, A-B-B-A. Until it has run: not known that the rain comes back on either API at 2x and 3x, that the downscaled data is good enough, what it costs, that the Vulkan path
 has no validation error. Nothing was built or run for the PS5 or Linux (the same SDK code and the same defaults; CI compiles the host code for Linux).
 
+## What the chain `rainfix2` measured (2026-10-28, RTX 5080; `SP\rainfix2\out\SUMMARY.txt` of the session)
+
+- **The rain is back with the fix** at 2x and 3x on both APIs: the share of the smooth pixels that changed in three frames (rain 0.10 to 0.16 at 1x, none 0.003 to 0.02): D3D12 2x 0.003 without the fix and 0.159 with it, 3x 0.011 and 0.183; Vulkan 2x 0.004 and 0.177, 3x 0.017 and 0.166; 1x 0.138 (D3D12) and 0.148 (Vulkan), where the fix is not reached (no `resolve_unscaled_copy_rules` line, no copies). The trace: the rain's draw rasterised 1,915,879 pixels at 2x and 4,279,787 at 3x with the fix and 0 without. (The rain at 1x: 517,206.)
+- **The cost of the first version** (PresentMon, uncapped, fixed 1/60 s a frame, the car standing, 16 s a run): D3D12 2x A-B-B-A: GPU busy median +3.4% (5.348 against 5.175 ms), frame time median +3.3%; B-A-A-B +3.0%; all eight +3.2% (spread of equal arms 4 to 5%); with the rain's draw left out +3.4% (5.305 against 5.129 ms: the copies alone, about 0.17 ms); Vulkan 2x +2.0% GPU busy (one pair). The rain's own draw adds nothing measurable beyond that (+3.4% with it and without it).
+- **Why the copies cost that much, and the batch** (`resolve_unscaled_copy_batch`, this branch): see `patches/README.md`'s section of the patch. Whether the game issues the four resolves when it is not raining, and what the batch costs: the chain `downscale` (not run when this was written).
+
 ## The development layer (`rain-trace.sdk.patch`)
 
 For the chain. `launcher/dev/rain-trace.sdk.patch` applies to the patched SDK (`git apply`, after `rexglue-resolve-unscaled-copy.patch`), changes nothing unless a cvar is set, and works on both APIs:
