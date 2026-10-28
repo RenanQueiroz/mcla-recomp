@@ -34,8 +34,11 @@
 // hook is in the game's loop whether or not the option of that name is on) sets the event when it finds the
 // ring full and the thread is waiting, so the round comes at once. While the main thread has no need of the
 // thread (a frame takes it longer than the rhythm, or the frame rate is capped below it) nothing sets the
-// event and the thread keeps its 7 ms. The audio watchdog turns it off for the rest of the session when the
-// audio output runs dry while the thread was coming round early (the SDK's steady underrun counter).
+// event and the thread keeps its 7 ms. The audio watchdog takes it back to the game's own Sleep when the audio
+// output runs dry while the thread was coming round early (the SDK's steady underrun counter): the first time for
+// mcla_pump_wake_pause_s seconds (a stall while the game starts or loads is not the option's doing: runs with it off
+// had such silences too, launcher/dev/pump-watchdog-2026-10-28.md), the second time for the rest of the session.
+// The silence of the game's own shutdown (the audio threads stop first) is not counted at all.
 
 #include "generated/default/mcla_init.h"
 
@@ -54,6 +57,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
+#include <rex/system/kernel_state.h>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -94,10 +98,17 @@ REXCVAR_DEFINE_BOOL(mcla_pump_wake_on_demand, false, "MCLA",
                     "nothing where the frame takes longer, or under a frame-rate cap below that. A steady audio "
                     "underrun while it runs turns it off for the rest of the session. Off is the game's own Sleep. "
                     "Has no effect while mcla_pump_sleep_max_ms is 0 or more");
+REXCVAR_DEFINE_INT32(mcla_pump_wake_pause_s, 60, "MCLA",
+                     "With mcla_pump_wake_on_demand: when the audio output runs dry while the frame-pacing thread was "
+                     "coming round early, the thread goes back to the game's own Sleep for this many seconds (a stall "
+                     "while the game starts or loads is not the option's doing) and then comes round on demand again; "
+                     "a second silence of that kind turns it off for the rest of the session. 0 turns it off at the "
+                     "first silence, as before")
+    .range(0, 3600);
 REXCVAR_DEFINE_INT32(mcla_pump_wake_test_trip_s, 0, "MCLA",
                      "Development: with mcla_pump_wake_on_demand, this many seconds after the first early wake the "
-                     "audio watchdog trips as if the audio had run dry (0 = never), to test the way back to the "
-                     "game's own Sleep")
+                     "audio watchdog trips as if the audio had run dry (0 = never), and once more for every trip so far "
+                     "that many seconds later, to test the way back to the game's own Sleep and the way off")
     .range(0, 3600);
 REXCVAR_DEFINE_BOOL(mcla_poll_stats, false, "MCLA",
                     "Development: log how the main thread's waits for a ring slot ended, every 10 "
@@ -134,7 +145,10 @@ Stats g_stats;
 // mcla_pump_wake_on_demand.
 struct Wake {
   std::atomic<bool> pump_waiting{false};  // the pump thread is inside its wait: the main thread may set the event
-  std::atomic<bool> off{false};           // the audio watchdog tripped: the game's own Sleep from now on
+  std::atomic<bool> off{false};           // the audio watchdog tripped twice: the game's own Sleep from now on
+  std::atomic<int64_t> paused_until_ns{0};  // the audio watchdog tripped once: the game's own Sleep until then (0 = not paused)
+  std::atomic<bool> shutdown{false};      // the game is shutting down: silence from here on is the audio output stopping
+  std::atomic<uint32_t> trips{0};
   std::atomic<uint64_t> waits{0}, early{0}, timed_out{0}, signals{0}, other_ring{0}, ring_calls{0};
   std::atomic<int64_t> first_early_ns{0}, last_early_ns{0};
   uint64_t steady_seen = 0;  // the pump thread's alone
@@ -192,7 +206,9 @@ void MaybeLog() {
       REXLOG_INFO(
           "poll tick: wake on demand{}: {} waits, {} ended early (the main thread set the event), {} ran out; the ring wait "
           "saw the thread waiting {} times, {} of them for another ring, and set the event {} times",
-          g_wake.off.load() ? " (OFF: the audio watchdog tripped)" : "", g_wake.waits.load(), g_wake.early.load(),
+          g_wake.off.load() ? " (OFF: the audio watchdog tripped twice)"
+                            : g_wake.paused_until_ns.load() != 0 ? " (paused: the audio watchdog tripped)" : "",
+          g_wake.waits.load(), g_wake.early.load(),
           g_wake.timed_out.load(), g_wake.ring_calls.load(), g_wake.other_ring.load(), g_wake.signals.load());
     }
   }
@@ -302,40 +318,82 @@ void WakePumpIfWaiting(PPCRegister& r31) {
   PumpWakeSet();
 }
 
-void TripWatchdog(const std::string& why) {
-  if (g_wake.off.exchange(true)) {
+// The game is shutting down: the window's close request (the close button, Alt+F4), the end of the guest's main
+// thread (src/mcla_app.cpp), or the kernel's own flag, which TerminateTitle sets for every way the title can end (the
+// in-game QUIT GAME, the dev pad's quit and close included). The audio output goes silent on the way out, and a round
+// of the pump thread that runs in that time is not an early wake that starved it.
+bool ShutdownBegun() {
+  if (g_wake.shutdown.load(std::memory_order_acquire)) {
+    return true;
+  }
+  auto* runtime = rex::Runtime::instance();
+  auto* kernel = runtime ? runtime->kernel_state() : nullptr;
+  if (kernel && kernel->is_terminating_title()) {
+    g_wake.shutdown.store(true, std::memory_order_release);  // TerminateTitle clears its flag again before the process ends
+    return true;
+  }
+  return false;
+}
+
+// The audio watchdog found a silence it blames on the early wakes. The first time (mcla_pump_wake_pause_s of 1 or
+// more) it only pauses them: a stall while the game starts or loads silences the output with or without the option, and
+// the option is worth keeping for the rest of the session. The second time, or with the pause off, they are off for
+// good.
+void TripWatchdog(const std::string& why, int64_t now) {
+  if (g_wake.off.load()) {
     return;
   }
+  const uint32_t trips = g_wake.trips.fetch_add(1, std::memory_order_relaxed) + 1;
+  const int32_t pause_s = REXCVAR_GET(mcla_pump_wake_pause_s);
+  if (trips == 1 && pause_s > 0) {
+    g_wake.paused_until_ns.store(now + static_cast<int64_t>(pause_s) * 1'000'000'000LL, std::memory_order_relaxed);
+    REXLOG_WARN(
+        "pump wake on demand: {}; the frame-pacing thread goes back to the game's own Sleep for {} s and then comes "
+        "round on demand again; a second silence of that kind turns it off for the rest of this session ({} early "
+        "wakes, {} timeouts so far)",
+        why, pause_s, g_wake.early.load(), g_wake.timed_out.load());
+    return;
+  }
+  g_wake.off.store(true);
   REXLOG_WARN(
       "pump wake on demand: {}; the frame-pacing thread goes back to the game's own Sleep for the rest of this session "
-      "({} early wakes, {} timeouts so far)",
-      why, g_wake.early.load(), g_wake.timed_out.load());
+      "({} early wakes, {} timeouts so far, {} silence{} blamed on the option)",
+      why, g_wake.early.load(), g_wake.timed_out.load(), trips, trips == 1 ? "" : "s");
 }
 
 // The audio watchdog (the pump thread, once a round): a silent frame in the middle of the game's audio, less than
-// two seconds after a round that came early, turns the option off. A silence with no early wake in the last
-// two seconds is not this option's doing (a stall, or a frame rate where it does not act) and is ignored.
+// two seconds after a round that came early, takes the option back (TripWatchdog). A silence with no early wake in the
+// last two seconds is not this option's doing (a stall, or a frame rate where it does not act) and is ignored, and so
+// is every silence once the game's shutdown has begun.
 void CheckAudio(int64_t now) {
   const uint64_t steady = rex::audio::dump::SteadyUnderruns();
+  if (ShutdownBegun()) {
+    g_wake.steady_seen = steady;
+    return;
+  }
   if (steady != g_wake.steady_seen) {
     const uint64_t added = steady - g_wake.steady_seen;
     g_wake.steady_seen = steady;
     const int64_t last = g_wake.last_early_ns.load(std::memory_order_relaxed);
     if (last != 0 && now - last < 2'000'000'000LL) {
       TripWatchdog("the audio output ran dry (" + std::to_string(added) +
-                   " silent frames) while the thread was coming round early");
+                       " silent frames) while the thread was coming round early",
+                   now);
       return;
     }
   }
+  // The development trip: test seconds after the first early wake, and once more that many seconds later for every
+  // trip so far, so that one run can show the pause, the way back and the way off.
   const int32_t test = REXCVAR_GET(mcla_pump_wake_test_trip_s);
   const int64_t first = g_wake.first_early_ns.load(std::memory_order_relaxed);
-  if (test > 0 && first != 0 && now - first >= static_cast<int64_t>(test) * 1'000'000'000LL) {
-    TripWatchdog("mcla_pump_wake_test_trip_s of " + std::to_string(test) + " s");
+  const int64_t due_s = static_cast<int64_t>(test) * (static_cast<int64_t>(g_wake.trips.load(std::memory_order_relaxed)) + 1);
+  if (test > 0 && first != 0 && now - first >= due_s * 1'000'000'000LL) {
+    TripWatchdog("mcla_pump_wake_test_trip_s of " + std::to_string(test) + " s", now);
   }
 }
 
 // The pump thread, in place of the game's Sleep(ms). Returns true when it waited (the hook then skips the game's
-// call), false to leave the Sleep to the game (off, tripped, Sleep(0), no event).
+// call), false to leave the Sleep to the game (off, tripped, paused, Sleep(0), no event).
 bool PumpWait(uint32_t ms) {
   if (ms == 0 || g_wake.off.load(std::memory_order_relaxed) || !PumpWakeUsable()) {
     return false;
@@ -346,10 +404,26 @@ bool PumpWait(uint32_t ms) {
     g_wake.steady_seen = rex::audio::dump::SteadyUnderruns();
     REXLOG_INFO(
         "pump wake on demand: on. The frame-pacing thread's Sleep is a wait that the main thread's ring wait ends early; "
-        "a steady audio underrun while it comes round early turns it off");
+        "a steady audio underrun while it comes round early takes it back to the game's own Sleep (for {} s the first "
+        "time, for the rest of the session the second)",
+        REXCVAR_GET(mcla_pump_wake_pause_s));
+  }
+  const int64_t paused_until = g_wake.paused_until_ns.load(std::memory_order_relaxed);
+  if (paused_until != 0) {
+    if (now < paused_until) {
+      g_wake.steady_seen = rex::audio::dump::SteadyUnderruns();  // the silences of the pause are not charged to the option
+      return false;
+    }
+    g_wake.paused_until_ns.store(0, std::memory_order_relaxed);
+    g_wake.last_early_ns.store(0, std::memory_order_relaxed);  // no early wake since the pause
+    g_wake.steady_seen = rex::audio::dump::SteadyUnderruns();
+    REXLOG_INFO(
+        "pump wake on demand: back on after the pause ({} early wakes, {} timeouts so far); a second silence of that "
+        "kind turns it off for the rest of this session",
+        g_wake.early.load(), g_wake.timed_out.load());
   }
   CheckAudio(now);
-  if (g_wake.off.load(std::memory_order_relaxed)) {
+  if (g_wake.off.load(std::memory_order_relaxed) || g_wake.paused_until_ns.load(std::memory_order_relaxed) != 0) {
     return false;
   }
   // What the game's Sleep would wait: its argument in guest milliseconds, scaled like XThread::Delay does.
@@ -680,4 +754,10 @@ uint64_t MclaPumpRounds() {
 // Rounds that the freeing thread's wait ended early because the main thread set the event (src/dev_pad.cpp's `state`).
 uint64_t MclaPumpEarlyWakes() {
   return g_wake.early.load(std::memory_order_relaxed);
+}
+
+// The game's shutdown has begun (src/mcla_app.cpp: the window's close request, the end of the guest's main thread): the
+// audio watchdog stops counting silences (ShutdownBegun).
+void MclaPumpWakeShutdownBegins() {
+  g_wake.shutdown.store(true, std::memory_order_release);
 }

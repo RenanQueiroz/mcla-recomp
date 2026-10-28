@@ -58,6 +58,7 @@ bool MclaRelaunchGame();  // src/mcla_app.cpp
 #endif
 #if !REX_PLATFORM_PS5
 void MclaWaitForSaves();  // src/save_wait.cpp
+void MclaPumpWakeShutdownBegins();  // src/poll_wait.cpp: the audio silence from here on is the output stopping
 #endif
 bool MclaSingleTileAvailable();  // src/render_perf.cpp
 int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
@@ -1698,6 +1699,7 @@ void CloseGame(bool restart) {
 #else
     (void)restart;
 #endif
+    MclaPumpWakeShutdownBegins();
     window->RequestClose();
   });
 #endif

@@ -130,6 +130,7 @@ bool MclaSaveInProgress();  // src/save_wait.cpp
 
 uint64_t MclaPumpRounds();  // src/poll_wait.cpp: rounds of the thread that frees the command ring's slots
 uint64_t MclaPumpEarlyWakes();  // src/poll_wait.cpp: of those, the ones the main thread's ring wait called early
+void MclaPumpWakeShutdownBegins();  // src/poll_wait.cpp: the audio silence from here on is the output stopping
 
 namespace {
 
@@ -1686,6 +1687,7 @@ void RequestQuit() {
   CloseFrameLog();
   if (g_window) {
     rex::ui::Window* window = g_window;
+    MclaPumpWakeShutdownBegins();
     window->app_context().CallInUIThread([window] { window->RequestClose(); });
   }
 }

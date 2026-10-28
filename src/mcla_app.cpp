@@ -208,6 +208,8 @@ bool MclaRelaunchGame() {
 
 // Lets a career save in progress finish before the game ends.
 void MclaWaitForSaves();  // src/save_wait.cpp
+// The game's shutdown has begun: the audio silence from here on is the output stopping (src/poll_wait.cpp).
+void MclaPumpWakeShutdownBegins();
 
 namespace {
 
@@ -1018,7 +1020,13 @@ void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
 bool MclaApp::OnWindowCloseRequested() {
   MclaWaitForSaves();
   MclaSaveMenuSettings();
+  MclaPumpWakeShutdownBegins();  // the window closes now: the title is terminated next
   return true;
+}
+
+void MclaApp::OnGuestThreadExit(rex::system::XThread* thread) {
+  (void)thread;
+  MclaPumpWakeShutdownBegins();
 }
 
 void MclaApp::OnPostSetup() {
