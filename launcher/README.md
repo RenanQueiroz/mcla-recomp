@@ -542,6 +542,13 @@ Vulkan one needs the Vulkan SDK when the game is built); where it isn't there
 or fails, the game uses MSAA. An older `mcla_msaa = false` still means off while
 `mcla_anti_aliasing` isn't set.
 
+*Anisotropic filtering* (`anisotropic_override`: `-1`, *Game default*, `0` *Off*, `2`, `3` (*4×*, the default), `4`, `5` (*16×*); it follows the SDK's cvar, which counts the levels 0 to 5) keeps
+textures sharp where they are seen at a slant, and it switches during play too (the pause menu's PERFORMANCE > ANISOTROPIC FILTERING). The SDK applies one level to every
+texture with mip levels and linear filtering; *Game default* applies none and leaves each texture at what the game itself asks for (a tally of the city and of a race found
+nothing for 35 to 36% of those textures, 4× for 27 to 52%, 8× for 8% and 16× for 3 to 26%). The row is after *FSR upscaling* in the Graphics list; 1× (trilinear) is not offered, as
+*Off* is trilinear for all but the textures that ask for a point mip filter. Nothing in the shader preparation depends on it (the samplers are not part of a pipeline).
+`devniso-2026-10-27.md` has the numbers.
+
 *Frame generation* (`frame_generation`, off by default) is AMD FSR 3.1's: one
 generated frame between each two the game renders (the pause menu's DISPLAY >
 FRAME GENERATION; it switches during play on both graphics APIs). FSR 3.1 is

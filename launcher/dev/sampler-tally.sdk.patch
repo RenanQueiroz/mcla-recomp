@@ -1,9 +1,9 @@
 diff --git a/include/rex/graphics/pipeline/texture/sampler_tally.h b/include/rex/graphics/pipeline/texture/sampler_tally.h
 new file mode 100644
-index 0000000..26f75e3
+index 0000000..17b10dd
 --- /dev/null
 +++ b/include/rex/graphics/pipeline/texture/sampler_tally.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,72 @@
 +// Development only (launcher/dev/sampler-tally.sdk.patch): counts what the game asks of each sampler, per sampler worked out for a draw, before
 +// anisotropic_override is applied: which anisotropic level the fetch constant (or the shader's fetch) holds, whether the texture has mip levels,
 +// the three filters, and whether the override would change it (it applies to textures with mip levels and linear min/mag and a point or linear mip
@@ -43,6 +43,7 @@ index 0000000..26f75e3
 +  static const char* const kMip[] = {"point", "linear", "basemap", "other"};
 +  std::vector<std::pair<uint64_t, uint32_t>> rows;
 +  uint64_t eligible = 0, eligible_game_off = 0, eligible_game_on = 0, game_on = 0;
++  uint64_t eligible_by_level[8] = {};
 +  for (uint32_t k = 0; k < (1u << 11); ++k) {
 +    const uint64_t c = counts[k].load(std::memory_order_relaxed);
 +    if (!c) {
@@ -53,15 +54,20 @@ index 0000000..26f75e3
 +    const bool mips = (k >> 6) & 1, base = (k >> 7) & 1, linear = (k >> 8) & 1;
 +    const uint32_t mip = (k >> 9) & 3;
 +    const bool is_eligible = mips && !base && linear && (mip == 0 || mip == 1);
-+    game_on += game != 0;
++    game_on += c * uint64_t(game != 0);
 +    if (is_eligible) {
 +      eligible += c;
++      eligible_by_level[game] += c;
 +      (game != 0 ? eligible_game_on : eligible_game_off) += c;
 +    }
 +  }
 +  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
 +  REXLOG_INFO("TMPAN sampler tally after {} samplers: eligible for the override {:.1f}% (of them the game asks for aniso {:.1f}%), game aniso on for {:.1f}% of all",
 +              n, 100.0 * eligible / n, eligible ? 100.0 * eligible_game_on / eligible : 0.0, 100.0 * game_on / n);
++  REXLOG_INFO("TMPAN eligible by the game's level (0 none, 1 to 5: 1x, 2x, 4x, 8x, 16x): {:.1f}% {:.1f}% {:.1f}% {:.1f}% {:.1f}% {:.1f}%",
++              eligible ? 100.0 * eligible_by_level[0] / eligible : 0.0, eligible ? 100.0 * eligible_by_level[1] / eligible : 0.0,
++              eligible ? 100.0 * eligible_by_level[2] / eligible : 0.0, eligible ? 100.0 * eligible_by_level[3] / eligible : 0.0,
++              eligible ? 100.0 * eligible_by_level[4] / eligible : 0.0, eligible ? 100.0 * eligible_by_level[5] / eligible : 0.0);
 +  for (size_t i = 0; i < rows.size() && i < 24; ++i) {
 +    const uint32_t k = rows[i].second;
 +    REXLOG_INFO("TMPAN   {:5.1f}%  binding aniso {} game aniso {} mips {} basemap {} min+mag linear {} mip filter {}", 100.0 * rows[i].first / n, k & 7,
