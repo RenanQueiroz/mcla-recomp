@@ -14,7 +14,14 @@ draws that follow such a round trip took 2.6 ms longer in total than draws of th
 same size after none on the Radeon iGPU at native resolution (471 draws after
 1,019 round trips; 2.8 ms while driving), and about 1.9 ms of a 4.8 ms GPU frame
 on the RTX 5080 at native resolution. These are upper bounds: the draw after an
-upload also reads data that is not in the cache. Vulkan hoists these uploads
+upload also reads data that is not in the cache. The transitions alone were
+measured with the shadow probe (2026-10-28): an empty shared memory round trip
+(reading state to unordered access and back, no copy) before every 4th draw of
+the shadow cascades cost 1.82 microseconds a pair on the Radeon iGPU at native
+resolution (+0.805 ms for 444 pairs) and 1.70 microseconds on the RTX 5080
+(+0.768 ms for 452 pairs); with about 1,000 round trips a frame that is about
+1.7 to 1.9 ms in transitions on both GPUs, which is the part hoisting cuts to one pair per run of draws.
+Vulkan hoists these uploads
 already (`rexglue-vulkan-hoist-shared-memory-uploads.patch`, 27% shorter frame
 on the RTX 5080 at native resolution).
 
