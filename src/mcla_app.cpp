@@ -925,6 +925,13 @@ void MclaApp::ApplyPcDefaults() {
   //   every fault;
   // - an EDRAM of 4,096 tiles, so that the scene fits in one tile with 2x MSAA
   //   (mcla_single_tile, src/render_perf.cpp);
+  // - video memory above native resolution (fork issue #19, launcher/dev/
+  //   vram-2026-10-28.md): no host render target taller than 1,024 rows (the
+  //   game's tallest surface is 736; the SDK makes each as tall as the
+  //   console's whole EDRAM, 4 to 16 times that for small ones), those that
+  //   hold no data and have been idle for 60 seconds freed, and, when the
+  //   process uses 90% of its video memory budget, idle ones freed at once and
+  //   the texture cache's limits halved;
   // - on Windows, HDR output whenever the display is in HDR mode (the SDK's
   //   own default stays off, for other titles). Not on Linux, where the
   //   display's HDR state isn't read yet, so auto would never turn it on
@@ -935,6 +942,9 @@ void MclaApp::ApplyPcDefaults() {
       {"shared_memory_hot_page_faults", "4"},
       {"shared_memory_hot_page_ms", "10000"},
       {"edram_tiles", "4096"},
+      {"render_target_max_height", "1024"},
+      {"render_target_trim_seconds", "60"},
+      {"gpu_memory_pressure_percent", "90"},
 #if REX_PLATFORM_WIN32
       {"hdr", "auto"},
 #endif

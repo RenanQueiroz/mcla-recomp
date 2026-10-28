@@ -1,0 +1,412 @@
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index 4bc489a..db4f6bc 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -131,6 +131,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+ 
+   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
+ 
++  // The render targets in the command list may be gone.
++  void OnRenderTargetsTrimmed() override { InvalidateCommandListRenderTargets(); }
++
+   bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const override;
+ 
+   bool IsGammaFormatHostStorageSeparate() const override;
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 8b460d9..8883271 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -175,6 +175,22 @@ class RenderTargetCache {
+ 
+   virtual void BeginFrame();
+ 
++  // Giving host render targets back (render_target_trim_seconds). A host render
++  // target is made for each key used and is otherwise kept for good, though one
++  // that is not the owner of any EDRAM range holds no data and can be made
++  // again when needed. At the end of a frame, the command processor asks
++  // IsTrimDue (at most once a second; with the time in milliseconds), and if it
++  // says yes, waits until the GPU is done with every submission and calls
++  // TrimUnusedRenderTargets, which frees the render targets that own no range
++  // and haven't been used for the time set (0 while set_trim_pressure(true):
++  // the host is short of video memory). Returns how many and how much.
++  bool IsTrimDue(uint64_t now_ms);
++  uint32_t TrimUnusedRenderTargets(uint64_t* freed_bytes_out = nullptr);
++  void set_trim_pressure(bool pressure) { trim_pressure_ = pressure; }
++  // How much host memory the render targets take, and how many are made (the
++  // implementation reports its own size per render target).
++  uint64_t GetRenderTargetsHostMemoryBytes(uint32_t* count_out = nullptr) const;
++
+   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                       uint32_t normalized_color_mask, const Shader& vertex_shader);
+ 
+@@ -319,11 +335,21 @@ class RenderTargetCache {
+     RenderTarget& operator=(RenderTarget&& render_target) = delete;
+     RenderTargetKey key() const { return key_; }
+ 
++    // The host memory the render target takes, 0 if the implementation doesn't
++    // say.
++    uint64_t host_memory_bytes() const { return host_memory_bytes_; }
++    void set_host_memory_bytes(uint64_t bytes) { host_memory_bytes_ = bytes; }
++    // When (RenderTargetCache::IsTrimDue's clock) it was last asked for.
++    uint64_t last_used_ms() const { return last_used_ms_; }
++    void set_last_used_ms(uint64_t ms) { last_used_ms_ = ms; }
++
+    protected:
+     RenderTarget(RenderTargetKey key) : key_(key) {}
+ 
+    private:
+     RenderTargetKey key_;
++    uint64_t host_memory_bytes_ = 0;
++    uint64_t last_used_ms_ = 0;
+   };
+ 
+   // The pitches in tiles in the transfer shaders' address constant, so that a
+@@ -793,6 +819,17 @@ class RenderTargetCache {
+ 
+   RenderTarget* GetOrCreateRenderTarget(RenderTargetKey key);
+ 
++  // Called after render targets were freed (TrimUnusedRenderTargets), with no
++  // pointer to any of them left in the common code, for the implementation to
++  // drop what refers to them (framebuffers).
++  virtual void OnRenderTargetsTrimmed() {}
++
++  // The clock of IsTrimDue, and what limits the next check.
++  uint64_t trim_now_ms_ = 0;
++  uint64_t trim_next_check_ms_ = 0;
++  uint64_t trim_min_idle_ms_ = 0;
++  bool trim_pressure_ = false;
++
+   // render_target_max_height (0: off) as read at start-up, rounded to the
+   // tile height, and how many draws it has cut (logged, rate-limited).
+   uint32_t render_target_max_height_ = 0;
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index b11e50d..614e5e2 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -189,6 +189,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
+ 
++  // Framebuffers reference the views of the render targets freed.
++  void OnRenderTargetsTrimmed() override;
++
+   bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const override;
+ 
+   bool IsGammaFormatHostStorageSeparate() const override;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index d35c107..62f7168 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -17,6 +17,7 @@
+ #include <utility>
+ 
+ #include <rex/assert.h>
++#include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/perf/counter.h>
+@@ -4368,6 +4369,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+     // Submission already closed now, so minus 1.
+     closed_frame_submissions_[(frame_current_++) % kQueueFrames] = submission_current_ - 1;
+ 
++    // render_target_trim_seconds: whether host render targets can be given back.
++    const bool render_targets_trim_due =
++        render_target_cache_ &&
++        render_target_cache_->IsTrimDue(rex::chrono::Clock::QueryHostUptimeMillis());
++
+     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
+       cache_clear_requested_ = false;
+ 
+@@ -4399,6 +4405,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+       render_target_cache_->ClearCache();
+ 
+       shared_memory_->ClearCache();
++    } else if (!cache_clear_requested_ && render_targets_trim_due &&
++               AwaitAllQueueOperationsCompletion()) {
++      // The GPU is done with everything submitted: render targets that hold no
++      // data can go.
++      render_target_cache_->TrimUnusedRenderTargets();
+     }
+   }
+ 
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 4292b0d..9cb5914 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -2056,6 +2056,23 @@ DXGI_FORMAT D3D12RenderTargetCache::GetDepthSRVStencilDXGIFormat(
+   }
+ }
+ 
++// Bytes of one sample of the formats render targets are made in (for the host
++// memory a render target takes).
++static uint32_t GetRenderTargetBytesPerSample(DXGI_FORMAT format) {
++  switch (format) {
++    case DXGI_FORMAT_R16G16B16A16_FLOAT:
++    case DXGI_FORMAT_R16G16B16A16_UNORM:
++    case DXGI_FORMAT_R16G16B16A16_SNORM:
++    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
++    case DXGI_FORMAT_R32G32_FLOAT:
++    case DXGI_FORMAT_R32G32_TYPELESS:
++    case DXGI_FORMAT_R32G8X24_TYPELESS:
++      return 8;
++    default:
++      return 4;
++  }
++}
++
+ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(RenderTargetKey key) {
+   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+ 
+@@ -2200,9 +2217,13 @@ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(Rend
+   }
+   device->CreateShaderResourceView(resource.Get(), &srv_desc, descriptor_srv.GetHandle());
+ 
+-  return new D3D12RenderTarget(key, resource.Get(), std::move(descriptor_draw),
+-                               std::move(descriptor_load_separate), std::move(descriptor_srv),
+-                               std::move(descriptor_srv_stencil), resource_state);
++  D3D12RenderTarget* render_target = new D3D12RenderTarget(
++      key, resource.Get(), std::move(descriptor_draw), std::move(descriptor_load_separate),
++      std::move(descriptor_srv), std::move(descriptor_srv_stencil), resource_state);
++  render_target->set_host_memory_bytes(uint64_t(resource_desc.Width) * resource_desc.Height *
++                                       resource_desc.SampleDesc.Count *
++                                       GetRenderTargetBytesPerSample(resource_desc.Format));
++  return render_target;
+ }
+ 
+ bool D3D12RenderTargetCache::IsHostDepthEncodingDifferent(
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index fa56131..7e03115 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -65,6 +65,15 @@ REXCVAR_DEFINE_UINT32(render_target_max_height, 0, "GPU",
+     .range(0, 8192)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_UINT32(render_target_trim_seconds, 0, "GPU",
++                      "With host render targets, free the ones that hold no EDRAM data (another "
++                      "render target has the tiles they last had) and haven't been used for this "
++                      "many seconds (0: keep every one made, as before). They are made again if "
++                      "needed, which takes a few milliseconds each (a hitch when the pause menu "
++                      "opens after a long time). A trim waits for the GPU to finish a frame")
++    .range(0, 3600)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -467,6 +476,107 @@ void RenderTargetCache::BeginFrame() {
+   ResetAccumulatedRenderTargets();
+ }
+ 
++uint64_t RenderTargetCache::GetRenderTargetsHostMemoryBytes(uint32_t* count_out) const {
++  uint64_t bytes = 0;
++  uint32_t count = 0;
++  for (const auto& render_target_pair : render_targets_) {
++    if (render_target_pair.second) {
++      ++count;
++      bytes += render_target_pair.second->host_memory_bytes();
++    }
++  }
++  if (count_out) {
++    *count_out = count;
++  }
++  return bytes;
++}
++
++bool RenderTargetCache::IsTrimDue(uint64_t now_ms) {
++  const bool first_call = !trim_now_ms_;
++  trim_now_ms_ = now_ms;
++  if (first_call) {
++    // The render targets made until now carry no time: give them a while.
++    trim_next_check_ms_ = now_ms + 5000;
++    return false;
++  }
++  const uint32_t trim_seconds = REXCVAR_GET(render_target_trim_seconds);
++  if (!trim_seconds || GetPath() != Path::kHostRenderTargets || now_ms < trim_next_check_ms_) {
++    return false;
++  }
++  trim_next_check_ms_ = now_ms + 1000;
++  trim_min_idle_ms_ = trim_pressure_ ? 0 : uint64_t(trim_seconds) * 1000;
++  // The render targets holding data (the owners of EDRAM ranges), as in
++  // ClearCache.
++  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
++  for (const auto& ownership_range_pair : ownership_ranges_) {
++    const OwnershipRange& ownership_range = ownership_range_pair.second;
++    owners.emplace(ownership_range.render_target);
++    owners.emplace(ownership_range.host_depth_render_target_unorm24);
++    owners.emplace(ownership_range.host_depth_render_target_float24);
++  }
++  for (const auto& render_target_pair : render_targets_) {
++    const RenderTarget* render_target = render_target_pair.second;
++    if (render_target && owners.find(render_target_pair.first) == owners.end() &&
++        render_target->last_used_ms() + trim_min_idle_ms_ <= now_ms) {
++      return true;
++    }
++  }
++  return false;
++}
++
++uint32_t RenderTargetCache::TrimUnusedRenderTargets(uint64_t* freed_bytes_out) {
++  uint64_t freed_bytes = 0;
++  uint32_t freed_count = 0;
++  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
++  for (const auto& ownership_range_pair : ownership_ranges_) {
++    const OwnershipRange& ownership_range = ownership_range_pair.second;
++    owners.emplace(ownership_range.render_target);
++    owners.emplace(ownership_range.host_depth_render_target_unorm24);
++    owners.emplace(ownership_range.host_depth_render_target_float24);
++  }
++  for (auto it = render_targets_.begin(); it != render_targets_.end();) {
++    RenderTarget* render_target = it->second;
++    if (!render_target) {
++      // Failed to make (memory may be there now): let the next use try again.
++      it = render_targets_.erase(it);
++      continue;
++    }
++    if (owners.find(it->first) == owners.end() &&
++        render_target->last_used_ms() + trim_min_idle_ms_ <= trim_now_ms_) {
++      freed_bytes += render_target->host_memory_bytes();
++      ++freed_count;
++      delete render_target;
++      it = render_targets_.erase(it);
++    } else {
++      ++it;
++    }
++  }
++  if (freed_count) {
++    // Nothing of the common code may keep a pointer to one that's gone.
++    std::memset(last_update_used_render_targets_, 0, sizeof(last_update_used_render_targets_));
++    std::memset(last_update_accumulated_render_targets_, 0,
++                sizeof(last_update_accumulated_render_targets_));
++    ResetAccumulatedRenderTargets();
++    for (std::vector<Transfer>& transfers : last_update_transfers_) {
++      transfers.clear();
++    }
++    for (std::vector<Transfer>& transfers : clear_rectangle_transfers_) {
++      transfers.clear();
++    }
++    OnRenderTargetsTrimmed();
++    REXGPU_INFO(
++        "RenderTargetCache: freed {} unused render targets ({} MB), {} left ({} MB), idle limit "
++        "{} s{}",
++        freed_count, freed_bytes >> 20, render_targets_.size(),
++        GetRenderTargetsHostMemoryBytes() >> 20, trim_min_idle_ms_ / 1000,
++        trim_pressure_ ? ", the video memory is short" : "");
++  }
++  if (freed_bytes_out) {
++    *freed_bytes_out = freed_bytes;
++  }
++  return freed_count;
++}
++
+ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                reg::RB_DEPTHCONTROL normalized_depth_control,
+                                uint32_t normalized_color_mask, const Shader& vertex_shader) {
+@@ -1825,6 +1935,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
+   RenderTarget* render_target;
+   if (it_rt != render_targets_.end()) {
+     render_target = it_rt->second;
++    if (render_target) {
++      render_target->set_last_used_ms(trim_now_ms_);
++    }
+   } else {
+     render_target = CreateRenderTarget(key);
+     uint32_t width = key.GetWidth();
+@@ -1844,6 +1957,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
+           key.is_depth ? "depth" : "color", static_cast<uint32_t>(key.resource_format),
+           static_cast<uint32_t>(key.base_tiles));
+     }
++    if (render_target) {
++      render_target->set_last_used_ms(trim_now_ms_);
++    }
+     // Insert even if failed to create, not to try to create again.
+     render_targets_.emplace(key, render_target);
+   }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 491594c..d5ea7a9 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -26,6 +26,7 @@
+ #include <SPIRV/GlslangToSpv.h>
+ #include <glslang/Public/ShaderLang.h>
+ #include <rex/assert.h>
++#include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
+@@ -6593,6 +6594,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+     // Submission already closed now, so minus 1.
+     closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] = GetCurrentSubmission() - 1;
+ 
++    // render_target_trim_seconds: whether host render targets can be given back.
++    const bool render_targets_trim_due =
++        render_target_cache_ &&
++        render_target_cache_->IsTrimDue(rex::chrono::Clock::QueryHostUptimeMillis());
++
+     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
+       cache_clear_requested_ = false;
+ 
+@@ -6623,6 +6629,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       primitive_processor_->ClearCache();
+ 
+       shared_memory_->ClearCache();
++    } else if (!cache_clear_requested_ && render_targets_trim_due &&
++               AwaitAllQueueOperationsCompletion()) {
++      // The GPU is done with everything submitted: render targets that hold no
++      // data can go.
++      render_target_cache_->TrimUnusedRenderTargets();
+     }
+   }
+ 
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index d6e82a4..210bb66 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1514,6 +1514,20 @@ void VulkanRenderTargetCache::ClearCache() {
+   RenderTargetCache::ClearCache();
+ }
+ 
++void VulkanRenderTargetCache::OnRenderTargetsTrimmed() {
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++
++  // As in ClearCache: framebuffers reference views of attachment images, which
++  // may be gone. The command processor has awaited all the submissions.
++  last_update_framebuffer_ = VK_NULL_HANDLE;
++  for (const auto& framebuffer_pair : framebuffers_) {
++    dfn.vkDestroyFramebuffer(device, framebuffer_pair.second.framebuffer, nullptr);
++  }
++  framebuffers_.clear();
++}
++
+ void VulkanRenderTargetCache::CompletedSubmissionUpdated() {
+   if (transfer_vertex_buffer_pool_) {
+     transfer_vertex_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
+@@ -2775,9 +2789,10 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+   }
+   VkImage image;
+   VkDeviceMemory memory;
++  VkDeviceSize memory_size = 0;
+   if (!ui::vulkan::util::CreateDedicatedAllocationImage(
+           vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image,
+-          memory)) {
++          memory, nullptr, &memory_size)) {
+     REXGPU_ERROR(
+         "VulkanRenderTarget: Failed to create a {}x{} {}xMSAA {} render target "
+         "image",
+@@ -2939,9 +2954,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+   }
+   dfn.vkUpdateDescriptorSets(device, key.is_depth ? 2 : 1, descriptor_set_write, 0, nullptr);
+ 
+-  return new VulkanRenderTarget(key, *this, image, memory, view_depth_color, view_depth_stencil,
+-                                view_stencil, view_srgb, view_color_transfer_separate,
+-                                descriptor_set_index_transfer_source);
++  VulkanRenderTarget* render_target = new VulkanRenderTarget(
++      key, *this, image, memory, view_depth_color, view_depth_stencil, view_stencil, view_srgb,
++      view_color_transfer_separate, descriptor_set_index_transfer_source);
++  render_target->set_host_memory_bytes(uint64_t(memory_size));
++  return render_target;
+ }
+ 
+ bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(
