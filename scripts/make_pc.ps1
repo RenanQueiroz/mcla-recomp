@@ -445,6 +445,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-render-target-max-height.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "render_target_max_height" }
     @{ Patch = "rexglue-render-target-trim.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "render_target_trim_seconds" }
     @{ Patch = "rexglue-gpu-memory.patch"; File = "src\graphics\command_processor.cpp"; Adds = "gpu_memory_log_ms" }
+    @{ Patch = "rexglue-d3d12-hoist-shared-memory-uploads.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_hoist_shared_memory_uploads" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }

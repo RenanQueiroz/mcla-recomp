@@ -226,6 +226,7 @@ rexglue-vulkan-odepth-scale.patch src/graphics/flags.cpp vulkan_odepth_float24_s
 rexglue-render-target-max-height.patch src/graphics/pipeline/render_target/cache.cpp render_target_max_height
 rexglue-render-target-trim.patch src/graphics/pipeline/render_target/cache.cpp render_target_trim_seconds
 rexglue-gpu-memory.patch src/graphics/command_processor.cpp gpu_memory_log_ms
+rexglue-d3d12-hoist-shared-memory-uploads.patch src/graphics/d3d12/command_processor.cpp d3d12_hoist_shared_memory_uploads
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW

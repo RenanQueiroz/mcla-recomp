@@ -932,6 +932,11 @@ void MclaApp::ApplyPcDefaults() {
   //   hold no data and have been idle for 60 seconds freed, and, when the
   //   process uses 90% of its video memory budget, those idle for 2 seconds freed and
   //   the texture cache's limits halved;
+  // - on Windows, D3D12 uploads into the shared memory recorded at the start of
+  //   the run of draws that needs them (d3d12_hoist_shared_memory_uploads,
+  //   patches/README.md, launcher/dev/d3d12-upload-hoisting-2026-10-28.md):
+  //   pictures identical to the setting off in the checks made, the GPU frame
+  //   shorter. The SDK's own default stays off; Vulkan has its own;
   // - on Windows, HDR output whenever the display is in HDR mode (the SDK's
   //   own default stays off, for other titles). Not on Linux, where the
   //   display's HDR state isn't read yet, so auto would never turn it on
@@ -946,6 +951,7 @@ void MclaApp::ApplyPcDefaults() {
       {"render_target_trim_seconds", "60"},
       {"gpu_memory_pressure_percent", "90"},
 #if REX_PLATFORM_WIN32
+      {"d3d12_hoist_shared_memory_uploads", "true"},
       {"hdr", "auto"},
 #endif
   };

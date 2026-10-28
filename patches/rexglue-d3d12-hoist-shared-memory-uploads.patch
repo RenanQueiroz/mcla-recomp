@@ -1,0 +1,674 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index d762036..10d8043 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -443,6 +443,14 @@ class D3D12CommandProcessor : public CommandProcessor {
+   std::vector<PendingUnscaledResolveCopy> pending_unscaled_copies_;
+   void FlushUnscaledResolveCopies();
+   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
++  // Upload hoisting (d3d12_hoist_shared_memory_uploads): called for a draw that
++  // has put the shared memory in the reading state (or the writing one, for a
++  // memory export) and submitted the barriers.
++  void BeginSharedMemoryDrawReads(bool memexport_used, const D3D12Shader* vertex_shader,
++                                  const D3D12Shader* pixel_shader);
++  void LogSharedMemoryHoistStats();
++  D3D12SharedMemory::HoistStats hoist_stats_total_;
++  uint64_t hoist_stats_next_log_ms_ = 0;
+   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
+ 
+   // Returns a buffer for reading GPU data back to the CPU. Assuming
+diff --git a/include/rex/graphics/d3d12/deferred_command_list.h b/include/rex/graphics/d3d12/deferred_command_list.h
+index 9dd18f3..7d4c1f1 100644
+--- a/include/rex/graphics/d3d12/deferred_command_list.h
++++ b/include/rex/graphics/d3d12/deferred_command_list.h
+@@ -37,8 +37,13 @@ class DeferredCommandList {
+ 
+   // Swaps the recorded commands with `stream` (normally an empty one, whose
+   // allocation is reused) and starts recording anew, for another thread to
+-  // execute them (threaded submission).
++  // execute them (threaded submission). The hoisted commands (see
++  // CmdHoistPoint) follow the main ones in `stream`, and its last element is
++  // the size of the main ones.
+   void TakeStream(std::vector<uintmax_t>& stream) {
++    const size_t main_size = command_stream_.size();
++    command_stream_.insert(command_stream_.end(), hoisted_stream_.begin(), hoisted_stream_.end());
++    command_stream_.push_back(uintmax_t(main_size));
+     command_stream_.swap(stream);
+     Reset();
+   }
+@@ -48,8 +53,38 @@ class DeferredCommandList {
+   void ExecuteStream(ID3D12GraphicsCommandList* command_list,
+                      ID3D12GraphicsCommandList1* command_list_1,
+                      const std::vector<uintmax_t>& stream) const {
+-    ExecuteCommands(command_list, command_list_1, stream.data(), stream.size());
+-  }
++    if (stream.empty()) {
++      return;
++    }
++    const size_t main_size = size_t(stream.back());
++    assert_true(main_size < stream.size());
++    ExecuteCommands(command_list, command_list_1, stream.data(), main_size,
++                    stream.data() + main_size);
++  }
++
++  // Hoisting (d3d12_hoist_shared_memory_uploads): commands recorded later but
++  // executed earlier, at a hoist point written into the stream before (the
++  // shared memory uploads that D3D12SharedMemory moves to the start of a run of
++  // draws instead of copying between the draws). The hoisted commands go to a
++  // second stream; a hoist point covers a contiguous range of it, which Execute
++  // replays where the hoist point is.
++  // Writes a hoist point covering nothing yet, and returns its handle.
++  size_t CmdHoistPoint();
++  // Directs the commands written from now on to the hoisted stream (true) or
++  // the main one.
++  void SetWritingHoisted(bool hoisted) {
++    write_stream_ = hoisted ? &hoisted_stream_ : &command_stream_;
++  }
++  size_t hoisted_stream_size() const { return hoisted_stream_.size(); }
++  // Drops the hoisted commands from `size` on (only those of the latest hoist
++  // point).
++  void TruncateHoistedStream(size_t size) {
++    assert_true(size <= hoisted_stream_.size());
++    hoisted_stream_.resize(size);
++  }
++  // Makes the hoist point cover the hoisted stream from where it was at
++  // CmdHoistPoint to its current end.
++  void ExtendHoistPoint(size_t hoist_point);
+ 
+   D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
+                                                   D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
+@@ -540,6 +575,7 @@ class DeferredCommandList {
+     kEndDebugMarker,
+     kInsertDebugMarker,
+     kExternalCallback,
++    kHoistedCommands,
+   };
+ 
+   struct CommandHeader {
+@@ -699,15 +735,23 @@ class DeferredCommandList {
+     // Followed by null-terminated label string.
+   };
+ 
++  struct HoistedCommandsArguments {
++    // Range of the hoisted stream, in elements.
++    size_t begin;
++    size_t end;
++  };
++
+   void* WriteCommand(Command command, size_t arguments_size_bytes);
+   void ExecuteCommands(ID3D12GraphicsCommandList* command_list,
+                        ID3D12GraphicsCommandList1* command_list_1, const uintmax_t* stream,
+-                       size_t stream_remaining) const;
++                       size_t stream_remaining, const uintmax_t* hoisted_stream) const;
+ 
+   const D3D12CommandProcessor& command_processor_;
+ 
+   // uintmax_t to ensure uint64_t and pointer alignment of all structures.
+   std::vector<uintmax_t> command_stream_;
++  std::vector<uintmax_t> hoisted_stream_;
++  std::vector<uintmax_t>* write_stream_ = &command_stream_;
+ };
+ 
+ }  // namespace rex::graphics::d3d12
+diff --git a/include/rex/graphics/d3d12/shared_memory.h b/include/rex/graphics/d3d12/shared_memory.h
+index 5100818..2ca1118 100644
+--- a/include/rex/graphics/d3d12/shared_memory.h
++++ b/include/rex/graphics/d3d12/shared_memory.h
+@@ -43,19 +43,29 @@ class D3D12SharedMemory : public SharedMemory {
+   // RequestRange may transition the buffer to copy destination - call it before
+   // UseForReading or UseForWriting.
+ 
+-  // Makes the buffer usable for vertices, indices and texture untiling.
++  // Makes the buffer usable for vertices, indices and texture untiling. Ends
++  // the run of draws that uploads can be hoisted to the start of (below): the
++  // texture loads that call it read the buffer without saying which pages.
+   void UseForReading() {
++    EndHoistRun();
++    UseForReadingInDraw();
++  }
++  // The same for a draw, which tells which pages it reads with MarkReadByDraw
++  // after the barriers (BeginDrawReads), and so does not end the run.
++  void UseForReadingInDraw() {
+     // Vertex fetch is also allowed in pixel shaders.
+-    CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_INDEX_BUFFER |
+-                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+-                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++    CommitUAVWritesAndTransitionBuffer(kReadState);
+   }
+   // Makes the buffer usable for texture tiling after a resolve.
+   void UseForWriting() {
++    EndHoistRun();
+     CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   }
+   // Makes the buffer usable as a source for copy commands.
+-  void UseAsCopySource() { CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE); }
++  void UseAsCopySource() {
++    EndHoistRun();
++    CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE);
++  }
+   // Must be called when doing draws/dispatches modifying data within the shared
+   // memory buffer as a UAV, to make sure that when UseForWriting is called the
+   // next time, a UAV barrier will be done, and subsequent overlapping UAV
+@@ -66,6 +76,43 @@ class D3D12SharedMemory : public SharedMemory {
+     }
+   }
+ 
++  // Upload hoisting (d3d12_hoist_shared_memory_uploads). Every upload into the
++  // buffer used to copy between two draws, with the buffer going from the
++  // reading state to the copy destination state and back, which makes the GPU
++  // wait for the draws before it to finish and the draws after it to wait for
++  // the copy. A "run" starts at a draw with the buffer in the reading state and
++  // goes on while it stays so and only draws use it. An upload of pages that no
++  // draw of the run has read yet is recorded at the start of the run instead
++  // (the command list's hoisted commands), between one pair of barriers that
++  // all the uploads of the run share. The same bytes reach the same draws:
++  // the draws before the upload do not read these pages, and nothing else
++  // reads or writes the buffer in the run.
++  //
++  // Called by a draw that reads the buffer, after UseForReadingInDraw and the
++  // barriers have been submitted (the buffer is in the reading state in the
++  // command list now): starts a run if there is none.
++  void BeginDrawReads();
++  // The draw reads these bytes of the buffer (vertex fetches, guest indices).
++  void MarkReadByDraw(uint32_t start, uint32_t length);
++  // Anything else that uses the buffer, and the end of the command list, end the
++  // run: uploads after it are done in place.
++  void EndHoistRun() { hoist_run_active_ = false; }
++  // Counts, for the log (d3d12_hoist_shared_memory_uploads_stats).
++  struct HoistStats {
++    // Runs of draws started, uploads hoisted to the start of a run, and uploads
++    // done in place because no run was going on, or because a draw of the run
++    // had read one of the pages (or an upload had written it).
++    uint64_t runs = 0;
++    uint64_t uploads_hoisted = 0;
++    uint64_t uploads_in_place_no_run = 0;
++    uint64_t uploads_in_place_page_read = 0;
++  };
++  HoistStats TakeHoistStats() {
++    HoistStats stats = hoist_stats_;
++    hoist_stats_ = {};
++    return stats;
++  }
++
+   void WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
+   void WriteRawUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
+   // Due to the D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP limitation, the
+@@ -92,6 +139,38 @@ class D3D12SharedMemory : public SharedMemory {
+   bool buffer_uav_writes_commit_needed_ = false;
+   void CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES new_state);
+ 
++  // The state for vertices, indices and texture untiling.
++  static constexpr D3D12_RESOURCE_STATES kReadState = D3D12_RESOURCE_STATES(
++      int(D3D12_RESOURCE_STATE_INDEX_BUFFER) | int(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) |
++      int(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
++
++  // Upload hoisting. Whether a run is going on: the buffer has been in the
++  // reading state since the hoist point (in the command list's main stream, at
++  // the draw that started the run, after the barriers before it) and nothing but
++  // draws has used it.
++  bool hoist_run_active_ = false;
++  size_t hoist_point_ = 0;
++  // Whether the hoisted stream has the barrier to the copy destination state
++  // for this run already, and where the barrier back is (dropped and written
++  // again after the next upload's copies).
++  bool hoist_run_has_uploads_ = false;
++  size_t hoist_closing_barrier_offset_ = 0;
++  // The pages the draws of the run read and the uploads of the run wrote, a bit
++  // per page, in 64-page words that only count if their serial is the run's, so
++  // nothing needs clearing between runs.
++  uint64_t hoist_serial_ = 0;
++  std::vector<uint64_t> hoist_pages_;
++  std::vector<uint64_t> hoist_pages_serial_;
++  std::vector<std::pair<uint32_t, uint32_t>> hoist_byte_ranges_temp_;
++  HoistStats hoist_stats_;
++  // Whether an upload of these page ranges (first page, page count) can be
++  // hoisted now; if so, starts recording it in the hoisted stream.
++  bool BeginHoistedUpload(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges);
++  // Ends recording a hoisted upload of these byte ranges.
++  void EndHoistedUpload(const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges);
++  void MarkPages(uint32_t start, uint32_t length);
++  void WriteHoistedBarrier(D3D12_RESOURCE_STATES state_before, D3D12_RESOURCE_STATES state_after);
++
+   // Non-shader-visible buffer descriptor heap for faster binding (via copying
+   // rather than creation).
+   enum class BufferDescriptorIndex : uint32_t {
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index d35c107..bda89af 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -69,6 +69,18 @@ REXCVAR_DEFINE_BOOL(d3d12_threaded_submission_idle_wait, true, "GPU/D3D12",
+                     "ends in short bursts of garbage blocks over the frame)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(d3d12_hoist_shared_memory_uploads, false, "GPU/D3D12",
++                    "Record the shared memory uploads (vertex and index data the CPU rewrote, "
++                    "textures) at the start of the run of draws they are for, between one pair of "
++                    "barriers for the run, when no draw before the upload has read the uploaded "
++                    "pages, instead of copying between the draws")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(d3d12_hoist_shared_memory_uploads_stats, false, "GPU/D3D12",
++                    "Log how many runs of draws, hoisted uploads and uploads done in place there "
++                    "were, every 5 seconds (with d3d12_hoist_shared_memory_uploads)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
+@@ -3490,9 +3502,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     if (memexport_used) {
+       shared_memory_->UseForWriting();
+     } else {
+-      shared_memory_->UseForReading();
++      shared_memory_->UseForReadingInDraw();
+     }
+     SubmitBarriers();
++    BeginSharedMemoryDrawReads(memexport_used, vertex_shader, pixel_shader);
+     PERF_counter_add_batched(REXCVAR_GET(gpu_batch_perf_counters), kDrawCalls, 1);
+     PERF_counter_add_batched(REXCVAR_GET(gpu_batch_perf_counters), kVerticesProcessed,
+                            primitive_processing_result.host_draw_vertex_count);
+@@ -3550,9 +3563,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     if (memexport_used) {
+       shared_memory_->UseForWriting();
+     } else {
+-      shared_memory_->UseForReading();
++      shared_memory_->UseForReadingInDraw();
+     }
+     SubmitBarriers();
++    BeginSharedMemoryDrawReads(memexport_used, vertex_shader, pixel_shader);
+     PERF_counter_add_batched(REXCVAR_GET(gpu_batch_perf_counters), kDrawCalls, 1);
+     PERF_counter_add_batched(REXCVAR_GET(gpu_batch_perf_counters), kVerticesProcessed,
+                            primitive_processing_result.host_draw_vertex_count);
+@@ -3607,6 +3621,63 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   return true;
+ }
+ 
++// Upload hoisting (d3d12_hoist_shared_memory_uploads): the draw about to be recorded reads the
++// shared memory in the reading state, with the barriers before it submitted. Starts a run of
++// draws if there is none, and says which pages this draw reads, so no upload of them is moved
++// before it (D3D12SharedMemory::BeginDrawReads). A superset of what the draw reads is safe: the
++// vertex fetch constants of both shaders, whether or not the draw's fetches were found in sync
++// with the shared memory, and the guest indices. A draw that exports to the shared memory ends
++// the run (UseForWriting).
++void D3D12CommandProcessor::BeginSharedMemoryDrawReads(bool memexport_used,
++                                                       const D3D12Shader* vertex_shader,
++                                                       const D3D12Shader* pixel_shader) {
++  if (!REXCVAR_GET(d3d12_hoist_shared_memory_uploads) || memexport_used) {
++    shared_memory_->EndHoistRun();
++    return;
++  }
++  shared_memory_->BeginDrawReads();
++  const RegisterFile& regs = *register_file_;
++  for (const Shader* shader :
++       {static_cast<const Shader*>(vertex_shader), static_cast<const Shader*>(pixel_shader)}) {
++    if (!shader) {
++      continue;
++    }
++    const Shader::ConstantRegisterMap& constant_map = shader->constant_register_map();
++    for (uint32_t i = 0; i < rex::countof(constant_map.vertex_fetch_bitmap); ++i) {
++      uint32_t vfetch_bits_remaining = constant_map.vertex_fetch_bitmap[i];
++      uint32_t j;
++      while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
++        vfetch_bits_remaining &= ~(uint32_t(1) << j);
++        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(i * 32 + j);
++        shared_memory_->MarkReadByDraw(vfetch_constant.address << 2, vfetch_constant.size << 2);
++      }
++    }
++  }
++  std::pair<uint32_t, uint32_t> guest_index_range = primitive_processor_->last_guest_index_range();
++  shared_memory_->MarkReadByDraw(guest_index_range.first, guest_index_range.second);
++}
++
++void D3D12CommandProcessor::LogSharedMemoryHoistStats() {
++  D3D12SharedMemory::HoistStats stats = shared_memory_->TakeHoistStats();
++  hoist_stats_total_.runs += stats.runs;
++  hoist_stats_total_.uploads_hoisted += stats.uploads_hoisted;
++  hoist_stats_total_.uploads_in_place_no_run += stats.uploads_in_place_no_run;
++  hoist_stats_total_.uploads_in_place_page_read += stats.uploads_in_place_page_read;
++  uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
++                                 std::chrono::steady_clock::now().time_since_epoch())
++                                 .count());
++  if (now_ms < hoist_stats_next_log_ms_) {
++    return;
++  }
++  hoist_stats_next_log_ms_ = now_ms + 5000;
++  REXGPU_INFO(
++      "D3D12 upload hoisting: {} runs of draws, {} uploads hoisted, {} done in place with no run "
++      "going, {} done in place because a draw of the run had read a page (since the last line)",
++      hoist_stats_total_.runs, hoist_stats_total_.uploads_hoisted,
++      hoist_stats_total_.uploads_in_place_no_run, hoist_stats_total_.uploads_in_place_page_read);
++  hoist_stats_total_ = {};
++}
++
+ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_size) {
+   if (!total_size || memexport_ranges_.empty()) {
+     return true;
+@@ -4187,6 +4258,9 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+     // end of the submission (when async pipeline creation requests are
+     // fulfilled).
+     deferred_command_list_.Reset();
++    if (shared_memory_) {
++      shared_memory_->EndHoistRun();
++    }
+ 
+     // Reset cached state of the command list.
+     ff_viewport_update_needed_ = true;
+@@ -4288,6 +4362,14 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+   if (submission_open_) {
+     assert_false(scratch_buffer_used_);
+ 
++    // The deferred commands are about to go; no run goes on into the next list.
++    if (shared_memory_) {
++      shared_memory_->EndHoistRun();
++      if (REXCVAR_GET(d3d12_hoist_shared_memory_uploads_stats)) {
++        LogSharedMemoryHoistStats();
++      }
++    }
++
+     if (active_occlusion_query_.valid && occlusion_query_heap_) {
+       deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
+                                          active_occlusion_query_.host_index);
+diff --git a/src/graphics/d3d12/deferred_command_list.cpp b/src/graphics/d3d12/deferred_command_list.cpp
+index 086d5be..e4361f6 100644
+--- a/src/graphics/d3d12/deferred_command_list.cpp
++++ b/src/graphics/d3d12/deferred_command_list.cpp
+@@ -26,6 +26,24 @@ DeferredCommandList::DeferredCommandList(const D3D12CommandProcessor& command_pr
+ 
+ void DeferredCommandList::Reset() {
+   command_stream_.clear();
++  hoisted_stream_.clear();
++  write_stream_ = &command_stream_;
++}
++
++size_t DeferredCommandList::CmdHoistPoint() {
++  assert_true(write_stream_ == &command_stream_);
++  auto& args = *reinterpret_cast<HoistedCommandsArguments*>(
++      WriteCommand(Command::kHoistedCommands, sizeof(HoistedCommandsArguments)));
++  args.begin = hoisted_stream_.size();
++  args.end = args.begin;
++  return size_t(reinterpret_cast<const uintmax_t*>(&args) - command_stream_.data());
++}
++
++void DeferredCommandList::ExtendHoistPoint(size_t hoist_point) {
++  assert_true(hoist_point < command_stream_.size());
++  auto& args = *reinterpret_cast<HoistedCommandsArguments*>(command_stream_.data() + hoist_point);
++  assert_true(args.begin <= hoisted_stream_.size());
++  args.end = hoisted_stream_.size();
+ }
+ 
+ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+@@ -33,12 +51,14 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+-  ExecuteCommands(command_list, command_list_1, command_stream_.data(), command_stream_.size());
++  ExecuteCommands(command_list, command_list_1, command_stream_.data(), command_stream_.size(),
++                  hoisted_stream_.data());
+ }
+ 
+ void DeferredCommandList::ExecuteCommands(ID3D12GraphicsCommandList* command_list,
+                                           ID3D12GraphicsCommandList1* command_list_1,
+-                                          const uintmax_t* stream, size_t stream_remaining) const {
++                                          const uintmax_t* stream, size_t stream_remaining,
++                                          const uintmax_t* hoisted_stream) const {
+   ID3D12PipelineState* current_pipeline_state = nullptr;
+   while (stream_remaining != 0) {
+     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
+@@ -286,6 +306,15 @@ void DeferredCommandList::ExecuteCommands(ID3D12GraphicsCommandList* command_lis
+         // The callee may have set its own.
+         current_pipeline_state = nullptr;
+       } break;
++      case Command::kHoistedCommands: {
++        // Copies and barriers only, which need no pipeline state: the nested call
++        // has its own, and the one of this call is untouched.
++        auto& args = *reinterpret_cast<const HoistedCommandsArguments*>(stream);
++        if (args.end > args.begin) {
++          ExecuteCommands(command_list, command_list_1, hoisted_stream + args.begin,
++                          args.end - args.begin, hoisted_stream);
++        }
++      } break;
+       default:
+         assert_unhandled_case(header.command);
+         break;
+@@ -298,12 +327,13 @@ void DeferredCommandList::ExecuteCommands(ID3D12GraphicsCommandList* command_lis
+ void* DeferredCommandList::WriteCommand(Command command, size_t arguments_size_bytes) {
+   size_t arguments_size_elements =
+       (arguments_size_bytes + sizeof(uintmax_t) - 1) / sizeof(uintmax_t);
+-  size_t offset = command_stream_.size();
+-  command_stream_.resize(offset + kCommandHeaderSizeElements + arguments_size_elements);
+-  CommandHeader& header = *reinterpret_cast<CommandHeader*>(command_stream_.data() + offset);
++  std::vector<uintmax_t>& stream = *write_stream_;
++  size_t offset = stream.size();
++  stream.resize(offset + kCommandHeaderSizeElements + arguments_size_elements);
++  CommandHeader& header = *reinterpret_cast<CommandHeader*>(stream.data() + offset);
+   header.command = command;
+   header.arguments_size_elements = uint32_t(arguments_size_elements);
+-  return command_stream_.data() + (offset + kCommandHeaderSizeElements);
++  return stream.data() + (offset + kCommandHeaderSizeElements);
+ }
+ 
+ }  // namespace rex::graphics::d3d12
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+index 1315e99..a681d27 100644
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -80,6 +80,12 @@ bool D3D12SharedMemory::Initialize() {
+   }
+   buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
+   buffer_uav_writes_commit_needed_ = false;
++  {
++    size_t hoist_page_words = ((size_t(kBufferSize) >> page_size_log2()) + 63) / 64;
++    hoist_run_active_ = false;
++    hoist_pages_.assign(hoist_page_words, 0);
++    hoist_pages_serial_.assign(hoist_page_words, 0);
++  }
+ 
+   D3D12_DESCRIPTOR_HEAP_DESC buffer_descriptor_heap_desc;
+   buffer_descriptor_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+@@ -184,6 +190,9 @@ void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES
+     }
+     return;
+   }
++  // A run of draws (BeginDrawReads) needs the buffer to stay in the reading
++  // state.
++  EndHoistRun();
+   command_processor_.PushTransitionBarrier(buffer_, buffer_state_, new_state);
+   buffer_state_ = new_state;
+   // "UAV -> anything" transition commits the writes implicitly.
+@@ -307,9 +316,13 @@ bool D3D12SharedMemory::UploadRanges(
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
+-  CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
+-  command_processor_.SubmitBarriers();
++  bool hoist = BeginHoistedUpload(upload_page_ranges);
++  if (!hoist) {
++    CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
++    command_processor_.SubmitBarriers();
++  }
+   auto& command_list = command_processor_.GetDeferredCommandList();
++  bool successful = true;
+   for (auto upload_range : upload_page_ranges) {
+     uint32_t upload_range_start = upload_range.first;
+     uint32_t upload_range_length = upload_range.second;
+@@ -322,7 +335,8 @@ bool D3D12SharedMemory::UploadRanges(
+           nullptr);
+       if (upload_buffer_mapping == nullptr) {
+         REXGPU_ERROR("Shared memory: Failed to get an upload buffer");
+-        return false;
++        successful = false;
++        break;
+       }
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+       std::memcpy(upload_buffer_mapping,
+@@ -335,8 +349,170 @@ bool D3D12SharedMemory::UploadRanges(
+       upload_range_start += upload_buffer_pages;
+       upload_range_length -= upload_buffer_pages;
+     }
++    if (!successful) {
++      break;
++    }
++  }
++  if (hoist) {
++    // Also after a failure, to leave the hoisted stream well-formed.
++    hoist_byte_ranges_temp_.clear();
++    for (const std::pair<uint32_t, uint32_t>& range : upload_page_ranges) {
++      hoist_byte_ranges_temp_.emplace_back(range.first << page_size_log2(),
++                                           range.second << page_size_log2());
++    }
++    EndHoistedUpload(hoist_byte_ranges_temp_);
++  }
++  return successful;
++}
++
++// Upload hoisting (d3d12_hoist_shared_memory_uploads): the scheme (a hoist point in the deferred
++// command stream, the uploads recorded in a second stream and replayed there, a bit per page for
++// what the draws of the run have read) follows ForzaHorizon1-ReImagined's patch 0036
++// (https://github.com/Dyotson/ForzaHorizon1-ReImagined, patches/rexglue-sdk), as ported to
++// Vulkan in rexglue-vulkan-hoist-shared-memory-uploads.patch, and the page bit code is its code;
++// what a run is on Direct3D 12 (no render passes), and what ends it, is written for this fork.
++// Under its licence:
++//
++//   MIT License
++//
++//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
++//
++//   Permission is hereby granted, free of charge, to any person obtaining a copy
++//   of this software and associated documentation files (the "Software"), to deal
++//   in the Software without restriction, including without limitation the rights
++//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++//   copies of the Software, and to permit persons to whom the Software is
++//   furnished to do so, subject to the following conditions:
++//
++//   The above copyright notice and this permission notice shall be included in all
++//   copies or substantial portions of the Software.
++//
++//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++//   SOFTWARE.
++
++bool D3D12SharedMemory::BeginHoistedUpload(
++    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
++  if (!hoist_run_active_) {
++    ++hoist_stats_.uploads_in_place_no_run;
++    return false;
++  }
++  // The buffer has been in the reading state since the start of the run (any
++  // change ends it), and no draw of the run has read these pages nor an upload
++  // of the run written them.
++  assert_true(buffer_state_ == kReadState);
++  for (const std::pair<uint32_t, uint32_t>& range : upload_page_ranges) {
++    if (!range.second) {
++      continue;
++    }
++    uint32_t page_first = range.first;
++    uint32_t page_last = range.first + range.second - 1;
++    if ((page_last >> 6) >= hoist_pages_.size()) {
++      ++hoist_stats_.uploads_in_place_page_read;
++      return false;
++    }
++    for (uint32_t word = page_first >> 6; word <= (page_last >> 6); ++word) {
++      if (hoist_pages_serial_[word] != hoist_serial_) {
++        continue;
++      }
++      uint64_t mask = ~uint64_t(0);
++      if (word == (page_first >> 6)) {
++        mask &= ~uint64_t(0) << (page_first & 63);
++      }
++      if (word == (page_last >> 6)) {
++        mask &= ~uint64_t(0) >> (63 - (page_last & 63));
++      }
++      if (hoist_pages_[word] & mask) {
++        ++hoist_stats_.uploads_in_place_page_read;
++        return false;
++      }
++    }
++  }
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  command_list.SetWritingHoisted(true);
++  if (!hoist_run_has_uploads_) {
++    hoist_run_has_uploads_ = true;
++    WriteHoistedBarrier(kReadState, D3D12_RESOURCE_STATE_COPY_DEST);
++  } else {
++    command_list.TruncateHoistedStream(hoist_closing_barrier_offset_);
+   }
+   return true;
+ }
+ 
++void D3D12SharedMemory::EndHoistedUpload(
++    const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  hoist_closing_barrier_offset_ = command_list.hoisted_stream_size();
++  WriteHoistedBarrier(D3D12_RESOURCE_STATE_COPY_DEST, kReadState);
++  command_list.SetWritingHoisted(false);
++  command_list.ExtendHoistPoint(hoist_point_);
++  ++hoist_stats_.uploads_hoisted;
++  // Another upload of these pages in the run would have to come after the first
++  // one but before the draws that read them, which the hoisted copies, all at
++  // the start of the run, cannot do: it is done in place.
++  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
++    MarkPages(range.first, range.second);
++  }
++}
++
++void D3D12SharedMemory::BeginDrawReads() {
++  if (hoist_run_active_) {
++    return;
++  }
++  if (buffer_state_ != kReadState || hoist_pages_.empty()) {
++    return;
++  }
++  hoist_point_ = command_processor_.GetDeferredCommandList().CmdHoistPoint();
++  ++hoist_serial_;
++  hoist_run_has_uploads_ = false;
++  hoist_run_active_ = true;
++  ++hoist_stats_.runs;
++}
++
++void D3D12SharedMemory::MarkReadByDraw(uint32_t start, uint32_t length) {
++  if (!hoist_run_active_) {
++    return;
++  }
++  MarkPages(start, length);
++}
++
++void D3D12SharedMemory::MarkPages(uint32_t start, uint32_t length) {
++  if (!length || start >= kBufferSize) {
++    return;
++  }
++  length = std::min(length, kBufferSize - start);
++  uint32_t page_first = start >> page_size_log2();
++  uint32_t page_last = (start + length - 1) >> page_size_log2();
++  for (uint32_t word = page_first >> 6; word <= (page_last >> 6); ++word) {
++    uint64_t mask = ~uint64_t(0);
++    if (word == (page_first >> 6)) {
++      mask &= ~uint64_t(0) << (page_first & 63);
++    }
++    if (word == (page_last >> 6)) {
++      mask &= ~uint64_t(0) >> (63 - (page_last & 63));
++    }
++    if (hoist_pages_serial_[word] != hoist_serial_) {
++      hoist_pages_serial_[word] = hoist_serial_;
++      hoist_pages_[word] = 0;
++    }
++    hoist_pages_[word] |= mask;
++  }
++}
++
++void D3D12SharedMemory::WriteHoistedBarrier(D3D12_RESOURCE_STATES state_before,
++                                            D3D12_RESOURCE_STATES state_after) {
++  D3D12_RESOURCE_BARRIER barrier;
++  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++  barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
++  barrier.Transition.pResource = buffer_;
++  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++  barrier.Transition.StateBefore = state_before;
++  barrier.Transition.StateAfter = state_after;
++  command_processor_.GetDeferredCommandList().D3DResourceBarrier(1, &barrier);
++}
++
+ }  // namespace rex::graphics::d3d12

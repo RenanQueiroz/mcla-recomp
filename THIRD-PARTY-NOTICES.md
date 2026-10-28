@@ -14,6 +14,9 @@ Ported from it:
   ported to ReXGlue v0.10.0 and extended (see `patches/README.md`). The notice
   is also in the code it adds (`src/graphics/vulkan/command_processor.cpp`,
   above `CanHoistSharedMemoryUpload`).
+- `patches/rexglue-d3d12-hoist-shared-memory-uploads.patch`: the scheme of its patch 0036 (as ported to Vulkan above) applied to
+  Direct3D 12, and the page bit code of that port. The notice is also in the code it adds
+  (`src/graphics/d3d12/shared_memory.cpp`, above `BeginHoistedUpload`).
 - `patches/rexglue-threaded-submission-vulkan.patch`: its patch 0038, ported to
   ReXGlue v0.10.0. The notice is also in the code it adds (above
   `StartSubmissionThread`).
