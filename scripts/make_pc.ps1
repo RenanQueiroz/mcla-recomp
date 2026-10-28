@@ -439,6 +439,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-xma-decoder-fixes.patch"; File = "src\audio\xma_context.cpp"; Adds = "xma_race_fixes" }
     @{ Patch = "rexglue-alpha-to-mask-tolerance.patch"; File = "src\graphics\flags.cpp"; Adds = "alpha_to_mask_tolerance" }
     @{ Patch = "rexglue-resolve-readback-rules.patch"; File = "src\graphics\command_processor.cpp"; Adds = "readback_resolve_rules" }
+    @{ Patch = "rexglue-occlusion-queries.patch"; File = "src\graphics\command_processor.cpp"; Adds = "occlusion_query_async" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }
     @{ Patch = "rexglue-upstream-host-fp-state.patch"; File = "include\rex\ppc\context.h"; Adds = "Keep host FP exceptions masked on every write" }
