@@ -531,6 +531,83 @@ class Report:
                     w(f"      +{(b - frames[i][0]) / 1000:7.3f} ms  {(e - b) / 1000:6.3f} ms  {self.tname(thr)}: {label}")
         return frames, per_frame
 
+    # ---- joint states of two threads
+    def wait_intervals(self, thr, lo, hi):
+        """The thread's blocking waits as disjoint intervals clipped to the window."""
+        iv = sorted((max(s.b, lo), min(s.e, hi)) for s in self.blocking_in(thr, lo, hi))
+        out = []
+        for b, e in iv:
+            if out and b <= out[-1][1]:
+                out[-1] = (out[-1][0], max(out[-1][1], e))
+            else:
+                out.append((b, e))
+        return out
+
+    def joint_states(self, a, b, lo, hi):
+        """Seconds both running, a waiting only, b waiting only, both waiting (blocking waits are 'waiting')."""
+        ia, ib = self.wait_intervals(a, lo, hi), self.wait_intervals(b, lo, hi)
+        both = 0.0
+        i = j = 0
+        while i < len(ia) and j < len(ib):
+            s, e = max(ia[i][0], ib[j][0]), min(ia[i][1], ib[j][1])
+            if e > s:
+                both += e - s
+            if ia[i][1] < ib[j][1]:
+                i += 1
+            else:
+                j += 1
+        wa = sum(e - s for s, e in ia)
+        wb = sum(e - s for s, e in ib)
+        span = hi - lo
+        return {"both_running": span - wa - wb + both, "a_waiting_only": wa - both, "b_waiting_only": wb - both, "both_waiting": both, "span": span}
+
+    def render_handoff(self, lo, hi, nframes, w):
+        upd = self.update_thread()
+        rt = next((k for k, v in self.roles.items() if v == "render"), None)
+        if upd is None or rt is None:
+            return
+        js = self.joint_states(upd, rt, lo, hi)
+        sp = js["span"]
+        w(f"      update / render thread states (a blocking wait is 'waiting'; the sampler's figures for the city before the wake on demand were 25 / 35 / 27 / 9 %): "
+          f"both running {100 * js['both_running'] / sp:.0f}%, update running + render waiting {100 * js['b_waiting_only'] / sp:.0f}%, "
+          f"update waiting + render running {100 * js['a_waiting_only'] / sp:.0f}%, both waiting {100 * js['both_waiting'] / sp:.0f}%")
+        kicks = [p[0] for p in self.points_in("kick", lo, hi, upd)]
+        rframes = [p[0] for p in self.points_in("render_frame", lo, hi)]
+        swaps = [p[0] for p in self.points_in("swap", lo, hi)]
+        dones = [p[0] for p in self.points_in("wait_frame_done", lo, hi, upd)]
+        if kicks and rframes:
+            lat, busy = [], []
+            for k in kicks:
+                j = bisect.bisect_left(rframes, k)
+                if j < len(rframes) and rframes[j] - k < 20000:
+                    lat.append(rframes[j] - k)
+                    s = bisect.bisect_left(swaps, rframes[j])
+                    if s < len(swaps) and swaps[s] - rframes[j] < 50000:
+                        busy.append(swaps[s] - rframes[j])
+            if lat:
+                w(f"      the update thread starts the render thread's frame (kick) -> the frame function starts: median {statistics.median(lat):.0f} us, p95 {sorted(lat)[int(len(lat) * .95)]:.0f} us ({len(lat)} kicks)")
+            if busy:
+                w(f"      the frame function's start -> the swap packet (the render thread's frame): median {statistics.median(busy) / 1000:.3f} ms, p95 {sorted(busy)[int(len(busy) * .95)] / 1000:.3f} ms")
+        if kicks and dones:
+            gap = []
+            for k in kicks:
+                j = bisect.bisect_left(dones, k)
+                if j < len(dones):
+                    gap.append(dones[j] - k)
+            if gap:
+                w(f"      the update thread's work between starting the render thread's frame and checking for the last one: median {statistics.median(gap) / 1000:.3f} ms, p95 {sorted(gap)[int(len(gap) * .95)] / 1000:.3f} ms")
+        # the update thread's blocking time right after the check (sub_823057E8): the wait for the render thread
+        if dones:
+            waits = [s for s in self.by_thread.get(upd, []) if s.kind in ("wait", "multi") and s.e - s.b >= self.args.min_wait_us]
+            ends = [s.b for s in waits]
+            tot, n = 0.0, 0
+            for d in dones:
+                j = bisect.bisect_left(ends, d)
+                if j < len(waits) and waits[j].b - d < 30:
+                    tot += waits[j].e - waits[j].b
+                    n += 1
+            w(f"      the update thread's check for the render thread's last frame blocked {n} of {len(dones)} times, {tot / max(1, len(dones)):.0f} us on average over all checks")
+
     # ---- hand-off numbers
     def handoff_section(self, lo, hi, nframes, w):
         upd = self.update_thread()
@@ -613,6 +690,7 @@ class Report:
         kicks = self.points_in("kick", lo, hi)
         if kicks:
             w(f"      the update thread started the render thread's frame {len(kicks) / nframes:.2f} times a frame")
+        self.render_handoff(lo, hi, nframes, w)
 
     # ---- a timeline of one frame
     def timeline(self, lo, hi, w, limit=140):
