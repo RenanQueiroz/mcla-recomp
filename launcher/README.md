@@ -998,6 +998,8 @@ during a build:
   `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
+- `occlusion-2026-10-28.md` (the sun's glare and the occlusion queries: why the SDK turned host queries off at the first query of every run, the fix in
+  `rexglue-occlusion-queries.patch`, what the game does with the count, how to read the chain's results).
 
 ## Scripted controller input (unattended runs)
 
