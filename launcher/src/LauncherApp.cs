@@ -1077,8 +1077,10 @@ sealed class LauncherApp : Component
         Element Settings() =>
             ScrollViewer(VStack(12,
                 Subtitle("Graphics"),
-                Pairs(GameSettings.GraphicsFor(gameSettings, DisplayRefresh.Main.Value, GpuVendor.For(ShaderStamp.LastAdapterVendor(GameOptions.Arguments(settingsRef.Current), Paths.BuildDir)),
-                                               DisplayDrivers.AutomaticApi(int.TryParse(ShaderStamp.Setting("d3d12_adapter", GameOptions.Arguments(settingsRef.Current), gameSettings), out var adapterOption) ? adapterOption : -1)).Select(SettingCombo).ToArray()),
+                Pairs(GameSettings.GraphicsFor(gameSettings, DisplayRefresh.Main.Value,
+                                               GpuVendor.For(ShaderStamp.LastAdapterVendor(GameOptions.Arguments(settingsRef.Current), Paths.BuildDir),
+                                                             ShaderStamp.GpuOptionsFor(GameOptions.Arguments(settingsRef.Current), gameSettings, Paths.BuildDir)),
+                                               DisplayDrivers.AutomaticApi(ShaderStamp.GpuOptionsFor(GameOptions.Arguments(settingsRef.Current), gameSettings, Paths.BuildDir))).Select(SettingCombo).ToArray()),
                 Subtitle("HDR"),
                 Pairs([.. GameSettings.HdrChoices.Select(SettingCombo), .. GameSettings.HdrLevels.Select(LevelSlider)]),
                 VStack(2, (DisplayHdr.Main.Value?.Describe() ?? DisplayHdr.Unknown)

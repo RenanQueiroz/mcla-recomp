@@ -92,5 +92,6 @@ if(WIN32)
     # timeBeginPeriod for the frame limiter.
     target_link_libraries(mcla PRIVATE winmm)
     # The shader storage: the display drivers in its stamp, a preparation's memory figures (dxgi, psapi).
-    target_link_libraries(mcla PRIVATE dxgi psapi)
+    # The GPU choice (src/mcla_app.cpp, ChooseGpu): Windows' graphics settings are read from the registry (advapi32).
+    target_link_libraries(mcla PRIVATE dxgi psapi advapi32)
 endif()

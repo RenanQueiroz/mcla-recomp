@@ -23,8 +23,9 @@ constexpr uint32_t kVendorNvidia = 0x10DE;
 // The wave size an RDNA GPU can run at (and GCN cannot: its waves are 64 lanes).
 constexpr uint32_t kRdnaWaveLaneCountMin = 32;
 
-// What is known of the adapter Direct3D 12 would take. uma and wave_lane_count_min are only
-// asked of AMD's adapters (0: not asked, or Direct3D 12 had no answer).
+// What is known of the adapter the game uses (the one src/gpu_choice.h chooses: on a PC with two
+// GPUs not necessarily the first Windows lists). uma and wave_lane_count_min are only asked of
+// AMD's adapters (0: not asked, or Direct3D 12 had no answer).
 struct AdapterFacts {
   uint32_t vendor = 0;               // DXGI_ADAPTER_DESC1::VendorId
   bool uma = false;                  // D3D12_FEATURE_DATA_ARCHITECTURE::UMA: shares the CPU's memory
