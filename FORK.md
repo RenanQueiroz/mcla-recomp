@@ -277,6 +277,7 @@ git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
 git apply ../../patches/rexglue-xma-decoder-fixes.patch
 git apply ../../patches/rexglue-alpha-to-mask-tolerance.patch
 git apply ../../patches/rexglue-resolve-readback-rules.patch
+git apply ../../patches/rexglue-texture-load-direct-unscaled.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch

@@ -1,0 +1,421 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index fc3b28d..92c54ef 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -51,6 +51,7 @@ REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
+ REXCVAR_DECLARE(bool, direct_host_resolve);
+ REXCVAR_DECLARE(bool, resolve_direct_batched_loads);
+ REXCVAR_DECLARE(bool, texture_load_direct);
++REXCVAR_DECLARE(bool, texture_load_direct_unscaled);
+ 
+ // GPU Textures
+ REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index 1e56c4f..f39335e 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -160,8 +160,14 @@ class TextureCache {
+ 
+     // Whether this texture is a resolution-scaled resolve target.
+     uint32_t scaled_resolve : 1;  // 97
++    // texture_load_direct_unscaled: whether this texture, at native resolution,
++    // is over memory that a resolve has written. Such a texture is loaded
++    // straight into the host texture rather than through a buffer. Part of the
++    // key so that a texture created before the memory was first resolved is not
++    // reused: it has no unordered access to load through.
++    uint32_t resolved_unscaled : 1;  // 98
+     // Least important in ==, so placed last.
+-    uint32_t is_valid : 1;  // 98
++    uint32_t is_valid : 1;  // 99
+ 
+     TextureKey() { MakeInvalid(); }
+     TextureKey(const TextureKey& key) { std::memcpy(this, &key, sizeof(*this)); }
+@@ -443,10 +449,16 @@ class TextureCache {
+   };
+   // The direct load shader replacing the regular one, or kDirectLoadShaderUnknown.
+   static DirectLoadShader GetDirectLoadShader(LoadShaderIndex load_shader);
+-  // Whether a texture with the key may be loaded directly: enabled, scaled, one
+-  // level, 2D, one layer, not in the packed mip tail. The host format and the
+-  // shader are checked separately.
++  // Whether a texture with the key may be loaded directly: one level, 2D, one
++  // layer, not in the packed mip tail, and either scaled with texture_load_direct
++  // or, at native resolution (texture_load_direct_unscaled), tiled and over
++  // memory a resolve has written (resolved_unscaled). The host format and the
++  // shader are checked separately. At native resolution the scaled shaders are
++  // used with a scale of 1: their addressing is then the unscaled one.
+   static bool IsDirectLoadPossible(const TextureKey& key);
++  // Whether the texture_load_direct_unscaled pipelines are wanted: native
++  // resolution and the setting on at startup.
++  bool IsDirectLoadUnscaledWanted() const;
+ 
+   struct LoadShaderInfo {
+     // Log2 of the sizes, in bytes, of the elements in the source (guest) and
+@@ -591,6 +603,9 @@ class TextureCache {
+   // Checks if there are any pages that contain scaled resolve data within the
+   // range.
+   bool IsRangeScaledResolved(uint32_t start_unscaled, uint32_t length_unscaled);
++  // texture_load_direct_unscaled: whether a resolve has written any page of the
++  // range at native resolution.
++  bool IsRangeResolvedUnscaled(uint32_t start_unscaled, uint32_t length_unscaled);
+   // Global shared memory invalidation callback for invalidating scaled resolved
+   // texture data.
+   static void ScaledResolveGlobalWatchCallbackThunk(
+@@ -620,6 +635,12 @@ class TextureCache {
+   // Global watch for scaled resolve data invalidation.
+   SharedMemory::GlobalWatchHandle scaled_resolve_global_watch_handle_ = nullptr;
+ 
++  // texture_load_direct_unscaled, native resolution only: bit vector storing
++  // whether a resolve has ever written each 4 KB physical memory page. Never
++  // cleared before the cache is: it only chooses which textures are created for
++  // loading straight into (a wrong guess costs speed, not correctness).
++  std::unique_ptr<uint32_t[]> resolved_pages_;
++
+   uint64_t current_submission_index_ = 0;
+   uint64_t current_submission_time_ = 0;
+ 
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 62b783d..98a740f 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -604,8 +604,11 @@ bool D3D12TextureCache::Initialize() {
+   }
+ 
+   // texture_load_direct pipelines. Without one, its textures are loaded through
+-  // a buffer.
+-  if (IsDrawResolutionScaled() && REXCVAR_GET(texture_load_direct)) {
++  // a buffer. At native resolution (texture_load_direct_unscaled) the same
++  // shaders are used, with a resolution scale of 1 and the shared memory as
++  // the source: their addressing is then the unscaled load shaders'.
++  if ((IsDrawResolutionScaled() && REXCVAR_GET(texture_load_direct)) ||
++      IsDirectLoadUnscaledWanted()) {
+     const D3D12_SHADER_BYTECODE load_shader_code_direct[] = {
+         {shaders::texture_load_32bpb_direct_scaled_cs,
+          sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
+@@ -1608,8 +1611,9 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+   desc.SampleDesc.Quality = 0;
+   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+   // Untiling through a buffer instead of using unordered access because copying
+-  // is not done that often, except for resolved data with resolution scaling
+-  // (texture_load_direct), which is often reloaded every frame.
++  // is not done that often, except for resolved data (texture_load_direct, with
++  // resolution scaling, and texture_load_direct_unscaled, without), which is
++  // often reloaded every frame.
+   desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+   DXGI_FORMAT direct_load_uav_format = GetDirectLoadUAVFormat(key, desc.Format);
+   if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN) {
+@@ -1873,9 +1877,15 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   // texture_load_direct: decode straight into the texture through an unsigned
+   // integer UAV, without the buffer and the copy.
+   bool direct_load = false;
++  // Unscaled (texture_load_direct_unscaled): the scaled shaders with a scale of
++  // 1, reading the shared memory; tiled textures only (the scaled shaders
++  // assume tiling), which the key's resolved_unscaled implies.
+   if (d3d12_texture.direct_load_uav_format() != DXGI_FORMAT_UNKNOWN &&
+-      REXCVAR_GET(texture_load_direct) && texture_resolution_scaled && level_first == 0 &&
+-      level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d) {
++      (texture_resolution_scaled
++           ? REXCVAR_GET(texture_load_direct)
++           : (REXCVAR_GET(texture_load_direct_unscaled) && texture_key.resolved_unscaled &&
++              texture_key.tiled)) &&
++      level_first == 0 && level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d) {
+     DirectLoadShader direct_load_shader = GetDirectLoadShader(load_shader);
+     if (direct_load_shader != kDirectLoadShaderUnknown &&
+         load_pipelines_direct_[direct_load_shader]) {
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 793f6cc..efb7ebd 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -131,6 +131,13 @@ REXCVAR_DEFINE_BOOL(texture_load_direct, true, "GPU",
+                     "a buffer and copying that into the texture. Turning it off takes effect at "
+                     "once; turning it on takes effect on restart");
+ 
++REXCVAR_DEFINE_BOOL(texture_load_direct_unscaled, true, "GPU",
++                    "At native resolution, load single-level 2D textures over memory that a "
++                    "resolve has written straight into the host texture in one compute pass, "
++                    "instead of decoding into a buffer and copying that into the texture. "
++                    "Turning it off takes effect at once (for the textures already created); "
++                    "turning it on takes effect on restart");
++
+ namespace rex::graphics {
+ 
+ const TextureCache::LoadShaderInfo TextureCache::load_shader_info_[kLoadShaderCount] = {
+@@ -228,6 +235,10 @@ TextureCache::TextureCache(const RegisterFile& register_file, SharedMemory& shar
+     std::memset(scaled_resolve_pages_l2_, 0, sizeof(scaled_resolve_pages_l2_));
+     scaled_resolve_global_watch_handle_ =
+         shared_memory.RegisterGlobalWatch(ScaledResolveGlobalWatchCallbackThunk, this);
++  } else if (REXCVAR_GET(texture_load_direct_unscaled)) {
++    constexpr uint32_t kResolvedPageDwordCount = SharedMemory::kBufferSize / 4096 / 32;
++    resolved_pages_ = std::unique_ptr<uint32_t[]>(new uint32_t[kResolvedPageDwordCount]);
++    std::memset(resolved_pages_.get(), 0, kResolvedPageDwordCount * sizeof(uint32_t));
+   }
+ }
+ 
+@@ -340,11 +351,26 @@ TextureCache::DirectLoadShader TextureCache::GetDirectLoadShader(LoadShaderIndex
+ }
+ 
+ bool TextureCache::IsDirectLoadPossible(const TextureKey& key) {
++  if (key.mip_max_level || key.dimension == xenos::DataDimension::k3D ||
++      key.GetDepthOrArraySize() != 1) {
++    return false;
++  }
++  if (key.scaled_resolve) {
++    if (!REXCVAR_GET(texture_load_direct)) {
++      return false;
++    }
++  } else if (!key.resolved_unscaled || !key.tiled ||
++             key.dimension != xenos::DataDimension::k2DOrStacked ||
++             !REXCVAR_GET(texture_load_direct_unscaled)) {
++    return false;
++  }
+   // Not if the base is in the packed mip tail (16 texels or less): that's
+   // loaded as the whole tail through the buffer.
+-  return REXCVAR_GET(texture_load_direct) && key.scaled_resolve && !key.mip_max_level &&
+-         key.dimension != xenos::DataDimension::k3D && key.GetDepthOrArraySize() == 1 &&
+-         key.GetGuestLayout().packed_level != 0;
++  return key.GetGuestLayout().packed_level != 0;
++}
++
++bool TextureCache::IsDirectLoadUnscaledWanted() const {
++  return !IsDrawResolutionScaled() && REXCVAR_GET(texture_load_direct_unscaled);
+ }
+ 
+ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
+@@ -371,6 +397,22 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_
+       scaled_resolve_pages_[i] |= add_bits;
+       scaled_resolve_pages_l2_[i >> 6] |= UINT64_C(1) << (i & 63);
+     }
++  } else if (resolved_pages_) {
++    uint32_t page_first = start_unscaled >> 12;
++    uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
++    uint32_t block_first = page_first >> 5;
++    uint32_t block_last = page_last >> 5;
++    auto global_lock = global_critical_region_.Acquire();
++    for (uint32_t i = block_first; i <= block_last; ++i) {
++      uint32_t add_bits = UINT32_MAX;
++      if (i == block_first) {
++        add_bits &= ~((UINT32_C(1) << (page_first & 31)) - 1);
++      }
++      if (i == block_last && (page_last & 31) != 31) {
++        add_bits &= (UINT32_C(1) << ((page_last & 31) + 1)) - 1;
++      }
++      resolved_pages_[i] |= add_bits;
++    }
+   }
+ 
+   // Invalidate textures. Toggling individual textures between scaled and
+@@ -804,6 +846,26 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+     }
+   }
+ 
++  // texture_load_direct_unscaled: a single-level tiled 2D texture of 32 or 64
++  // bits a texel over memory that a resolve has written at native resolution is
++  // created for loading straight into. Whether the host can is up to its texture
++  // cache (the format, and a pipeline for it).
++  if (resolved_pages_ && !key.scaled_resolve && key.tiled &&
++      key.dimension == xenos::DataDimension::k2DOrStacked && !key.mip_max_level &&
++      key.GetDepthOrArraySize() == 1 && REXCVAR_GET(texture_load_direct_unscaled)) {
++    const FormatInfo* direct_format_info = FormatInfo::Get(key.format);
++    uint32_t direct_bytes_per_block = direct_format_info->bytes_per_block();
++    if (direct_format_info->block_width == 1 && direct_format_info->block_height == 1 &&
++        (direct_bytes_per_block == 4 || direct_bytes_per_block == 8)) {
++      texture_util::TextureGuestLayout direct_guest_layout = key.GetGuestLayout();
++      uint32_t direct_base_size = direct_guest_layout.base.level_data_extent_bytes;
++      if (direct_guest_layout.packed_level != 0 && direct_base_size &&
++          IsRangeResolvedUnscaled(key.base_page << 12, direct_base_size)) {
++        key.resolved_unscaled = 1;
++      }
++    }
++  }
++
+   auto get_host_extent = [this, &key](uint32_t& host_width_out, uint32_t& host_height_out,
+                                       uint32_t& host_depth_or_array_size_out) {
+     host_width_out = key.GetWidth();
+@@ -1092,6 +1154,35 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled, uint32_t lengt
+   return false;
+ }
+ 
++bool TextureCache::IsRangeResolvedUnscaled(uint32_t start_unscaled, uint32_t length_unscaled) {
++  if (!resolved_pages_) {
++    return false;
++  }
++  start_unscaled = std::min(start_unscaled, SharedMemory::kBufferSize);
++  length_unscaled = std::min(length_unscaled, SharedMemory::kBufferSize - start_unscaled);
++  if (!length_unscaled) {
++    return false;
++  }
++  uint32_t page_first = start_unscaled >> 12;
++  uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
++  uint32_t block_first = page_first >> 5;
++  uint32_t block_last = page_last >> 5;
++  auto global_lock = global_critical_region_.Acquire();
++  for (uint32_t i = block_first; i <= block_last; ++i) {
++    uint32_t check_bits = UINT32_MAX;
++    if (i == block_first) {
++      check_bits &= ~((UINT32_C(1) << (page_first & 31)) - 1);
++    }
++    if (i == block_last && (page_last & 31) != 31) {
++      check_bits &= (UINT32_C(1) << ((page_last & 31) + 1)) - 1;
++    }
++    if (resolved_pages_[i] & check_bits) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ void TextureCache::ScaledResolveGlobalWatchCallbackThunk(
+     const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
+     uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index e474eb9..1ee9676 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -1313,8 +1313,14 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+                                                   uint32_t view_format_count) {
+   // Only single-level 2D (and stacked and cube) textures: the copy is of one
+   // level, and 3D images would need another shader.
+-  if (storage_copy_pipeline_layout_ == VK_NULL_HANDLE || key.mip_max_level != 0 ||
+-      key.dimension == xenos::DataDimension::k3D) {
++  // texture_load_direct_unscaled: a resolved texture at native resolution is
++  // loaded straight into the image, which needs the storage view, whether or not
++  // the storage copy (vulkan_texture_load_storage_copy) is on.
++  bool direct_load_unscaled = !key.scaled_resolve &&
++                              load_direct_pipeline_layout_ != VK_NULL_HANDLE &&
++                              IsDirectLoadPossible(key);
++  if ((storage_copy_pipeline_layout_ == VK_NULL_HANDLE && !direct_load_unscaled) ||
++      key.mip_max_level != 0 || key.dimension == xenos::DataDimension::k3D) {
+     return VK_FORMAT_UNDEFINED;
+   }
+   // The format the load writes in (as in LoadTextureDataFromResidentMemoryImpl).
+@@ -1374,7 +1380,8 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+   if (key.scaled_resolve) {
+     size_bytes *= uint64_t(draw_resolution_scale_x()) * draw_resolution_scale_y();
+   }
+-  if (size_bytes < uint64_t(REXCVAR_GET(vulkan_texture_load_storage_copy_min_kb)) * 1024) {
++  if (!direct_load_unscaled &&
++      size_bytes < uint64_t(REXCVAR_GET(vulkan_texture_load_storage_copy_min_kb)) * 1024) {
+     return VK_FORMAT_UNDEFINED;
+   }
+   VkFormat storage_copy_format = texel_size == 4   ? VK_FORMAT_R32_UINT
+@@ -1558,7 +1565,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   // copy view, without the scratch buffer and the copy.
+   VkPipeline pipeline_direct = VK_NULL_HANDLE;
+   VkImageView direct_load_view = VK_NULL_HANDLE;
+-  if (REXCVAR_GET(texture_load_direct) && texture_key.scaled_resolve &&
++  // Unscaled (texture_load_direct_unscaled): the scaled shaders with a scale of
++  // 1, reading the shared memory; tiled textures only (the scaled shaders
++  // assume tiling), which the key's resolved_unscaled implies.
++  if ((texture_key.scaled_resolve
++           ? REXCVAR_GET(texture_load_direct)
++           : (REXCVAR_GET(texture_load_direct_unscaled) && texture_key.resolved_unscaled &&
++              texture_key.tiled)) &&
+       vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED && level_first == 0 &&
+       level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d &&
+       pipeline_float_convert == VK_NULL_HANDLE) {
+@@ -3385,55 +3398,59 @@ bool VulkanTextureCache::Initialize() {
+         }
+       }
+     }
++  }
+ 
+-    // texture_load_direct pipelines, for textures with a storage copy view.
+-    // Without one, its textures are loaded through the scratch buffer.
+-    if (storage_copy_pipeline_layout_ != VK_NULL_HANDLE && IsDrawResolutionScaled() &&
+-        REXCVAR_GET(texture_load_direct)) {
+-      VkDescriptorSetLayout load_direct_descriptor_set_layouts[] = {
+-          command_processor_.GetSingleTransientDescriptorLayout(
+-              VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute),
+-          load_descriptor_set_layout_storage_buffer,
++  // texture_load_direct pipelines, for textures with a storage copy view (with
++  // resolution scaling: those of vulkan_texture_load_storage_copy; at native
++  // resolution: those of resolved textures, texture_load_direct_unscaled, which
++  // get the view whatever that setting is, and use the scaled shaders with a
++  // scale of 1). Without one, its textures are loaded through the scratch buffer.
++  if ((storage_copy_pipeline_layout_ != VK_NULL_HANDLE && IsDrawResolutionScaled() &&
++       REXCVAR_GET(texture_load_direct)) ||
++      IsDirectLoadUnscaledWanted()) {
++    VkDescriptorSetLayout load_direct_descriptor_set_layouts[] = {
++        command_processor_.GetSingleTransientDescriptorLayout(
++            VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute),
++        load_descriptor_set_layout_storage_buffer,
++    };
++    VkPushConstantRange load_direct_push_constant_range;
++    load_direct_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
++    load_direct_push_constant_range.offset = 0;
++    load_direct_push_constant_range.size = sizeof(LoadConstants);
++    VkPipelineLayoutCreateInfo load_direct_pipeline_layout_create_info;
++    load_direct_pipeline_layout_create_info.sType =
++        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
++    load_direct_pipeline_layout_create_info.pNext = nullptr;
++    load_direct_pipeline_layout_create_info.flags = 0;
++    load_direct_pipeline_layout_create_info.setLayoutCount =
++        uint32_t(rex::countof(load_direct_descriptor_set_layouts));
++    load_direct_pipeline_layout_create_info.pSetLayouts = load_direct_descriptor_set_layouts;
++    load_direct_pipeline_layout_create_info.pushConstantRangeCount = 1;
++    load_direct_pipeline_layout_create_info.pPushConstantRanges =
++        &load_direct_push_constant_range;
++    if (dfn.vkCreatePipelineLayout(device, &load_direct_pipeline_layout_create_info, nullptr,
++                                   &load_direct_pipeline_layout_) != VK_SUCCESS) {
++      REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline layout");
++      load_direct_pipeline_layout_ = VK_NULL_HANDLE;
++    } else {
++      const std::pair<const uint32_t*, size_t> load_direct_shader_code[] = {
++          {shaders::texture_load_32bpb_direct_scaled_cs,
++           sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
++          {shaders::texture_load_64bpb_direct_scaled_cs,
++           sizeof(shaders::texture_load_64bpb_direct_scaled_cs)},
++          {shaders::texture_load_depth_float_direct_scaled_cs,
++           sizeof(shaders::texture_load_depth_float_direct_scaled_cs)},
++          {shaders::texture_load_depth_unorm_direct_scaled_cs,
++           sizeof(shaders::texture_load_depth_unorm_direct_scaled_cs)},
+       };
+-      VkPushConstantRange load_direct_push_constant_range;
+-      load_direct_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+-      load_direct_push_constant_range.offset = 0;
+-      load_direct_push_constant_range.size = sizeof(LoadConstants);
+-      VkPipelineLayoutCreateInfo load_direct_pipeline_layout_create_info;
+-      load_direct_pipeline_layout_create_info.sType =
+-          VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+-      load_direct_pipeline_layout_create_info.pNext = nullptr;
+-      load_direct_pipeline_layout_create_info.flags = 0;
+-      load_direct_pipeline_layout_create_info.setLayoutCount =
+-          uint32_t(rex::countof(load_direct_descriptor_set_layouts));
+-      load_direct_pipeline_layout_create_info.pSetLayouts = load_direct_descriptor_set_layouts;
+-      load_direct_pipeline_layout_create_info.pushConstantRangeCount = 1;
+-      load_direct_pipeline_layout_create_info.pPushConstantRanges =
+-          &load_direct_push_constant_range;
+-      if (dfn.vkCreatePipelineLayout(device, &load_direct_pipeline_layout_create_info, nullptr,
+-                                     &load_direct_pipeline_layout_) != VK_SUCCESS) {
+-        REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline layout");
+-        load_direct_pipeline_layout_ = VK_NULL_HANDLE;
+-      } else {
+-        const std::pair<const uint32_t*, size_t> load_direct_shader_code[] = {
+-            {shaders::texture_load_32bpb_direct_scaled_cs,
+-             sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
+-            {shaders::texture_load_64bpb_direct_scaled_cs,
+-             sizeof(shaders::texture_load_64bpb_direct_scaled_cs)},
+-            {shaders::texture_load_depth_float_direct_scaled_cs,
+-             sizeof(shaders::texture_load_depth_float_direct_scaled_cs)},
+-            {shaders::texture_load_depth_unorm_direct_scaled_cs,
+-             sizeof(shaders::texture_load_depth_unorm_direct_scaled_cs)},
+-        };
+-        static_assert(rex::countof(load_direct_shader_code) == kDirectLoadShaderCount);
+-        for (uint32_t i = 0; i < kDirectLoadShaderCount; ++i) {
+-          load_direct_pipelines_[i] = ui::vulkan::util::CreateComputePipeline(
+-              vulkan_device, load_direct_pipeline_layout_, load_direct_shader_code[i].first,
+-              load_direct_shader_code[i].second);
+-          if (load_direct_pipelines_[i] == VK_NULL_HANDLE) {
+-            REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline {}",
+-                         i);
+-          }
++      static_assert(rex::countof(load_direct_shader_code) == kDirectLoadShaderCount);
++      for (uint32_t i = 0; i < kDirectLoadShaderCount; ++i) {
++        load_direct_pipelines_[i] = ui::vulkan::util::CreateComputePipeline(
++            vulkan_device, load_direct_pipeline_layout_, load_direct_shader_code[i].first,
++            load_direct_shader_code[i].second);
++        if (load_direct_pipelines_[i] == VK_NULL_HANDLE) {
++          REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline {}",
++                       i);
+         }
+       }
+     }
