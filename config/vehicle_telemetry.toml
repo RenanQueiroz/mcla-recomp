@@ -1,0 +1,11 @@
+# The player car's state for controller feedback. Implemented in
+# src/vehicle_telemetry.cpp.
+
+# 0x822117C0 in sub_822112A8 (the race HUD update), at the start of the block
+# that writes the speedometer (|[[r30+8]+128] velocity|), the tachometer
+# (car+664), a gauge (car+668) and the gear display ([car+16]+60 -> +20).
+# r30 = the player. Runs once per HUD update, so not in menus or pause.
+[[midasm_hook]]
+address = 0x822117C0
+name = "mcla_vehicle_telemetry"
+registers = ["r30"]

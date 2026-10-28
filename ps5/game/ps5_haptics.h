@@ -34,6 +34,7 @@
 #include <rex/cvar.h>
 
 #include "title_log.h"
+#include "vehicle_telemetry.h"
 
 REXCVAR_DEFINE_BOOL(mcla_pad_haptics, false, "MCLA",
                     "DualSense haptics from the game's sound and rumble; off: two-motor rumble");
@@ -48,6 +49,12 @@ REXCVAR_DEFINE_DOUBLE(mcla_haptics_front_mix, 0.3, "MCLA",
                       "Share of the front channels in the sound part").range(0.0, 2.0);
 REXCVAR_DEFINE_DOUBLE(mcla_haptics_cutoff_hz, 140.0, "MCLA",
                       "Low-pass cut-off of the sound part, Hz").range(30.0, 400.0);
+REXCVAR_DEFINE_DOUBLE(mcla_haptics_road, 0.3, "MCLA",
+                      "Road texture that grows with the car's speed").range(0.0, 2.0);
+REXCVAR_DEFINE_DOUBLE(mcla_haptics_shift, 0.5, "MCLA", "Thump on each gear change").range(0.0, 2.0);
+REXCVAR_DEFINE_DOUBLE(mcla_haptics_crash, 0.9, "MCLA",
+                      "Jolt on a crash, by how much speed it takes away").range(0.0, 2.0);
+REXCVAR_DEFINE_DOUBLE(mcla_haptics_nitro, 0.4, "MCLA", "Surge while the nitro burns").range(0.0, 2.0);
 
 extern "C" {
 int sceAudioOutInit(void);
@@ -161,6 +168,12 @@ class Ps5Haptics {
   static constexpr uint32_t kFormatF32Stereo = 4;
   static constexpr int kFailuresToGiveUp = 40;
   static constexpr int kQueue = 4;
+  // About 50 ms of blocks (5.3 ms each) for the crash test, and how many
+  // blocks without a HUD update mean the car is not being driven (~300 ms).
+  static constexpr int kSpeedHistory = 10;
+  static constexpr uint32_t kStaleBlocks = 56;
+  static constexpr float kCrashSpeedDrop = 3.0f;
+  static constexpr int kNitroHoldBlocks = 30;
 
   struct Block {
     float samples[kSamples];
@@ -218,6 +231,19 @@ class Ps5Haptics {
     int failures = 0;
     float peak_in = 0.0f, peak_out = 0.0f;
     uint32_t blocks = 0, starved = 0;
+    // The car's state (src/vehicle_telemetry.h), followed once per block.
+    float road_level = 0.0f, road_hp = 0.0f, road_lp = 0.0f;
+    float shift_env = 0.0f, crash_env = 0.0f, nitro_env = 0.0f, crash_lp = 0.0f;
+    float phase_shift = 0.0f, phase_nitro = 0.0f, phase_crash = 0.0f;
+    float speed_history[kSpeedHistory] = {};
+    int history_pos = 0;
+    int32_t last_gear = 0;
+    float last_nitro_time = 0.0f;
+    int nitro_hold = 0;
+    uint32_t last_hud = 0, stale_blocks = 0;
+    // Per-sample decay of each event, from its time constant in seconds.
+    const float shift_decay = std::exp(-1.0f / (0.035f * kRate));
+    const float crash_decay = std::exp(-1.0f / (0.12f * kRate));
     while (running_) {
       Block block;
       bool have_audio = false;
@@ -238,6 +264,43 @@ class Ps5Haptics {
       const float a = 1.0f - std::exp(-kTwoPi * cutoff / kRate);
       const float target_large = large_.load(std::memory_order_relaxed) / 255.0f;
       const float target_small = small_.load(std::memory_order_relaxed) / 255.0f;
+
+      // Game events. Only while a car is driven: the HUD feeds the telemetry
+      // every frame, and in the pause menu the physics stand still.
+      const uint32_t hud = g_mcla_vehicle.hud_updates.load(std::memory_order_relaxed);
+      stale_blocks = hud != last_hud ? 0 : stale_blocks + 1;
+      last_hud = hud;
+      const bool driving = hud != 0 && stale_blocks < kStaleBlocks && !MclaVehiclePaused();
+      const float speed = g_mcla_vehicle.speed.load(std::memory_order_relaxed);
+      const int32_t gear = g_mcla_vehicle.gear.load(std::memory_order_relaxed);
+      const float nitro_time = g_mcla_vehicle.nitro_time.load(std::memory_order_relaxed);
+      const float road_gain = static_cast<float>(REXCVAR_GET(mcla_haptics_road));
+      const float shift_gain = static_cast<float>(REXCVAR_GET(mcla_haptics_shift));
+      const float crash_gain = static_cast<float>(REXCVAR_GET(mcla_haptics_crash));
+      const float nitro_gain = static_cast<float>(REXCVAR_GET(mcla_haptics_nitro));
+      float road_target = 0.0f;
+      bool nitro_on = false;
+      if (driving) {
+        // Road: grows with speed, full at about 220 km/h.
+        road_target = std::min(1.0f, speed / 60.0f);
+        road_target *= road_target > 0.02f ? 1.0f : 0.0f;
+        // A gear change, up or down (not through neutral at a standstill).
+        if (gear != last_gear && gear != 0 && last_gear != 0) shift_env = 1.0f;
+        // A crash: more speed lost in about 50 ms than braking can take.
+        const float before = speed_history[history_pos];
+        const float lost = before - speed;
+        if (lost > kCrashSpeedDrop) crash_env = std::max(crash_env, std::min(1.0f, lost / 12.0f));
+        // Nitro: its timer moves while it burns (once a frame, so hold it
+        // across the blocks in between).
+        if (nitro_time != last_nitro_time && nitro_time > 0.0f) nitro_hold = kNitroHoldBlocks;
+      }
+      if (!driving) nitro_hold = 0;
+      nitro_on = nitro_hold > 0;
+      if (nitro_hold > 0) --nitro_hold;
+      speed_history[history_pos] = speed;
+      history_pos = (history_pos + 1) % kSpeedHistory;
+      last_gear = gear;
+      last_nitro_time = nitro_time;
       for (uint32_t i = 0; i < kSamples; ++i) {
         // The sound part: two one-pole low-passes, then the DC taken out so
         // the actuators are not pushed to one side.
@@ -264,8 +327,34 @@ class Ps5Haptics {
         const float rumble_l = env_large * (low + 0.5f * noise_l) + 0.5f * env_small * (high + 0.45f * noise_r);
         const float rumble_r = 0.5f * env_large * (low + 0.5f * noise_r) + env_small * (high + 0.45f * noise_l);
 
-        const float left = SoftLimit((sound + rumble_l * rumble_gain) * gain);
-        const float right = SoftLimit((sound + rumble_r * rumble_gain) * gain);
+        // Road texture: noise band-passed to about 25..90 Hz, scaled by speed.
+        road_level += (road_target - road_level) * 0.0005f;
+        const float road_noise = 0.5f * (noise_l + noise_r);
+        road_lp += 0.012f * (road_noise - road_lp);
+        road_hp += 0.003f * (road_lp - road_hp);
+        const float road = (road_lp - road_hp) * 6.0f * road_level * road_gain;
+        // Gear change: a short 40 Hz thump.
+        phase_shift += 40.0f / kRate;
+        if (phase_shift >= 1.0f) phase_shift -= 1.0f;
+        const float shift = std::sin(kTwoPi * phase_shift) * shift_env * shift_gain;
+        shift_env *= shift_decay;
+        // Crash: a hard 30 Hz knock with rough noise on top.
+        phase_crash += 30.0f / kRate;
+        if (phase_crash >= 1.0f) phase_crash -= 1.0f;
+        crash_lp += 0.02f * (noise_l - crash_lp);
+        const float crash =
+            (0.8f * std::sin(kTwoPi * phase_crash) + 1.5f * crash_lp) * crash_env * crash_gain;
+        crash_env *= crash_decay;
+        // Nitro: a steady 65 Hz surge while it burns, eased in and out.
+        nitro_env += ((nitro_on ? 1.0f : 0.0f) - nitro_env) * 0.0003f;
+        phase_nitro += 65.0f / kRate;
+        if (phase_nitro >= 1.0f) phase_nitro -= 1.0f;
+        const float nitro =
+            (0.6f * std::sin(kTwoPi * phase_nitro) + 0.6f * noise_r) * nitro_env * nitro_gain;
+
+        const float events = road + shift + crash + nitro;
+        const float left = SoftLimit((sound + rumble_l * rumble_gain + events) * gain);
+        const float right = SoftLimit((sound + rumble_r * rumble_gain + events) * gain);
         peak_out = std::max(peak_out, std::max(std::fabs(left), std::fabs(right)));
         out_f32[2 * i] = left;
         out_f32[2 * i + 1] = right;

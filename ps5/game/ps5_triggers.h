@@ -27,6 +27,7 @@
 #include <rex/cvar.h>
 
 #include "ps5_haptics.h"
+#include "vehicle_telemetry.h"
 
 REXCVAR_DEFINE_BOOL(mcla_adaptive_triggers, false, "MCLA",
                     "DualSense adaptive triggers: throttle spring on R2, brake resistance on L2");
@@ -38,6 +39,8 @@ REXCVAR_DEFINE_BOOL(mcla_trigger_vibration, true, "MCLA",
                     "Short trigger buzzes on wheelspin, hard braking and hits");
 REXCVAR_DEFINE_INT32(mcla_trigger_vibration_strength, 3, "MCLA",
                      "Strength of those buzzes, 1 to 8").range(1, 8);
+REXCVAR_DEFINE_BOOL(mcla_trigger_rev_limiter, true, "MCLA",
+                    "R2 buzzes near the top of each gear with the throttle floored");
 
 extern "C" {
 int scePadSetTriggerEffect(int handle, const void* param);
@@ -62,6 +65,30 @@ class Ps5Triggers {
     const auto now = std::chrono::steady_clock::now();
     if (now - last_update_ < std::chrono::milliseconds(kMinIntervalMs)) return;
     last_update_ = now;
+
+    // The HUD updates the car's telemetry every frame while a car is driven;
+    // when it stops (menus, pause, cut-scenes) the triggers go slack. Only
+    // once the telemetry has been seen at all, so a game state it does not
+    // cover never loses the triggers.
+    const uint32_t hud = g_mcla_vehicle.hud_updates.load(std::memory_order_relaxed);
+    if (hud != last_hud_) {
+      last_hud_ = hud;
+      last_hud_change_ = now;
+      seen_hud_ = true;
+    }
+    if (seen_hud_ &&
+        (now - last_hud_change_ > std::chrono::milliseconds(kNoHudMs) || MclaVehiclePaused())) {
+      if (!slack_) {
+        Release();
+        slack_ = true;
+        MclaHapticsLog("PS5 triggers: no HUD (menu or pause): triggers slack");
+      }
+      return;
+    }
+    if (slack_) {
+      slack_ = false;
+      MclaHapticsLog("PS5 triggers: HUD back: triggers on");
+    }
 
     const bool buzz = REXCVAR_GET(mcla_trigger_vibration);
     const int strength = REXCVAR_GET(mcla_trigger_vibration_strength);
@@ -99,14 +126,32 @@ class Ps5Triggers {
       return now < until;
     };
 
-    // R2: wheelspin, nitro or a scrape while the throttle is floored.
-    SendOne(1, event(r2 > 200, r2_buzz_until_)
-                   ? Vibration(3, strength, 30)
-                   : Resistance(1, 9, 1, REXCVAR_GET(mcla_trigger_throttle)));
+    // Where in the current gear the car is: MCLA has no rev counter to read,
+    // but it shifts up at the top of each gear, so the speed of each upshift is
+    // learnt and the speed against it stands in for the revs.
+    const float speed = g_mcla_vehicle.speed.load(std::memory_order_relaxed);
+    const int gear = g_mcla_vehicle.gear.load(std::memory_order_relaxed);
+    if (gear == last_gear_ + 1 && last_gear_ >= 1 && last_gear_ < kGears) {
+      float& top = gear_top_[last_gear_];
+      top = top > 0.0f ? top * 0.7f + speed * 0.3f : speed;
+    }
+    last_gear_ = gear;
+    const bool at_limiter = REXCVAR_GET(mcla_trigger_rev_limiter) && gear >= 1 && gear < kGears &&
+                            gear_top_[gear] > 5.0f && speed > gear_top_[gear] * 0.96f && r2 > 220;
+
+    // R2: wheelspin, nitro or a scrape while the throttle is floored; else a
+    // buzz at the top of the gear; else the spring.
+    if (event(r2 > 200, r2_buzz_until_)) {
+      SendOne(1, Vibration(3, strength, 30));
+    } else if (at_limiter) {
+      SendOne(1, Vibration(4, std::max(1, strength - 1), 25));
+    } else {
+      SendOne(1, Resistance(1, 9, 1, REXCVAR_GET(mcla_trigger_throttle), r2));
+    }
     // L2: an ABS-like pulse while braking hard.
     SendOne(0, event(l2 > 150, l2_buzz_until_)
                    ? Vibration(2, strength, 20)
-                   : Resistance(2, 8, 2, REXCVAR_GET(mcla_trigger_brake)));
+                   : Resistance(2, 8, 2, REXCVAR_GET(mcla_trigger_brake), l2));
   }
 
   // Both triggers back to no effect.
@@ -116,6 +161,7 @@ class Ps5Triggers {
     param.trigger_mask = kMaskL2 | kMaskR2;
     scePadSetTriggerEffect(pad_handle_, &param);
     sent_any_ = false;
+    sent_[0] = sent_[1] = false;
   }
 
  private:
@@ -131,6 +177,8 @@ class Ps5Triggers {
   static constexpr float kRiseThreshold = 70.0f;
   static constexpr int kBuzzMs = 400;
   static constexpr int kCooldownMs = 800;
+  static constexpr int kNoHudMs = 300;
+  static constexpr int kGears = 8;
 
   struct Command {
     int32_t mode = 0;
@@ -149,7 +197,10 @@ class Ps5Triggers {
 
   // Resistance rising from start_strength at position start to end_strength at
   // end (positions 0..9, strengths 1..8), in the best mode the console takes.
-  Command Resistance(uint8_t start, uint8_t end, int start_strength, int end_strength) const {
+  // Plain feedback has one strength, so it follows how far the trigger is
+  // pressed (0..255) instead.
+  Command Resistance(uint8_t start, uint8_t end, int start_strength, int end_strength,
+                     uint8_t pressed) const {
     start_strength = std::clamp(start_strength, 1, 8);
     end_strength = std::clamp(end_strength, 1, 8);
     Command command;
@@ -173,7 +224,8 @@ class Ps5Triggers {
       default:
         command.mode = kModeFeedback;
         command.data[0] = start;
-        command.data[1] = static_cast<uint8_t>((start_strength + end_strength) / 2);
+        command.data[1] = static_cast<uint8_t>(
+            start_strength + (end_strength - start_strength) * pressed / 255);
         break;
     }
     return command;
@@ -222,6 +274,12 @@ class Ps5Triggers {
   }
 
   int pad_handle_ = -1;
+  uint32_t last_hud_ = 0;
+  std::chrono::steady_clock::time_point last_hud_change_{};
+  bool seen_hud_ = false;
+  bool slack_ = false;
+  int last_gear_ = 0;
+  float gear_top_[kGears] = {};
   int resistance_mode_ = kModeSlopeFeedback;
   float baseline_ = 0.0f;
   int last_rumble_ = 0;
