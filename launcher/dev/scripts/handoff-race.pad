@@ -7,6 +7,7 @@ include boot-to-race.pad
 follow sunset-and-vine.route
 wait_until f32 0x827D7510 >= 9.3 300s
 mark race
+peeku 0x8288B9EC 3
 wait 4s
 set handoff_trace_label race
 mark w_race

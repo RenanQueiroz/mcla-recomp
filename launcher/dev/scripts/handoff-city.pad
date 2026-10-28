@@ -14,6 +14,9 @@ wait_until roam 180s
 mark free_roam
 wait 8s
 mark roam
+# the render thread's pipeline words (sub_82305D00 / sub_82305E38 read them): 0x8288B9EC the flag byte (top byte of the word),
+# 0x8288B9F4 the mode (<= 0: no render thread, 1: the update thread waits for each frame, >= 2: one frame ahead); logged by the dev pad
+peeku 0x8288B9EC 3
 wait 2s
 set handoff_trace_label roam
 mark w_roam
