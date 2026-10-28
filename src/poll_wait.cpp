@@ -39,6 +39,8 @@
 
 #include "generated/default/mcla_init.h"
 
+#include "handoff_trace.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -135,6 +137,7 @@ Stats g_stats;
 struct Wake {
   std::atomic<bool> pump_waiting{false};  // the pump thread is inside its wait: the main thread may set the event
   std::atomic<bool> off{false};           // the audio watchdog tripped: the game's own Sleep from now on
+  std::atomic<bool> set_recorded{false};  // the hand-off trace has the main thread's first set in this wait
   std::atomic<uint64_t> waits{0}, early{0}, timed_out{0}, signals{0}, other_ring{0}, ring_calls{0};
   std::atomic<int64_t> first_early_ns{0}, last_early_ns{0};
   uint64_t steady_seen = 0;  // the pump thread's alone
@@ -299,6 +302,9 @@ void WakePumpIfWaiting(PPCRegister& r31) {
     return;
   }
   g_wake.signals.fetch_add(1, std::memory_order_relaxed);
+  if (!g_wake.set_recorded.load(std::memory_order_relaxed) && !g_wake.set_recorded.exchange(true, std::memory_order_relaxed)) {
+    MclaHandoffEvent(mcla_handoff::kPumpWakeSet);
+  }
   PumpWakeSet();
 }
 
@@ -358,9 +364,12 @@ bool PumpWait(uint32_t ms) {
     return false;
   }
   PumpWakeReset();  // a set from an earlier wait is not this wait's
+  g_wake.set_recorded.store(false, std::memory_order_relaxed);
+  MclaHandoffEvent(mcla_handoff::kPumpSleepBegin, wait_ms);
   g_wake.pump_waiting.store(true, std::memory_order_seq_cst);
   const bool early = PumpWakeWait(wait_ms);
   g_wake.pump_waiting.store(false, std::memory_order_seq_cst);
+  MclaHandoffEvent(mcla_handoff::kPumpSleepEnd, early ? 1 : 0);
   g_wake.waits.fetch_add(1, std::memory_order_relaxed);
   if (early) {
     g_wake.early.fetch_add(1, std::memory_order_relaxed);

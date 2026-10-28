@@ -1,0 +1,823 @@
+diff --git a/include/rex/handoff_trace.h b/include/rex/handoff_trace.h
+new file mode 100644
+index 0000000..7fcb78b
+--- /dev/null
++++ b/include/rex/handoff_trace.h
+@@ -0,0 +1,84 @@
++#pragma once
++/**
++ * @file        handoff_trace.h
++ * @brief       Development trace of the hand-offs between threads (rexglue-handoff-trace.patch).
++ *
++ * With the cvar handoff_trace on, the runtime puts a time-stamped event into a big buffer at the
++ * points where one thread waits for another or wakes it: the guest's kernel waits and signals
++ * (with the guest call chain of the caller), the command processor's wait for the guest's write
++ * pointer, its execution of the ring, the swaps and the Direct3D 12 submission thread's queue; the
++ * game adds its own (frame start, the render thread's loop...). The buffer is written to a file
++ * (handoff_trace_file) when handoff_trace_dump is set to true or at exit, and a script turns it
++ * into per-frame timelines (launcher/dev/handoff_trace.py of the game's repository).
++ *
++ * With the trace off every call below is one function call and two loads. Recording takes about
++ * 60 ns and no lock.
++ *
++ * The event numbers are part of the file format (version 1): below 100 the SDK's, 100 and up the
++ * game's own.
++ */
++
++#include <cstdint>
++
++namespace rex::handoff {
++
++enum Event : uint16_t {
++  kNone = 0,
++  // a = label number, b = 1 when a window starts (handoff_trace_run set to true) and 0 when it ends
++  kMark = 1,
++  // Guest kernel objects (src/system/xobject.cpp ...). a = the object (ObjectId), c = its
++  // type; the guest call chain is in the event.
++  kWaitBegin = 10,       // b = timeout in ms (0xFFFFFFFF: none)
++  kWaitEnd = 11,         // b = the X_STATUS
++  kWaitPoll = 12,        // a wait with no timeout, answered at once: b = the X_STATUS
++  kWaitMultiBegin = 13,  // a = the first object, b = count | wait type << 16, c = timeout in ms
++  kWaitMultiEnd = 14,    // a = the first object, b = the X_STATUS
++  kSignalAndWait = 15,   // a = the object signalled, b = the object waited for
++  kEventSet = 16,        // XEvent::Set or Pulse: b = 0 for Set, 1 for Pulse
++  kSemRelease = 17,      // b = the count released
++  kMutantRelease = 18,
++  kDelayBegin = 19,      // KeDelayExecutionThread / Sleep: a = ms (not for a Sleep(0))
++  kDelayEnd = 20,
++  // The command processor (src/graphics/command_processor.cpp, d3d12/command_processor.cpp)
++  kCpIdleBegin = 40,  // out of commands: a = read index
++  kCpIdleEnd = 41,    // a = turns of the wait loop, b = write index
++  kCpExecBegin = 42,  // a = read index, b = write index
++  kCpExecEnd = 43,    // a = the new read index
++  kCpWritePtr = 44,   // the guest writes CP_RB_WPTR (on the guest's thread): a = value
++  kCpSwapBegin = 45,  // a = front buffer
++  kCpSwapEnd = 46,
++  kD3dFenceBegin = 47,    // waits for the Direct3D 12 queue (the frame in flight limit)
++  kD3dFenceEnd = 48,
++  kSubmitQueue = 49,      // the command processor hands a command list to the submission thread: a = its number
++  kSubmitBegin = 50,      // the submission thread starts on it
++  kSubmitEnd = 51,
++  kSubmitAwaitBegin = 52,  // the command processor waits for the submission thread
++  kSubmitAwaitEnd = 53,
++  kCpWaitRegBegin = 54,   // a WAIT_REG_MEM packet that does not match yet: a = the register or address, b = wait info
++  kCpWaitRegEnd = 55,     // ... and does
++  // The game's own events start at 100 (its src/handoff_trace.h).
++  kUserBase = 100,
++};
++
++// True while events are being recorded. Cheap.
++bool Active();
++
++// Records an event for the calling thread (a, b, c are the event's own).
++void Record(uint16_t event, uint32_t a = 0, uint32_t b = 0, uint32_t c = 0);
++
++// Like Record, with the calling guest thread's call chain: the link register, then the return
++// addresses saved in the next three frames of its PPC stack (zeros for a host thread).
++void RecordGuest(uint16_t event, uint32_t a = 0, uint32_t b = 0, uint32_t c = 0);
++
++// Names the next window (handoff_trace_label does the same from a script).
++void SetLabel(const char* label);
++
++// Writes the buffer to `path`, or to handoff_trace_file when null; recording stops. True on success.
++bool Dump(const char* path = nullptr);
++
++// A number for a host object in the events (a stand-in for its address).
++inline uint32_t ObjectId(const void* object) {
++  return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(object) >> 4);
++}
++
++}  // namespace rex::handoff
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index bd96ce5..72e8e4f 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -32,6 +32,7 @@
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/sampler_info.h>
+ #include <rex/graphics/xenos.h>
++#include <rex/handoff_trace.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+@@ -541,6 +542,7 @@ void CommandProcessor::WorkerThreadMain() {
+       // event is too high.
+       PrepareForWait();
+       uint32_t loop_count = 0;
++      rex::handoff::Record(rex::handoff::kCpIdleBegin, static_cast<uint32_t>(read_ptr_index_));
+       do {
+         // If we spin around too much, revert to a "low-power" state.
+         if (loop_count > 500) {
+@@ -555,6 +557,7 @@ void CommandProcessor::WorkerThreadMain() {
+       } while (worker_running_ && pending_fns_.empty() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+       ReturnFromWait();
++      rex::handoff::Record(rex::handoff::kCpIdleEnd, loop_count, write_ptr_index);
+       if (!worker_running_ || !pending_fns_.empty()) {
+         continue;
+       }
+@@ -562,7 +565,9 @@ void CommandProcessor::WorkerThreadMain() {
+     assert_true(read_ptr_index_ != write_ptr_index);
+ 
+     // Execute. Note that we handle wraparound transparently.
++    rex::handoff::Record(rex::handoff::kCpExecBegin, static_cast<uint32_t>(read_ptr_index_), write_ptr_index);
+     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
++    rex::handoff::Record(rex::handoff::kCpExecEnd, static_cast<uint32_t>(read_ptr_index_));
+ 
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+@@ -651,6 +656,7 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
+ }
+ 
+ void CommandProcessor::UpdateWritePointer(uint32_t value) {
++  rex::handoff::Record(rex::handoff::kCpWritePtr, value);
+   write_ptr_index_ = value;
+   write_ptr_index_event_->Set();
+ }
+@@ -1319,7 +1325,9 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   // Low latency: the frame's render submission ends here, and the paint and present that
+   // IssueSwap makes are the frame's.
+   ui::LowLatency::OnRenderSwap();
++  rex::handoff::Record(rex::handoff::kCpSwapBegin, frontbuffer_ptr);
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
++  rex::handoff::Record(rex::handoff::kCpSwapEnd, frontbuffer_ptr);
+   ui::LowLatency::OnRenderSwapDone();
+   HdrLogSceneCheck();
+   hdr_frame_ = HdrFrame();
+@@ -1988,6 +1996,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+   bool is_memory = (wait_info & 0x10) != 0;
+ 
+   bool matched = false;
++  bool stalled = false;  // rexglue-handoff-trace.patch
+   do {
+     uint32_t value = 0;
+     if (is_memory) {
+@@ -2028,6 +2037,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+         break;
+     }
+     if (!matched) {
++      if (!stalled) {
++        stalled = true;
++        rex::handoff::Record(rex::handoff::kCpWaitRegBegin, poll_reg_addr, wait_info);
++      }
+       // Wait.
+       if (wait >= 0x100) {
+         PrepareForWait();
+@@ -2049,6 +2062,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+       }
+     }
+   } while (!matched);
++  if (stalled) {
++    rex::handoff::Record(rex::handoff::kCpWaitRegEnd, poll_reg_addr);
++  }
+ 
+   return true;
+ }
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index d35c107..86db7c4 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -27,6 +27,7 @@
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/xenos.h>
++#include <rex/handoff_trace.h>
+ #include <rex/kernel/xboxkrnl/video.h>
+ #include <rex/logging.h>
+ #include <rex/memory/utils.h>
+@@ -1850,6 +1851,7 @@ void D3D12CommandProcessor::SubmissionThread() {
+       job = std::move(submission_thread_jobs_.front());
+       submission_thread_jobs_.pop_front();
+     }
++    rex::handoff::Record(rex::handoff::kSubmitBegin, static_cast<uint32_t>(job.submission));
+     // The allocator was reclaimed only after the fence of its previous
+     // submission had been reached.
+     job.command_allocator->Reset();
+@@ -1859,6 +1861,7 @@ void D3D12CommandProcessor::SubmissionThread() {
+     ID3D12CommandList* execute_command_lists[] = {command_list_};
+     direct_queue->ExecuteCommandLists(1, execute_command_lists);
+     direct_queue->Signal(submission_fence_, job.submission);
++    rex::handoff::Record(rex::handoff::kSubmitEnd, static_cast<uint32_t>(job.submission));
+     job.stream.clear();
+     {
+       std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+@@ -1873,11 +1876,13 @@ void D3D12CommandProcessor::AwaitSubmissionThread() {
+   if (submission_thread_submitted_.load(std::memory_order_acquire) >= submission_thread_queued_) {
+     return;
+   }
++  rex::handoff::Record(rex::handoff::kSubmitAwaitBegin, static_cast<uint32_t>(submission_thread_queued_));
+   std::unique_lock<std::mutex> lock(submission_thread_mutex_);
+   submission_thread_done_cond_.wait(lock, [this] {
+     return submission_thread_submitted_.load(std::memory_order_acquire) >=
+            submission_thread_queued_;
+   });
++  rex::handoff::Record(rex::handoff::kSubmitAwaitEnd, static_cast<uint32_t>(submission_thread_queued_));
+ }
+ 
+ void D3D12CommandProcessor::ShutdownSubmissionThread() {
+@@ -4161,8 +4166,14 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+   // Check the fence - needed for all kinds of submissions (to reclaim transient
+   // resources early) and specifically for frames (not to queue too many), and
+   // await the availability of the current frame.
++  if (is_opening_frame) {
++    rex::handoff::Record(rex::handoff::kD3dFenceBegin, static_cast<uint32_t>(frame_current_));
++  }
+   CheckSubmissionFence(is_opening_frame ? closed_frame_submissions_[frame_current_ % kQueueFrames]
+                                         : 0);
++  if (is_opening_frame) {
++    rex::handoff::Record(rex::handoff::kD3dFenceEnd, static_cast<uint32_t>(frame_current_));
++  }
+   // TODO(Triang3l): If failed to await (completed submission < awaited frame
+   // submission), do something like dropping the draw command that wanted to
+   // open the frame.
+@@ -4327,6 +4338,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+       }
+       submission_thread_request_cond_.notify_one();
+       submission_thread_queued_ = submission_current_;
++      rex::handoff::Record(rex::handoff::kSubmitQueue, static_cast<uint32_t>(submission_current_));
+     } else {
+       // Submissions still with the thread (if it was just turned off) go first.
+       AwaitSubmissionThread();
+diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
+index 6231b65..46b3216 100644
+--- a/src/system/CMakeLists.txt
++++ b/src/system/CMakeLists.txt
+@@ -45,6 +45,7 @@ set(REXSYSTEM_SOURCES
+     gpu_plugin_loader.cpp
+     thread.cpp
+     thread_state.cpp
++    handoff_trace.cpp
+     xex_module.cpp
+ )
+ 
+diff --git a/src/system/handoff_trace.cpp b/src/system/handoff_trace.cpp
+new file mode 100644
+index 0000000..d342a6d
+--- /dev/null
++++ b/src/system/handoff_trace.cpp
+@@ -0,0 +1,389 @@
++/**
++ * @file        handoff_trace.cpp
++ * @brief       Development trace of the hand-offs between threads (rexglue-handoff-trace.patch).
++ *
++ * See include/rex/handoff_trace.h. The buffer is one array of 40-byte slots, filled in the order
++ * the threads take an index from one atomic counter; nothing is ever overwritten, and when it is
++ * full recording stops and the rest is counted as dropped. A slot whose event number is still 0
++ * was being written when the buffer was dumped and is skipped by the reader.
++ */
++
++#include <rex/handoff_trace.h>
++
++#include <algorithm>
++#include <atomic>
++#include <cctype>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <thread>
++
++#include <rex/cvar.h>
++#include <rex/logging.h>
++#include <rex/ppc/context.h>
++#include <rex/system/thread_state.h>
++#include <rex/system/xmemory.h>
++#include <rex/system/xthread.h>
++#include <rex/thread.h>
++
++REXCVAR_DEFINE_BOOL(handoff_trace, false, "Development",
++                    "Development: record time-stamped events at the points where threads wait for each "
++                    "other (guest kernel waits and signals with the guest call chain, the command "
++                    "processor's wait for work, swaps, the Direct3D 12 submission thread, the game's own) "
++                    "into a buffer that is written to handoff_trace_file. Costs about 60 ns an event")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(handoff_trace_events, 6, "Development",
++                     "Development: with handoff_trace, the size of the buffer in millions of events "
++                     "(40 bytes each); recording stops when it is full")
++    .range(1, 64)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_STRING(handoff_trace_file, "handoff-trace.hotrace", "Development",
++                      "Development: with handoff_trace, where the buffer is written (at exit, or when "
++                      "handoff_trace_dump is set)");
++REXCVAR_DEFINE_BOOL(handoff_trace_run, true, "Development",
++                    "Development: with handoff_trace, whether events are recorded now. Setting it to true "
++                    "starts a window (a mark with the number of handoff_trace_label is recorded) and to "
++                    "false ends it; start the game with it false to record only the windows a script opens")
++    .transient();
++REXCVAR_DEFINE_STRING(handoff_trace_label, "", "Development",
++                      "Development: with handoff_trace, the name of the next window; its number is in the "
++                      "window's marks and the names are in the file")
++    .transient();
++REXCVAR_DEFINE_BOOL(handoff_trace_dump, false, "Development",
++                    "Development: setting this to true writes the trace to handoff_trace_file and stops "
++                    "recording")
++    .transient();
++
++namespace rex::handoff {
++namespace {
++
++struct Slot {  // 40 bytes
++  uint64_t t;  // steady_clock, ns
++  uint16_t ev;
++  uint16_t thread;
++  uint32_t a, b, c;
++  uint32_t ra[4];
++};
++static_assert(sizeof(Slot) == 40, "the file format's slot");
++
++struct ThreadInfo {  // 56 bytes in the file
++  uint32_t tid;
++  uint32_t guest_handle;
++  int64_t first_ns;
++  char name[40];
++};
++static_assert(sizeof(ThreadInfo) == 56, "the file format's thread entry");
++
++constexpr uint32_t kMaxThreads = 192;
++constexpr uint32_t kMaxLabels = 64;
++constexpr uint32_t kLabelLen = 48;
++
++std::mutex& Mutex() {
++  static std::mutex m;
++  return m;
++}
++
++std::atomic<bool> g_decided{false};
++std::atomic<bool> g_recording{false};
++std::atomic<bool> g_dumped{false};
++Slot* g_slots = nullptr;
++uint64_t g_capacity = 0;
++std::atomic<uint64_t> g_next{0};
++std::atomic<uint64_t> g_dropped{0};
++std::atomic<uint32_t> g_thread_count{0};
++ThreadInfo g_threads[kMaxThreads];
++char g_labels[kMaxLabels][kLabelLen];
++uint32_t g_label_count = 1;  // 0 is "no label"
++std::atomic<uint32_t> g_label{0};
++int64_t g_start_ns = 0;
++thread_local uint16_t t_thread = 0xFFFF;
++
++int64_t NowNs() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++bool IsTrue(std::string_view v) {
++  std::string s(v);
++  for (char& c : s) {
++    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++  }
++  return s == "1" || s == "true" || s == "on" || s == "yes";
++}
++
++uint16_t ThreadIndex() {
++  if (t_thread != 0xFFFF) {
++    return t_thread;
++  }
++  const uint32_t i = g_thread_count.fetch_add(1, std::memory_order_relaxed);
++  if (i >= kMaxThreads) {
++    t_thread = static_cast<uint16_t>(kMaxThreads - 1);  // the last entry stands for all the rest
++    return t_thread;
++  }
++  ThreadInfo& info = g_threads[i];
++  info.tid = rex::thread::current_thread_system_id();
++  info.first_ns = NowNs();
++  if (rex::system::XThread::IsInThread()) {
++    rex::system::XThread* thread = rex::system::XThread::GetCurrentThread();
++    if (thread) {
++      info.guest_handle = thread->handle();
++      std::snprintf(info.name, sizeof(info.name), "%s", thread->name().c_str());
++    }
++  }
++  t_thread = static_cast<uint16_t>(i);
++  return t_thread;
++}
++
++void Put(uint16_t ev, uint32_t a, uint32_t b, uint32_t c, const uint32_t* ra) {
++  const uint64_t i = g_next.fetch_add(1, std::memory_order_relaxed);
++  if (i >= g_capacity) {
++    if (i == g_capacity) {
++      g_recording.store(false, std::memory_order_relaxed);
++    }
++    g_dropped.fetch_add(1, std::memory_order_relaxed);
++    return;
++  }
++  Slot& s = g_slots[i];
++  s.t = static_cast<uint64_t>(NowNs());
++  s.thread = ThreadIndex();
++  s.a = a;
++  s.b = b;
++  s.c = c;
++  if (ra) {
++    s.ra[0] = ra[0];
++    s.ra[1] = ra[1];
++    s.ra[2] = ra[2];
++    s.ra[3] = ra[3];
++  }
++  __atomic_store_n(&s.ev, ev, __ATOMIC_RELEASE);  // last: the slot is complete
++}
++
++uint32_t Load32(const uint8_t* base, uint32_t address) {
++  uint32_t raw;
++  std::memcpy(&raw, base + address, sizeof(raw));
++  return __builtin_bswap32(raw);
++}
++
++// The calling guest thread's call chain. Everything read is inside the thread's own stack, between
++// the bounds in its PCR (r13 + 0x70 and 0x74); a frame is [r1] = the caller's r1 and, in the
++// caller's frame, at -8 from that, the return address the callee was called with.
++void GuestChain(uint32_t ra[4]) {
++  ra[0] = ra[1] = ra[2] = ra[3] = 0;
++  if (!rex::system::XThread::IsInThread()) {
++    return;
++  }
++  rex::system::XThread* thread = rex::system::XThread::GetCurrentThread();
++  if (!thread || !thread->is_guest_thread()) {
++    return;
++  }
++  rex::runtime::ThreadState* state = rex::runtime::ThreadState::Get();
++  if (!state || !state->memory()) {
++    return;
++  }
++  const PPCContext* ctx = state->context();
++  const uint8_t* base = state->memory()->virtual_membase();
++  if (!ctx || !base) {
++    return;
++  }
++  ra[0] = static_cast<uint32_t>(ctx->lr);
++  const uint32_t pcr = ctx->r13.u32;
++  if (pcr < 0x10000) {
++    return;
++  }
++  const uint32_t w0 = Load32(base, pcr + 0x70);
++  const uint32_t w1 = Load32(base, pcr + 0x74);
++  const uint32_t lo = std::min(w0, w1);
++  const uint32_t hi = std::max(w0, w1);
++  uint32_t sp = ctx->r1.u32;
++  if (lo < 0x10000 || hi - lo > (64u << 20) || sp < lo || sp >= hi || (sp & 15) != 0) {
++    return;
++  }
++  for (int i = 1; i < 4; ++i) {
++    const uint32_t prev = Load32(base, sp);  // the caller's frame
++    if (prev <= sp || prev >= hi || (prev & 15) != 0 || prev - 8 < lo) {
++      break;
++    }
++    ra[i] = Load32(base, prev - 8);
++    sp = prev;
++  }
++}
++
++uint32_t LabelNumber(std::string_view name) {
++  std::lock_guard<std::mutex> lock(Mutex());
++  for (uint32_t i = 1; i < g_label_count; ++i) {
++    if (name == g_labels[i]) {
++      return i;
++    }
++  }
++  if (g_label_count >= kMaxLabels) {
++    return kMaxLabels - 1;
++  }
++  const uint32_t i = g_label_count++;
++  std::snprintf(g_labels[i], kLabelLen, "%.*s", static_cast<int>(name.size()), name.data());
++  return i;
++}
++
++void OnRun(std::string_view, std::string_view value) {
++  if (!g_slots || g_dumped.load()) {
++    return;
++  }
++  if (IsTrue(value)) {
++    if (!g_recording.load(std::memory_order_relaxed)) {
++      Put(kMark, g_label.load(), 1, 0, nullptr);
++      g_recording.store(true, std::memory_order_release);
++    }
++  } else if (g_recording.load(std::memory_order_relaxed)) {
++    Put(kMark, g_label.load(), 0, 0, nullptr);
++    g_recording.store(false, std::memory_order_release);
++  }
++}
++
++void OnLabel(std::string_view, std::string_view value) {
++  g_label.store(LabelNumber(value));
++}
++
++void OnDump(std::string_view, std::string_view value) {
++  if (IsTrue(value)) {
++    Dump(nullptr);
++  }
++}
++
++void Init() {
++  bool on;
++  {
++    std::lock_guard<std::mutex> lock(Mutex());
++    if (g_decided.load(std::memory_order_acquire)) {
++      return;
++    }
++    on = REXCVAR_GET(handoff_trace);
++    if (on) {
++      const uint64_t capacity =
++          static_cast<uint64_t>(std::clamp(REXCVAR_GET(handoff_trace_events), 1, 64)) * 1000000ull;
++      g_slots = static_cast<Slot*>(std::calloc(capacity, sizeof(Slot)));
++      if (g_slots) {
++        g_capacity = capacity;
++        g_start_ns = NowNs();
++        g_labels[0][0] = 0;
++      } else {
++        REXLOG_ERROR("handoff trace: cannot allocate {} MB; the trace is off",
++                     capacity * sizeof(Slot) / (1024 * 1024));
++        on = false;
++      }
++    }
++    if (on) {
++      g_recording.store(REXCVAR_GET(handoff_trace_run), std::memory_order_release);
++    }
++    g_decided.store(true, std::memory_order_release);
++  }
++  if (on) {
++    // After the lock: the change callbacks run under the cvar registry's lock, and one of them dumps.
++    rex::cvar::RegisterChangeCallback("handoff_trace_run", OnRun);
++    rex::cvar::RegisterChangeCallback("handoff_trace_label", OnLabel);
++    rex::cvar::RegisterChangeCallback("handoff_trace_dump", OnDump);
++    std::atexit([] {
++      if (!g_dumped.load()) {
++        Dump(nullptr);
++      }
++    });
++    REXLOG_INFO("handoff trace: on, {} million events, to {}{}", g_capacity / 1000000,
++                REXCVAR_GET(handoff_trace_file),
++                g_recording.load() ? "" : " (recording starts with handoff_trace_run)");
++  }
++}
++
++}  // namespace
++
++bool Active() {
++  if (g_recording.load(std::memory_order_relaxed)) {
++    return true;
++  }
++  if (g_decided.load(std::memory_order_acquire)) {
++    return false;
++  }
++  Init();
++  return g_recording.load(std::memory_order_relaxed);
++}
++
++void Record(uint16_t event, uint32_t a, uint32_t b, uint32_t c) {
++  if (!Active()) {
++    return;
++  }
++  Put(event, a, b, c, nullptr);
++}
++
++void RecordGuest(uint16_t event, uint32_t a, uint32_t b, uint32_t c) {
++  if (!Active()) {
++    return;
++  }
++  uint32_t ra[4];
++  GuestChain(ra);
++  Put(event, a, b, c, ra);
++}
++
++void SetLabel(const char* label) {
++  if (label) {
++    g_label.store(LabelNumber(label));
++  }
++}
++
++bool Dump(const char* path_arg) {
++  std::lock_guard<std::mutex> lock(Mutex());
++  if (!g_slots) {
++    return false;
++  }
++  g_recording.store(false, std::memory_order_release);
++  g_dumped.store(true);
++  // A thread that took an index just before the stop may still be filling its slot.
++  std::this_thread::sleep_for(std::chrono::milliseconds(30));
++  const std::string path = (path_arg && *path_arg) ? std::string(path_arg) : REXCVAR_GET(handoff_trace_file);
++  std::FILE* f = std::fopen(path.c_str(), "wb");
++  if (!f) {
++    REXLOG_ERROR("handoff trace: cannot write {}", path);
++    return false;
++  }
++  const uint64_t count = std::min<uint64_t>(g_next.load(), g_capacity);
++  const uint32_t threads = std::min<uint32_t>(g_thread_count.load(), kMaxThreads);
++#pragma pack(push, 1)
++  struct Header {
++    char magic[8];
++    uint32_t version;
++    uint32_t slot_size;
++    uint64_t count;
++    uint32_t thread_count;
++    uint32_t label_count;
++    int64_t start_ns;
++    int64_t dump_ns;
++    uint64_t dropped;
++    uint64_t reserved;
++  } header{};
++#pragma pack(pop)
++  static_assert(sizeof(Header) == 64, "the file format's header");
++  std::memcpy(header.magic, "HOTRACE1", 8);
++  header.version = 1;
++  header.slot_size = sizeof(Slot);
++  header.count = count;
++  header.thread_count = threads;
++  header.label_count = g_label_count;
++  header.start_ns = g_start_ns;
++  header.dump_ns = NowNs();
++  header.dropped = g_dropped.load();
++  bool ok = std::fwrite(&header, sizeof(header), 1, f) == 1;
++  ok = ok && (threads == 0 || std::fwrite(g_threads, sizeof(ThreadInfo), threads, f) == threads);
++  ok = ok && std::fwrite(g_labels, kLabelLen, g_label_count, f) == g_label_count;
++  ok = ok && (count == 0 || std::fwrite(g_slots, sizeof(Slot), static_cast<size_t>(count), f) == count);
++  ok = (std::fclose(f) == 0) && ok;
++  if (ok) {
++    REXLOG_INFO("handoff trace: wrote {} events ({} dropped, {} threads) to {}", count, header.dropped, threads,
++                path);
++  } else {
++    REXLOG_ERROR("handoff trace: writing {} failed", path);
++  }
++  return ok;
++}
++
++}  // namespace rex::handoff
+diff --git a/src/system/xevent.cpp b/src/system/xevent.cpp
+index c24fbd1..69e365e 100644
+--- a/src/system/xevent.cpp
++++ b/src/system/xevent.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/handoff_trace.h>
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/xevent.h>
+@@ -74,11 +75,13 @@ void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
+ }
+ 
+ int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
++  rex::handoff::RecordGuest(rex::handoff::kEventSet, handle(), 0, static_cast<uint32_t>(type()));
+   event_->Set();
+   return 1;
+ }
+ 
+ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
++  rex::handoff::RecordGuest(rex::handoff::kEventSet, handle(), 1, static_cast<uint32_t>(type()));
+   event_->Pulse();
+   return 1;
+ }
+diff --git a/src/system/xmutant.cpp b/src/system/xmutant.cpp
+index 9303962..93143b5 100644
+--- a/src/system/xmutant.cpp
++++ b/src/system/xmutant.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/handoff_trace.h>
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+@@ -38,6 +39,7 @@ void XMutant::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
+ }
+ 
+ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon, bool wait) {
++  rex::handoff::RecordGuest(rex::handoff::kMutantRelease, handle(), 0, static_cast<uint32_t>(type()));
+   // Call should succeed if we own the mutant, so go ahead and do this.
+   if (owning_thread_ == XThread::GetCurrentThread()) {
+     owning_thread_ = nullptr;
+diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
+index d358f39..4e53482 100644
+--- a/src/system/xobject.cpp
++++ b/src/system/xobject.cpp
+@@ -12,6 +12,7 @@
+ #include <vector>
+ 
+ #include <rex/chrono/clock.h>
++#include <rex/handoff_trace.h>
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
+@@ -213,7 +214,23 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
+                                 : std::chrono::milliseconds::max();
+ 
+   XThread::CheckTitleTermination();
++  // rexglue-handoff-trace.patch: a wait with a timeout of 0 is one event after it, any other two.
++  const bool traced = rex::handoff::Active();
++  const uint32_t trace_ms = opt_timeout ? static_cast<uint32_t>(timeout_ms.count()) : 0xFFFFFFFFu;
++  if (traced && trace_ms != 0) {
++    rex::handoff::RecordGuest(rex::handoff::kWaitBegin, handle(), trace_ms,
++                              static_cast<uint32_t>(type()));
++  }
+   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
++  if (traced) {
++    if (trace_ms != 0) {
++      rex::handoff::Record(rex::handoff::kWaitEnd, handle(), static_cast<uint32_t>(result),
++                           static_cast<uint32_t>(type()));
++    } else {
++      rex::handoff::RecordGuest(rex::handoff::kWaitPoll, handle(), static_cast<uint32_t>(result),
++                                static_cast<uint32_t>(type()));
++    }
++  }
+   XThread::CheckTitleTermination();
+   switch (result) {
+     case rex::thread::WaitResult::kSuccess:
+@@ -239,9 +256,18 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
+                                       TimeoutTicksToMs(*opt_timeout)))
+                                 : std::chrono::milliseconds::max();
+ 
++  const bool traced = rex::handoff::Active();
++  if (traced) {
++    rex::handoff::RecordGuest(rex::handoff::kSignalAndWait, signal_object->handle(),
++                              wait_object->handle(), static_cast<uint32_t>(wait_object->type()));
++  }
+   auto result =
+       rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
+                                  alertable ? true : false, timeout_ms);
++  if (traced) {
++    rex::handoff::Record(rex::handoff::kWaitEnd, wait_object->handle(), static_cast<uint32_t>(result),
++                         static_cast<uint32_t>(wait_object->type()));
++  }
+   switch (result) {
+     case rex::thread::WaitResult::kSuccess:
+       wait_object->WaitCallback();
+@@ -272,6 +298,21 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+                                       TimeoutTicksToMs(*opt_timeout)))
+                                 : std::chrono::milliseconds::max();
+ 
++  // rexglue-handoff-trace.patch: the end is recorded on every way out.
++  struct MultiTrace {
++    uint32_t first;
++    bool on;
++    ~MultiTrace() {
++      if (on) {
++        rex::handoff::Record(rex::handoff::kWaitMultiEnd, first);
++      }
++    }
++  } multi_trace{count ? objects[0]->handle() : 0, rex::handoff::Active()};
++  if (multi_trace.on) {
++    rex::handoff::RecordGuest(rex::handoff::kWaitMultiBegin, multi_trace.first,
++                              count | (wait_type << 16),
++                              opt_timeout ? static_cast<uint32_t>(timeout_ms.count()) : 0xFFFFFFFFu);
++  }
+   XThread::CheckTitleTermination();
+   if (wait_type) {
+     auto result =
+diff --git a/src/system/xsemaphore.cpp b/src/system/xsemaphore.cpp
+index db830e4..572a723 100644
+--- a/src/system/xsemaphore.cpp
++++ b/src/system/xsemaphore.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/handoff_trace.h>
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/xsemaphore.h>
+@@ -40,6 +41,8 @@ bool XSemaphore::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
+ 
+ bool XSemaphore::ReleaseSemaphore(int32_t release_count, int32_t* out_previous_count) {
+   int32_t previous_count = 0;
++  rex::handoff::RecordGuest(rex::handoff::kSemRelease, handle(), static_cast<uint32_t>(release_count),
++                            static_cast<uint32_t>(type()));
+   bool success = semaphore_->Release(release_count, &previous_count);
+   if (out_previous_count) {
+     *out_previous_count = previous_count;
+diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
+index 2630b80..3dc7878 100644
+--- a/src/system/xthread.cpp
++++ b/src/system/xthread.cpp
+@@ -18,6 +18,7 @@
+ #include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
++#include <rex/handoff_trace.h>
+ #include <rex/perf/counter.h>
+ #include <rex/literals.h>
+ #include <rex/logging.h>
+@@ -1013,6 +1014,19 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
+   }
+   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
+   CheckTitleTermination();
++  // rexglue-handoff-trace.patch: not for a Sleep(0), which the game's polling loops call thousands of
++  // times a frame; the end is recorded on every way out.
++  struct DelayTrace {
++    bool on;
++    ~DelayTrace() {
++      if (on) {
++        rex::handoff::Record(rex::handoff::kDelayEnd);
++      }
++    }
++  } delay_trace{timeout_ms != 0 && rex::handoff::Active()};
++  if (delay_trace.on) {
++    rex::handoff::RecordGuest(rex::handoff::kDelayBegin, timeout_ms, alertable);
++  }
+   if (alertable) {
+     auto result = rex::thread::AlertableSleep(std::chrono::milliseconds(timeout_ms));
+     CheckTitleTermination();

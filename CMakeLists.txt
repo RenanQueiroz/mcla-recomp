@@ -43,6 +43,7 @@ set(MCLA_SOURCES
     src/render_perf.cpp
     src/perf_options.cpp
     src/poll_wait.cpp
+    src/handoff_trace.cpp
     src/warp_fix.cpp
     src/button_prompts.cpp
     src/settings_menu.cpp

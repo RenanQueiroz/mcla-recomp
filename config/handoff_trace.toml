@@ -1,0 +1,76 @@
+# Hooks for the hand-off trace (src/handoff_trace.cpp; the SDK's rex::handoff, patches/README.md,
+# rexglue-handoff-trace.patch). Each records a time-stamped event where the game's threads meet, and does
+# nothing else; with --handoff_trace off (the default) each is a thread-local access and a call that
+# returns at once. They do not change a register or a jump.
+
+# sub_82148A10(object r3, time r4): the update thread's wait for a free slot of the command ring.
+# The first instruction.
+[[midasm_hook]]
+name = "mcla_ho_ring_begin"
+address = 0x82148A10
+registers = ["r3"]
+
+# The head of its polling loop (`cmplw cr6,r3,r26`), reached once per Sleep(0).
+[[midasm_hook]]
+name = "mcla_ho_ring_turn"
+address = 0x82148AA8
+registers = ["r3"]
+
+# Where every way through the wait arrives: no wait needed, a slot freed, the 1,000 microseconds up
+# (`rlwinm r11,r28,5,0,26`).
+[[midasm_hook]]
+name = "mcla_ho_ring_end"
+address = 0x82148AE8
+registers = ["r3"]
+
+# The last statement of sub_82161210, `stwx r8,r10,r9`: the head word of the ring (r10 = ring * 8) is
+# now r8: the update thread has published a slot. Hooked after the store.
+[[midasm_hook]]
+name = "mcla_ho_ring_advance"
+address = 0x82161880
+after_instruction = true
+registers = ["r10", "r8"]
+
+# sub_82144888: one round of the thread that frees the slots. The first instruction.
+[[midasm_hook]]
+name = "mcla_ho_pump_round"
+address = 0x82144888
+registers = ["r3"]
+
+# sub_82160088, the instruction after `stw r11,4(r6)` (0x82160140, which config/poll_wait.toml hooks
+# after): the word at +4 of the ring, r11, has just been set.
+[[midasm_hook]]
+name = "mcla_ho_pump_free"
+address = 0x82160144
+registers = ["r11"]
+
+# sub_82305E38, the render thread's loop: where it comes back to before its wait for work
+# (`lbz r11,-17940(r30)`).
+[[midasm_hook]]
+name = "mcla_ho_render_loop"
+address = 0x82305E90
+registers = ["r31"]
+
+# sub_822C0980, the frame function: the first instruction.
+[[midasm_hook]]
+name = "mcla_ho_render_frame"
+address = 0x822C0980
+registers = ["r3"]
+
+# sub_82305D00: the update thread starts the render thread's frame. The first instruction.
+[[midasm_hook]]
+name = "mcla_ho_kick"
+address = 0x82305D00
+registers = ["r3"]
+
+# sub_823057E8: the update thread's check for the render thread's previous frame. The first instruction.
+[[midasm_hook]]
+name = "mcla_ho_wait_frame_done"
+address = 0x823057E8
+registers = ["r3"]
+
+# sub_82131008, which calls the frame function. The first instruction.
+[[midasm_hook]]
+name = "mcla_ho_game_loop"
+address = 0x82131008
+registers = ["r3"]

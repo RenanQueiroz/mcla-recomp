@@ -12,6 +12,7 @@
 
 #include "generated/default/mcla_init.h"
 
+#include "handoff_trace.h"
 #include "mcla_app.h"
 
 #include <algorithm>
@@ -207,6 +208,8 @@ void WaitForFrameDeadline() {
     return;
   }
   if (now < next_us) {
+    MclaHandoffEvent(mcla_handoff::kLimiterBegin, kSite == kPaceAtSwap ? 1 : 0,
+                     static_cast<uint32_t>(next_us - now));
     // Sleep most of the way, then spin the last stretch: sleeps overshoot by
     // up to a millisecond or two, which is a large share of an 8.3 ms frame.
     constexpr uint64_t kSpinMicros = 1500;
@@ -220,6 +223,7 @@ void WaitForFrameDeadline() {
       std::this_thread::yield();
 #endif
     }
+    MclaHandoffEvent(mcla_handoff::kLimiterEnd, kSite == kPaceAtSwap ? 1 : 0);
   }
   now = NowMicros();
   next_us += period_us;
@@ -280,6 +284,10 @@ void mcla_frame_start(PPCRegister& r3) {
 
 void mcla_frame_delta(PPCRegister& r8) {
   MclaProfileCountUpdate();
+  {
+    static thread_local uint32_t timer_passes = 0;  // the hand-off trace's frame number on each thread
+    MclaHandoffEvent(mcla_handoff::kFrameStart, ++timer_passes);
+  }
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
   MclaTickSettingsMenu();
@@ -350,6 +358,10 @@ static void PaceUnlimitedSwap(bool timed) {
 
 bool mcla_present_interval(PPCRegister& r11) {
   MclaProfileCountSwap();
+  {
+    static std::atomic<uint32_t> swaps{0};
+    MclaHandoffEvent(mcla_handoff::kSwap, swaps.fetch_add(1, std::memory_order_relaxed) + 1);
+  }
   MclaDevPadSwap();
   MclaApplyMsaaAtSwap();
   if (OriginalTiming()) {

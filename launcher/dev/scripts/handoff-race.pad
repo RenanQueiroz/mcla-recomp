@@ -1,0 +1,33 @@
+# The race route of the hand-off trace (cpu/handoff-trace work): the race of race.pad (boot-to-race.pad, the car follows the leading
+# opponent's route), in real-time steps, a window of 6 s uncapped, then a 60 FPS cap and another window. For the trace, run it with
+# --handoff_trace=true --handoff_trace_run=false --handoff_trace_file=<run folder>\handoff.hotrace (see handoff-city.pad); without
+# --handoff_trace it runs with nothing recorded, and the marks w_* ... w_*_end bracket each window in frames.csv.
+# Marks: title, map_zoom, menu, race_intro, race, w_race, w_race_end, settle, race60, w_race60, w_race60_end, end.
+include boot-to-race.pad
+follow sunset-and-vine.route
+wait_until f32 0x827D7510 >= 9.3 300s
+mark race
+wait 4s
+set handoff_trace_label race
+mark w_race
+set handoff_trace_run true
+wait 6s
+set handoff_trace_run false
+mark w_race_end
+wait 1s
+set mcla_fps 60
+mark settle
+wait 4s
+mark race60
+set handoff_trace_label race60
+mark w_race60
+set handoff_trace_run true
+wait 6s
+set handoff_trace_run false
+mark w_race60_end
+wait 1s
+follow stop
+set mcla_fps 0
+mark end
+set handoff_trace_dump true
+wait 4s

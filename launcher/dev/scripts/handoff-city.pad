@@ -1,0 +1,53 @@
+# The city route of the hand-off trace (cpu/handoff-trace work): boot -> title -> city, a standing segment (roam) and a
+# wall-time drive (drive), both uncapped, then a 60 FPS cap. Run it with real-time steps (no --mcla_fixed_dt) and --mcla_fps=0
+# (uncapped) and, for the trace, --handoff_trace=true --handoff_trace_run=false --handoff_trace_file=<run folder>\handoff.hotrace:
+# the trace then records only the windows below (`set handoff_trace_run true` ... `false`, 6 s each), and the file is written at
+# the end (`set handoff_trace_dump true`). Without --handoff_trace the same script runs with nothing recorded (every `set` of
+# the handoff_trace_* options is then ignored), so that the frame times of the windows can be compared with and without the
+# trace: the `mark`s w_* ... w_*_end bracket each window in frames.csv.
+# Marks: title, map_zoom, free_roam, roam, w_roam, w_roam_end, drive, w_drive, w_drive_end, settle, cap60, w_cap60, w_cap60_end, end.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 8s
+mark roam
+wait 2s
+set handoff_trace_label roam
+mark w_roam
+set handoff_trace_run true
+wait 6s
+set handoff_trace_run false
+mark w_roam_end
+wait 2s
+trigger rt 1 0.35s
+trigger rt 0.6
+stick lx 1 0.28s
+trigger rt 1
+mark drive
+wait 3s
+set handoff_trace_label drive
+mark w_drive
+set handoff_trace_run true
+wait 6s
+set handoff_trace_run false
+mark w_drive_end
+wait 3s
+release all
+set mcla_fps 60
+mark settle
+wait 4s
+mark cap60
+set handoff_trace_label cap60
+mark w_cap60
+set handoff_trace_run true
+wait 6s
+set handoff_trace_run false
+mark w_cap60_end
+wait 1s
+set mcla_fps 0
+mark end
+set handoff_trace_dump true
+wait 4s

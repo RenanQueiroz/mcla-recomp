@@ -224,6 +224,7 @@ rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp wait
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW
 rexglue-upstream-small-fixes.patch include/rex/system/xam/user_profile.h Settings are owned, and replaced, through
+rexglue-handoff-trace.patch src/system/handoff_trace.cpp HOTRACE1
 LATER
 
 # ---------------------------------------------------------------------------
