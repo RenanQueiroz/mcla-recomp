@@ -155,7 +155,7 @@ index 85e9963..3287021 100644
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index bd96ce5..6f81406 100644
+index bd96ce5..5ca99fd 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -107,6 +107,31 @@ REXCVAR_DEFINE_STRING(readback_resolve_rules, "", "GPU",
@@ -174,8 +174,8 @@ index bd96ce5..6f81406 100644
 +                      "and written to the destination range; texture fetches are still served "
 +                      "from the scaled buffer. Rules are those of readback_resolve_rules "
 +                      "(addr, len, pitch, height, fmt, src, phase; mode is not used). "
-+                      "Nothing happens without draw resolution scaling. Empty: no rules (the "
-+                      "default).")
++                      "Nothing happens without draw resolution scaling. Empty, or \"off\": no "
++                      "rules (the default).")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +REXCVAR_DEFINE_BOOL(resolve_unscaled_copy_batch, true, "GPU",
@@ -269,18 +269,20 @@ index bd96ce5..6f81406 100644
    if (matched >= 0) {
      mode = readback_rules_[size_t(matched)].mode;
    }
-@@ -504,6 +536,60 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
+@@ -504,6 +536,62 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
    return mode;
  }
  
 +bool CommandProcessor::IsUnscaledResolveCopyEnabled() {
-+  return !REXCVAR_GET(resolve_unscaled_copy_rules).empty();
++  // "off" is the same as empty (a script that sets options with the dev pad cannot set an empty value).
++  const std::string& rules_text = REXCVAR_GET(resolve_unscaled_copy_rules);
++  return !rules_text.empty() && rules_text != "off";
 +}
 +
 +int CommandProcessor::MatchUnscaledResolveCopyRule(uint32_t written_address,
 +                                                   uint32_t written_length) {
 +  const std::string& rules_text = REXCVAR_GET(resolve_unscaled_copy_rules);
-+  if (rules_text.empty()) {
++  if (rules_text.empty() || rules_text == "off") {
 +    return -1;
 +  }
 +  if (rules_text != unscaled_copy_rules_text_) {
