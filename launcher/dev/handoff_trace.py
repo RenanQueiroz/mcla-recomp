@@ -1,7 +1,7 @@
 r"""Reads a hand-off trace (a .hotrace file written by the game with --handoff_trace) and says where the threads wait for each other.
 
   python -I handoff_trace.py <trace.hotrace> [--gen <generated\default folder>] [--threads <threads.csv>] [--window LABEL]
-                             [--frames N] [--json out.json] [--timeline N] [--min-wait-us 10]
+                             [--json out.json] [--frames-csv frames.csv] [--frame N] [--timeline 0|1] [--min-wait-us 10]
 
 The trace is the SDK's rex::handoff buffer (patches\rexglue-handoff-trace.patch: guest kernel waits and signals with the
 guest call chain of the caller, the command processor's waits, the Direct3D 12 submission thread) plus the game's own
@@ -304,6 +304,8 @@ class Report:
         self.by_thread = collections.defaultdict(list)
         for s in self.spans:
             self.by_thread[s.thr].append(s)
+        self.frame_rows = []        # one row per frame of every window (--frames-csv)
+        self.current_window = ""
         self.ends = {t: [s.e for s in lst] for t, lst in self.by_thread.items()}
 
     # ---- names
@@ -489,6 +491,18 @@ class Report:
                 else:
                     key = (self.tname(thr), f"{kind}: {label}")
                 total[key] += e - b
+        for i, (lo_f, hi_f) in enumerate(frames):
+            comp = collections.defaultdict(float)
+            for thr, kind, label, b, e, wk in per_frame[i][1]:
+                role = self.roles.get(thr, "other")
+                comp["wake" if kind == "wake" else ("run_" + role if kind == "run" else "wait_" + kind)] += e - b
+            blocked = sum(min(s.e, hi_f) - max(s.b, lo_f) for s in self.blocking_in(upd, lo_f, hi_f))
+            ring = sum(min(s.e, hi_f) - max(s.b, lo_f) for s in self.blocking_in(upd, lo_f, hi_f) if s.kind == "ring")
+            bound = max(comp.items(), key=lambda kv: kv[1])[0] if comp else ""
+            self.frame_rows.append({"window": self.current_window, "frame": i, "start_ms": round(lo_f / 1000, 3),
+                                    "duration_ms": round((hi_f - lo_f) / 1000, 3), "update_blocked_us": round(blocked),
+                                    "update_ring_wait_us": round(ring), "bound_by": bound,
+                                    **{k: round(v) for k, v in sorted(comp.items())}})
         n = len(frames)
         dur = statistics.mean(d for d, _ in per_frame)
         w(f"  Critical path of the update thread's frame, average of {n} frames of {dur / 1000:.3f} ms (the path from the end of a frame back through the waits that held it):")
@@ -721,6 +735,7 @@ class Report:
         upd = self.update_thread()
         summary = {}
         for name, lo, hi in self.windows():
+            self.current_window = name
             w("")
             w(f"==== window {name}: {(hi - lo) / 1e6:.2f} s ====")
             starts = [p[0] for p in self.points_in("frame_start", lo, hi, upd)] if upd is not None else []
@@ -745,6 +760,11 @@ class Report:
             self.handoff_section(lo, hi, nframes, w)
             w("")
             self.polling_section(lo, hi, nframes, w)
+            if upd is not None and res and self.args.frame is not None and 0 <= self.args.frame < len(res[0]):
+                i = self.args.frame
+                w("")
+                w(f"  Timeline of frame {i} ({res[1][i][0] / 1000:.3f} ms; waits of {self.args.min_wait_us * 2:g} us or more, the points of the hand-off):")
+                self.timeline(res[0][i][0], res[0][i][1], w, limit=400)
             if upd is not None and res and self.args.timeline:
                 frames, per_frame = res
                 order = sorted(range(len(frames)), key=lambda i: per_frame[i][0])
@@ -777,6 +797,8 @@ def main():
     ap.add_argument("--sites", type=int, default=5, help="wait sites listed per thread")
     ap.add_argument("--timeline", type=int, default=1, help="print the timeline of the median frame (0: not)")
     ap.add_argument("--json", default="", help="write a summary for A/B comparisons")
+    ap.add_argument("--frames-csv", default="", help="one row per frame: duration, the update thread's blocked time, the critical path by thread and kind")
+    ap.add_argument("--frame", type=int, default=None, help="also print the timeline of this frame of every window (0-based)")
     args = ap.parse_args()
     tr = load(args.trace)
     rep = Report(tr, args)
@@ -785,6 +807,13 @@ def main():
     print("\n".join(out))
     if args.json:
         Path(args.json).write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    if args.frames_csv and rep.frame_rows:
+        cols = ["window", "frame", "start_ms", "duration_ms", "update_blocked_us", "update_ring_wait_us", "bound_by"]
+        extra = sorted({k for r in rep.frame_rows for k in r} - set(cols))
+        with open(args.frames_csv, "w", newline="", encoding="utf-8") as f:
+            wr = csv.DictWriter(f, fieldnames=cols + extra, restval=0)
+            wr.writeheader()
+            wr.writerows(rep.frame_rows)
 
 
 if __name__ == "__main__":
