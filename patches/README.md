@@ -53,6 +53,7 @@ git apply ../../patches/rexglue-fsr-upscaling.patch
 git apply ../../patches/rexglue-guest-atomics-lock-free.patch
 git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
 git apply ../../patches/rexglue-xma-decoder-fixes.patch
+git apply ../../patches/rexglue-alpha-to-mask-tolerance.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
@@ -1643,6 +1644,21 @@ Built and run on Windows only, with an NVIDIA RTX 5080 and the Radeon above; not
 | MMCSS registration (`audio_thread_priority` 3) | `src/audio/audio_thread.cpp` (new) | Windows |
 | `audio_adaptive_queue`, the SDL output's counters and the mix dump | `src/audio/sdl/sdl_audio_driver.cpp`, `include/rex/audio/sdl/sdl_audio_driver.h` | SDL audio (Windows, Linux, the PS5) |
 | `audio_stats`, `audio_dump_dir`, the WAV writers | `src/audio/audio_dump.cpp`, `include/rex/audio/audio_dump.h`, `include/rex/audio/flags.h`, `src/audio/CMakeLists.txt` | all platforms |
+
+## rexglue-alpha-to-mask-tolerance.patch
+
+Fork issue #8 ("white texture/block issues"): opaque geometry with a lattice of holes in it, one pixel in every 2x2 quad, through which what is behind shows. The posts of the bus shelter in the story's first cutscene look like a dotted grid against the building behind; a lamp pole in front of a lit shop window, a palm trunk and the bushes in front of the window carry the same dots exactly inside the window's rectangle (outside it the pole's background is as dark as the pole, so the holes cannot be seen). The game draws most of its world with alpha to mask: `RB_COLORCONTROL` 0x8700001C is alpha test (greater than 0) with alpha to mask and the dither offsets 3, 1, 0, 2, and 703 of the 3,730 draws of a city frame at dusk (704 of 3,653 by day) are like that, all in the 2x MSAA scene: the billboards of the distant trees, the shadow collector, foliage and other world draws. The translators make the coverage as the console's hardware does (`registers.h`): sample 0 of a 2x pixel is covered when alpha is at least 0.5 - offset / 8, sample 1 when it is at least 1 - offset / 8, the offset being the one of the pixel's place in its 2x2 quad. The pixel with offset 0 therefore needs alpha of 1.0 exactly for its second sample, and the alpha of many world shaders is a product (a texture's alpha, an interpolated vertex alpha, constants) that comes out a hair under 1.0 on the host's GPU. That pixel then loses its second sample: with 2x MSAA a half-contrast dot where the resolve averages it with what is behind. Xenia Canary has the same code (and a `use_fuzzy_alpha_epsilon` of 1e-3 for the alpha test, "to prevent flickering on NVIDIA graphics cards": the same kind of difference).
+
+Where the dots are: x odd, y even on D3D12 and x even, y odd on Vulkan, which are the same place by each translator's own numbering of the quad (D3D12 2 * (x & 1) + (y & 1), Vulkan (x & 1) + 2 * (y & 1); the two differ, which this patch does not change), index 2, offset 0, threshold 1.0. Measured on the shop window's lamp pole at the dusk spawn of free roam (RTX 5080, D3D12, 1x, 1280x720, the dots counted by parity in x 150 to 167, y 185 to 254): 61 at (x odd, y even) against 9 to 18 at each of the other three; with alpha to mask off (a development switch) 8; with the offsets forced to 2, 2, 2, 2 (no dithering) 8; with a tolerance of 1/2048, 1/512, 1/128 on the thresholds 8, 5, 7. On Vulkan 52 at (x even, y odd) against 7 to 17 (the vinyl work's pictures, same GPU). The footage of the same cutscene from an Xbox 360 (a 12 Mbps 4K upscale of 720p, `launcher/dev/dither-2026-10-27.md`) has the shelter's posts solid against the bright sign behind them.
+
+`alpha_to_mask_tolerance` (a double, 0.00195 by default, restart-only: it is in the translated shader) is subtracted from every coverage threshold in both translators, which is the comparison of alpha rounded to 8 bits (a step of 8-bit alpha is 0.0039, so an alpha under 1.0 by less than half of one counts as 1.0, and every other threshold moves by the same amount, 0.002 at most). `--alpha_to_mask_tolerance=0` compares the exact float as before. The translated shaders have the same instructions with another constant, so there is nothing to measure in time. The shaders do change, so the first start after the patch compiles the pipelines that use alpha to mask again, as after any change of the translators (the launcher's *Prepare shaders* does it before Play).
+
+| Change | Files | Affects |
+|---|---|---|
+| The `alpha_to_mask_tolerance` option | `include/rex/graphics/flags.h`, `src/graphics/flags.cpp` | D3D12, Vulkan (PC, PS5) |
+| The thresholds lowered by it | `dxbc_translator_om.cpp` (`CompletePixelShader_AlphaToMaskSample`, also the ROV path), `spirv_translator_rb.cpp` (under `src/graphics/pipeline/shader`; the host render target path and the fragment shader interlock path) | D3D12; Vulkan (PC, PS5) |
+
+The genuine dithering stays: foliage, the distant trees' billboards and the edges of bushes, whose alpha is a fraction, are covered as before (the bush at the window in the pictures). Nothing was measured on the PS5 (the same SDK code, untested there) or on Linux.
 
 ## rexglue-upstream-storage-flush.patch
 
