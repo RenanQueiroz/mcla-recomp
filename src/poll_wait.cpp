@@ -61,6 +61,9 @@
 #endif
 #include <windows.h>
 #endif
+#if defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(mcla_poll_wait, false, "MCLA",
                     "The main thread waits for a free slot of the game's command ring by sleeping on "
@@ -68,6 +71,16 @@ REXCVAR_DEFINE_BOOL(mcla_poll_wait, false, "MCLA",
                     "before the loop's deadline, instead of calling Sleep(0) in a loop: about 2.8 ms "
                     "of the 6.4 ms of CPU a frame the main thread uses in the city, a third of it in "
                     "the kernel. Off is the game's own loop");
+REXCVAR_DEFINE_INT32(mcla_poll_pause_turns, 0, "MCLA",
+                     "The main thread's wait for a free slot of the game's command ring (the loop of "
+                     "sub_82148A10) calls the game's Sleep(0), a SwitchToThread, on every turn. With a value "
+                     "above 0 each turn first reads the slot's word up to this many times with the "
+                     "processor's pause hint between the reads (about 10 to 140 cycles each, so 64 turns "
+                     "are 0.3 to 3 microseconds), and skips the Sleep(0) when the word changed meanwhile; "
+                     "otherwise the Sleep(0) follows as before. The wait ends at the same moments, with "
+                     "fewer system calls and without the loop's clock readings between the reads. 0 is the "
+                     "game's own loop. Has no effect while mcla_poll_wait is on")
+    .range(0, 4096);
 REXCVAR_DEFINE_INT32(mcla_poll_spin_us, 40, "MCLA",
                      "With mcla_poll_wait: microseconds the main thread spins on the slot's word "
                      "(with the pause hint) before it sleeps")
@@ -122,6 +135,8 @@ uint8_t* GuestBase() {
 struct Stats {
   std::atomic<uint64_t> calls{0}, done_in_spin{0}, slept{0}, woken_by_release{0}, woken_by_timer{0},
       tail_changed{0}, tail_deadline{0}, no_time_left{0}, no_sleep{0}, releases{0};
+  // mcla_poll_pause_turns: turns of the game's loop that went through the pause spin, and how many of them saw the word change.
+  std::atomic<uint64_t> pause_turns{0}, pause_hits{0};
   // The thread that frees the slots (the loop of sub_82144888): how often it comes round, how far
   // apart its rounds are and what it passes to Sleep (whole milliseconds).
   std::atomic<uint64_t> ticks{0}, tick_periods{0}, tick_period_ns_sum{0}, tick_period_ns_max{0}, sleep_capped{0};
@@ -165,6 +180,12 @@ void MaybeLog() {
       g_stats.calls.load(), g_stats.done_in_spin.load(), g_stats.no_time_left.load(), g_stats.no_sleep.load(),
       g_stats.slept.load(), g_stats.woken_by_release.load(), g_stats.woken_by_timer.load(),
       g_stats.tail_changed.load(), g_stats.tail_deadline.load(), g_stats.releases.load());
+  if (g_stats.pause_turns.load()) {
+    REXLOG_INFO(
+        "poll pause: {} turns of the game's wait loop went through the pause spin, {} of them saw the word change "
+        "(the Sleep(0) was skipped); mcla_poll_pause_turns {}",
+        g_stats.pause_turns.load(), g_stats.pause_hits.load(), REXCVAR_GET(mcla_poll_pause_turns));
+  }
   if (g_stats.ticks.load()) {
     std::string histogram;
     for (int i = 0; i <= 16; ++i) {
@@ -200,6 +221,42 @@ void MaybeLog() {
 
 uint32_t Swap32(uint32_t v) {
   return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+}
+
+inline void SpinPause() {
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_pause();
+#endif
+}
+
+// mcla_poll_pause_turns: one turn of the game's wait loop (the hook is ahead of its Sleep(0)). Reads the ring's word
+// (+4 of the ring the context picks, as sub_82148A10 does) up to `turns` times with the pause hint between the reads.
+// True when it changed: the hook then skips the Sleep(0), and the game's loop reads the word and the clock, sees the
+// change and leaves, as it would after the Sleep(0). False: the Sleep(0) goes on as it did.
+bool PauseSpin(PPCRegister& r31, PPCRegister& r30, PPCRegister& r29, int32_t turns) {
+  uint8_t* base = GuestBase();
+  if (!base) {
+    return false;
+  }
+  const uint32_t ring = (uint32_t(base[r31.u32 + 199]) >> 2) & 0x3FFFFFF8u;
+  volatile const uint32_t* word = reinterpret_cast<volatile const uint32_t*>(base + r30.u32 + 4 + ring);
+  const uint32_t expected = Swap32(r29.u32);  // guest memory is big-endian
+  bool changed = false;
+  for (int32_t i = 0; i < turns; ++i) {
+    if (*word != expected) {
+      changed = true;
+      break;
+    }
+    SpinPause();
+  }
+  if (REXCVAR_GET(mcla_poll_stats)) {
+    g_stats.pause_turns.fetch_add(1, std::memory_order_relaxed);
+    if (changed) {
+      g_stats.pause_hits.fetch_add(1, std::memory_order_relaxed);
+    }
+    MaybeLog();
+  }
+  return changed;
 }
 
 float GuestFloat(uint32_t ea) {
@@ -537,7 +594,8 @@ bool mcla_poll_wait(PPCRegister& r31, PPCRegister& r30, PPCRegister& r29, PPCReg
     InstallWriterTrace();
   }
   if (!REXCVAR_GET(mcla_poll_wait)) {
-    return false;
+    const int32_t pause_turns = REXCVAR_GET(mcla_poll_pause_turns);
+    return pause_turns > 0 && PauseSpin(r31, r30, r29, pause_turns);
   }
   uint8_t* base = GuestBase();
   static thread_local HrTimer timer;
@@ -626,7 +684,11 @@ bool mcla_poll_wait(PPCRegister& r31, PPCRegister& r30, PPCRegister& r29, PPCReg
   }
   return true;
 #else
-  (void)r31, (void)r30, (void)r29, (void)r26, (void)r3;
+  (void)r26, (void)r3;
+  if (!REXCVAR_GET(mcla_poll_wait)) {
+    const int32_t pause_turns = REXCVAR_GET(mcla_poll_pause_turns);
+    return pause_turns > 0 && PauseSpin(r31, r30, r29, pause_turns);
+  }
   return false;
 #endif
 }
