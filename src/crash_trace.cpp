@@ -30,6 +30,7 @@ constexpr uint32_t kCodeBegin = 0x82130000;
 constexpr uint32_t kCodeEnd = 0x827CD054;
 constexpr uintptr_t kGuestBase = 0x100000000ull;
 constexpr uintptr_t kNullPageSize = 0x10000;
+constexpr uintptr_t kVirtualHeapsEnd = 0xA0000000;
 // Largest plausible distance from a function's entry to an address inside it.
 constexpr uintptr_t kMaxFunctionSpan = 0x80000;
 
@@ -57,15 +58,21 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   uintptr_t fault = record->ExceptionInformation[1];
-  if (fault < kGuestBase || fault >= kGuestBase + kNullPageSize) {
+  // Also a read of the guest's virtual heaps (up to the physical aliases at 0xA0000000, whose
+  // faults are the write watch's): guest code followed a stale or garbage pointer. The first few
+  // are logged, then the game's own "Unhandled guest access violation" line is all there is.
+  const bool heap_read = record->ExceptionInformation[0] == 0 &&
+                         fault >= kGuestBase + kNullPageSize && fault < kGuestBase + kVirtualHeapsEnd;
+  if (!heap_read && (fault < kGuestBase || fault >= kGuestBase + kNullPageSize)) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
-  if (InterlockedExchange(&reported, 1)) {
+  static LONG heap_reads = 0;
+  if (heap_read ? InterlockedIncrement(&heap_reads) > 6 : InterlockedExchange(&reported, 1)) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
 
-  REXLOG_ERROR("guest null-page {} at guest 0x{:08X}; host stack (innermost first):",
-               record->ExceptionInformation[0] ? "write" : "read",
+  REXLOG_ERROR("guest {} {} at guest 0x{:08X}; host stack (innermost first):",
+               heap_read ? "heap" : "null-page", record->ExceptionInformation[0] ? "write" : "read",
                static_cast<uint32_t>(fault - kGuestBase));
   CONTEXT context = *info->ContextRecord;
   for (int frame = 0; frame < 32 && context.Rip; ++frame) {
