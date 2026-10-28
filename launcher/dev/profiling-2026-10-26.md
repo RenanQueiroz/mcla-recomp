@@ -259,7 +259,9 @@ Checked so far (single runs under the shared lock, so they say how it behaves, n
 `launcher/dev/scripts/wake-ab.pad` at 16 logical processors with the option on ran at 239 to 240 FPS uncapped (frame median 4.15 to 4.17 ms,
 p99 4.8 ms; the thread's rounds equal the frames, every one of them early) and held the caps (120.0, 60.0 and 30.0 swaps a second, no early round
 under a cap, the game clock 1.002 to 1.003 s a second); the ring wait only ever saw ring 0 with the thread waiting; with the watchdog tripped by
-`--mcla_pump_wake_test_trip_s=20` the frame rate fell back to 146 FPS and the log said so.
+`--mcla_pump_wake_test_trip_s=20` the frame rate fell back to 146 FPS and the log said so. The same trip under the exclusive lock (2026-10-27, one
+run, 16 logical processors): the thread had ended 4,530 waits early when it tripped; after it, roam 146.0 and drive 145.9 swaps a second (frame median
+6.83 and 6.81 ms, p99 7.85 and 7.89), the caps 120.0, 60.0 and 30.0, the game clock 1.002 to 1.003, 0 steady underruns and 0 late audio wakes.
 
 ### The A/B
 
