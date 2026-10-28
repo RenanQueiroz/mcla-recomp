@@ -24,6 +24,7 @@
 // Exit code 0: every check passed. Output: one line per check with the number of inputs and of differences.
 #include <rex/ppc/context.h>
 
+#include <cpuid.h>
 #include <xmmintrin.h>
 
 #include <algorithm>
@@ -280,6 +281,16 @@ static void run_ints(const Op& op, int tid, int nthreads, int scale, bool exhaus
   }
 }
 
+static std::string cpu_brand() {
+  unsigned r[12] = {};
+  if (__get_cpuid_max(0x80000000, nullptr) >= 0x80000004) {
+    for (unsigned i = 0; i < 3; ++i) __get_cpuid(0x80000002 + i, &r[4 * i], &r[4 * i + 1], &r[4 * i + 2], &r[4 * i + 3]);
+  }
+  char b[49] = {};
+  std::memcpy(b, r, 48);
+  return b;
+}
+
 // ---- part B ----
 static int part_b() {
   int fails = 0;
@@ -330,7 +341,8 @@ int main(int argc, char** argv) {
     else { std::printf("usage: csr_exact [--scale N] [--threads T] [--exhaustive]\n"); return 2; }
   }
   const auto t0 = std::chrono::steady_clock::now();
-  std::printf("csr_exact: scale %d, %d threads%s; MXCSR before: %#x\n", scale, threads, exhaustive ? ", exhaustive" : "", _mm_getcsr());
+  std::printf("csr_exact: scale %d, %d threads%s; MXCSR before: %#x; CPU: %s\n", scale, threads, exhaustive ? ", exhaustive" : "", _mm_getcsr(),
+              cpu_brand().c_str());
   const Op ops[] = {
       {"fabs", op_fabs, true, [](u64 b) { return b & ~(1ULL << 63); }, 0, 1},
       {"fnabs", op_fnabs, true, [](u64 b) { return b | (1ULL << 63); }, 0, 1},
