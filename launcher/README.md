@@ -1001,7 +1001,7 @@ during a build:
 - `shadow-probe.sdk.patch` (SDK, D3D12 and Vulkan, `TMPSP`; the layer after `frame-log` for `gt-build.ps1 -Layer`): `tmp_sp_mode` (a bit mask, hot-reloaded, set from a pad)
   perturbs the depth-only draws of the four sun-shadow cascades so that their GPU time can be split into what it is bound by: 1 no rasterization (an empty
   scissor: vertex work and primitive setup remain), 2 the viewport 16 times smaller (the pixel work almost gone), 4 one triangle per draw (what a draw costs by
-  itself), 8 no depth or stencil writes, 16 half of the triangles, 32 no stencil, 64 only every `tmp_sp_decimate`-th draw. The picture is wrong while a bit is on;
+  itself), 8 no depth or stencil writes, 16 half of the triangles, 32 no stencil, 64 only every `tmp_sp_decimate`-th draw, 128 the label only (the base of a sweep), 256 an empty shared-memory barrier round trip before every 4th draw (D3D12). The picture is wrong while a bit is on;
   the GPU timestamps carry an `SPM=<mode> phase=<bit>` label at the first perturbed draw of each cascade. `gpu-timestamps-vulkan.sdk.patch` and `frame-log.sdk.patch`
   were rebased onto the resolve readback rules (`rexglue-resolve-readback-rules.patch`) for it.
 
