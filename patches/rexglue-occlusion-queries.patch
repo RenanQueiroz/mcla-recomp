@@ -1,5 +1,5 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 828d462..49e0b3a 100644
+index 828d462..f307e7f 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -13,6 +13,7 @@
@@ -10,7 +10,7 @@ index 828d462..49e0b3a 100644
  #include <functional>
  #include <memory>
  #include <mutex>
-@@ -685,6 +686,40 @@ class CommandProcessor {
+@@ -685,6 +686,78 @@ class CommandProcessor {
                                            uint32_t count);
    virtual bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, uint32_t packet,
                                                    uint32_t count);
@@ -18,10 +18,13 @@ index 828d462..49e0b3a 100644
 +  // Guest occlusion queries (rexglue-occlusion-queries.patch). Direct3D 9 on the console issues
 +  // EVENT_WRITE_ZPD twice for a query, to the two halves of a 64-byte record: the end snapshot goes
 +  // to +0x00 (with 0xFFFFFEED in its ZPass words until the GPU has written it), the begin snapshot
-+  // to +0x20. The game subtracts the begin from the end. The two events are paired by their order,
-+  // not by address; the host query between them is read back without waiting (as the memexport
-+  // fast readback does), the guest gets the last real count of the record (the fake count before
-+  // the first) at the end event, and the real count when the host GPU has it.
++  // to +0x20. The game subtracts the begin from the end. The two events are paired by their order
++  // (an event 0x20 below the open begin is its end whatever the snapshot holds: the game stores
++  // the sentinel with the CPU, which a late count written to the record could undo); the host
++  // query between them is read back without waiting (as the memexport fast readback does). At the
++  // end event the game is told the newest real count the host has delivered so far (the fake count
++  // before the first), a few frames old by the depth of the host's GPU queue; the count of this
++  // very query is written to the record only if the record still holds that guess.
 +  // The host side is the backends' (the defaults: no host queries, the fake count only).
 +  virtual bool HostOcclusionQueriesUsable() const { return false; }
 +  // Starts a host query at this point of the command stream; false: none was started.
@@ -29,8 +32,8 @@ index 828d462..49e0b3a 100644
 +  // Whether the host query is still recording (a submission ending inside it cuts it).
 +  virtual bool HostOcclusionQueryRecording() const { return false; }
 +  // Ends the recording host query and queues a copy of its count. submission_out is the submission
-+  // whose completion makes the count readable, draws_out the number of guest draws that reached the
-+  // host inside the query.
++  // whose completion makes the count readable, draws_out the number of guest draws that reached
++  // IssueDraw's counting point inside the query (host_draws_recorded_ counts those recorded).
 +  virtual bool HostOcclusionQueryEnd(uint32_t& /*host_index_out*/, uint64_t& /*submission_out*/,
 +                                     uint32_t& /*draws_out*/) {
 +    return false;
@@ -48,32 +51,77 @@ index 828d462..49e0b3a 100644
 +  void PollOcclusionQueryResults();
 +  // Forgets the open guest query and the pending counts (the host side is gone or restarting).
 +  void ClearOcclusionQueryState();
++
++  // What a draw inside a guest occlusion query is on the host (development log, with
++  // occlusion_query_log): the backends fill it where they record the draw.
++  struct OcclusionDrawInfo {
++    uint32_t prim_type = 0;
++    uint32_t host_vertex_count = 0;
++    bool indexed = false;
++    uint32_t depth_control = 0;  // RB_DEPTHCONTROL as the draw uses it
++    uint32_t color_mask = 0;     // normalized: 4 bits per render target
++    bool pixel_shader = false;   // a host pixel shader is bound
++    uint32_t bound_rts = 0;      // bit 0 depth / stencil, bits 1 to 4 colour
++    uint32_t host_msaa = 0;      // xenos::MsaaSamples
++    uint32_t viewport[4] = {};   // x, y, width, height (host pixels)
++    uint32_t scissor[4] = {};    // x, y, width, height (host pixels)
++    float z_min = 0.0f;
++    float z_max = 0.0f;
++    bool depth_clip = false;
++    bool convert_z_to_float24 = false;
++    uint32_t transfers_depth = 0;   // ownership transfers the draw's render target update made
++    uint32_t transfers_colour = 0;
++  };
++  // Every host draw the backends record (a draw that returns early is not one): they call this
++  // right before the draw call, with the depth range and depth control the draw uses.
++  void OnHostDrawRecorded(float z_min, float z_max, uint32_t depth_control) {
++    ++host_draws_recorded_;
++    if (!occlusion_guest_open_) {
++      occlusion_prev_z_min_ = z_min;
++      occlusion_prev_z_max_ = z_max;
++      occlusion_prev_depth_control_ = depth_control;
++    }
++  }
++  // Whether the draw about to be recorded is one to describe in the log: inside a guest query with
++  // a host query, the first draws of the first queries and of every 240th.
++  bool OcclusionDrawLogWanted() const;
++  void LogOcclusionDraw(const char* backend, const OcclusionDrawInfo& info);
    bool ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet, const char* opcode_name,
                                uint32_t viz_query_condition, uint32_t count_remaining);
    bool ExecutePacketType3_DRAW_INDX(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
-@@ -798,6 +833,44 @@ class CommandProcessor {
+@@ -798,6 +871,69 @@ class CommandProcessor {
    // name (for explicit-override compatibility).
    const char* legacy_readback_memexport_cvar_name_ = nullptr;
  
 +  // Guest occlusion queries (ExecuteGuestOcclusionEvent).
 +  bool ExecuteGuestOcclusionEvent(uint32_t sample_count_address,
-+                                  xenos::xe_gpu_depth_sample_counts* sample_counts, bool is_end);
-+  void WriteOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts, uint32_t samples);
-+  void WriteOcclusionGuess(uint32_t end_address, xenos::xe_gpu_depth_sample_counts* sample_counts);
++                                  xenos::xe_gpu_depth_sample_counts* sample_counts,
++                                  bool sentinel_present);
++  // Writes the ZPass words (and the other counters) of an end snapshot: samples is the count the
++  // game will take; returns the 64-bit value of the ZPass pair as written.
++  uint64_t WriteOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts,
++                                uint32_t samples);
++  // The count the game is told at an end event: the newest real one (the fake count before the
++  // first); false when there is none to tell (a negative fake count and no real one).
++  bool OcclusionGuessSamples(uint32_t& samples_out) const;
 +  void DropPendingOcclusionResult(uint32_t end_address);
 +  struct OcclusionPending {
 +    uint32_t end_address;  // the record's end snapshot (the guest's sample counts)
 +    uint32_t host_index;
 +    uint64_t submission;
-+    uint32_t draws;
-+    uint32_t swap_counter;  // counter_ at the end event
-+    uint64_t event_number;  // number of the end event
++    uint32_t draws;           // guest draws that reached the backend inside the query
++    uint32_t draws_recorded;  // of them, host draws recorded
++    uint32_t swap_counter;    // counter_ at the end event
++    uint64_t event_number;    // number of the end event
++    uint64_t guess_zpass;     // the ZPass pair written at the end event (0: none was)
++    int64_t end_time_us;      // steady clock at the end event
 +  };
 +  struct OcclusionStats {
 +    uint64_t begins = 0;
 +    uint64_t ends = 0;
 +    uint64_t issued = 0;        // ends with a host query behind them
-+    uint64_t delivered = 0;     // real counts written to the guest
++    uint64_t delivered = 0;     // real counts that reached the host side (read)
++    uint64_t written = 0;       // of them, written to the record (it still held the guess)
 +    uint64_t superseded = 0;    // pending counts dropped because the record was used again
 +    uint64_t dropped = 0;       // pending counts dropped for the queue's length
 +    uint64_t cut = 0;           // ends whose host query a submission end had cut
@@ -81,17 +129,32 @@ index 828d462..49e0b3a 100644
 +    uint64_t unpaired = 0;      // ends without an open guest query
 +    uint64_t restarted = 0;     // begins inside an open guest query
 +    uint64_t odd_pairs = 0;     // begin address is not end address + 0x20
++    uint64_t sentinel_lost = 0; // ends whose snapshot did not hold the sentinel (paired by address)
 +    uint64_t late_events = 0;   // sum of the events between an end and its count
++    uint64_t latency_us = 0;    // sum of the microseconds between an end and its count
++    uint64_t nonzero = 0;       // delivered counts above zero
++    uint64_t draws_seen = 0;    // guest draws inside queries that reached the backends
++    uint64_t draws_recorded = 0;
++    uint64_t draws_left_out = 0;
 +  };
 +  bool occlusion_guest_open_ = false;
 +  bool occlusion_host_began_ = false;
 +  uint32_t occlusion_begin_address_ = 0;
 +  uint64_t occlusion_events_ = 0;
 +  std::deque<OcclusionPending> occlusion_pending_;
-+  // The last real count told to the game for each record's end snapshot.
-+  std::unordered_map<uint32_t, uint32_t> occlusion_last_counts_;
++  // The newest real count the host delivered (what an end event tells the game).
++  bool occlusion_latest_valid_ = false;
++  uint32_t occlusion_latest_samples_ = 0;
 +  std::unordered_set<uint32_t> occlusion_seen_records_;
 +  OcclusionStats occlusion_stats_;
++  // The host draws recorded (OnHostDrawRecorded), at the start of the open host query, and the
++  // last draw recorded outside a guest query (for the log).
++  uint64_t host_draws_recorded_ = 0;
++  uint64_t occlusion_recorded_at_begin_ = 0;
++  float occlusion_prev_z_min_ = 0.0f;
++  float occlusion_prev_z_max_ = 0.0f;
++  uint32_t occlusion_prev_depth_control_ = 0;
++  uint32_t occlusion_draw_in_query_ = 0;
 +
   private:
    reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};
@@ -152,20 +215,56 @@ index d762036..9165cda 100644
      bool valid = false;
    } active_occlusion_query_;
    struct VertexBufferState {
+diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
+index ad24e94..7bdd000 100644
+--- a/include/rex/graphics/d3d12/pipeline_cache.h
++++ b/include/rex/graphics/d3d12/pipeline_cache.h
+@@ -222,6 +222,9 @@ class PipelineCache {
+     uint32_t depth_write : 1;                         // 18
+     uint32_t stencil_enable : 1;                      // 19
+     uint32_t stencil_read_mask : 8;                   // 27
++    // A depth test that always passes, without writing, kept enabled (a draw in an occlusion
++    // query: without depth / stencil and a pixel shader Direct3D 12 doesn't rasterize it).
++    uint32_t depth_test_always : 1;  // 28
+ 
+     uint32_t stencil_write_mask : 8;                   // 8
+     xenos::StencilOp stencil_front_fail_op : 3;        // 11
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
-index fc3b28d..8ee8608 100644
+index fc3b28d..0a990d5 100644
 --- a/include/rex/graphics/flags.h
 +++ b/include/rex/graphics/flags.h
-@@ -35,6 +35,9 @@ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+@@ -35,6 +35,10 @@ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
  REXCVAR_DECLARE(bool, readback_memexport);
  REXCVAR_DECLARE(bool, readback_memexport_fast);
  REXCVAR_DECLARE(bool, occlusion_query_enable);
 +REXCVAR_DECLARE(bool, occlusion_query_async);
 +REXCVAR_DECLARE(bool, occlusion_query_keep_submission_open);
++REXCVAR_DECLARE(bool, occlusion_query_force_rasterization);
 +REXCVAR_DECLARE(int32_t, occlusion_query_log);
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
  // GPU Depth / Render Target Behavior
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 97ea0a4..238f202 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -197,6 +197,16 @@ class RenderTargetCache {
+   // each.
+   uint32_t GetLastUpdateBoundRenderTargets(uint32_t* depth_and_color_formats_out = nullptr) const;
+ 
++  // How many ownership transfers the last update needed, for the depth render target and for the
++  // colour ones together (the occlusion query log; 0 with pixel shader interlock).
++  void GetLastUpdateTransferCounts(uint32_t& depth_out, uint32_t& color_out) const {
++    depth_out = uint32_t(last_update_transfers_[0].size());
++    color_out = 0;
++    for (size_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++      color_out += uint32_t(last_update_transfers_[i].size());
++    }
++  }
++
+  protected:
+   RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
+                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
 index 85e9963..ea85eeb 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
@@ -219,10 +318,18 @@ index 85e9963..ea85eeb 100644
    } active_occlusion_query_;
    struct VertexBufferState {
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index bd96ce5..43451c9 100644
+index bd96ce5..f68310c 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
-@@ -85,6 +85,30 @@ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstdlib>
+@@ -85,6 +86,38 @@ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
  REXCVAR_DEFINE_BOOL(occlusion_query_enable, true, "GPU", "Enable host occlusion query handling")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -243,6 +350,14 @@ index bd96ce5..43451c9 100644
 +                    "record's last real count")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
++REXCVAR_DEFINE_BOOL(occlusion_query_force_rasterization, true, "GPU",
++                    "Direct3D 12: a draw inside a guest occlusion query that has no depth test, "
++                    "stencil or pixel shader to rasterize with (Direct3D 12 does not rasterize "
++                    "it, so the query would count 0) is given a depth test that always passes, "
++                    "against the frame's depth target, so that its samples are counted "
++                    "(rexglue-occlusion-queries.patch)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
 +REXCVAR_DEFINE_INT32(occlusion_query_log, 0, "GPU",
 +                     "Log guest occlusion queries at info level: the first N begin and end events "
 +                     "and results, every record's first use (the users of occlusion queries, with "
@@ -253,7 +368,7 @@ index bd96ce5..43451c9 100644
  REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
                        "Controls CPU readback of render-to-texture resolve results.\n"
                        " none: Disable readback (default)\n"
-@@ -551,6 +575,10 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -551,6 +584,10 @@ void CommandProcessor::WorkerThreadMain() {
  
          rex::thread::MaybeYield();
          loop_count++;
@@ -264,7 +379,7 @@ index bd96ce5..43451c9 100644
          write_ptr_index = write_ptr_index_.load();
        } while (worker_running_ && pending_fns_.empty() &&
                 (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
-@@ -963,6 +991,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
+@@ -963,6 +1000,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
    } while (reader.read_count());
  
    OnPrimaryBufferEnd();
@@ -272,7 +387,7 @@ index bd96ce5..43451c9 100644
  
    return write_index;
  }
-@@ -2244,6 +2273,16 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
+@@ -2244,6 +2282,57 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
    return true;
  }
  
@@ -282,14 +397,55 @@ index bd96ce5..43451c9 100644
 +// is_begin << 5).
 +constexpr uint32_t kOcclusionBeginOffset = sizeof(xenos::xe_gpu_depth_sample_counts);
 +// Counts still on their way: a longer queue means the host GPU is far behind (or lost), the
-+// oldest are given up (the game was told its record's last real count at their end).
++// oldest are given up.
 +constexpr size_t kOcclusionMaxPending = 64;
++// The draws of the first queries and of every 240th are described in the log (occlusion_query_log).
++constexpr uint64_t kOcclusionDrawLogFirstQueries = 16;
++constexpr uint64_t kOcclusionDrawLogEvery = 240;
++// Draws of a query that no host draw was recorded for, described in the log without a limit on
++// the query's ordinal (the first few only).
++constexpr uint64_t kOcclusionLeftOutLogMax = 24;
++
++int64_t OcclusionNowUs() {
++  return std::chrono::duration_cast<std::chrono::microseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++// Replaces the ZPass pair (A, then B: one 64-bit word in the host's byte order) of an end snapshot
++// with the count if it still holds what was written there at the end event: a record the game has
++// armed again since (it stores the sentinel with the CPU) or consumed is left alone.
++bool ReplaceOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts,
++                            uint64_t expected_pair, uint32_t samples) {
++  static_assert(offsetof(xenos::xe_gpu_depth_sample_counts, ZPass_B) ==
++                    offsetof(xenos::xe_gpu_depth_sample_counts, ZPass_A) + sizeof(uint32_t),
++                "ZPass_A and ZPass_B are adjacent");
++  auto* pair = reinterpret_cast<uint64_t*>(&sample_counts->ZPass_A);
++  const uint64_t desired = samples;
++  if ((reinterpret_cast<uintptr_t>(pair) & 7) == 0) {
++    uint64_t expected = expected_pair;
++    if (!__atomic_compare_exchange_n(pair, &expected, desired, false, __ATOMIC_SEQ_CST,
++                                     __ATOMIC_SEQ_CST)) {
++      return false;
++    }
++  } else {
++    uint64_t current;
++    std::memcpy(&current, pair, sizeof(current));
++    if (current != expected_pair) {
++      return false;
++    }
++    std::memcpy(pair, &desired, sizeof(desired));
++  }
++  sample_counts->Total_A = samples;
++  sample_counts->Total_B = 0;
++  return true;
++}
 +}  // namespace
 +
  bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                            uint32_t packet, uint32_t count) {
    // Set by D3D as BE but struct ABI is LE
-@@ -2253,25 +2292,41 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -2253,25 +2342,41 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    // Writeback initiator.
    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
  
@@ -306,11 +462,11 @@ index bd96ce5..43451c9 100644
 +  // Older versions of D3D also checks for ZFail (4D5307D5).
 +  bool is_end_via_z_fail =
 +      pSampleCounts->ZFail_A == kQueryFinished || pSampleCounts->ZFail_B == kQueryFinished;
-+  const bool is_end = is_end_via_z_pass || is_end_via_z_fail;
++  const bool sentinel_present = is_end_via_z_pass || is_end_via_z_fail;
 +
 +  if (REXCVAR_GET(occlusion_query_enable) && REXCVAR_GET(occlusion_query_async) &&
 +      HostOcclusionQueriesUsable()) {
-+    return ExecuteGuestOcclusionEvent(sample_count_address, pSampleCounts, is_end);
++    return ExecuteGuestOcclusionEvent(sample_count_address, pSampleCounts, sentinel_present);
 +  }
 +  if (occlusion_guest_open_) {
 +    // Host queries were switched off inside a query.
@@ -341,16 +497,16 @@ index bd96ce5..43451c9 100644
 -    std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
 -    if (is_end_via_z_pass || is_end_via_z_fail) {
 +    std::memset(pSampleCounts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
-+    if (is_end) {
++    if (sentinel_present) {
        pSampleCounts->ZPass_A = fake_sample_count;
        pSampleCounts->Total_A = fake_sample_count;
      }
-@@ -2280,6 +2335,204 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -2280,6 +2385,304 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    return true;
  }
  
-+void CommandProcessor::WriteOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts,
-+                                            uint32_t samples) {
++uint64_t CommandProcessor::WriteOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts,
++                                                uint32_t samples) {
 +  sample_counts->Total_A = samples;
 +  sample_counts->Total_B = 0;
 +  sample_counts->ZFail_A = 0;
@@ -363,21 +519,22 @@ index bd96ce5..43451c9 100644
 +  std::atomic_thread_fence(std::memory_order_release);
 +  const uint64_t zpass = samples;
 +  std::memcpy(&sample_counts->ZPass_A, &zpass, sizeof(zpass));
++  return zpass;
 +}
 +
-+void CommandProcessor::WriteOcclusionGuess(uint32_t end_address,
-+                                           xenos::xe_gpu_depth_sample_counts* sample_counts) {
-+  // Until the real count arrives (or when there will be none): the last real count of this
-+  // record, the fake count before the first, as xenia-canary's fast mode does.
-+  const auto last = occlusion_last_counts_.find(end_address);
-+  if (last != occlusion_last_counts_.end()) {
-+    WriteOcclusionCounts(sample_counts, last->second);
-+    return;
++bool CommandProcessor::OcclusionGuessSamples(uint32_t& samples_out) const {
++  // The newest real count the host has delivered (a few frames old: the depth of its GPU queue),
++  // as xenia-canary's fast mode tells the guest the last real delta before the real one lands.
++  if (occlusion_latest_valid_) {
++    samples_out = occlusion_latest_samples_;
++    return true;
 +  }
 +  const int32_t fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
 +  if (fake_sample_count >= 0) {
-+    WriteOcclusionCounts(sample_counts, uint32_t(fake_sample_count));
++    samples_out = uint32_t(fake_sample_count);
++    return true;
 +  }
++  return false;
 +}
 +
 +void CommandProcessor::DropPendingOcclusionResult(uint32_t end_address) {
@@ -392,11 +549,32 @@ index bd96ce5..43451c9 100644
 +}
 +
 +bool CommandProcessor::ExecuteGuestOcclusionEvent(
-+    uint32_t address, xenos::xe_gpu_depth_sample_counts* sample_counts, bool is_end) {
++    uint32_t address, xenos::xe_gpu_depth_sample_counts* sample_counts, bool sentinel_present) {
 +  OcclusionStats& stats = occlusion_stats_;
 +  ++occlusion_events_;
 +  const int32_t log_events = REXCVAR_GET(occlusion_query_log);
 +  const bool log_event = log_events > 0 && occlusion_events_ <= uint64_t(log_events);
++
++  // Which event it is. An event 0x20 below the open begin's address is that query's end, whatever
++  // the snapshot holds: the sentinel the game stores there with the CPU could be gone (a count
++  // written late over it), and an end taken for a begin would zero the snapshot and the game
++  // would read a count of 0. Anything else goes by the sentinel.
++  bool is_end;
++  if (occlusion_guest_open_ && address + kOcclusionBeginOffset == occlusion_begin_address_) {
++    is_end = true;
++    if (!sentinel_present) {
++      ++stats.sentinel_lost;
++      if (stats.sentinel_lost <= 4) {
++        REXGPU_INFO(
++            "occlusion query end at {:08X} (swap {}): the snapshot does not hold the game's "
++            "sentinel; paired by address with the begin at {:08X}",
++            address, counter_, occlusion_begin_address_);
++      }
++    }
++  } else {
++    is_end = sentinel_present;
++  }
++
 +  if (log_events > 0) {
 +    // Every record the game queries, once, however late in the run: the users of occlusion queries.
 +    const uint32_t record = is_end ? address : address - kOcclusionBeginOffset;
@@ -434,6 +612,8 @@ index bd96ce5..43451c9 100644
 +    occlusion_guest_open_ = true;
 +    occlusion_begin_address_ = address;
 +    occlusion_host_began_ = HostOcclusionQueryBegin();
++    occlusion_recorded_at_begin_ = host_draws_recorded_;
++    occlusion_draw_in_query_ = 0;
 +    if (log_event) {
 +      REXGPU_INFO("occlusion query begin at {:08X} (swap {}, event {}, render phase {:08X}): {}",
 +                  address, counter_, occlusion_events_, guest_marker_phase_,
@@ -454,9 +634,21 @@ index bd96ce5..43451c9 100644
 +    uint64_t submission = 0;
 +    uint32_t draws = 0;
 +    if (HostOcclusionQueryEnd(host_index, submission, draws)) {
++      const uint32_t recorded = uint32_t(host_draws_recorded_ - occlusion_recorded_at_begin_);
++      stats.draws_seen += draws;
++      stats.draws_recorded += recorded;
 +      DropPendingOcclusionResult(address);
++      // The newest count the host has (reading never waits), then what the game is told now.
++      PollOcclusionQueryResults();
++      uint32_t guess = 0;
++      if (OcclusionGuessSamples(guess)) {
++        WriteOcclusionCounts(sample_counts, guess);
++      }
++      uint64_t pair_after = 0;
++      std::memcpy(&pair_after, &sample_counts->ZPass_A, sizeof(pair_after));
 +      occlusion_pending_.push_back(OcclusionPending{address, host_index, submission, draws,
-+                                                    counter_, occlusion_events_});
++                                                    recorded, counter_, occlusion_events_,
++                                                    pair_after, OcclusionNowUs()});
 +      if (occlusion_pending_.size() > kOcclusionMaxPending) {
 +        occlusion_pending_.pop_front();
 +        ++stats.dropped;
@@ -471,20 +663,19 @@ index bd96ce5..43451c9 100644
 +              address, begin_address, address + kOcclusionBeginOffset);
 +        }
 +      }
-+      WriteOcclusionGuess(address, sample_counts);
 +      if (log_event) {
 +        REXGPU_INFO(
-+            "occlusion query end at {:08X} (swap {}, event {}): host query ended after {} draws "
-+            "(host query {}, submission {}); the game is told {} until the count arrives",
-+            address, counter_, occlusion_events_, draws, host_index, submission,
++            "occlusion query end at {:08X} (swap {}, event {}): host query ended after {} draws, "
++            "{} recorded on the host (host query {}, submission {}); the game is told {} until "
++            "the count arrives",
++            address, counter_, occlusion_events_, draws, recorded, host_index, submission,
 +            uint32_t(sample_counts->ZPass_A));
 +      }
-+      PollOcclusionQueryResults();
 +      return true;
 +    }
 +  }
 +
-+  // No host query behind this end: the record's last real count (the fake one before the first).
++  // No host query behind this end: the newest real count (the fake one before the first).
 +  if (!was_open) {
 +    ++stats.unpaired;
 +  } else if (host_began) {
@@ -492,7 +683,10 @@ index bd96ce5..43451c9 100644
 +  } else {
 +    ++stats.no_host;
 +  }
-+  WriteOcclusionGuess(address, sample_counts);
++  uint32_t guess = 0;
++  if (OcclusionGuessSamples(guess)) {
++    WriteOcclusionCounts(sample_counts, guess);
++  }
 +  if (log_event || stats.cut + stats.unpaired + stats.no_host <= 4) {
 +    const char* why = !was_open
 +                          ? "no query was open"
@@ -515,28 +709,41 @@ index bd96ce5..43451c9 100644
 +    }
 +    occlusion_pending_.pop_front();
 +    const uint32_t clamped = samples > uint64_t(UINT32_MAX) ? UINT32_MAX : uint32_t(samples);
++    // What the next end event tells the game.
++    occlusion_latest_valid_ = true;
++    occlusion_latest_samples_ = clamped;
++    OcclusionStats& stats = occlusion_stats_;
++    ++stats.delivered;
++    if (clamped) {
++      ++stats.nonzero;
++    }
++    stats.late_events += occlusion_events_ - pending.event_number;
++    const int64_t latency_us = std::max<int64_t>(0, OcclusionNowUs() - pending.end_time_us);
++    stats.latency_us += uint64_t(latency_us);
++    // Into the record too, if the game has not touched it since the end event (it may have read
++    // the guess already: then the count is for the next end event's guess only).
++    bool written = false;
 +    auto* sample_counts =
 +        memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(pending.end_address);
 +    if (sample_counts) {
-+      WriteOcclusionCounts(sample_counts, clamped);
++      written = ReplaceOcclusionCounts(sample_counts, pending.guess_zpass, clamped);
++      if (written) {
++        ++stats.written;
++      }
 +    }
-+    if (occlusion_last_counts_.size() >= 256) {
-+      occlusion_last_counts_.clear();
-+    }
-+    occlusion_last_counts_[pending.end_address] = clamped;
-+    OcclusionStats& stats = occlusion_stats_;
-+    ++stats.delivered;
-+    stats.late_events += occlusion_events_ - pending.event_number;
 +    if (log_events > 0 && (stats.delivered <= uint64_t(log_events) || stats.delivered % 120 == 0)) {
 +      REXGPU_INFO(
-+          "occlusion query result for {:08X}: {} samples told to the game ({} on the host), {} "
-+          "draws, issued at swap {}, delivered at swap {} after {} events; begins {}, ends {}, "
-+          "host {}, delivered {}, superseded {}, dropped {}, cut {}, no host {}, unpaired {}, "
-+          "restarted {}, odd pairs {}",
-+          pending.end_address, clamped, raw_samples, pending.draws, pending.swap_counter,
-+          counter_, occlusion_events_ - pending.event_number, stats.begins, stats.ends,
-+          stats.issued, stats.delivered, stats.superseded, stats.dropped, stats.cut, stats.no_host,
-+          stats.unpaired, stats.restarted, stats.odd_pairs);
++          "occlusion query result for {:08X}: {} samples ({} on the host), {} draws, {} recorded, "
++          "issued at swap {}, delivered at swap {} after {} events and {:.2f} ms, {} into the "
++          "record; begins {}, ends {}, host {}, delivered {} (nonzero {}, written {}), superseded "
++          "{}, dropped {}, cut {}, no host {}, unpaired {}, restarted {}, sentinel lost {}, odd "
++          "pairs {}",
++          pending.end_address, clamped, raw_samples, pending.draws, pending.draws_recorded,
++          pending.swap_counter, counter_, occlusion_events_ - pending.event_number,
++          double(latency_us) / 1000.0, written ? "written" : "not written", stats.begins,
++          stats.ends, stats.issued, stats.delivered, stats.nonzero, stats.written,
++          stats.superseded, stats.dropped, stats.cut, stats.no_host, stats.unpaired,
++          stats.restarted, stats.sentinel_lost, stats.odd_pairs);
 +    }
 +  }
 +}
@@ -547,11 +754,90 @@ index bd96ce5..43451c9 100644
 +  occlusion_pending_.clear();
 +}
 +
++bool CommandProcessor::OcclusionDrawLogWanted() const {
++  if (!occlusion_guest_open_ || !occlusion_host_began_ || REXCVAR_GET(occlusion_query_log) <= 0) {
++    return false;
++  }
++  const uint64_t query = occlusion_stats_.begins;
++  return query <= kOcclusionDrawLogFirstQueries || query % kOcclusionDrawLogEvery == 0;
++}
++
++void CommandProcessor::LogOcclusionDraw(const char* backend, const OcclusionDrawInfo& info) {
++  const RegisterFile& regs = *register_file_;
++  reg::RB_DEPTHCONTROL depth_control;
++  depth_control.value = info.depth_control;
++  reg::RB_DEPTHCONTROL prev_depth_control;
++  prev_depth_control.value = occlusion_prev_depth_control_;
++  REXGPU_INFO(
++      "occlusion draw {} of query {} ({}, swap {}, phase {:08X}): prim {} verts {}{} | depth ctl "
++      "{:08X} (z {} func {} write {} stencil {}) colour mask {:X} ps {} | RTs {:X} msaa {} | "
++      "viewport {},{} {}x{} z [{:.6f}, {:.6f}] clip {} f24 {} | scissor {},{} {}x{} | transfers "
++      "depth {} colour {} | before the query: z [{:.6f}, {:.6f}] ctl {:08X} (z {} func {} write "
++      "{}) | regs: mode {:08X} surface {:08X} depth {:08X} depthctl {:08X} colourmask {:08X} "
++      "colourctl {:08X} clip {:08X} vte {:08X} sc {:08X} window {:08X} scissor {:08X} {:08X} "
++      "vizq {:08X} | vport x {:.3f}+{:.3f} "
++      "y {:.3f}+{:.3f} z {:.6f}+{:.6f}",
++      occlusion_draw_in_query_ + 1, occlusion_stats_.begins, backend, counter_,
++      guest_marker_phase_, info.prim_type, info.host_vertex_count, info.indexed ? " indexed" : "",
++      info.depth_control, uint32_t(depth_control.z_enable), uint32_t(depth_control.zfunc),
++      uint32_t(depth_control.z_write_enable), uint32_t(depth_control.stencil_enable),
++      info.color_mask, info.pixel_shader ? "yes" : "no", info.bound_rts, info.host_msaa,
++      info.viewport[0], info.viewport[1], info.viewport[2], info.viewport[3], info.z_min,
++      info.z_max, info.depth_clip ? "on" : "off", info.convert_z_to_float24 ? "on" : "off",
++      info.scissor[0], info.scissor[1], info.scissor[2], info.scissor[3], info.transfers_depth,
++      info.transfers_colour, occlusion_prev_z_min_, occlusion_prev_z_max_,
++      occlusion_prev_depth_control_, uint32_t(prev_depth_control.z_enable),
++      uint32_t(prev_depth_control.zfunc), uint32_t(prev_depth_control.z_write_enable),
++      regs[XE_GPU_REG_RB_MODECONTROL], regs[XE_GPU_REG_RB_SURFACE_INFO],
++      regs[XE_GPU_REG_RB_DEPTH_INFO], regs[XE_GPU_REG_RB_DEPTHCONTROL],
++      regs[XE_GPU_REG_RB_COLOR_MASK], regs[XE_GPU_REG_RB_COLORCONTROL],
++      regs[XE_GPU_REG_PA_CL_CLIP_CNTL], regs[XE_GPU_REG_PA_CL_VTE_CNTL],
++      regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
++      regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
++      regs[XE_GPU_REG_PA_SC_VIZ_QUERY], regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE),
++      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
++      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
++      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
++      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
++      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET));
++  ++occlusion_draw_in_query_;
++}
++
  bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
                                                const char* opcode_name, uint32_t viz_query_condition,
                                                uint32_t count_remaining) {
+@@ -2383,8 +2786,29 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+       bool hdr_blend_overridden = HdrBeforeDraw();
+       // Temporal AA: the anti-aliasing pass goes before this draw.
+       taa_pending_ = TaaCheckDraw();
++      const bool occlusion_draw = occlusion_guest_open_ && occlusion_host_began_;
++      const uint64_t host_draws_recorded_before = host_draws_recorded_;
+       draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+                                  is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
++      if (occlusion_draw && host_draws_recorded_ == host_draws_recorded_before) {
++        // A draw inside a guest occlusion query that never reached the host GPU is counted as
++        // hidden: the log says which (the first few), and the stats say how many.
++        if (++occlusion_stats_.draws_left_out <= kOcclusionLeftOutLogMax &&
++            REXCVAR_GET(occlusion_query_log) > 0) {
++          const RegisterFile& regs = *register_file_;
++          REXGPU_INFO(
++              "occlusion draw left out of query {} (swap {}, phase {:08X}): prim {} verts {} "
++              "returned {} | regs: mode {:08X} surface {:08X} depth {:08X} depthctl {:08X} "
++              "colourmask {:08X} clip {:08X} sc {:08X} vizq {:08X}",
++              occlusion_stats_.begins, counter_, guest_marker_phase_,
++              uint32_t(vgt_draw_initiator.prim_type), uint32_t(vgt_draw_initiator.num_indices),
++              draw_succeeded ? "true" : "false", regs[XE_GPU_REG_RB_MODECONTROL],
++              regs[XE_GPU_REG_RB_SURFACE_INFO], regs[XE_GPU_REG_RB_DEPTH_INFO],
++              regs[XE_GPU_REG_RB_DEPTHCONTROL], regs[XE_GPU_REG_RB_COLOR_MASK],
++              regs[XE_GPU_REG_PA_CL_CLIP_CNTL], regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
++              regs[XE_GPU_REG_PA_SC_VIZ_QUERY]);
++        }
++      }
+       if (hdr_blend_overridden) {
+         (*register_file_)[reg::RB_BLENDCONTROL::rt_register_indices[0]] =
+             hdr_saved_blend_control_;
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index d35c107..0e5d481 100644
+index d35c107..2aa9912 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -224,73 +224,6 @@ std::string D3D12CommandProcessor::ShaderStorageReport(bool shutdown) {
@@ -653,7 +939,63 @@ index d35c107..0e5d481 100644
  
    // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
    if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
-@@ -5831,7 +5772,10 @@ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
+@@ -3178,6 +3119,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+ 
+   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
++  if (active_occlusion_query_.valid && REXCVAR_GET(occlusion_query_force_rasterization) &&
++      is_rasterization_done && pixel_shader == nullptr && !memexport_used &&
++      !normalized_depth_control.z_enable && !normalized_depth_control.stencil_enable &&
++      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
++    // Without a pixel shader and without depth / stencil, Direct3D 12 does not rasterize the draw
++    // at all (the way rasterization is switched off in it), so the query would count nothing; the
++    // console counts the samples that pass, and with no test all of them. A test that always
++    // passes, against the frame's depth target (the pipeline cache keeps it enabled).
++    normalized_depth_control.z_enable = 1;
++    normalized_depth_control.zfunc = xenos::CompareFunction::kAlways;
++    normalized_depth_control.z_write_enable = 0;
++  }
+ 
+   // Shader modifications.
+   uint32_t ps_param_gen_pos = UINT32_MAX;
+@@ -3484,6 +3437,36 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   SetPrimitiveTopology(primitive_topology);
+   // Must not call anything that may change the primitive topology from now on!
+ 
++  // The host draw is recorded from here (for the occlusion query log and counters).
++  OnHostDrawRecorded(viewport_info.z_min, viewport_info.z_max, normalized_depth_control.value);
++  if (active_occlusion_query_.valid && OcclusionDrawLogWanted()) {
++    OcclusionDrawInfo occlusion_draw_info;
++    occlusion_draw_info.prim_type = uint32_t(primitive_type);
++    occlusion_draw_info.host_vertex_count = primitive_processing_result.host_draw_vertex_count;
++    occlusion_draw_info.indexed = primitive_processing_result.index_buffer_type !=
++                                  PrimitiveProcessor::ProcessedIndexBufferType::kNone;
++    occlusion_draw_info.depth_control = normalized_depth_control.value;
++    occlusion_draw_info.color_mask = normalized_color_mask;
++    occlusion_draw_info.pixel_shader = pixel_shader != nullptr;
++    occlusion_draw_info.bound_rts = bound_depth_and_color_render_target_bits;
++    occlusion_draw_info.host_msaa = uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples);
++    for (uint32_t i = 0; i < 2; ++i) {
++      occlusion_draw_info.viewport[i] = viewport_info.xy_offset[i];
++      occlusion_draw_info.viewport[2 + i] = viewport_info.xy_extent[i];
++      occlusion_draw_info.scissor[i] = scissor.offset[i];
++      occlusion_draw_info.scissor[2 + i] = scissor.extent[i];
++    }
++    occlusion_draw_info.z_min = viewport_info.z_min;
++    occlusion_draw_info.z_max = viewport_info.z_max;
++    occlusion_draw_info.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
++    occlusion_draw_info.convert_z_to_float24 = convert_z_to_float24;
++    if (host_render_targets_used) {
++      render_target_cache_->GetLastUpdateTransferCounts(occlusion_draw_info.transfers_depth,
++                                                        occlusion_draw_info.transfers_colour);
++    }
++    LogOcclusionDraw("d3d12", occlusion_draw_info);
++  }
++
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+       PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
+@@ -5831,7 +5814,10 @@ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
  }
  
  void D3D12CommandProcessor::ShutdownOcclusionQueryResources() {
@@ -665,7 +1007,7 @@ index d35c107..0e5d481 100644
  
    if (occlusion_query_readback_ && occlusion_query_readback_mapping_) {
      occlusion_query_readback_->Unmap(0, nullptr);
-@@ -5849,35 +5793,11 @@ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out)
+@@ -5849,35 +5835,11 @@ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out)
    return true;
  }
  
@@ -704,7 +1046,7 @@ index d35c107..0e5d481 100644
    uint32_t host_index = 0;
    if (!AcquireOcclusionQueryIndex(host_index)) {
      return false;
-@@ -5885,51 +5805,71 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
+@@ -5885,51 +5847,71 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
    if (!BeginSubmission(true)) {
      return false;
    }
@@ -799,7 +1141,7 @@ index d35c107..0e5d481 100644
    return true;
  }
  
-@@ -5946,22 +5886,6 @@ uint64_t D3D12CommandProcessor::NormalizeOcclusionSamples(uint64_t samples) cons
+@@ -5946,22 +5928,6 @@ uint64_t D3D12CommandProcessor::NormalizeOcclusionSamples(uint64_t samples) cons
    return (samples + (scale >> 1)) / scale;
  }
  
@@ -822,8 +1164,42 @@ index d35c107..0e5d481 100644
  void D3D12CommandProcessor::WriteGammaRampSRV(bool is_pwl,
                                                D3D12_CPU_DESCRIPTOR_HANDLE handle) const {
    ID3D12Device* device = GetD3D12Provider().GetDevice();
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index c5136c8..8565923 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -1540,9 +1540,18 @@ bool PipelineCache::GetCurrentStateDescription(
+           description_out.stencil_back_func = description_out.stencil_front_func;
+         }
+       }
++      // A test that always passes, without writing, is removed from every guest draw
++      // (draw_util::GetNormalizedDepthControl); the command processor puts it back for a draw in an
++      // occlusion query that has nothing else for Direct3D 12 to rasterize with.
++      if (normalized_depth_control.z_enable &&
++          normalized_depth_control.zfunc == xenos::CompareFunction::kAlways &&
++          !normalized_depth_control.z_write_enable) {
++        description_out.depth_test_always = 1;
++      }
+       // If not binding the DSV, ignore the format in the hash.
+       if (description_out.depth_func != xenos::CompareFunction::kAlways ||
+-          description_out.depth_write || description_out.stencil_enable) {
++          description_out.depth_write || description_out.stencil_enable ||
++          description_out.depth_test_always) {
+         description_out.depth_format =
+             xenos::DepthRenderTargetFormat(bound_depth_and_color_render_target_formats[0]);
+         depth_stencil_bound_and_used = true;
+@@ -2994,7 +3003,8 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
+ 
+   if (!edram_rov_used) {
+     // Depth/stencil.
+-    if (description.depth_func != xenos::CompareFunction::kAlways || description.depth_write) {
++    if (description.depth_func != xenos::CompareFunction::kAlways || description.depth_write ||
++        description.depth_test_always) {
+       state_desc.DepthStencilState.DepthEnable = TRUE;
+       state_desc.DepthStencilState.DepthWriteMask =
+           description.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 491594c..13f4142 100644
+index 491594c..8b3f5de 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -741,72 +741,6 @@ std::string VulkanCommandProcessor::ShaderStorageReport(bool shutdown) {
@@ -922,7 +1298,50 @@ index 491594c..13f4142 100644
        // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
        if (prim_type == xenos::PrimitiveType::kRectangleList && !memexport_writes_possible &&
            !active_occlusion_query_.valid &&
-@@ -5819,7 +5759,10 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
+@@ -5132,6 +5072,42 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     }
+   }
+ 
++  // The host draw is recorded from here (for the occlusion query log and counters).
++  OnHostDrawRecorded(viewport_info.z_min, viewport_info.z_max, normalized_depth_control.value);
++  if (active_occlusion_query_.valid && OcclusionDrawLogWanted()) {
++    OcclusionDrawInfo occlusion_draw_info;
++    occlusion_draw_info.prim_type = uint32_t(prim_type);
++    occlusion_draw_info.host_vertex_count = primitive_processing_result.host_draw_vertex_count;
++    occlusion_draw_info.indexed = primitive_processing_result.index_buffer_type !=
++                                  PrimitiveProcessor::ProcessedIndexBufferType::kNone;
++    occlusion_draw_info.depth_control = normalized_depth_control.value;
++    occlusion_draw_info.color_mask = normalized_color_mask;
++    occlusion_draw_info.pixel_shader = pixel_shader != nullptr;
++    occlusion_draw_info.bound_rts = render_target_cache_->GetLastUpdateBoundRenderTargets();
++    occlusion_draw_info.host_msaa = uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples);
++    for (uint32_t i = 0; i < 2; ++i) {
++      occlusion_draw_info.viewport[i] = viewport_info.xy_offset[i];
++      occlusion_draw_info.viewport[2 + i] = viewport_info.xy_extent[i];
++    }
++    draw_util::Scissor occlusion_scissor;
++    draw_util::GetScissor(regs, occlusion_scissor);
++    for (uint32_t i = 0; i < 2; ++i) {
++      const uint32_t scale = i ? draw_resolution_scale_y : draw_resolution_scale_x;
++      occlusion_draw_info.scissor[i] = occlusion_scissor.offset[i] * scale;
++      occlusion_draw_info.scissor[2 + i] = occlusion_scissor.extent[i] * scale;
++    }
++    occlusion_draw_info.z_min = viewport_info.z_min;
++    occlusion_draw_info.z_max = viewport_info.z_max;
++    occlusion_draw_info.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
++    occlusion_draw_info.convert_z_to_float24 =
++        host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader();
++    if (host_render_targets_used) {
++      render_target_cache_->GetLastUpdateTransferCounts(occlusion_draw_info.transfers_depth,
++                                                        occlusion_draw_info.transfers_colour);
++    }
++    LogOcclusionDraw("vulkan", occlusion_draw_info);
++  }
++
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
+@@ -5819,7 +5795,10 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
  }
  
  void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
@@ -934,7 +1353,7 @@ index 491594c..13f4142 100644
  
    const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -5854,31 +5797,12 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
+@@ -5854,31 +5833,12 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
    return true;
  }
  
@@ -970,7 +1389,7 @@ index 491594c..13f4142 100644
    uint32_t host_index = 0;
    if (!AcquireOcclusionQueryIndex(host_index)) {
      return false;
-@@ -5887,52 +5811,91 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -5887,52 +5847,91 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -1075,7 +1494,7 @@ index 491594c..13f4142 100644
      VkMappedMemoryRange memory_range = {};
      memory_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
      memory_range.memory = occlusion_query_readback_memory_;
-@@ -5941,12 +5904,12 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -5941,12 +5940,12 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
          std::min(rex::round_up(VkDeviceSize(sizeof(uint64_t) * kMaxOcclusionQueries),
                                 vulkan_device->properties().nonCoherentAtomSize),
                   occlusion_query_readback_memory_size_);
@@ -1091,7 +1510,7 @@ index 491594c..13f4142 100644
    return true;
  }
  
-@@ -5963,24 +5926,6 @@ uint64_t VulkanCommandProcessor::NormalizeOcclusionSamples(uint64_t samples) con
+@@ -5963,24 +5962,6 @@ uint64_t VulkanCommandProcessor::NormalizeOcclusionSamples(uint64_t samples) con
    return (samples + (scale >> 1)) / scale;
  }
  
@@ -1116,7 +1535,7 @@ index 491594c..13f4142 100644
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
-@@ -6399,6 +6344,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -6399,6 +6380,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      assert_false(scratch_buffer_used_);
  
      if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
