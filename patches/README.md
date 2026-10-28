@@ -1692,7 +1692,7 @@ The genuine dithering stays: foliage, the distant trees' billboards and the edge
 - `IssueCopy` takes its fast path (the resolve and nothing else) when the option is empty, as before; the rules are matched by the same function as the readback's (`FindMatchingReadbackRule`).
 - Both backends. At native resolution the copy is not reached.
 
-**Status.** Written from the SDK's code and the trace; compiled by CI (D3D12 and Vulkan sources); not run when this was written (the chain `rainfix2` runs it). The downscale takes one host pixel of each block (as the readback does; `readback_resolve_half_pixel_offset` moves it to the block's centre); its layout assumption holds for 8 bytes a pixel at 2x2 (the rain's resolves) and is approximate elsewhere (derived from the scaled addressing of the SDK's shaders, `launcher/dev/rain-unscaled-copy-2026-10-28.md`); not measured. Nothing ran on Linux or the PS5.
+**Status.** Written from the SDK's code and the trace; compiled by CI (D3D12 and Vulkan sources); not run when this was written (the chain `rainfix2` runs it). The downscale takes one host pixel of each block (as the readback does; `readback_resolve_half_pixel_offset` moves it to the block's centre); its layout assumption is exact for 8 bytes a pixel at 2x2 (the rain's resolves), reads a pixel of the right block at 3x3, and reads a neighbour's pixel for half or more of the pixels at 4 bytes or less (checked by arithmetic against the scaled addressing of the SDK's shaders: `launcher/dev/scaled-resolve-layout-check.py`, `launcher/dev/rain-unscaled-copy-2026-10-28.md`; that also applies to the vinyl readback at 2x and 3x). Nothing ran on Linux or the PS5.
 
 | Change | Files | Affects |
 |---|---|---|

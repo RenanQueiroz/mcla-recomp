@@ -70,17 +70,29 @@ The game option `mcla_rain_unscaled_copy` (default on; next start) sets the defa
 resolve has that length, pitch, height and format (read: the 1x log has four of 128x128 with the format 37 and 17 of 128x128 with the format 6). The earlier attempt `mcla_rain_readback` is removed (it was
 never in a release).
 
-## What the downscale takes (read; it applies to the vinyl readback as well)
+## What the downscale takes (checked by arithmetic: `launcher/dev/scaled-resolve-layout-check.py`; it applies to the vinyl readback as well)
 
-The pass takes, for each guest pixel, the host pixel at slot `pixel * scale_x * scale_y` of the scaled data (the top-left of its block; `readback_resolve_half_pixel_offset` moves it to the block's centre). The scaled
-layout of this SDK (`XeTextureScaledTiledOffset` in the xenia sources the SDK's shaders are built from, `texture_address.xesli`) keeps host pixels in sub-units of N x 1 (N = 2 for 8 bytes a pixel, 4 for 4 bytes,
-8 for 2 and 1), column-major inside one guest unit, not as one contiguous block per guest pixel. Worked out by hand from that function (not run): for 8 bytes a pixel at 2x2 the pass's slot is exactly the top-left host
-pixel; at 3x3 it is a host pixel inside the right guest pixel's block, but one row down; for 4 bytes a pixel (the vinyl texture, `8_8_8_8`) at 2x2 every second guest pixel takes the value of its left neighbour
-(host pixel (0,1) of the left pixel's block). A particle's state is probably the same over a block (inferred: the update pass samples the scaled state textures at the guest texel), so the rain's data should not be
-affected at 2x or 3x; the vinyl readback at 2x and 3x may be (not measured; it was checked at 1x only, where nothing is downscaled).
+The pass takes, for each guest pixel, the host pixel at slot `pixel * scale_x * scale_y` of the scaled data (meant as the top-left of its block; `readback_resolve_half_pixel_offset` moves it to the block's
+centre). The scaled layout of this SDK (`XeTextureScaledTiledOffset` in the xenia sources the SDK's shaders are built from, `texture_address.xesli`) keeps host pixels in sub-units of N x 1 (N = 2 for 8 bytes a
+pixel, 4 for 4 bytes, 8 for 2 and 1), column-major inside one guest unit, not as one contiguous block per guest pixel. The script transcribes that function and the tiled address and asks, for a 64x64 texture,
+where the pass's read lands (run 2026-10-28):
 
-The trace of the 2x readback runs showed the first two texels of all four vertex buffers equal in the guest's memory (`4049BCE1C198715E4049BCE1C198715E`), while the 1x data (shared memory) has them different. Not
-explained yet. The layer prints 32 bytes now (four texels) of each buffer; the chain's fix arms show whether the shared memory has the same pairs, and one arm turns the half-pixel offset on.
+| bytes a pixel | scale | top-left host pixel of the block | a host pixel of the pixel's own block |
+|---|---|---|---|
+| 8 (the rain's resolves) | 2x2 | 4096 of 4096 | 4096 of 4096 |
+| 8 | 3x3 | 2048 of 4096 | 4096 of 4096 |
+| 4 (the custom vinyl texture, `8_8_8_8`) | 2x2 | 2048 of 4096 | 2048 of 4096 |
+| 4 | 3x3 | 1024 of 4096 | 3072 of 4096 |
+| 2 | 2x2 / 3x3 | 1024 / 512 | 1024 / 2048 |
+| 1 | 2x2 / 3x3 | 1024 / 512 | 1024 / 2048 |
+
+So for the rain the data comes out as the simulation wrote it at 2x, and at 3x from a host pixel of the right block (the state is probably the same over a block: inferred), but the vinyl readback at 2x and 3x
+reads a neighbour's pixel for half or a quarter of the pixels (every second pixel repeats its left neighbour at 2x; not looked at in a picture; the vinyl fix was checked at 1x, where nothing is downscaled). A pass
+that is right for every size and scale (the unit-based inverse in the script matches the top-left host pixel for 4096 of 4096 in every row above) needs a new shader; xenia-canary has one for its own layout.
+
+The trace of the 2x readback runs showed the first two texels of all four vertex buffers equal in the guest's memory (`4049BCE1C198715E4049BCE1C198715E`), while the 1x data (shared memory) has them different. The
+pass is exact for these resolves at 2x (table), so the equal pair is in the scaled data itself (the simulation at 2x), not made by the pass. Not explained yet. The layer prints 32 bytes now (four texels) of each
+buffer; the chain's fix arms show whether the shared memory has the same pairs, and one arm turns the half-pixel offset on.
 
 ## How xenia-canary handles it (read: the `canary_experimental` branch, commit `48b318a` of 2026-10-27; nothing of it was run)
 
