@@ -74,7 +74,7 @@ index 1e56c4f..f39335e 100644
    uint64_t current_submission_time_ = 0;
  
 diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
-index 62b783d..11efc63 100644
+index 62b783d..0789e6d 100644
 --- a/src/graphics/d3d12/texture_cache.cpp
 +++ b/src/graphics/d3d12/texture_cache.cpp
 @@ -604,8 +604,11 @@ bool D3D12TextureCache::Initialize() {
@@ -91,7 +91,7 @@ index 62b783d..11efc63 100644
      const D3D12_SHADER_BYTECODE load_shader_code_direct[] = {
          {shaders::texture_load_32bpb_direct_scaled_cs,
           sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
-@@ -1608,8 +1611,9 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+@@ -1608,9 +1611,11 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
    desc.SampleDesc.Quality = 0;
    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
    // Untiling through a buffer instead of using unordered access because copying
@@ -101,9 +101,71 @@ index 62b783d..11efc63 100644
 +  // resolution scaling, and texture_load_direct_unscaled, without), which is
 +  // often reloaded every frame.
    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
++  const DXGI_FORMAT plain_resource_format = desc.Format;
    DXGI_FORMAT direct_load_uav_format = GetDirectLoadUAVFormat(key, desc.Format);
    if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN) {
-@@ -1648,6 +1652,17 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+     desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+@@ -1622,32 +1627,59 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+   uint32_t heap_index = UINT32_MAX;
+   uint64_t heap_offset = 0, heap_size = 0;
+-  if (REXCVAR_GET(d3d12_texture_heaps)) {
+-    D3D12_RESOURCE_ALLOCATION_INFO allocation_info = device->GetResourceAllocationInfo(0, 1, &desc);
+-    if (allocation_info.SizeInBytes != UINT64_MAX &&
+-        AllocateTextureHeapRange(allocation_info.SizeInBytes, allocation_info.Alignment,
+-                                 heap_index, heap_offset)) {
+-      if (SUCCEEDED(device->CreatePlacedResource(texture_heaps_[heap_index].heap.Get(),
+-                                                 heap_offset, &desc, resource_state, nullptr,
+-                                                 IID_PPV_ARGS(&resource)))) {
+-        heap_size = allocation_info.SizeInBytes;
+-      } else {
+-        FreeTextureHeapRange(heap_index, heap_offset, allocation_info.SizeInBytes);
+-        heap_index = UINT32_MAX;
++  while (true) {
++    if (REXCVAR_GET(d3d12_texture_heaps)) {
++      D3D12_RESOURCE_ALLOCATION_INFO allocation_info =
++          device->GetResourceAllocationInfo(0, 1, &desc);
++      if (allocation_info.SizeInBytes != UINT64_MAX &&
++          AllocateTextureHeapRange(allocation_info.SizeInBytes, allocation_info.Alignment,
++                                   heap_index, heap_offset)) {
++        if (SUCCEEDED(device->CreatePlacedResource(texture_heaps_[heap_index].heap.Get(),
++                                                   heap_offset, &desc, resource_state, nullptr,
++                                                   IID_PPV_ARGS(&resource)))) {
++          heap_size = allocation_info.SizeInBytes;
++        } else {
++          FreeTextureHeapRange(heap_index, heap_offset, allocation_info.SizeInBytes);
++          heap_index = UINT32_MAX;
++        }
+       }
+     }
+-  }
+-  if (!resource &&
+-      FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesDefault,
+-                                             provider.GetHeapFlagCreateNotZeroed(), &desc,
+-                                             resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
+-    return nullptr;
++    if (resource ||
++        SUCCEEDED(device->CreateCommittedResource(
++            &ui::d3d12::util::kHeapPropertiesDefault, provider.GetHeapFlagCreateNotZeroed(), &desc,
++            resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
++      break;
++    }
++    if (direct_load_uav_format == DXGI_FORMAT_UNKNOWN) {
++      return nullptr;
++    }
++    // A host that does not accept unordered access for the format: the texture
++    // is loaded through a buffer, as without texture_load_direct (and
++    // texture_load_direct_unscaled).
++    direct_load_uav_format = DXGI_FORMAT_UNKNOWN;
++    desc.Format = plain_resource_format;
++    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
++    resource.Reset();
++    heap_index = UINT32_MAX;
++    heap_offset = 0;
++    heap_size = 0;
+   }
+   auto texture = new D3D12Texture(*this, key, resource.Get(), resource_state);
+   if (heap_index != UINT32_MAX) {
      texture->SetPlacement(heap_index, heap_offset, heap_size);
    }
    texture->SetDirectLoadUAVFormat(direct_load_uav_format);
@@ -121,7 +183,7 @@ index 62b783d..11efc63 100644
    return std::unique_ptr<Texture>(texture);
  }
  
-@@ -1873,9 +1888,15 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1873,9 +1905,15 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    // texture_load_direct: decode straight into the texture through an unsigned
    // integer UAV, without the buffer and the copy.
    bool direct_load = false;
@@ -134,13 +196,13 @@ index 62b783d..11efc63 100644
 +      (texture_resolution_scaled
 +           ? REXCVAR_GET(texture_load_direct)
 +           : (REXCVAR_GET(texture_load_direct_unscaled) && texture_key.resolved_unscaled &&
-+              texture_key.tiled)) &&
++              texture_key.tiled && !is_3d_tiling)) &&
 +      level_first == 0 && level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d) {
      DirectLoadShader direct_load_shader = GetDirectLoadShader(load_shader);
      if (direct_load_shader != kDirectLoadShaderUnknown &&
          load_pipelines_direct_[direct_load_shader]) {
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 793f6cc..b28afbd 100644
+index 793f6cc..9553537 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
 @@ -131,6 +131,13 @@ REXCVAR_DEFINE_BOOL(texture_load_direct, true, "GPU",
@@ -241,25 +303,32 @@ index 793f6cc..b28afbd 100644
        key_.GetWidth(), key_.GetHeight(), key_.GetDepthOrArraySize(), key_.GetLogDimensionName(),
        FormatInfo::Get(key_.format)->name, key_.mip_max_level + 1, key_.packed_mips ? "" : "un",
        key_.mip_max_level != 0 ? "s" : "", key_.base_page << 12, key_.pitch << 5, GetGuestBaseSize(),
-@@ -804,6 +848,26 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+@@ -804,6 +848,33 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
      }
    }
  
 +  // texture_load_direct_unscaled: a single-level tiled 2D texture of 32 or 64
 +  // bits a texel over memory that a resolve has written at native resolution is
 +  // created for loading straight into. Whether the host can is up to its texture
-+  // cache (the format, and a pipeline for it).
++  // cache (the format, a pipeline for it, and IsDirectLoadPossible: the base not
++  // in the packed mip tail). This runs whenever the bindings are looked up again,
++  // which is every frame after a resolve, so the extent is the cheap upper bound
++  // of the tiled base level (rows of the pitch, a multiple of 32, for the height
++  // rounded up to a tile) rather than the guest layout; it only picks the pages
++  // to look at.
 +  if (resolved_pages_ && !key.scaled_resolve && key.tiled &&
 +      key.dimension == xenos::DataDimension::k2DOrStacked && !key.mip_max_level &&
-+      key.GetDepthOrArraySize() == 1 && REXCVAR_GET(texture_load_direct_unscaled)) {
++      key.GetDepthOrArraySize() == 1 && (key.GetWidth() > 16 || key.GetHeight() > 16) &&
++      REXCVAR_GET(texture_load_direct_unscaled)) {
 +    const FormatInfo* direct_format_info = FormatInfo::Get(key.format);
 +    uint32_t direct_bytes_per_block = direct_format_info->bytes_per_block();
 +    if (direct_format_info->block_width == 1 && direct_format_info->block_height == 1 &&
 +        (direct_bytes_per_block == 4 || direct_bytes_per_block == 8)) {
-+      texture_util::TextureGuestLayout direct_guest_layout = key.GetGuestLayout();
-+      uint32_t direct_base_size = direct_guest_layout.base.level_data_extent_bytes;
-+      if (direct_guest_layout.packed_level != 0 && direct_base_size &&
-+          IsRangeResolvedUnscaled(key.base_page << 12, direct_base_size)) {
++      uint64_t direct_base_size =
++          uint64_t(key.pitch << 5) *
++          rex::align(key.GetHeight(), xenos::kTextureTileWidthHeight) * direct_bytes_per_block;
++      if (IsRangeResolvedUnscaled(key.base_page << 12,
++                                  uint32_t(std::min(direct_base_size, uint64_t(UINT32_MAX))))) {
 +        key.resolved_unscaled = 1;
 +      }
 +    }
@@ -268,7 +337,7 @@ index 793f6cc..b28afbd 100644
    auto get_host_extent = [this, &key](uint32_t& host_width_out, uint32_t& host_height_out,
                                        uint32_t& host_depth_or_array_size_out) {
      host_width_out = key.GetWidth();
-@@ -1092,6 +1156,35 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled, uint32_t lengt
+@@ -1092,6 +1163,35 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled, uint32_t lengt
    return false;
  }
  
@@ -305,28 +374,10 @@ index 793f6cc..b28afbd 100644
      const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
      uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index e474eb9..1d8995c 100644
+index e474eb9..971f60e 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
-@@ -1291,6 +1291,17 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
-   std::unique_ptr<VulkanTexture> texture(new VulkanTexture(*this, key, image, allocation));
-   texture->set_storage_copy_format(storage_copy_format);
-   texture->set_image_format(formats[0]);
-+  if (key.resolved_unscaled && storage_copy_format != VK_FORMAT_UNDEFINED) {
-+    // The first few, to see that texture_load_direct_unscaled applies to anything.
-+    static uint32_t direct_unscaled_logged = 0;
-+    if (direct_unscaled_logged < 24) {
-+      ++direct_unscaled_logged;
-+      REXGPU_INFO(
-+          "VulkanTextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
-+          "straight in",
-+          key.GetWidth(), key.GetHeight(), FormatInfo::Get(key.format)->name, key.base_page << 12);
-+    }
-+  }
-   return texture;
- }
- 
-@@ -1313,8 +1324,14 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+@@ -1313,8 +1313,14 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
                                                    uint32_t view_format_count) {
    // Only single-level 2D (and stacked and cube) textures: the copy is of one
    // level, and 3D images would need another shader.
@@ -343,7 +394,26 @@ index e474eb9..1d8995c 100644
      return VK_FORMAT_UNDEFINED;
    }
    // The format the load writes in (as in LoadTextureDataFromResidentMemoryImpl).
-@@ -1374,7 +1391,8 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+@@ -1330,6 +1336,18 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+   if (host_format.load_shader == kLoadShaderIndexUnknown || host_format.block_compressed) {
+     return VK_FORMAT_UNDEFINED;
+   }
++  if (direct_load_unscaled) {
++    // Only for the load shaders that have a direct one (32bpb, 64bpb and the two
++    // depth ones, not the conversions) with a pipeline.
++    DirectLoadShader direct_load_shader = GetDirectLoadShader(host_format.load_shader);
++    if (direct_load_shader == kDirectLoadShaderUnknown ||
++        load_direct_pipelines_[direct_load_shader] == VK_NULL_HANDLE) {
++      direct_load_unscaled = false;
++      if (storage_copy_pipeline_layout_ == VK_NULL_HANDLE) {
++        return VK_FORMAT_UNDEFINED;
++      }
++    }
++  }
+   // The unsigned integer view must be in the same compatibility class as the
+   // view formats: only plain 32, 64 and 128 bit color formats.
+   uint32_t texel_size = 0;
+@@ -1374,7 +1392,8 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
    if (key.scaled_resolve) {
      size_bytes *= uint64_t(draw_resolution_scale_x()) * draw_resolution_scale_y();
    }
@@ -353,7 +423,25 @@ index e474eb9..1d8995c 100644
      return VK_FORMAT_UNDEFINED;
    }
    VkFormat storage_copy_format = texel_size == 4   ? VK_FORMAT_R32_UINT
-@@ -1558,7 +1576,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1389,6 +1408,17 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
+       return VK_FORMAT_UNDEFINED;
+     }
+   }
++  if (direct_load_unscaled) {
++    // The first few, to see that texture_load_direct_unscaled applies to anything.
++    static uint32_t direct_unscaled_logged = 0;
++    if (direct_unscaled_logged < 24) {
++      ++direct_unscaled_logged;
++      REXGPU_INFO(
++          "VulkanTextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
++          "straight in",
++          key.GetWidth(), key.GetHeight(), FormatInfo::Get(key.format)->name, key.base_page << 12);
++    }
++  }
+   return storage_copy_format;
+ }
+ 
+@@ -1558,7 +1588,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    // copy view, without the scratch buffer and the copy.
    VkPipeline pipeline_direct = VK_NULL_HANDLE;
    VkImageView direct_load_view = VK_NULL_HANDLE;
@@ -364,11 +452,11 @@ index e474eb9..1d8995c 100644
 +  if ((texture_key.scaled_resolve
 +           ? REXCVAR_GET(texture_load_direct)
 +           : (REXCVAR_GET(texture_load_direct_unscaled) && texture_key.resolved_unscaled &&
-+              texture_key.tiled)) &&
++              texture_key.tiled && !is_3d_tiling)) &&
        vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED && level_first == 0 &&
        level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d &&
        pipeline_float_convert == VK_NULL_HANDLE) {
-@@ -3385,55 +3409,59 @@ bool VulkanTextureCache::Initialize() {
+@@ -3385,55 +3421,59 @@ bool VulkanTextureCache::Initialize() {
          }
        }
      }
