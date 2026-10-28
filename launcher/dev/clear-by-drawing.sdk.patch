@@ -1,0 +1,273 @@
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 1ddbdfc..3624294 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -72,6 +72,7 @@ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+ namespace shaders {
++#include "../shaders/bytecode/d3d12_5_1/clear_float4_ps.h"
+ #include "../shaders/bytecode/d3d12_5_1/clear_uint2_ps.h"
+ #include "../shaders/bytecode/d3d12_5_1/fullscreen_cw_vs.h"
+ #include "../shaders/bytecode/d3d12_5_1/hdr_fullscreen_vs.h"
+@@ -5347,11 +5348,92 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+           command_processor_.SubmitBarriers();
+           TmpPixMark(command_list, ">cbar");  // TMPCS
+           TmpPixMark(command_list, "<cclr");  // TMPCS
+-          command_list.D3DClearRenderTargetView(
+-              dest_d3d12_rt.descriptor_load_separate().IsValid()
+-                  ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
+-                  : dest_d3d12_rt.descriptor_draw().GetHandle(),
+-              color_clear_value, 1, &clear_rect);
++          // TMPCD: MCLA_CLEAR_BY_DRAWING=1 draws the rectangle with the clear color instead
++          // of calling ClearRenderTargetView (for the views that are the draw ones).
++          static const bool tmpcd_enabled = [] {
++            char tmpcd_env[8];
++            return GetEnvironmentVariableA("MCLA_CLEAR_BY_DRAWING", tmpcd_env, sizeof(tmpcd_env)) != 0;
++          }();
++          static ID3D12RootSignature* tmpcd_root_signature = nullptr;
++          static std::unordered_map<uint64_t, ID3D12PipelineState*> tmpcd_pipelines;
++          ID3D12PipelineState* tmpcd_pipeline = nullptr;
++          if (tmpcd_enabled && !dest_d3d12_rt.descriptor_load_separate().IsValid()) {
++            DXGI_FORMAT tmpcd_format = GetColorDrawDXGIFormat(dest_rt_key.GetColorFormat());
++            uint64_t tmpcd_key = (uint64_t(tmpcd_format) << 8) | uint64_t(dest_rt_key.msaa_samples);
++            auto tmpcd_it = tmpcd_pipelines.find(tmpcd_key);
++            if (tmpcd_it != tmpcd_pipelines.end()) {
++              tmpcd_pipeline = tmpcd_it->second;
++            } else {
++              if (!tmpcd_root_signature) {
++                D3D12_ROOT_PARAMETER tmpcd_constants;
++                tmpcd_constants.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++                tmpcd_constants.Constants.ShaderRegister = 0;
++                tmpcd_constants.Constants.RegisterSpace = 0;
++                tmpcd_constants.Constants.Num32BitValues = 4;
++                tmpcd_constants.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++                D3D12_ROOT_SIGNATURE_DESC tmpcd_root_desc;
++                tmpcd_root_desc.NumParameters = 1;
++                tmpcd_root_desc.pParameters = &tmpcd_constants;
++                tmpcd_root_desc.NumStaticSamplers = 0;
++                tmpcd_root_desc.pStaticSamplers = nullptr;
++                tmpcd_root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
++                tmpcd_root_signature = ui::d3d12::util::CreateRootSignature(provider, tmpcd_root_desc);
++              }
++              if (tmpcd_root_signature) {
++                D3D12_GRAPHICS_PIPELINE_STATE_DESC tmpcd_desc = {};
++                tmpcd_desc.pRootSignature = tmpcd_root_signature;
++                tmpcd_desc.VS.pShaderBytecode = shaders::fullscreen_cw_vs;
++                tmpcd_desc.VS.BytecodeLength = sizeof(shaders::fullscreen_cw_vs);
++                tmpcd_desc.PS.pShaderBytecode = shaders::clear_float4_ps;
++                tmpcd_desc.PS.BytecodeLength = sizeof(shaders::clear_float4_ps);
++                tmpcd_desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
++                    D3D12_COLOR_WRITE_ENABLE_ALL;
++                tmpcd_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++                tmpcd_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++                tmpcd_desc.RasterizerState.DepthClipEnable = TRUE;
++                tmpcd_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++                tmpcd_desc.NumRenderTargets = 1;
++                tmpcd_desc.RTVFormats[0] = tmpcd_format;
++                if (dest_rt_key.msaa_samples == xenos::MsaaSamples::k2X && !msaa_2x_supported_) {
++                  tmpcd_desc.SampleMask = 0b1001;
++                  tmpcd_desc.SampleDesc.Count = 4;
++                } else {
++                  tmpcd_desc.SampleMask = UINT_MAX;
++                  tmpcd_desc.SampleDesc.Count = UINT(1) << UINT(dest_rt_key.msaa_samples);
++                }
++                if (FAILED(device->CreateGraphicsPipelineState(&tmpcd_desc,
++                                                               IID_PPV_ARGS(&tmpcd_pipeline)))) {
++                  tmpcd_pipeline = nullptr;
++                }
++              }
++              tmpcd_pipelines.emplace(tmpcd_key, tmpcd_pipeline);
++            }
++          }
++          if (tmpcd_pipeline) {
++            D3D12_CPU_DESCRIPTOR_HANDLE tmpcd_rtv = dest_d3d12_rt.descriptor_draw().GetHandle();
++            command_list.D3DOMSetRenderTargets(1, &tmpcd_rtv, FALSE, nullptr);
++            are_current_command_list_render_targets_valid_ = false;
++            D3D12_VIEWPORT tmpcd_viewport;
++            tmpcd_viewport.TopLeftX = float(clear_rect.left);
++            tmpcd_viewport.TopLeftY = float(clear_rect.top);
++            tmpcd_viewport.Width = float(clear_rect.right - clear_rect.left);
++            tmpcd_viewport.Height = float(clear_rect.bottom - clear_rect.top);
++            tmpcd_viewport.MinDepth = 0.0f;
++            tmpcd_viewport.MaxDepth = 1.0f;
++            command_processor_.SetViewport(tmpcd_viewport);
++            command_processor_.SetScissorRect(clear_rect);
++            command_processor_.SetExternalGraphicsRootSignature(tmpcd_root_signature);
++            command_list.D3DSetGraphicsRoot32BitConstants(0, 4, color_clear_value, 0);
++            command_processor_.SetExternalPipeline(tmpcd_pipeline);
++            command_processor_.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++            command_list.D3DDrawInstanced(3, 1, 0, 0);
++          } else {
++            command_list.D3DClearRenderTargetView(
++                dest_d3d12_rt.descriptor_load_separate().IsValid()
++                    ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
++                    : dest_d3d12_rt.descriptor_draw().GetHandle(),
++                color_clear_value, 1, &clear_rect);
++          }
+           TmpPixMark(command_list, ">cclr");  // TMPCS
+         }
+       }
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/clear_float4_ps.h b/src/graphics/shaders/bytecode/d3d12_5_1/clear_float4_ps.h
+new file mode 100644
+index 0000000..8de2252
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/clear_float4_ps.h
+@@ -0,0 +1,157 @@
++#if 0
++//
++// Generated by Microsoft (R) HLSL Shader Compiler 10.1
++//
++//
++// Buffer Definitions: 
++//
++// cbuffer XeClearColor
++// {
++//
++//   float4 xe_clear_color;             // Offset:    0 Size:    16
++//
++// }
++//
++//
++// Resource Bindings:
++//
++// Name                                 Type  Format         Dim      ID      HLSL Bind  Count
++// ------------------------------ ---------- ------- ----------- ------- -------------- ------
++// XeClearColor                      cbuffer      NA          NA     CB0            cb0      1 
++//
++//
++//
++// Input signature:
++//
++// Name                 Index   Mask Register SysValue  Format   Used
++// -------------------- ----- ------ -------- -------- ------- ------
++// no Input
++//
++// Output signature:
++//
++// Name                 Index   Mask Register SysValue  Format   Used
++// -------------------- ----- ------ -------- -------- ------- ------
++// SV_Target                0   xyzw        0   TARGET   float   xyzw
++//
++ps_5_1
++dcl_globalFlags refactoringAllowed
++dcl_constantbuffer CB0[0:0][1], immediateIndexed, space=0
++dcl_output o0.xyzw
++mov o0.xyzw, CB0[0][0].xyzw
++ret 
++// Approximately 2 instruction slots used
++#endif
++
++const BYTE clear_float4_ps[] =
++{
++     68,  88,  66,  67, 202, 220, 
++    185,  72,   8,  39,  69, 133, 
++     48, 107, 184, 108, 123, 161, 
++     23, 102,   1,   0,   0,   0, 
++    144,   2,   0,   0,   5,   0, 
++      0,   0,  52,   0,   0,   0, 
++     84,   1,   0,   0, 100,   1, 
++      0,   0, 152,   1,   0,   0, 
++    244,   1,   0,   0,  82,  68, 
++     69,  70,  24,   1,   0,   0, 
++      1,   0,   0,   0, 116,   0, 
++      0,   0,   1,   0,   0,   0, 
++     60,   0,   0,   0,   1,   5, 
++    255, 255,   0, 133,   0,   0, 
++    240,   0,   0,   0,  19,  19, 
++     68,  37,  60,   0,   0,   0, 
++     24,   0,   0,   0,  40,   0, 
++      0,   0,  40,   0,   0,   0, 
++     36,   0,   0,   0,  12,   0, 
++      0,   0,   0,   0,   0,   0, 
++    100,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      1,   0,   0,   0,   1,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,  88, 101, 
++     67, 108, 101,  97, 114,  67, 
++    111, 108, 111, 114,   0, 171, 
++    171, 171, 100,   0,   0,   0, 
++      1,   0,   0,   0, 140,   0, 
++      0,   0,  16,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0, 180,   0,   0,   0, 
++      0,   0,   0,   0,  16,   0, 
++      0,   0,   2,   0,   0,   0, 
++    204,   0,   0,   0,   0,   0, 
++      0,   0, 255, 255, 255, 255, 
++      0,   0,   0,   0, 255, 255, 
++    255, 255,   0,   0,   0,   0, 
++    120, 101,  95,  99, 108, 101, 
++     97, 114,  95,  99, 111, 108, 
++    111, 114,   0, 102, 108, 111, 
++     97, 116,  52,   0, 171, 171, 
++      1,   0,   3,   0,   1,   0, 
++      4,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0, 195,   0,   0,   0, 
++     77, 105,  99, 114, 111, 115, 
++    111, 102, 116,  32,  40,  82, 
++     41,  32,  72,  76,  83,  76, 
++     32,  83, 104,  97, 100, 101, 
++    114,  32,  67, 111, 109, 112, 
++    105, 108, 101, 114,  32,  49, 
++     48,  46,  49,   0,  73,  83, 
++     71,  78,   8,   0,   0,   0, 
++      0,   0,   0,   0,   8,   0, 
++      0,   0,  79,  83,  71,  78, 
++     44,   0,   0,   0,   1,   0, 
++      0,   0,   8,   0,   0,   0, 
++     32,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      3,   0,   0,   0,   0,   0, 
++      0,   0,  15,   0,   0,   0, 
++     83,  86,  95,  84,  97, 114, 
++    103, 101, 116,   0, 171, 171, 
++     83,  72,  69,  88,  84,   0, 
++      0,   0,  81,   0,   0,   0, 
++     21,   0,   0,   0, 106,   8, 
++      0,   1,  89,   0,   0,   7, 
++     70, 142,  48,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   1,   0, 
++      0,   0,   0,   0,   0,   0, 
++    101,   0,   0,   3, 242,  32, 
++     16,   0,   0,   0,   0,   0, 
++     54,   0,   0,   7, 242,  32, 
++     16,   0,   0,   0,   0,   0, 
++     70, 142,  48,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,  62,   0, 
++      0,   1,  83,  84,  65,  84, 
++    148,   0,   0,   0,   2,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   1,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   1,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   1,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0,   0,   0,   0,   0, 
++      0,   0
++};

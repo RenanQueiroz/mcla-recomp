@@ -1,0 +1,191 @@
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index e23291a..dfea212 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -54,6 +54,15 @@ REXCVAR_DEFINE_BOOL(skip_overwritten_transfers, true, "GPU",
+                     "such as a full-screen post-processing pass), only where it can be proven")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++// TMPOVW: development check of skip_overwritten_transfers (launcher/dev/overwrite-poison.sdk.patch).
++static int g_tmp_ovw_line = 0;
++REXCVAR_DEFINE_BOOL(tmp_overwrite_poison, false, "GPU",
++                    "TMPOVW: fill what skip_overwritten_transfers doesn't transfer with a junk value")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(tmp_overwrite_log, false, "GPU",
++                    "TMPOVW: log the draws that need ownership transfers and whether they are skipped")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_UINT32(edram_tiles, 2048, "GPU",
+                       "Size of the EDRAM emulated, in tiles: 2048 as on the console, or 4096 for "
+                       "titles patched to draw more at once than the console could hold (a "
+@@ -770,6 +779,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+   // If the draw rewrites a rectangle of the color render targets completely,
+   // there is no need to transfer what's there into them. Looked for only if a
+   // transfer would happen (the analysis runs the vertex shader on the CPU).
++  g_tmp_ovw_line = 0;  // TMPOVW
+   if (!interlock_barrier_only && pixel_shader && is_rasterization_done &&
+       regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kRectangleList &&
+       REXCVAR_GET(skip_overwritten_transfers)) {
+@@ -802,6 +812,50 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     return true;
+   }
+ 
++  // TMPOVW: the draws that took ownership with transfers, or without them because of the rectangle.
++  if (REXCVAR_GET(tmp_overwrite_log) && pixel_shader) {
++    uint32_t tmp_transfer_count = 0, tmp_tiles = 0;
++    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++      tmp_transfer_count += uint32_t(last_update_transfers_[i].size());
++      for (const Transfer& tmp_transfer : last_update_transfers_[i]) {
++        tmp_tiles += tmp_transfer.end_tiles - tmp_transfer.start_tiles;
++      }
++    }
++    static uint32_t tmp_logged = 0;
++    if ((tmp_transfer_count || last_update_overwritten_rectangle_valid_) && tmp_logged < 6000) {
++      ++tmp_logged;
++      auto tmp_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++      REXGPU_INFO(
++          "TMPOVW: {} vs {:016X} ps {:016X} prim {} n {} msaa {} depth {} mask {:X} rect {},{} {}x{} "
++          "remaining transfers {} ({} tiles) line {}",
++          last_update_overwritten_rectangle_valid_ ? "CUT" : "kept", vertex_shader.ucode_data_hash(),
++          pixel_shader->ucode_data_hash(), uint32_t(tmp_initiator.prim_type),
++          uint32_t(tmp_initiator.num_indices), uint32_t(msaa_samples),
++          uint32_t(normalized_depth_control.z_enable || normalized_depth_control.stencil_enable),
++          normalized_color_mask, last_update_overwritten_rectangle_.x_pixels,
++          last_update_overwritten_rectangle_.y_pixels, last_update_overwritten_rectangle_.width_pixels,
++          last_update_overwritten_rectangle_.height_pixels, tmp_transfer_count, tmp_tiles,
++          g_tmp_ovw_line);
++    }
++  }
++
++  // TMPOVW: instead of leaving the old contents where the transfers were
++  // skipped, fill that area with a value that doesn't look like anything, to
++  // find out if the draw doesn't rewrite all of it (a stale value that happens
++  // to be right would hide that).
++  if (last_update_overwritten_rectangle_valid_ && REXCVAR_GET(tmp_overwrite_poison)) {
++    static const std::vector<Transfer> tmp_no_transfers;
++    for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++      if (!(depth_and_color_rts_used_bits & (uint32_t(1) << i)) || !rts[i]) {
++        continue;
++      }
++      RenderTarget* tmp_poison_rt = rts[i];
++      uint64_t tmp_poison_value = UINT64_C(0x8040C0208040C020);
++      TransferAndClearRenderTargets(1, &tmp_poison_rt, &tmp_no_transfers, &tmp_poison_value,
++                                    nullptr, last_update_overwritten_rectangle_);
++    }
++  }
++
+   // If everything succeeded, update the used render targets.
+   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+     last_update_used_render_targets_[i] =
+@@ -1375,7 +1429,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+       (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type) &&
+        regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+            xenos::VGTOutputPath::kTessellationEnable)) {
+-    return false;
++    { g_tmp_ovw_line = __LINE__; return false; }
+   }
+   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+@@ -1383,7 +1437,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+       pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
+       pa_su_sc_mode_cntl.poly_offset_front_enable || pa_su_sc_mode_cntl.poly_offset_back_enable ||
+       pa_su_sc_mode_cntl.poly_offset_para_enable) {
+-    return false;
++    { g_tmp_ovw_line = __LINE__; return false; }
+   }
+ 
+   // Nothing but color, all components of every color render target replaced:
+@@ -1391,7 +1445,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+   // tested away.
+   if (normalized_depth_control.z_enable || normalized_depth_control.stencil_enable ||
+       !normalized_color_mask) {
+-    return false;
++    { g_tmp_ovw_line = __LINE__; return false; }
+   }
+   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+     uint32_t rt_write_mask = (normalized_color_mask >> (4 * i)) & 0b1111;
+@@ -1399,7 +1453,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+       continue;
+     }
+     if (rt_write_mask != 0b1111) {
+-      return false;
++      { g_tmp_ovw_line = __LINE__; return false; }
+     }
+     auto rb_blendcontrol =
+         regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
+@@ -1409,7 +1463,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+         rb_blendcontrol.alpha_srcblend != xenos::BlendFactor::kOne ||
+         rb_blendcontrol.alpha_destblend != xenos::BlendFactor::kZero ||
+         rb_blendcontrol.alpha_comb_fcn != xenos::BlendOp::kAdd) {
+-      return false;
++      { g_tmp_ovw_line = __LINE__; return false; }
+     }
+   }
+   auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+@@ -1417,12 +1471,12 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+       (rb_colorcontrol.alpha_test_enable &&
+        rb_colorcontrol.alpha_func != xenos::CompareFunction::kAlways) ||
+       rb_colorcontrol.alpha_to_mask_enable) {
+-    return false;
++    { g_tmp_ovw_line = __LINE__; return false; }
+   }
+   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+   xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
+   if (msaa_samples > xenos::MsaaSamples::k4X || !rb_surface_info.surface_pitch) {
+-    return false;
++    { g_tmp_ovw_line = __LINE__; return false; }
+   }
+ 
+   // The vertices, on the CPU. The vertex shader may fetch textures (the tone
+@@ -1449,7 +1503,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+   }
+   interpreter.SetExportSink(nullptr);
+   if (!vertices_known) {
+-    return false;
++    { g_tmp_ovw_line = __LINE__; return false; }
+   }
+ 
+   // The vertices in pixels, as the host shaders transform them: the division
+@@ -1479,7 +1533,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+     const ClearRectangleVertexExportSink& vertex = vertices[i];
+     float w = vertex.position[3];
+     if (vertex.killed || vertex.position_mask != 0b1111 || !(w > 0.0f) || !(w < FLT_MAX)) {
+-      return false;
++      { g_tmp_ovw_line = __LINE__; return false; }
+     }
+     // The factor the host shaders multiply by: 1 / W, or W as it is if the
+     // vertex shader gives 1 / W.
+@@ -1489,7 +1543,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+       // Not clipped away by the near and the far planes.
+       float z = vertex.position[2] * (pa_cl_vte_cntl.vtx_z_fmt ? 1.0f : w_factor);
+       if (!(z >= (pa_cl_clip_cntl.dx_clip_space_def ? 0.0f : -1.0f) && z <= 1.0f)) {
+-        return false;
++        { g_tmp_ovw_line = __LINE__; return false; }
+       }
+     }
+     for (uint32_t j = 0; j < 2; ++j) {
+@@ -1505,13 +1559,13 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+     if (!(edges[i][0] < edges[i][1]) || (a != edges[i][0] && a != edges[i][1]) ||
+         (b != edges[i][0] && b != edges[i][1]) || (c != edges[i][0] && c != edges[i][1]) ||
+         !(edges[i][0] > -4096.0f) || !(edges[i][1] < 4096.0f)) {
+-      return false;
++      { g_tmp_ovw_line = __LINE__; return false; }
+     }
+   }
+   for (uint32_t i = 0; i < 3; ++i) {
+     for (uint32_t j = i + 1; j < 3; ++j) {
+       if (pixels[i][0] == pixels[j][0] && pixels[i][1] == pixels[j][1]) {
+-        return false;
++        { g_tmp_ovw_line = __LINE__; return false; }
+       }
+     }
+   }
+@@ -1563,7 +1617,7 @@ bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
+                                            scissor.offset[i] + scissor.extent[i])));
+     high = std::min(high, int32_t(limits[i]));
+     if (low >= high) {
+-      return false;
++      { g_tmp_ovw_line = __LINE__; return false; }
+     }
+     covered[i][0] = low;
+     covered[i][1] = high;

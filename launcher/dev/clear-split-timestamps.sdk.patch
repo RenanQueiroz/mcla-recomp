@@ -1,0 +1,109 @@
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 8fc2945..d73a258 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -2066,6 +2066,17 @@ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(Rend
+   resource_desc.Width = key.GetWidth() * draw_resolution_scale_x();
+   resource_desc.Height =
+       GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) * draw_resolution_scale_y();
++  {  // TMPCS: a diagnosis, not a feature: host render targets at most MCLA_RT_HEIGHT_CAP guest pixels tall
++    char tmp_cap_env[16];
++    DWORD tmp_cap_length = GetEnvironmentVariableA("MCLA_RT_HEIGHT_CAP", tmp_cap_env, sizeof(tmp_cap_env));
++    if (tmp_cap_length && tmp_cap_length < sizeof(tmp_cap_env)) {
++      UINT tmp_cap = 0;
++      for (DWORD i = 0; i < tmp_cap_length; ++i) {
++        tmp_cap = tmp_cap * 10 + UINT(tmp_cap_env[i] - '0');
++      }
++      resource_desc.Height = std::min<UINT>(resource_desc.Height, tmp_cap * draw_resolution_scale_y());
++    }
++  }
+   resource_desc.DepthOrArraySize = 1;
+   resource_desc.MipLevels = 1;
+   if (key.is_depth) {
+@@ -5078,11 +5089,24 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+             dest_d3d12_rt.resource(),
+             dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_DEPTH_WRITE),
+             D3D12_RESOURCE_STATE_DEPTH_WRITE);
++        if (g_tmpgt_active) {  // TMPCS
++          D3D12_RESOURCE_DESC tmp_desc = dest_d3d12_rt.resource()->GetDesc();
++          std::string tmp_cs = "CLRD " + dest_rt_key.GetDebugName() + " rect " +
++                               std::to_string(clear_rect.right - clear_rect.left) + "x" +
++                               std::to_string(clear_rect.bottom - clear_rect.top) + " texture " +
++                               std::to_string(tmp_desc.Width) + "x" + std::to_string(tmp_desc.Height) +
++                               "x" + std::to_string(tmp_desc.SampleDesc.Count);
++          TmpGtMark(command_list, tmp_cs.c_str());
++        }
++        TmpPixMark(command_list, "<cbar");  // TMPCS
+         command_processor_.SubmitBarriers();
++        TmpPixMark(command_list, ">cbar");  // TMPCS
++        TmpPixMark(command_list, "<cclr");  // TMPCS
+         command_list.D3DClearDepthStencilView(dest_d3d12_rt.descriptor_draw().GetHandle(),
+                                               D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                               depth_host_clear_value, UINT(clear_value) & 0xFF, 1,
+                                               &clear_rect);
++        TmpPixMark(command_list, ">cclr");  // TMPCS
+       } else {
+         float color_clear_value[4] = {};
+         bool clear_via_drawing = false;
+@@ -5191,12 +5215,29 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+           command_processor_.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+           command_list.D3DDrawInstanced(3, 1, 0, 0);
+         } else {
++          if (g_tmpgt_active) {  // TMPCS
++            D3D12_RESOURCE_DESC tmp_desc = dest_d3d12_rt.resource()->GetDesc();
++            std::string tmp_cs = "CLRC " + dest_rt_key.GetDebugName() + " rect " +
++                                 std::to_string(clear_rect.right - clear_rect.left) + "x" +
++                                 std::to_string(clear_rect.bottom - clear_rect.top) + " texture " +
++                                 std::to_string(tmp_desc.Width) + "x" + std::to_string(tmp_desc.Height) +
++                                 "x" + std::to_string(tmp_desc.SampleDesc.Count) + " value " +
++                                 std::to_string(color_clear_value[0]) + "," +
++                                 std::to_string(color_clear_value[1]) + "," +
++                                 std::to_string(color_clear_value[2]) + "," +
++                                 std::to_string(color_clear_value[3]);
++            TmpGtMark(command_list, tmp_cs.c_str());
++          }
++          TmpPixMark(command_list, "<cbar");  // TMPCS
+           command_processor_.SubmitBarriers();
++          TmpPixMark(command_list, ">cbar");  // TMPCS
++          TmpPixMark(command_list, "<cclr");  // TMPCS
+           command_list.D3DClearRenderTargetView(
+               dest_d3d12_rt.descriptor_load_separate().IsValid()
+                   ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
+                   : dest_d3d12_rt.descriptor_draw().GetHandle(),
+               color_clear_value, 1, &clear_rect);
++          TmpPixMark(command_list, ">cclr");  // TMPCS
+         }
+       }
+     }
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 8aee3b1..f650acf 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -6146,8 +6146,17 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+ 
+     // Perform the clear.
+     if (resolve_clear_needed) {
++      if (g_vkgt_active) {  // TMPCS
++        std::string tmp_cs = std::string(dest_rt_key.is_depth ? "CLRD " : "CLRC ") +
++                             dest_rt_key.GetDebugName() + " rect " +
++                             std::to_string(resolve_clear_rect.rect.extent.width) + "x" +
++                             std::to_string(resolve_clear_rect.rect.extent.height);
++        TmpGtMark(command_buffer, tmp_cs.c_str());
++      }
++      if (g_vkgt_active) TmpGtMark(command_buffer, "<cbar");  // TMPCS
+       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+           transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
++      if (g_vkgt_active) TmpGtMark(command_buffer, ">cbar");  // TMPCS
+       VkClearAttachment resolve_clear_attachment;
+       resolve_clear_attachment.colorAttachment = 0;
+       std::memset(&resolve_clear_attachment.clearValue, 0,
+@@ -6276,7 +6285,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+                       color_resolve_clear_host_value, sizeof(float) * 4);
+         }
+       }
++      if (g_vkgt_active) TmpGtMark(command_buffer, "<cclr");  // TMPCS
+       command_buffer.CmdVkClearAttachments(1, &resolve_clear_attachment, 1, &resolve_clear_rect);
++      if (g_vkgt_active) TmpGtMark(command_buffer, ">cclr");  // TMPCS
+     }
+   }
+ }

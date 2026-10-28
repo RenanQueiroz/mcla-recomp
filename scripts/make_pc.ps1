@@ -436,6 +436,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-fsr-upscaling.patch"; File = "include\rex\graphics\command_processor.h"; Adds = "TaaResolveStretch" }
     @{ Patch = "rexglue-guest-atomics-lock-free.patch"; File = "src\core\mutex.cpp"; Adds = "guest_atomics_lock_free" }
     @{ Patch = "rexglue-resolve-direct-batched-loads.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "resolve_direct_batched_loads" }
+    @{ Patch = "rexglue-skip-overwritten-transfers.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "skip_overwritten_transfers" }
+    @{ Patch = "rexglue-d3d12-depth-resolve-read-state.patch"; File = "src\graphics\d3d12\render_target_cache.cpp"; Adds = "d3d12_depth_resolve_read_state" }
     @{ Patch = "rexglue-xma-decoder-fixes.patch"; File = "src\audio\xma_context.cpp"; Adds = "xma_race_fixes" }
     @{ Patch = "rexglue-alpha-to-mask-tolerance.patch"; File = "src\graphics\flags.cpp"; Adds = "alpha_to_mask_tolerance" }
     @{ Patch = "rexglue-resolve-downscale-unit-layout.patch"; File = "src\graphics\command_processor.cpp"; Adds = "resolve_downscale_unit_layout" }

@@ -1,0 +1,91 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 022ed02..28e2191 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -46,6 +46,7 @@ REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
+ REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
+ REXCVAR_DECLARE(bool, direct_host_resolve);
+ REXCVAR_DECLARE(bool, resolve_direct_batched_loads);
++REXCVAR_DECLARE(bool, d3d12_depth_resolve_read_state);
+ REXCVAR_DECLARE(bool, texture_load_direct);
+ 
+ // GPU Textures
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 8fc2945..b1d5d5d 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1772,10 +1772,16 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+                                             direct_source_views[i],
+                                             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+             }
++            // A depth render target is also kept in the depth read state, not to be
++            // decompressed for the shader.
++            D3D12_RESOURCE_STATES direct_source_state =
++                direct_source->key().is_depth && REXCVAR_GET(d3d12_depth_resolve_read_state)
++                    ? D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
++                                            D3D12_RESOURCE_STATE_DEPTH_READ)
++                    : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+             command_processor_.PushTransitionBarrier(
+-                direct_source->resource(),
+-                direct_source->SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++                direct_source->resource(), direct_source->SetResourceState(direct_source_state),
++                direct_source_state);
+             command_list.D3DSetComputeRootSignature(direct_resolve_root_signature_);
+             for (uint32_t i = 0; i < 2; ++i) {
+               command_list.D3DSetComputeRootDescriptorTable(
+@@ -4391,10 +4397,14 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+         // anyway even in the best case, so it's not possible to have all the
+         // barriers in one place here.
+         TransitionEdramBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        D3D12_RESOURCE_STATES host_depth_store_source_state =
++            REXCVAR_GET(d3d12_depth_resolve_read_state)
++                ? D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
++                                        D3D12_RESOURCE_STATE_DEPTH_READ)
++                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+         command_processor_.PushTransitionBarrier(
+-            dest_d3d12_rt.resource(),
+-            dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++            dest_d3d12_rt.resource(), dest_d3d12_rt.SetResourceState(host_depth_store_source_state),
++            host_depth_store_source_state);
+         // Pipeline.
+         command_processor_.SetExternalPipeline(
+             host_depth_store_pipelines_[size_t(dest_rt_key.msaa_samples)]);
+@@ -6292,10 +6302,14 @@ bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump
+   uint32_t rt_sort_index = 0;
+   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+     auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
+-    command_processor_.PushTransitionBarrier(
+-        d3d12_rt.resource(),
+-        d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++    D3D12_RESOURCE_STATES dump_source_state =
++        d3d12_rt.key().is_depth && REXCVAR_GET(d3d12_depth_resolve_read_state)
++            ? D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
++                                    D3D12_RESOURCE_STATE_DEPTH_READ)
++            : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++    command_processor_.PushTransitionBarrier(d3d12_rt.resource(),
++                                             d3d12_rt.SetResourceState(dump_source_state),
++                                             dump_source_state);
+     if (d3d12_rt.temporary_sort_index() == UINT32_MAX) {
+       d3d12_rt.SetTemporarySortIndex(rt_sort_index++);
+     }
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index e23291a..1d37188 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -71,6 +71,13 @@ REXCVAR_DEFINE_BOOL(resolve_direct_batched_loads, true, "GPU",
+                     "of them (false: one load at a time, as before)")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(d3d12_depth_resolve_read_state, true, "GPU/D3D12",
++                    "Direct3D 12: read a depth render target for a resolve in the depth read state "
++                    "together with the shader resource one, which on some GPUs keeps it "
++                    "compressed, instead of in the shader resource state alone, which decompresses "
++                    "it first")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,

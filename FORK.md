@@ -274,6 +274,8 @@ git apply ../../patches/rexglue-threaded-submission-d3d12-idle-wait.patch
 git apply ../../patches/rexglue-fsr-upscaling.patch
 git apply ../../patches/rexglue-guest-atomics-lock-free.patch
 git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
+git apply ../../patches/rexglue-skip-overwritten-transfers.patch
+git apply ../../patches/rexglue-d3d12-depth-resolve-read-state.patch
 git apply ../../patches/rexglue-xma-decoder-fixes.patch
 git apply ../../patches/rexglue-alpha-to-mask-tolerance.patch
 git apply ../../patches/rexglue-resolve-downscale-unit-layout.patch

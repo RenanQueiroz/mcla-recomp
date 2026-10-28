@@ -1,4 +1,5 @@
 diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index 81aab6c..02205e6 100644
 --- a/include/rex/graphics/vulkan/deferred_command_buffer.h
 +++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
 @@ -316,6 +316,14 @@ class DeferredCommandBuffer {
@@ -25,6 +26,7 @@ diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex
      kVkEndQuery,
      kVkEndRenderPass,
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index fa486a9..97d4c38 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -101,6 +101,26 @@ REXCVAR_DEFINE_UINT32(vulkan_threaded_submission_split_draws, 1000, "GPU/Vulkan"
@@ -166,7 +168,7 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
    current_render_pass_ = VK_NULL_HANDLE;
    current_framebuffer_ = nullptr;
    in_render_pass_ = false;
-@@ -5424,6 +5520,13 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -5425,6 +5521,13 @@ bool VulkanCommandProcessor::IssueCopy() {
    if (!BeginSubmission(true)) {
      return false;
    }
@@ -181,6 +183,7 @@ diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/com
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
    if (readback_mode == ReadbackResolveMode::kDisabled) {
 diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index 4a71f37..dc5a208 100644
 --- a/src/graphics/vulkan/deferred_command_buffer.cpp
 +++ b/src/graphics/vulkan/deferred_command_buffer.cpp
 @@ -20,6 +20,8 @@
@@ -206,6 +209,7 @@ diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulk
          assert_unhandled_case(header.command);
          break;
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 8aee3b1..789d387 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -62,6 +62,28 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
@@ -237,7 +241,7 @@ diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/r
  namespace rex::graphics::vulkan {
  
  // Generated with `xb buildshaders`.
-@@ -2073,8 +2095,34 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+@@ -2260,9 +2282,35 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
        RenderTarget* const* depth_and_color_render_targets =
            last_update_accumulated_render_targets();
  
@@ -247,7 +251,8 @@ diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/r
 +      if (tmp_any_xfer && g_vkgt_active)
 +        TmpGtMark(command_processor_.deferred_command_buffer(), "<xfer");
        PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
-                                        depth_and_color_render_targets, last_update_transfers());
+                                        depth_and_color_render_targets, last_update_transfers(),
+                                        nullptr, last_update_overwritten_rectangle());
 +      if (tmp_any_xfer && g_vkgt_active)
 +        TmpGtMark(command_processor_.deferred_command_buffer(), ">xfer");
 +      static uint32_t tmp_draws_in_pass = 0;  // TMPGT
@@ -273,6 +278,7 @@ diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/r
        if (depth_and_color_render_targets[0]) {
          render_pass_key.depth_and_color_used |= 1 << 0;
 diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index ebc998e..d8d4b2a 100644
 --- a/src/graphics/vulkan/shared_memory.cpp
 +++ b/src/graphics/vulkan/shared_memory.cpp
 @@ -27,6 +27,27 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
@@ -320,6 +326,7 @@ diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_
      return true;
    }
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index e474eb9..7552c22 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
 @@ -46,6 +46,27 @@ REXCVAR_DEFINE_UINT32(vulkan_texture_load_storage_copy_min_kb, 64, "GPU/Vulkan",
@@ -350,7 +357,7 @@ diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture
  namespace rex::graphics::vulkan {
  
  // Generated with `xb buildshaders`.
-@@ -1403,6 +1424,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+@@ -1405,6 +1426,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
  
  bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                 bool load_mips) {

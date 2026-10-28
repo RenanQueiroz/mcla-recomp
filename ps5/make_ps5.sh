@@ -217,6 +217,8 @@ rexglue-threaded-submission-d3d12-idle-wait.patch src/graphics/d3d12/command_pro
 rexglue-fsr-upscaling.patch include/rex/graphics/command_processor.h TaaResolveStretch
 rexglue-guest-atomics-lock-free.patch src/core/mutex.cpp guest_atomics_lock_free
 rexglue-resolve-direct-batched-loads.patch src/graphics/pipeline/render_target/cache.cpp resolve_direct_batched_loads
+rexglue-skip-overwritten-transfers.patch src/graphics/pipeline/render_target/cache.cpp skip_overwritten_transfers
+rexglue-d3d12-depth-resolve-read-state.patch src/graphics/d3d12/render_target_cache.cpp d3d12_depth_resolve_read_state
 rexglue-xma-decoder-fixes.patch src/audio/xma_context.cpp xma_race_fixes
 rexglue-alpha-to-mask-tolerance.patch src/graphics/flags.cpp alpha_to_mask_tolerance
 rexglue-resolve-downscale-unit-layout.patch src/graphics/command_processor.cpp resolve_downscale_unit_layout

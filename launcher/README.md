@@ -1000,6 +1000,20 @@ during a build:
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
 - `rain-unscaled-copy-2026-10-28.md` (fork issue #17, the rain not drawn at resolution scale 2x and 3x: the rain's drops are simulated on the GPU and fetched as vertex data, which the scaled resolve does not write to the shared memory; the fix writes the 1x version of those resolves there on the GPU, `rexglue-resolve-unscaled-copy.patch` and `mcla_rain_unscaled_copy`; the trace that confirmed the cause; how xenia-canary handles it), `scaled-resolve-layout-check.py` (what the SDK's resolve downscale pass reads, by arithmetic), `rain-trace.sdk.patch` (an SDK layer, for `gt-build.ps1 -Layer rain-trace` or `git apply`: `tmp_draw_trace` logs what the GPU did with chosen draws and their vertex bytes, `tmp_draw_skip`, `tmp_draw_trace_nodepth`, `tmp_draw_trace_reupload`; both APIs).
 - `vram-2026-10-28.md` (fork issue #19, 50 to 60 FPS then 5 FPS at 2x on a 6 GB card: what the SDK and the fork allocate on the GPU and how each scales with the resolution scale, the host render targets of the game counted from its frame logs, the three SDK patches that cap and free them and watch the budget, the measurement chain), `vram-rtcensus.py <frame log>` (the render target keys a frame log implies and their size at 1x, 2x, 3x, with a cap on the height), `vram-resolveheaps.py <frame log>` (the scaled resolve heaps its resolves imply), `vram-checkcap.py [cap] <frame log>` (whether a cap on the host render target height cuts any draw a log shows), `vram-sampler.py` (Windows' GPU Process Memory and GPU Adapter Memory counters of chosen processes every 500 ms).
+- `gpu-round2-2026-10-27.md` (2026-10-27): the transfers that the next draw rewrites
+  (`rexglue-skip-overwritten-transfers.patch`), the barriers before the depth resolves
+  (`rexglue-d3d12-depth-resolve-read-state.patch`) and what is known about the cost of the
+  converted clear rectangles. Three more layers for `gt-build.ps1 -Layer`, after
+  `frame-log` (the order matters): `overwrite-poison.sdk.patch` (`TMPOVW`: `tmp_overwrite_poison`
+  fills the part of a range that the cut does not transfer with a junk pattern, so a cut that was
+  not complete shows in a picture; `tmp_overwrite_log` logs `TMPOVW: CUT|kept ... line N` for every
+  analysed draw), `clear-split-timestamps.sdk.patch` (`TMPCS`: the barriers and the call of every
+  converted clear timed apart, labelled with the render target, the rectangle and the host texture's
+  size; `MCLA_RT_HEIGHT_CAP=<rows>` caps the host render targets' height, Direct3D 12, diagnosis
+  only) and `clear-by-drawing.sdk.patch` (`TMPCD`: `MCLA_CLEAR_BY_DRAWING=1` draws the clear
+  rectangle with a pixel shader instead of `ClearRenderTargetView`, Direct3D 12). They go on the SDK
+  with both patches in (`gt-build.ps1 -Layer gpu-timestamps,...`); `gt-build.ps1 -ToolsDir` names
+  the tools folder of a build made with another options file.
 
 ## Scripted controller input (unattended runs)
 
