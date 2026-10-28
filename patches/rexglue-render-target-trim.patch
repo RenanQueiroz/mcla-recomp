@@ -13,10 +13,10 @@ index 4bc489a..db4f6bc 100644
  
    bool IsGammaFormatHostStorageSeparate() const override;
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
-index 8b460d9..8883271 100644
+index 8b460d9..f1af6d5 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
 +++ b/include/rex/graphics/pipeline/render_target/cache.h
-@@ -175,6 +175,22 @@ class RenderTargetCache {
+@@ -175,6 +175,23 @@ class RenderTargetCache {
  
    virtual void BeginFrame();
  
@@ -27,8 +27,9 @@ index 8b460d9..8883271 100644
 +  // IsTrimDue (at most once a second; with the time in milliseconds), and if it
 +  // says yes, waits until the GPU is done with every submission and calls
 +  // TrimUnusedRenderTargets, which frees the render targets that own no range
-+  // and haven't been used for the time set (0 while set_trim_pressure(true):
-+  // the host is short of video memory). Returns how many and how much.
++  // and haven't been used for the time set (at most 2 seconds while
++  // set_trim_pressure(true): the host is short of video memory). Returns how
++  // many and how much.
 +  bool IsTrimDue(uint64_t now_ms);
 +  uint32_t TrimUnusedRenderTargets(uint64_t* freed_bytes_out = nullptr);
 +  void set_trim_pressure(bool pressure) { trim_pressure_ = pressure; }
@@ -39,7 +40,7 @@ index 8b460d9..8883271 100644
    virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
                        uint32_t normalized_color_mask, const Shader& vertex_shader);
  
-@@ -319,11 +335,21 @@ class RenderTargetCache {
+@@ -319,11 +336,21 @@ class RenderTargetCache {
      RenderTarget& operator=(RenderTarget&& render_target) = delete;
      RenderTargetKey key() const { return key_; }
  
@@ -61,7 +62,7 @@ index 8b460d9..8883271 100644
    };
  
    // The pitches in tiles in the transfer shaders' address constant, so that a
-@@ -793,6 +819,17 @@ class RenderTargetCache {
+@@ -793,6 +820,17 @@ class RenderTargetCache {
  
    RenderTarget* GetOrCreateRenderTarget(RenderTargetKey key);
  
@@ -175,7 +176,7 @@ index 4292b0d..9cb5914 100644
  
  bool D3D12RenderTargetCache::IsHostDepthEncodingDifferent(
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
-index fa56131..7e03115 100644
+index fa56131..d35c6dc 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
 +++ b/src/graphics/pipeline/render_target/cache.cpp
 @@ -65,6 +65,15 @@ REXCVAR_DEFINE_UINT32(render_target_max_height, 0, "GPU",
@@ -194,7 +195,7 @@ index fa56131..7e03115 100644
  REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
                      "Resolve from host render targets directly to shared memory when possible")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -467,6 +476,107 @@ void RenderTargetCache::BeginFrame() {
+@@ -467,6 +476,110 @@ void RenderTargetCache::BeginFrame() {
    ResetAccumulatedRenderTargets();
  }
  
@@ -226,7 +227,10 @@ index fa56131..7e03115 100644
 +    return false;
 +  }
 +  trim_next_check_ms_ = now_ms + 1000;
-+  trim_min_idle_ms_ = trim_pressure_ ? 0 : uint64_t(trim_seconds) * 1000;
++  // Short of video memory: what was used in the last couple of seconds is the
++  // working set (freeing it would only make it again), the rest goes.
++  trim_min_idle_ms_ = trim_pressure_ ? std::min(uint64_t(trim_seconds) * 1000, uint64_t(2000))
++                                     : uint64_t(trim_seconds) * 1000;
 +  // The render targets holding data (the owners of EDRAM ranges), as in
 +  // ClearCache.
 +  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
@@ -302,7 +306,7 @@ index fa56131..7e03115 100644
  bool RenderTargetCache::Update(bool is_rasterization_done,
                                 reg::RB_DEPTHCONTROL normalized_depth_control,
                                 uint32_t normalized_color_mask, const Shader& vertex_shader) {
-@@ -1825,6 +1935,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
+@@ -1825,6 +1938,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
    RenderTarget* render_target;
    if (it_rt != render_targets_.end()) {
      render_target = it_rt->second;
@@ -312,7 +316,7 @@ index fa56131..7e03115 100644
    } else {
      render_target = CreateRenderTarget(key);
      uint32_t width = key.GetWidth();
-@@ -1844,6 +1957,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
+@@ -1844,6 +1960,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
            key.is_depth ? "depth" : "color", static_cast<uint32_t>(key.resource_format),
            static_cast<uint32_t>(key.base_tiles));
      }

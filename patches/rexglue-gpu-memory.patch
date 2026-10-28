@@ -82,10 +82,10 @@ index 66cea4f..fc4414f 100644
    void BeginFrame() override;
    void EndFrame();
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
-index 8883271..b39e248 100644
+index f1af6d5..53554bf 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
 +++ b/include/rex/graphics/pipeline/render_target/cache.h
-@@ -187,6 +187,12 @@ class RenderTargetCache {
+@@ -188,6 +188,12 @@ class RenderTargetCache {
    bool IsTrimDue(uint64_t now_ms);
    uint32_t TrimUnusedRenderTargets(uint64_t* freed_bytes_out = nullptr);
    void set_trim_pressure(bool pressure) { trim_pressure_ = pressure; }
@@ -218,10 +218,10 @@ index 35035a4..796baf5 100644
    ID3D12CommandQueue* direct_queue_ = nullptr;
    IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index bd96ce5..5f6cb01 100644
+index bd96ce5..ae9a730 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
-@@ -66,6 +66,27 @@ REXCVAR_DEFINE_DOUBLE(mcla_hdr_knee, 0.6, "GPU",
+@@ -66,6 +66,28 @@ REXCVAR_DEFINE_DOUBLE(mcla_hdr_knee, 0.6, "GPU",
                        "(1 = its white)")
      .range(0.1, 0.95);
  
@@ -233,9 +233,10 @@ index bd96ce5..5f6cb01 100644
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_UINT32(gpu_memory_pressure_percent, 0, "GPU",
 +                      "When the process uses this percentage of its video memory budget, or of "
-+                      "gpu_memory_emulate_mb, give memory back: render targets that hold no data go "
-+                      "at once (render_target_trim_seconds must be set) and the texture cache's "
-+                      "limits are halved; it ends 8 points under it (0: off)")
++                      "gpu_memory_emulate_mb, give memory back: render targets that hold no data "
++                      "and weren't used for 2 seconds go (render_target_trim_seconds must be set) "
++                      "and the texture cache's limits are halved; it ends 8 points under it (0: "
++                      "off)")
 +    .range(0, 100)
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_UINT32(gpu_memory_emulate_mb, 0, "GPU",
@@ -249,7 +250,7 @@ index bd96ce5..5f6cb01 100644
  REXCVAR_DEFINE_BOOL(gpu_regwrite_bulk, true, "GPU",
                      "Write blocks of registers in bulk and test for the few registers with side "
                      "effects, instead of one virtual WriteRegister call and switch per register "
-@@ -379,6 +400,77 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
+@@ -379,6 +401,77 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
    }
  }
  
@@ -384,7 +385,7 @@ index 62f7168..0e11329 100644
      const bool render_targets_trim_due =
          render_target_cache_ &&
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
-index 7e03115..f05444b 100644
+index d35c6dc..b0aa109 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
 +++ b/src/graphics/pipeline/render_target/cache.cpp
 @@ -39,6 +39,7 @@ REXCVAR_DEFINE_BOOL(snorm16_render_target_full_range, true, "GPU",
@@ -395,7 +396,7 @@ index 7e03115..f05444b 100644
  
  REXCVAR_DEFINE_BOOL(clear_rectangle_draws, true, "GPU",
                      "With host render targets, clear instead of drawing rectangles that only fill "
-@@ -1949,6 +1950,16 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
+@@ -1952,6 +1953,16 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
            width, height, uint32_t(1) << uint32_t(key.msaa_samples),
            key.is_depth ? "depth" : "color", static_cast<uint32_t>(key.resource_format),
            static_cast<uint32_t>(key.base_tiles));

@@ -930,7 +930,7 @@ void MclaApp::ApplyPcDefaults() {
   //   game's tallest surface is 736; the SDK makes each as tall as the
   //   console's whole EDRAM, 4 to 16 times that for small ones), those that
   //   hold no data and have been idle for 60 seconds freed, and, when the
-  //   process uses 90% of its video memory budget, idle ones freed at once and
+  //   process uses 90% of its video memory budget, those idle for 2 seconds freed and
   //   the texture cache's limits halved;
   // - on Windows, HDR output whenever the display is in HDR mode (the SDK's
   //   own default stays off, for other titles). Not on Linux, where the
