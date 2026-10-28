@@ -46,18 +46,19 @@ REXCVAR_DEFINE_INT32(mcla_fps, 30, "MCLA",
                      "-1 restores the game's original fixed 30 Hz timing")
     .range(-1, 240);
 
-// The cap while frame generation is on (the SDK's frame_generation): the rendered
-// rate, so 60 shows 120. -1 is HALF DISPLAY, just under half the display's refresh
-// rate (floor of its 97%, so 116 on 240 Hz and 58 on 120 Hz: the presents then
-// stay under the display's own limit and the swap to screen stays short). While
-// frame generation is off, or can't run, mcla_fps applies, as it does with HALF
-// DISPLAY on a display under 100 Hz, where half would be under 50 rendered.
 REXCVAR_DEFINE_BOOL(mcla_timer_hr_at_cap, false, "MCLA",
                     "Windows: while a frame-rate cap is set, the timer thread waits on a high-resolution timer "
                     "(timer_queue_hr_wait) even where the game leaves that off (6 or more logical processors), "
                     "which gives back the core it keeps busy: about half of the process's CPU at a 60 FPS cap. "
                     "Without a cap the value the game started with applies. A timer_queue_hr_wait the player has "
                     "set is never changed. Off leaves timer_queue_hr_wait alone");
+
+// The cap while frame generation is on (the SDK's frame_generation): the rendered
+// rate, so 60 shows 120. -1 is HALF DISPLAY, just under half the display's refresh
+// rate (floor of its 97%, so 116 on 240 Hz and 58 on 120 Hz: the presents then
+// stay under the display's own limit and the swap to screen stays short). While
+// frame generation is off, or can't run, mcla_fps applies, as it does with HALF
+// DISPLAY on a display under 100 Hz, where half would be under 50 rendered.
 REXCVAR_DEFINE_INT32(mcla_fps_frame_generation, -1, "MCLA",
                      "Frame-rate cap with frame generation on: -1 is HALF DISPLAY (just under half "
                      "the display's refresh rate), 0 uncapped, or the rendered rate. mcla_fps "
