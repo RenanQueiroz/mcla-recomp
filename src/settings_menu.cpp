@@ -684,7 +684,7 @@ constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
 constexpr double kPassIntervals[] = {0.0, 2.0, 4.0, 8.0};
 constexpr double kTrafficDistances[] = {250.0, 325.0, 400.0};
 // anisotropic_override (the SDK's, hot-reloadable: the samplers are worked out again for every draw):
-// -1 leaves the game's own choice, 0 turns it off, then 2x, 4x (the default), 8x and 16x; 1x is
+// -1 leaves the game's own choice, 0 turns it off, then 2x, 4x, 8x and 16x (the default); 1x is
 // trilinear, which OFF is for all but the textures that ask for a point mip filter, so it has no row.
 constexpr double kAnisotropicLevels[] = {-1.0, 0.0, 2.0, 3.0, 4.0, 5.0};
 constexpr const char* kAnisotropicLabels[] = {"GAME DEFAULT", "OFF", "2X", "4X", "8X", "16X"};

@@ -597,6 +597,10 @@ void MclaApp::ApplyPcDefaults() {
   //   every fault;
   // - an EDRAM of 4,096 tiles, so that the scene fits in one tile with 2x MSAA
   //   (mcla_single_tile, src/render_perf.cpp);
+  // - anisotropic filtering at 16x instead of the SDK's 4x: the only level
+  //   never below what the game asks for (it asks 16x for the road in a race),
+  //   at no measurable cost on an RTX 5080 and 1.5% on an integrated Radeon
+  //   (launcher/dev/aniso-2026-10-27.md);
   // - on Windows, HDR output whenever the display is in HDR mode (the SDK's
   //   own default stays off, for other titles). Not on Linux, where the
   //   display's HDR state isn't read yet, so auto would never turn it on
@@ -607,6 +611,7 @@ void MclaApp::ApplyPcDefaults() {
       {"shared_memory_hot_page_faults", "4"},
       {"shared_memory_hot_page_ms", "10000"},
       {"edram_tiles", "4096"},
+      {"anisotropic_override", "5"},
 #if REX_PLATFORM_WIN32
       {"hdr", "auto"},
 #endif
