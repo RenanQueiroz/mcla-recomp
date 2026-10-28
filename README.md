@@ -268,6 +268,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Single-tile rendering | `--mcla_single_tile=false` | Or the launcher's *Single tile rendering*, or PERFORMANCE › SINGLE TILE RENDERING in the pause menu, which takes effect at once. |
 | The 4,096-tile EDRAM (PC and PS5 default) | `--edram_tiles=2048` | The SDK's default, the console's size; single-tile rendering then has no room and is off (its pause menu row says UNAVAILABLE). On the PS5, `edram_tiles = 2048` in `/data/mcla/mcla.toml`. |
 | Resolved textures decoded straight in | `--texture_load_direct=false` | Takes effect at once; turning it back on needs a restart. |
+| Resolved textures decoded straight in, at native resolution | `--texture_load_direct_unscaled=false` | Takes effect at once for the textures already created; turning it back on needs a restart. Unmeasured when written: see [patches/README.md](patches/README.md). |
 | No frame wait for new pipelines | `--async_pipeline_end_of_frame_wait=true` | Restores the wait. The old behaviour in full also needs `--async_pipeline_wait_budget_ms=0 --vulkan_async_skip_incomplete_frames_max_ms=0 --vulkan_async_placeholder_pipelines=true`. |
 | Register writes in bulk | `--gpu_regwrite_bulk=false` | |
 | Shared-memory request fast path | `--shared_memory_request_fast_path=false` | With hot pages on, `--shared_memory_request_fast_path_with_hot_pages=false` turns off only that part. |
@@ -281,7 +282,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | D3D12 placed texture heaps | `--d3d12_texture_heaps=false` | Textures created from then on are separate allocations again. |
 | Vulkan uploads before the render pass | `--vulkan_hoist_shared_memory_uploads=false` | |
 | Vulkan threaded submission | `--vulkan_threaded_submission=false` | `--vulkan_threaded_submission_split_draws`, as on D3D12. |
-| Vulkan texture loads by compute | `--vulkan_texture_load_storage_copy=off` | Default `auto`, on with NVIDIA only; `on` tries it on other GPUs, and with it the direct texture loads on Vulkan. |
+| Vulkan texture loads by compute | `--vulkan_texture_load_storage_copy=off` | Default `auto`, on with NVIDIA only; `on` tries it on other GPUs, and with it the direct texture loads on Vulkan at a scaled resolution (at native resolution `texture_load_direct_unscaled` gives the textures it loads the same storage view whatever this is). |
 | Vulkan shader storage in parallel | `--vulkan_pipeline_storage_translation_threads=1` | Default -1, as many threads as pipeline creation uses. |
 | Vulkan pipeline cache file | `--vulkan_pipeline_cache_file=true` turns it on | Off by default. |
 | Frame pacing at the swap | `--mcla_pace_at_swap=false` | |

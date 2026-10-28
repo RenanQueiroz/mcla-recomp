@@ -485,6 +485,33 @@ Built and run on Windows only, with an NVIDIA RTX 5080.
 | The pipelines and the storage image descriptor | `include/rex/graphics/vulkan/texture_cache.h`, `src/graphics/vulkan/texture_cache.cpp` | Vulkan |
 | The shaders (XeSL sources, DXBC and SPIR-V) | `src/graphics/shaders/texture_load_*direct_scaled*`, `src/graphics/shaders/bytecode/d3d12_5_1/texture_load_*_direct_scaled_cs.h`, `src/graphics/shaders/vulkan_spirv/texture_load_*_direct_scaled_cs.h` | D3D12, Vulkan |
 
+## rexglue-texture-load-direct-unscaled.patch
+
+`rexglue-texture-load-direct.patch` loads resolved textures straight into the host texture, but only with resolution scaling. At native resolution nothing is scaled, and a resolved texture was still decoded into a buffer and copied. On the integrated Radeon (D3D12, native resolution, free roam) texture loads were 3.8 ms of a 38.9 ms GPU frame, 2.2 ms of it the copy (`launcher/dev/gpu-weak-2026-10-27.md`); the 1280x1280 shadow atlas alone was 0.65 to 0.71 ms (decode 0.29, copy 0.41). The textures loaded every frame are render targets the game resolved.
+
+This patch extends that to native resolution, with its own setting `texture_load_direct_unscaled` (default on; `false` loads through the buffer again at once for the textures already created, while turning it back on takes effect on restart, as the pipelines and the page record are made at startup). The shaders are the ones of `texture_load_direct`, with no new shader code. Their addressing is the scaled one, and with a resolution scale of 1 it is the unscaled one: `XeTextureScaledTiledOffset` with a scale of 1 is `XeTextureTiledOffset2D` (or `3D`) of the first block of the group of consecutive blocks plus the offset inside the group, the same as the unscaled offset of the block, and the right-hand group is the same distance away (`launcher/dev/check_texload_scale1.py` ports both from the xenia 0b2ffa3 sources and compares every block position, x up to 2048, of 2D and 3D-tiled textures of 32 and 64 bits a texel, pitches 32 to 4096 blocks: 172 cases, 0 different). The source is the shared memory (the unscaled load's), the scale in the push constants is 1.
+
+A texture is loaded this way when it:
+- has one level, is 2D with one layer, is tiled, and is not so small (16 texels or less) that its base is in the packed mip tail;
+- is over memory a resolve has written. The texture cache keeps a bit for every 4 KB page of the shared memory that a resolve has written at native resolution (`MarkRangeAsResolved`, as the scaled resolve record that exists with resolution scaling). It is never cleared until the cache is: it only decides which textures are created for loading straight in, so a wrong answer (a streamed texture over memory a render target once used) costs speed, not correctness. A texture whose base covers a resolved page and has 32 or 64 bits a texel in 1x1 blocks gets `resolved_unscaled` in its key, as `scaled_resolve` is in the key at a scaled resolution: a texture made before the memory was first resolved has no unordered access, so it is not reused;
+- is loaded by the 32bpb, 64bpb or either depth load shader (unchanged formats, 20e4 depth and 24-bit unorm depth), as for `texture_load_direct`;
+- on D3D12, has a format with an allowed unsigned view (`R32_UINT` for the typeless 32-bit formats `R8G8B8A8`, `B8G8R8A8`, `R10G10B10A2`, `R16G16` and `R32`, `R16G16B16A16_UINT` for `R16G16B16A16`): it is created typeless with unordered access, as `texture_load_direct`'s;
+- on Vulkan, has the storage view of `vulkan_texture_load_storage_copy` (`r32ui` or `rgba16ui`; a storage image format on the device for the texture's formats). Resolved textures at native resolution get that view and the storage usage whatever `vulkan_texture_load_storage_copy` is (it is off on AMD and Intel by default), and the setting's 64 KiB minimum does not apply to them. Without a storage-capable format they load through the buffer as before.
+
+Everything else keeps the buffer path: mips, 3D, cube and array textures, linear textures, block-compressed and 8 and 16-bit formats (no direct shader for those), the formats converted while loading (7e3 colour, signed 16-bit), and every texture at a scaled resolution (those are `texture_load_direct`'s, as before).
+
+Why the result is the same, by construction: the decode (guest address, endian swap, 20e4 and 24-bit depth conversion) is the one `texture_load_direct` runs at a scaled resolution, where it was checked against the buffer path with screenshots; its guest addressing at a scale of 1 is the unscaled load's (above); and it writes each texel of the only level once, to the place the buffer copy would put it. What is not proved: that the stores through the unsigned view of a typeless (D3D12) or storage-capable (Vulkan) image leave the same bits the copy left on every GPU. That is what the frozen-world pictures check (below, pending).
+
+Setting `texture_load_direct_unscaled`: bool, default true. Each of the first 24 textures created for it logs one line (`texture_load_direct_unscaled: WxH <format> at 0x... is loaded straight in`), and the trace log marks them as `resolved`.
+
+Measured: nothing yet. The patch was compiled on GitHub (Host code job) but not run when this section was written; the chain that measures it is `launcher/dev/texload-direct-unscaled-2026-10-28.md`'s. Not built or run: Linux, the PS5 build (it applies and compiles the same Vulkan code), Intel graphics.
+
+| Change | Files | Affects |
+|---|---|---|
+| The setting, the key's `resolved_unscaled`, the record of resolved pages, which textures | `include/rex/graphics/flags.h`, `include/rex/graphics/pipeline/texture/cache.h`, `src/graphics/pipeline/texture/cache.cpp` | D3D12, Vulkan |
+| The pipelines, the load with scale 1 | `src/graphics/d3d12/texture_cache.cpp` | D3D12 |
+| The pipelines without the storage copy, the storage view for these textures, the load | `src/graphics/vulkan/texture_cache.cpp` | Vulkan |
+
 ## rexglue-async-pipelines-no-frame-wait.patch
 
 **What happened before.** With `async_shader_compilation` (on by default), a draw whose pipeline is new is left out while the pipeline is created on the pipeline creation threads. Then, at the end of every submission, `PipelineCache::EndSubmission` on both APIs:
