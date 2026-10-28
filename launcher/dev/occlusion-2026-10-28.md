@@ -56,3 +56,46 @@ Its `occlusion_query` has four modes, `fake`, `fast` (the default), `fast-alt` a
 `SP\occl\scripts\occl_chain.py`'s header has the step table. The sun runs (D3D12 and Vulkan, 1x and 2x, fix off and on): free roam at the spawn, the car standing, fixed 1/60 s a frame; for each time of day the camera is turned round the car (right stick) in 60 steps of 8 frames;
 every step reads the sun object (samples and ratio) and every second step takes a picture, so the same step is the same view with the fix off (ratio 0.8) and on. The cost runs: real time, uncapped, PresentMon, `occlusion_query_async` false, true, true, false (10 s each). `SUMMARY.txt` has the ratio of every step as a digit string, the counters, the latency in swaps, the host counts, the sheets
 `sun-<api>-x<scale>.jpg` (rows: the brightest sun, just before and after it is lost, a partly covered one; columns: fix off, fix on, the difference x8), the cost tables and the records of the `users` run.
+
+
+## Second round (the same day): what the first chain showed, and what changed
+
+Every claim says whether it was measured (a log or a table of the first chain, `SP\occl\out\SUMMARY.txt`), read (the recompiled code or the SDK) or inferred.
+
+### What the first chain showed (measured: RTX 5080, 15 runs, 11:23 to 11:38)
+
+- **The pairing works.** No host query was turned off: D3D12 2x `begins` 4,460, `ends` 4,054, `host` 4,054, `delivered` 4,027, `superseded` 27, `dropped` 0, `cut` 0, `restarted` 406; Vulkan 2x 5,797 / 5,205 / 5,205 / 5,141 / 64 / 0 / 0 / 592; the same shape at 1x.
+- **Every host count was 0.** D3D12 2x 4,027 of 4,027 results, Vulkan 2x 5,141 of 5,141, D3D12 1x 3,701 of 3,701, each query with 4 draws. So the sun object's ratio was 0 at all 180 steps of every sweep: the game was told a sun that is always hidden (the glare off), worse than the fake 0.8.
+  **The exception:** Vulkan 1x (`s1v-vulkan-x1-on`): 1,089 of 5,099 results were above 0 (5,984 samples, constant, for 1,021 results before the pad's `title` mark and 68 of the 71 results of the title phase; then 5,994, 6,004, ... 6,471, 5,940 over 12 results while the camera started to move; then 0 for the map zoom-out, free roam and the three sweeps).
+  So on Vulkan 1x the host path counted the sun's draws at the title scene. D3D12 1x, D3D12 2x and Vulkan 2x counted nothing in the same scene (D3D12 1x: 311 + 44 results before and in the title phase, all 0; Vulkan 2x: 742 + 427, all 0).
+- **Half the ends were taken for begins.** The log has, in a period of four queries, two clean pairs (`begin 02D58020`, `end 02D58000`; `begin 02D58060`, `end 02D58040`) and two pairs where the end shows up as `begin at 02D58000 ... inside the open query begun at 02D58020` (`restarted`). The first version told an end from a begin by the sentinel `0xFFFFFEED` in the event's snapshot, and in those queries it was gone.
+- **Latency.** 5 to 7 swaps from an end to its count at D3D12 and 3 to 5 at Vulkan, at about 240 FPS uncapped (the swap counter is the command processor's: a swap a frame in the city).
+- **Cost.** A B B A at 2x D3D12: 178.95 fps (off) against 174.20 (on), equal arms differing by 5.9 and 6.0 fps; the second run (B A A B) gave the opposite sign (+2.69 %): within the noise; Vulkan 2x -1.35 % (equal arms 4.5 / 4.9); 1x +1.53 % and +0.10 %. No cost is measurable, which also says little while the counts are 0.
+
+### Why the ends were taken for begins (read, and the log's pattern)
+
+`sub_8241DE08` (the game's `Issue`) stores the sentinel in the end snapshot of the query's last slot in one of two ways: with the CPU, at once (`stw -275` to ZPass A and B), when the query has never been issued (`[query+24]` is 0) or its flag byte `[query+20]` has bit 7 set; or, when it has been issued and not consumed, with two PM4 memory writes
+(`0xC0013D00`) followed by two `WAIT_REG_MEM` (`0xC0043C00`) in the command stream, so that the GPU's earlier write of the old count cannot land after it. `sub_8241E088` (`GetData`) sets bit 7 of `[query+20]` when it has read a snapshot that is not the sentinel.
+In the first version, `GetData` finds the fence passed right after the end event and reads the guess (the record's last real count), sets the flag, the game's next `Issue(END)` for that query stores the sentinel with the CPU, and the real count of the earlier use, written late by `PollOcclusionQueryResults` into the same
+end snapshot, lands on top of it before the command processor has run the new end event: the event finds no sentinel and the first version takes it for a begin (and zeroes the snapshot: the game then reads 0). The PM4 path is in order and safe. That makes the period of four queries seen in the log (flag set, flag not set, for each of the two query objects).
+This is read from the code and fits the log; nothing was run to confirm it.
+
+### What the second version does about it
+
+An event 0x20 below the open begin's address is that query's end (the game's two snapshots are always 0x20 apart; `odd pairs` was 0), whatever the snapshot holds. The game is told, at every end event, the newest real count the host has delivered (before the first: the fake count); the count of the query itself is written to its record by one compare-and-swap
+of the ZPass pair, only if the record still holds what the end event wrote there. So no write to the guest's memory races with the game's CPU store of the sentinel any more, and the count the game reads is as new as the host's queue allows (about the depth of the host's GPU queue: the latency above is that, not a delay of the SDK's; at a capped frame rate the queue is shorter, which the chain's `la*` runs measure).
+`sentinel lost` counts the ends that were paired by address with no sentinel there; it should stay 0.
+
+### Why the host counts were 0: not known; what each candidate predicts (the chain's diagnostic runs separate them)
+
+1. **D3D12 does not rasterize the sun's draws** (inferred from the SDK's own comment in `pipeline_cache.cpp`: "rasterization (along with pixel counting) is disabled by disabling the pixel shader and depth / stencil", and its TODO about occlusion counting). It needs the sun's draws to have no depth test, no stencil and no colour write. The game's design (a query to see the sun hidden by buildings) argues for a depth test, so this is the less likely candidate;
+   but the sun's pass (render phase `0x02000000`) is after the depth resolve (`frame-structure-2026-10-16.md`), and the glare sprite may sample the resolved depth itself. Prediction: the log's `occlusion draw` lines show `z=0` for the guest's own RB_DEPTHCONTROL with a colour mask 0, and `--occlusion_query_force_rasterization=false` (dd2) counts 0 where the default (dd1) counts above 0 at the title. The setting is the fix for this case on D3D12.
+   On Vulkan the same draws would count (the render pass has the frame's attachments and counts without a depth test): consistent with 5,984 at Vulkan 1x, not with Vulkan 2x.
+2. **A depth test against a depth buffer that is not the scene's at that point.** Prediction: `occlusion draw` lines with `z=1`, a func other than always, and `transfers depth` above 0 or a depth range unlike the scene's; the ROV and FSI runs (dd3, dv3) count the rasterized samples whatever the emulated depth test says: above 0 there, 0 in the default path, means the draws rasterize and the depth test removes everything.
+3. **Something that depends on the resolution scale on Vulkan** (Vulkan 1x counts, 2x does not, in the same scene). Prediction: dv1 against dv2 differ in the draw lines (viewport, scissor, render targets, depth range) or not at all (then the count is wrong inside the host: `direct_host_resolve=false` (dv4) or the float24 conversion in the pixel shader (dv5) may change it).
+4. **The draws are counted but not recorded.** The result lines now say `4 draws, N recorded`; `occlusion draw left out` lines say which draws never reached the host GPU and why (the registers).
+
+### The second chain (`SP\occl2\chain.ps1`)
+
+The diagnostic runs (D3D12 1x and 2x, Vulkan 1x and 2x; `render_target_path_d3d12=rov`, `render_target_path_vulkan=fsi`, `occlusion_query_force_rasterization=false`, `direct_host_resolve=false`, `depth_float24_convert_in_pixel_shader=true` on Vulkan, `async_shader_compilation=false`, `native_2x_msaa=false`; each the same short pad: boot, the title,
+start, the zoom-out, free roam, one picture; about 40 s a run), then the sun sweeps with the fix off and on at 2x and 1x on both APIs, the latency runs (D3D12 capped at 60 and 30 FPS, Vulkan at 60), and the cost A B B A. `SUMMARY.txt` has, per run and phase, the host counts and the state of the draws, a table of the variables side by side, the sweeps' ratios, the sheets and the latency in ms.

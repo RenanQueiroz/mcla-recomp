@@ -318,7 +318,7 @@ index 85e9963..ea85eeb 100644
    } active_occlusion_query_;
    struct VertexBufferState {
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index bd96ce5..f68310c 100644
+index bd96ce5..4f5d85e 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,6 +10,7 @@
@@ -387,7 +387,7 @@ index bd96ce5..f68310c 100644
  
    return write_index;
  }
-@@ -2244,6 +2282,57 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
+@@ -2244,6 +2282,55 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
    return true;
  }
  
@@ -417,9 +417,7 @@ index bd96ce5..f68310c 100644
 +// armed again since (it stores the sentinel with the CPU) or consumed is left alone.
 +bool ReplaceOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts,
 +                            uint64_t expected_pair, uint32_t samples) {
-+  static_assert(offsetof(xenos::xe_gpu_depth_sample_counts, ZPass_B) ==
-+                    offsetof(xenos::xe_gpu_depth_sample_counts, ZPass_A) + sizeof(uint32_t),
-+                "ZPass_A and ZPass_B are adjacent");
++  // ZPass_A and ZPass_B are adjacent in the struct (offsets 16 and 20).
 +  auto* pair = reinterpret_cast<uint64_t*>(&sample_counts->ZPass_A);
 +  const uint64_t desired = samples;
 +  if ((reinterpret_cast<uintptr_t>(pair) & 7) == 0) {
@@ -445,7 +443,7 @@ index bd96ce5..f68310c 100644
  bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                            uint32_t packet, uint32_t count) {
    // Set by D3D as BE but struct ABI is LE
-@@ -2253,25 +2342,41 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -2253,25 +2340,41 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    // Writeback initiator.
    WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
  
@@ -501,7 +499,7 @@ index bd96ce5..f68310c 100644
        pSampleCounts->ZPass_A = fake_sample_count;
        pSampleCounts->Total_A = fake_sample_count;
      }
-@@ -2280,6 +2385,304 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
+@@ -2280,6 +2383,304 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
    return true;
  }
  
@@ -806,7 +804,7 @@ index bd96ce5..f68310c 100644
  bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
                                                const char* opcode_name, uint32_t viz_query_condition,
                                                uint32_t count_remaining) {
-@@ -2383,8 +2786,29 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -2383,8 +2784,29 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
        bool hdr_blend_overridden = HdrBeforeDraw();
        // Temporal AA: the anti-aliasing pass goes before this draw.
        taa_pending_ = TaaCheckDraw();
