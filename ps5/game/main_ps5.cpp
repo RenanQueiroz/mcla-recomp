@@ -572,6 +572,11 @@ int main() {
 #endif
   rex::cvar::SetDefaultValue("edram_tiles", MCLA_STRINGIZE(MCLA_EDRAM_TILES));
   Line("settings: edram_tiles = %s", rex::cvar::GetFlagByName("edram_tiles").c_str());
+  // Anisotropic filtering at 16x instead of the SDK's 4x, as on PC (src/mcla_app.cpp,
+  // ApplyPcDefaults): the only level never below what the game asks for. Untested on
+  // the console; an anisotropic_override line in /data/mcla/mcla.toml wins.
+  rex::cvar::SetDefaultValue("anisotropic_override", "5");
+  Line("settings: anisotropic_override = %s", rex::cvar::GetFlagByName("anisotropic_override").c_str());
   // The shader pack's import (src/shader_prepare.cpp): at every start, whatever of the pack the
   // storage lacks is rebuilt from the game's files and added before the storage loads
   // (mcla_shader_pack_auto, on by default; there is no launcher to prepare apart). make_ps5.sh

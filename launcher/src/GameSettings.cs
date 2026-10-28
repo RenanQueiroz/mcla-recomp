@@ -197,7 +197,8 @@ static class GameSettings
              + "switch during play in the pause menu; FSR takes a moment to start the first time.",
         DefaultFrom = file =>
             (file.TryGetValue("mcla_msaa", out var raw) && SettingValues.Same(SettingValues.Parse(raw), false))
-            || (file.TryGetValue("mcla_preset", out var preset) && SettingValues.Same(SettingValues.Parse(preset), "low"))
+            || (file.TryGetValue("mcla_preset", out var preset)
+                && (SettingValues.Same(SettingValues.Parse(preset), "low") || SettingValues.Same(SettingValues.Parse(preset), "lowest")))
             ? "off" : null,
         // FSR only where its runtime for the graphics API in use was built
         // (the Vulkan one needs the Vulkan SDK at build time); otherwise the
@@ -224,6 +225,21 @@ static class GameSettings
         Offered = (file, value) => SettingValues.Same(value, "off") || FsrRuntimeBuilt(file),
         Unavailable = "not built for this graphics API",
     };
+    // anisotropic_override (the SDK's, src/graphics/pipeline/texture/cache.cpp: 0 off, 1 to 5 are 1x, 2x, 4x, 8x and 16x,
+    // -1 leaves what the game asks for): applied to every texture with mip levels and linear filtering, as the samplers are
+    // worked out for each draw, so it changes during play too (the pause menu's PERFORMANCE rows). 1x is left out: it is
+    // trilinear, which Off already is for all but the textures that ask for point mip filtering.
+    public static readonly GameSetting Anisotropic = new("anisotropic_override", "Anisotropic filtering",
+        [new("Game default (as on the console)", -1L), new("Off", 0L), new("2×", 2L), new("4×", 3L),
+         new("8×", 4L), new("16× (default)", 5L)], 5L)
+    {
+        Info = "Keeps textures sharp where they are seen at a slant: the road stretching away from the car, "
+             + "the pavement, the sides of buildings. Without it they turn to a smear a little way off. 4× is clearly "
+             + "sharper than Off; 8× and 16× (the default) sharpen the far end of a road further. "
+             + "Game default is what the game itself asks for, which is the console's own. It costs next to nothing: "
+             + "no measurable difference between Off and 16× on an RTX 5080 at 4K, and about 1% (0.5 ms of 38) on an integrated "
+             + "Radeon at the game's own resolution. Changes during play in the pause menu (PERFORMANCE).",
+    };
     static bool FsrRuntimeBuilt(IReadOnlyDictionary<string, string> file)
     {
         var api = file.TryGetValue("mcla_gpu_backend", out var raw) ? SettingValues.Parse(raw) : "any";
@@ -232,17 +248,21 @@ static class GameSettings
     }
     // mcla_preset (src/perf_options.cpp): a starting point for a weak GPU. Low-end makes the
     // detail options below default to their cheap values (anti-aliasing off among them, which
-    // the file's own mcla_anti_aliasing still overrides); the others are the pause menu's.
+    // the file's own mcla_anti_aliasing still overrides); the others are the pause menu's. Lowest is
+    // Low-end with the real-time shadows off too (mcla_shadows, a pause-menu row).
     public static readonly GameSetting Preset = new("mcla_preset", "Graphics preset",
-        [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low")], "custom")
+        [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low"),
+         new("Lowest (Low-end, and no shadows)", "lowest")], "custom")
     {
         Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the far sun shadows every "
              + "2nd frame and the environment map of the cars every 4th (the picture of the last time is kept "
              + "in between). On an integrated Radeon that is about 12% less frame time at the game's own "
              + "resolution (32.3 instead of 36.8 ms in free roam): 4% from the shadows, the map and the "
              + "blur, and 7 to 8% from leaving anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
-             + "integrated graphics. An option you set by hand (Anti-aliasing here, or the pause menu's "
-             + "PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
+             + "integrated graphics. Lowest is Low-end with the real-time shadows off as well: about 27% less "
+             + "frame time than with no preset on that Radeon (and 17% at 3x on an RTX 5080), but no sun "
+             + "shadows at all, not even the one under the car. An option you set by hand (Anti-aliasing here, "
+             + "or the pause menu's PERFORMANCE rows) keeps its value. Custom leaves everything as it is set.",
     };
     // temporal_aa_sharpness (the SDK's): FSR's own sharpening (RCAS) after it.
     public static readonly GameSetting FsrSharpness = new("temporal_aa_sharpness", "FSR sharpness",
@@ -472,7 +492,7 @@ static class GameSettings
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0, string? recommendedApi = null) =>
         [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
-         FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
+         Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Language, Intro, Prompts];

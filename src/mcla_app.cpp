@@ -935,8 +935,12 @@ void MclaApp::ApplyPcDefaults() {
   // - on Windows, D3D12 uploads into the shared memory recorded at the start of
   //   the run of draws that needs them (d3d12_hoist_shared_memory_uploads,
   //   patches/README.md, launcher/dev/d3d12-upload-hoisting-2026-10-28.md):
-  //   pictures identical to the setting off in the checks made, the GPU frame
-  //   shorter. The SDK's own default stays off; Vulkan has its own;
+  //   no pixel difference beyond the world's own flicker in the checks made,
+  //   the GPU frame shorter. The SDK's own default stays off; Vulkan has its own;
+  // - anisotropic filtering at 16x instead of the SDK's 4x: the only level
+  //   never below what the game asks for (it asks 16x for the road in a race),
+  //   at no measurable cost on an RTX 5080 and 1.5% on an integrated Radeon
+  //   (launcher/dev/aniso-2026-10-27.md);
   // - on Windows, HDR output whenever the display is in HDR mode (the SDK's
   //   own default stays off, for other titles). Not on Linux, where the
   //   display's HDR state isn't read yet, so auto would never turn it on
@@ -950,6 +954,7 @@ void MclaApp::ApplyPcDefaults() {
       {"render_target_max_height", "1024"},
       {"render_target_trim_seconds", "60"},
       {"gpu_memory_pressure_percent", "90"},
+      {"anisotropic_override", "5"},
 #if REX_PLATFORM_WIN32
       {"d3d12_hoist_shared_memory_uploads", "true"},
       {"hdr", "auto"},

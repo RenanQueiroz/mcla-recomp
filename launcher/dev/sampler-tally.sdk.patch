@@ -1,0 +1,120 @@
+diff --git a/include/rex/graphics/pipeline/texture/sampler_tally.h b/include/rex/graphics/pipeline/texture/sampler_tally.h
+new file mode 100644
+index 0000000..17b10dd
+--- /dev/null
++++ b/include/rex/graphics/pipeline/texture/sampler_tally.h
+@@ -0,0 +1,72 @@
++// Development only (launcher/dev/sampler-tally.sdk.patch): counts what the game asks of each sampler, per sampler worked out for a draw, before
++// anisotropic_override is applied: which anisotropic level the fetch constant (or the shader's fetch) holds, whether the texture has mip levels,
++// the three filters, and whether the override would change it (it applies to textures with mip levels and linear min/mag and a point or linear mip
++// filter). A table of the counts is logged (TMPAN lines) at 4M, 8M, 16M, ... samplers.
++#pragma once
++
++#include <algorithm>
++#include <atomic>
++#include <cstdint>
++#include <utility>
++#include <vector>
++
++#include <rex/logging.h>
++
++namespace rex::graphics {
++
++struct SamplerTallyKey {
++  // The bits: binding (the shader's own aniso: 0 disabled, 7 use the fetch constant) 3, game (the level after the fetch constant) 3, has mips 1,
++  // base map (mip filter "base map") 1, linear min and mag 1, mip filter 2 (0 point, 1 linear, 2 base map, 3 other).
++  static uint32_t Pack(uint32_t binding, uint32_t game, bool has_mips, bool base_map, bool min_mag_linear, uint32_t mip) {
++    return (binding & 7) | ((game & 7) << 3) | (uint32_t(has_mips) << 6) | (uint32_t(base_map) << 7) | (uint32_t(min_mag_linear) << 8) |
++           ((mip & 3) << 9);
++  }
++};
++
++inline void TallySampler(uint32_t binding_aniso, uint32_t game_aniso, bool has_mips, bool base_map, bool min_mag_linear, uint32_t mip_filter) {
++  static std::atomic<uint64_t> counts[1u << 11];
++  static std::atomic<uint64_t> total{0};
++  static std::atomic<uint64_t> next_report{uint64_t(1) << 22};
++  const uint32_t key = SamplerTallyKey::Pack(binding_aniso, game_aniso, has_mips, base_map, min_mag_linear, mip_filter);
++  counts[key].fetch_add(1, std::memory_order_relaxed);
++  const uint64_t n = total.fetch_add(1, std::memory_order_relaxed) + 1;
++  uint64_t due = next_report.load(std::memory_order_relaxed);
++  if (n < due || !next_report.compare_exchange_strong(due, due * 2)) {
++    return;
++  }
++  static const char* const kMip[] = {"point", "linear", "basemap", "other"};
++  std::vector<std::pair<uint64_t, uint32_t>> rows;
++  uint64_t eligible = 0, eligible_game_off = 0, eligible_game_on = 0, game_on = 0;
++  uint64_t eligible_by_level[8] = {};
++  for (uint32_t k = 0; k < (1u << 11); ++k) {
++    const uint64_t c = counts[k].load(std::memory_order_relaxed);
++    if (!c) {
++      continue;
++    }
++    rows.emplace_back(c, k);
++    const uint32_t game = (k >> 3) & 7;
++    const bool mips = (k >> 6) & 1, base = (k >> 7) & 1, linear = (k >> 8) & 1;
++    const uint32_t mip = (k >> 9) & 3;
++    const bool is_eligible = mips && !base && linear && (mip == 0 || mip == 1);
++    game_on += c * uint64_t(game != 0);
++    if (is_eligible) {
++      eligible += c;
++      eligible_by_level[game] += c;
++      (game != 0 ? eligible_game_on : eligible_game_off) += c;
++    }
++  }
++  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++  REXLOG_INFO("TMPAN sampler tally after {} samplers: eligible for the override {:.1f}% (of them the game asks for aniso {:.1f}%), game aniso on for {:.1f}% of all",
++              n, 100.0 * eligible / n, eligible ? 100.0 * eligible_game_on / eligible : 0.0, 100.0 * game_on / n);
++  REXLOG_INFO("TMPAN eligible by the game's level (0 none, 1 to 5: 1x, 2x, 4x, 8x, 16x): {:.1f}% {:.1f}% {:.1f}% {:.1f}% {:.1f}% {:.1f}%",
++              eligible ? 100.0 * eligible_by_level[0] / eligible : 0.0, eligible ? 100.0 * eligible_by_level[1] / eligible : 0.0,
++              eligible ? 100.0 * eligible_by_level[2] / eligible : 0.0, eligible ? 100.0 * eligible_by_level[3] / eligible : 0.0,
++              eligible ? 100.0 * eligible_by_level[4] / eligible : 0.0, eligible ? 100.0 * eligible_by_level[5] / eligible : 0.0);
++  for (size_t i = 0; i < rows.size() && i < 24; ++i) {
++    const uint32_t k = rows[i].second;
++    REXLOG_INFO("TMPAN   {:5.1f}%  binding aniso {} game aniso {} mips {} basemap {} min+mag linear {} mip filter {}", 100.0 * rows[i].first / n, k & 7,
++                (k >> 3) & 7, (k >> 6) & 1, (k >> 7) & 1, (k >> 8) & 1, kMip[(k >> 9) & 3]);
++  }
++}
++
++}  // namespace rex::graphics
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 62b783d..c5179ff 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -25,6 +25,7 @@
+ #include <rex/graphics/d3d12/texture_cache.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/texture/info.h>
++#include <rex/graphics/pipeline/texture/sampler_tally.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/logging.h>
+@@ -1027,6 +1028,8 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
+   xenos::AnisoFilter aniso_filter = binding.aniso_filter == xenos::AnisoFilter::kUseFetchConst
+                                         ? fetch.aniso_filter
+                                         : binding.aniso_filter;
++  graphics::TallySampler(uint32_t(binding.aniso_filter), uint32_t(aniso_filter), has_mips, mip_base_map, min_mag_linear,
++                         uint32_t(mip_filter));
+   int32_t anisotropic_override = REXCVAR_GET(anisotropic_override);
+   if (anisotropic_override > -1 && anisotropic_override < 6 && has_mips && !mip_base_map &&
+       min_mag_linear && mip_filter_bilinear_or_trilinear) {
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index e474eb9..08dc5e3 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -23,6 +23,7 @@
+ #include <rex/dbg.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/texture/info.h>
++#include <rex/graphics/pipeline/texture/sampler_tally.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/vulkan/command_processor.h>
+ #include <rex/graphics/vulkan/deferred_command_buffer.h>
+@@ -820,6 +821,8 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
+                                                  &mip_min_level, &mip_max_level);
+   parameters.mip_min_level = mip_min_level;
+   bool has_mips = mip_max_level > mip_min_level;
++  graphics::TallySampler(uint32_t(binding.aniso_filter), uint32_t(aniso_filter), has_mips, parameters.mip_base_map != 0,
++                         min_mag_linear != 0, uint32_t(mip_filter));
+   int32_t anisotropic_override = REXCVAR_GET(anisotropic_override);
+   if (anisotropic_override > -1 && anisotropic_override < 6 && has_mips &&
+       !parameters.mip_base_map && min_mag_linear && mip_filter_bilinear_or_trilinear) {

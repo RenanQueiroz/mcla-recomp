@@ -119,9 +119,10 @@ REXCVAR_DEFINE_STRING(mcla_preset, "custom", "MCLA",
                       "A starting point for the detail options, for a weak GPU:\n"
                       " custom: every option as set (the default)\n"
                       " low: no anti-aliasing and no full-screen blur, the far shadows drawn "
-                      "every 2nd frame and the environment map every 4th; an option set by "
-                      "hand keeps its value")
-    .allowed({"custom", "low"});
+                      "every 2nd frame and the environment map every 4th\n"
+                      " lowest: as low, and no real-time shadows\n"
+                      "An option set by hand keeps its value")
+    .allowed({"custom", "low", "lowest"});
 
 // For measuring what an option is worth. The title screen's camera wanders, so
 // two runs never show the same scene; this switches the named option between
@@ -565,9 +566,13 @@ uint32_t MclaRenderPhasesToSkip() {
 // frame at native resolution, 29% at 2x), the far shadows every 2nd frame and the
 // environment map every 4th (about 1 ms each at native), the full-screen blur (0.5 ms).
 // The reflection view stays every frame: every 2nd saved about 0.3 ms, too little for a
-// reflection that lags.
+// reflection that lags. Lowest is Low and the real-time shadows off, by far the largest
+// saving left (launcher/dev/aniso-2026-10-27.md: 16 to 17% of the frame on every GPU
+// measured; Low 12.3% and Lowest 26.9% on the integrated Radeon), at the price of every
+// sun shadow.
 void MclaApplyPreset() {
-  if (REXCVAR_GET(mcla_preset) != "low") {
+  const std::string preset = REXCVAR_GET(mcla_preset);
+  if (preset != "low" && preset != "lowest") {
     return;
   }
   constexpr std::pair<const char*, const char*> kLow[] = {
@@ -576,15 +581,24 @@ void MclaApplyPreset() {
       {"mcla_env_map_interval", "4"},
       {"mcla_fullscreen_blur", "false"},
   };
-  for (const auto& [name, value] : kLow) {
-    if (rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) {
-      continue;
+  constexpr std::pair<const char*, const char*> kLowest[] = {
+      {"mcla_shadows", "false"},
+  };
+  auto apply = [&preset](const auto& options) {
+    for (const auto& [name, value] : options) {
+      if (rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) {
+        continue;
+      }
+      if (!rex::cvar::SetDefaultValue(name, value)) {
+        REXLOG_WARN("preset {}: {} = {} not taken", preset, name, value);
+      }
     }
-    if (!rex::cvar::SetDefaultValue(name, value)) {
-      REXLOG_WARN("preset low: {} = {} not taken", name, value);
-    }
+  };
+  apply(kLow);
+  if (preset == "lowest") {
+    apply(kLowest);
   }
-  REXLOG_INFO("perf options: preset low");
+  REXLOG_INFO("perf options: preset {}", preset);
 }
 
 void MclaMigrateAntiAliasing() {

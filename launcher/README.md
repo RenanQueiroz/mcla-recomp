@@ -542,6 +542,14 @@ Vulkan one needs the Vulkan SDK when the game is built); where it isn't there
 or fails, the game uses MSAA. An older `mcla_msaa = false` still means off while
 `mcla_anti_aliasing` isn't set.
 
+*Anisotropic filtering* (`anisotropic_override`: `-1`, *Game default*, `0` *Off*, `2`, `3` (*4×*), `4`, `5` (*16×*, the default); it follows the SDK's cvar, which counts the levels 0 to 5) keeps
+textures sharp where they are seen at a slant, and it switches during play too (the pause menu's PERFORMANCE > ANISOTROPIC FILTERING). The SDK applies one level to every
+texture with mip levels and linear filtering; *Game default* applies none and leaves each texture at what the game itself asks for (a tally of the city and of a race found
+nothing for 35 to 36% of those textures, 4× for 27 to 52%, 8× for 8% and 16× for 3 to 26%). The row is after *FSR upscaling* in the Graphics list; 1× (trilinear) is not offered, as
+*Off* is trilinear for all but the textures that ask for a point mip filter. Nothing in the shader preparation depends on it (the samplers are not part of a pipeline).
+It costs next to nothing (none measurable on an RTX 5080 at 3×; 16× against *Off* is 0.5 to 0.6 ms, 1.3 to 1.5%, on the integrated Radeon of a Ryzen 9800X3D at native resolution),
+so it is not part of the Low-end preset. `dev\aniso-2026-10-27.md` has the tables.
+
 *Frame generation* (`frame_generation`, off by default) is AMD FSR 3.1's: one
 generated frame between each two the game renders (the pause menu's DISPLAY >
 FRAME GENERATION; it switches during play on both graphics APIs). FSR 3.1 is
@@ -604,7 +612,7 @@ instead of 93 to 94% (`dev\single-tile-edram-2026-10-16.md`). Off, the scene is
 drawn as on the console. With `--edram_tiles=2048` there is no room for one tile:
 the pause menu's row says UNAVAILABLE and nothing changes either way.
 
-*Graphics preset* (`mcla_preset`: `custom`, the default, or `low`) is a starting point for a weak
+*Graphics preset* (`mcla_preset`: `custom`, the default, `low` or `lowest`) is a starting point for a weak
 graphics card: Low-end makes anti-aliasing and the full-screen blur default to off, the far
 sun shadows (`mcla_far_shadow_interval`) to being drawn every 2nd frame and the
 environment map of the cars (`mcla_env_map_interval`) every 4th, the picture of the last
@@ -615,6 +623,10 @@ of 36.8 and anti-aliasing off another 2.5 to 2.9 ms (29% at 2x), 11 to 12% toget
 (free roam 36.8 to 32.3 ms, driving 35.8 to 31.7 ms; `dev\gpu-weak-2026-10-27.md` has
 each option's saving and what was left out: the
 reflection view every 2nd frame saves 0.3 ms, too little for a reflection that lags).
+Lowest is Low-end and the real-time shadows off too (`mcla_shadows`, the pause menu's SHADOWS row): the shadows are
+16 to 17% of the frame on every GPU measured, the largest saving left, so Lowest is 26.9% below no preset on that
+Radeon (Vulkan, native resolution, a frozen race start: Low-end 34.2 ms, 12.3% below; Lowest 28.8 ms) and 17% at 3x on an RTX 5080,
+at the price of every sun shadow, the one under the car too (`dev\aniso-2026-10-27.md`).
 
 *Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is
 Vulkan on AMD's integrated graphics of the RDNA generation and on Intel graphics and
