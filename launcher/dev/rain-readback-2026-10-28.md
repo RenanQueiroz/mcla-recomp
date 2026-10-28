@@ -59,6 +59,8 @@ reached. `full` waits for the GPU after every one of the four resolves, every fr
 looked at; `mcRain::Update`, `sub_822EFF70`, stops early when the intensity is 0, so the simulation may not run then: read, not checked); `fast` copies the previous frame's data without waiting (the rain is drawn one frame late; the simulation then reads one more frame of lag from the guest's memory, which is a
 fixed delay, not a drift: inferred, not measured).
 
+A GPU-only fix would hook the coherency packet: after the four resolves the game issues a "make coherent" for the written range with the action `VC | TC` (vertex cache and texture cache; the SDK's trace log, `Make 0561F000 -> 05640000 (135168b) coherent, action = VC | TC`, measured in the old 2x run's `game.1.log`, 226 lines for that address) and `CommandProcessor::MakeCoherent` is a stub (read). A scaled-resolved range made coherent for the vertex cache could be downscaled on the GPU into the shared memory (the readback path's `resolve_downscale` pass with the shared memory as its destination, then `RangeWrittenByGpu`), with the pixel size taken from the resolve that wrote it: no wait, the current frame's data, no rule per title. Not written: the readback rule is the cheaper thing to test first.
+
 **Not measured:** that the rule matches (the SDK's resolve log names the rule: `set resolve_log_frames 3`), that the rain comes back on D3D12 and Vulkan at 2x and 3x, what `full` and `fast`
 cost, that the downscaled state is good enough for the simulation, nothing on Linux or the PS5.
 
