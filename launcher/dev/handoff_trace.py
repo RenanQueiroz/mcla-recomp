@@ -160,127 +160,102 @@ class Span:
         self.id = 0
 
 
+BEGIN = {10: "wait", 13: "multi", 19: "delay", 40: "cp_idle", 42: "cp_exec", 45: "cp_swap", 47: "d3d_fence", 50: "submit",
+         52: "submit_await", 54: "cp_waitreg", 102: "limiter", 110: "ring", 122: "pump_sleep"}
+END = {11: "wait", 14: "multi", 20: "delay", 41: "cp_idle", 43: "cp_exec", 46: "cp_swap", 48: "d3d_fence", 51: "submit",
+       53: "submit_await", 55: "cp_waitreg", 103: "limiter", 112: "ring", 123: "pump_sleep"}
+
+
+def make_span(kind, th, o, t, a, b):
+    """o = (begin t, a, b, c, ra) of the begin event; a, b = the end event's."""
+    bt, oa, ob, oc, ra = o
+    if kind == "wait":
+        return Span(th, "wait", bt, t, ("h", oa), ra, {"type": oc, "timeout": ob, "result": b})
+    if kind == "multi":
+        return Span(th, "multi", bt, t, ("h", oa), ra, {"count": ob & 0xFFFF, "all": (ob >> 16) == 0})
+    if kind == "delay":
+        return Span(th, "delay", bt, t, None, ra, {"ms": oa})
+    if kind == "cp_idle":
+        return Span(th, "cp_idle", bt, t, ("wptr",), None, {"turns": a, "write": b})
+    if kind == "cp_exec":
+        return Span(th, "cp_exec", bt, t, None, None, {"read": oa, "write": ob, "new_read": a})
+    if kind == "d3d_fence":
+        return Span(th, "d3d_fence", bt, t, None, None, {"frame": oa})
+    if kind == "submit":
+        return Span(th, "submit", bt, t, None, None, {"n": oa})
+    if kind == "submit_await":
+        return Span(th, "submit_await", bt, t, ("submitdone",), None, {})
+    if kind == "cp_waitreg":
+        return Span(th, "cp_waitreg", bt, t, None, None, {"addr": oa})
+    if kind == "limiter":
+        return Span(th, "limiter", bt, t, None, None, {"site": oa, "us": ob})
+    if kind == "ring":
+        return Span(th, "ring", bt, t, ("slot",), None, {"turns": a, "waited": b, "object": oa})
+    if kind == "pump_sleep":
+        return Span(th, "pump_sleep", bt, t, ("pumpwake",) if a else None, None, {"ms": oa, "early": a})
+    return Span(th, kind, bt, t, None, None, {})
+
+
 def build(tr):
-    """Walk the events in time order: spans (waits, busy stretches), signals by key, points by kind."""
+    """Walk the events in time order: spans (waits, busy stretches), signals by key, points by kind. A span is a begin and an end
+    event of one kind on one thread (a command processor execution holds fence waits and swaps, so the kinds are kept apart);
+    spans still open when a window closes are cut there (their end was not recorded)."""
     spans = []
     signals = collections.defaultdict(list)   # key -> [(t, thr, ra)]
     points = collections.defaultdict(list)    # event name -> [(t, thr, a, b)]
     marks = []                                # (t, label, start?)
     open_ = {}
     start_ns = tr.start_ns
+
+    def cut_all(t):
+        for (th, kind), o in open_.items():
+            if kind in BLOCKING:
+                spans.append(Span(th, kind, o[0], t, None, o[4], {"cut": True}))
+        open_.clear()
+
     for row in tr.rows:
         t = (row[0] - start_ns) / 1000.0
         e, th, a, b, c = row[1], row[2], row[3], row[4], row[5]
         ra = row[6:10]
+        kind = BEGIN.get(e)
+        if kind:
+            open_[(th, kind)] = (t, a, b, c, ra)
+            continue
+        kind = END.get(e)
+        if kind:
+            if kind == "submit":
+                signals[("submitdone",)].append((t, th, ra))
+            o = open_.pop((th, kind), None)
+            if o:
+                spans.append(make_span(kind, th, o, t, a, b))
+            continue
         if e == 1:
             marks.append((t, a, b))
-        elif e == 10:
-            open_[th] = ("wait", t, a, ra, (c, b))
-        elif e == 11:
-            o = open_.pop(th, None)
-            if o and o[0] == "wait":
-                spans.append(Span(th, "wait", o[1], t, ("h", o[2]), o[3], {"type": o[4][0], "timeout": o[4][1], "result": b}))
+            cut_all(t)
         elif e == 12:
             spans.append(Span(th, "poll", t, t, ("h", a), ra, {"type": c, "result": b}))
-        elif e == 13:
-            open_[th] = ("multi", t, a, ra, (b, c))
-        elif e == 14:
-            o = open_.pop(th, None)
-            if o and o[0] == "multi":
-                spans.append(Span(th, "multi", o[1], t, ("h", o[2]), o[3], {"count": o[4][0] & 0xFFFF, "all": (o[4][0] >> 16) == 0}))
         elif e == 15:
             signals[("h", a)].append((t, th, ra))
-            open_[th] = ("wait", t, b, ra, (c, 0xFFFFFFFF))
+            open_[(th, "wait")] = (t, b, 0xFFFFFFFF, c, ra)
         elif e in (16, 17, 18):
             signals[("h", a)].append((t, th, ra))
-        elif e == 19:
-            open_[th] = ("delay", t, a, ra, None)
-        elif e == 20:
-            o = open_.pop(th, None)
-            if o and o[0] == "delay":
-                spans.append(Span(th, "delay", o[1], t, None, o[3], {"ms": o[2]}))
-        elif e == 40:
-            open_[th] = ("cp_idle", t, a, ra, None)
-        elif e == 41:
-            o = open_.pop(th, None)
-            if o and o[0] == "cp_idle":
-                spans.append(Span(th, "cp_idle", o[1], t, ("wptr",), None, {"turns": a, "write": b}))
-        elif e == 42:
-            open_[th] = ("cp_exec", t, a, ra, b)
-        elif e == 43:
-            o = open_.pop(th, None)
-            if o and o[0] == "cp_exec":
-                spans.append(Span(th, "cp_exec", o[1], t, None, None, {"read": o[2], "write": o[4], "new_read": a}))
         elif e == 44:
             signals[("wptr",)].append((t, th, ra))
             points["cp_wptr"].append((t, th, a, b))
-        elif e == 45:
-            open_[th] = ("cp_swap", t, a, ra, None)
-        elif e == 46:
-            o = open_.pop(th, None)
-            if o and o[0] == "cp_swap":
-                spans.append(Span(th, "cp_swap", o[1], t, None, None, {}))
-        elif e == 47:
-            open_[th] = ("d3d_fence", t, a, ra, None)
-        elif e == 48:
-            o = open_.pop(th, None)
-            if o and o[0] == "d3d_fence":
-                spans.append(Span(th, "d3d_fence", o[1], t, None, None, {"frame": o[2]}))
         elif e == 49:
             points["submit_queue"].append((t, th, a, b))
-        elif e == 50:
-            open_[th] = ("submit", t, a, ra, None)
-        elif e == 51:
-            signals[("submitdone",)].append((t, th, ra))
-            o = open_.pop(th, None)
-            if o and o[0] == "submit":
-                spans.append(Span(th, "submit", o[1], t, None, None, {"n": o[2]}))
-        elif e == 52:
-            open_[th] = ("submit_await", t, a, ra, None)
-        elif e == 53:
-            o = open_.pop(th, None)
-            if o and o[0] == "submit_await":
-                spans.append(Span(th, "submit_await", o[1], t, ("submitdone",), None, {}))
-        elif e == 54:
-            open_[th] = ("cp_waitreg", t, a, ra, b)
-        elif e == 55:
-            o = open_.pop(th, None)
-            if o and o[0] == "cp_waitreg":
-                spans.append(Span(th, "cp_waitreg", o[1], t, None, None, {"addr": o[2]}))
-        elif e == 102:
-            open_[th] = ("limiter", t, a, ra, b)
-        elif e == 103:
-            o = open_.pop(th, None)
-            if o and o[0] == "limiter":
-                spans.append(Span(th, "limiter", o[1], t, None, None, {"site": o[2], "us": o[4]}))
-        elif e == 110:
-            open_[th] = ("ring", t, a, ra, None)
-        elif e == 112:
-            o = open_.pop(th, None)
-            if o and o[0] == "ring":
-                spans.append(Span(th, "ring", o[1], t, ("slot",), None, {"turns": a, "waited": b, "object": o[2]}))
         elif e == 113:
             points["ring_advance"].append((t, th, a, b))
             signals[("ring_advance",)].append((t, th, ra))
         elif e == 121:
             signals[("slot",)].append((t, th, ra))
             points["pump_free"].append((t, th, a, b))
-        elif e == 122:
-            open_[th] = ("pump_sleep", t, a, ra, None)
-        elif e == 123:
-            o = open_.pop(th, None)
-            if o and o[0] == "pump_sleep":
-                spans.append(Span(th, "pump_sleep", o[1], t, ("pumpwake",) if a else None, None, {"ms": o[2], "early": a}))
         elif e == 124:
             signals[("pumpwake",)].append((t, th, ra))
             points["pump_wake_set"].append((t, th, a, b))
         elif e in EV_NAMES:
             points[EV_NAMES[e]].append((t, th, a, b))
-    # waits still open at the end of the trace are cut there (they ran to the end)
-    end_t = tr.last_us
-    for th, o in open_.items():
-        if o[0] in BLOCKING:
-            spans.append(Span(th, o[0], o[1], end_t, None, o[3], {"cut": True}))
+    cut_all(tr.last_us)
     spans.sort(key=lambda s: (s.e, s.b))
     for n, s in enumerate(spans):
         s.id = n
