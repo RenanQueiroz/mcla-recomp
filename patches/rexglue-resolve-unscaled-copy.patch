@@ -333,7 +333,7 @@ index bd96ce5..5ca99fd 100644
    if (legacy_readback_memexport_cvar_name_ &&
        rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index d35c107..780e808 100644
+index d35c107..d59409e 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -2532,6 +2532,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
@@ -382,7 +382,7 @@ index d35c107..780e808 100644
    // The global mode, or, with readback_resolve_rules, that of the rule this
    // resolve matches (rexglue-resolve-readback-rules.patch).
    const ReadbackResolveMode readback_mode = GetReadbackResolveModeFor(
-@@ -3986,6 +4002,230 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -3986,6 +4002,241 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
    return true;
  }
  
@@ -397,6 +397,11 @@ index d35c107..780e808 100644
 +    return;
 +  }
 +  auto fail = [&](const char* reason) {
++    // The resolve that was made is a copy that is not done: the ones that wait go first
++    // (resolve_unscaled_copy_batch), as for a resolve that is not copied.
++    if (!pending_unscaled_copies_.empty()) {
++      FlushUnscaledResolveCopies();
++    }
 +    LogUnscaledResolveCopy(written_address, written_length, rule, reason, false);
 +  };
 +
@@ -467,7 +472,13 @@ index d35c107..780e808 100644
 +  }
 +
 +  if (REXCVAR_GET(resolve_unscaled_copy_batch)) {
-+    // The copy is made, with the others of its group, by FlushUnscaledResolveCopies.
++    // The copy is made, with the others of its group, by FlushUnscaledResolveCopies. The
++    // scaled resolve buffers alias each other (an aliasing barrier when another one becomes
++    // current), so a copy from another buffer than the ones waiting makes them go first.
++    if (!pending_unscaled_copies_.empty() &&
++        pending_unscaled_copies_.back().scaled_resolve_buffer != scaled_resolve_buffer) {
++      FlushUnscaledResolveCopies();
++    }
 +    PendingUnscaledResolveCopy pending;
 +    pending.written_address = written_address;
 +    pending.written_length = written_length;
@@ -613,7 +624,7 @@ index d35c107..780e808 100644
  void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
    if (await_submission >= submission_current_) {
      if (submission_open_) {
-@@ -4260,6 +4500,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -4260,6 +4511,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
  bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
  
@@ -650,7 +661,7 @@ index 62b783d..03bd906 100644
      D3D12_CPU_DESCRIPTOR_HANDLE handle, uint32_t element_size_bytes_pow2) {
    assert_true(IsDrawResolutionScaled());
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 491594c..132d36f 100644
+index 491594c..ecf9e54 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -2918,6 +2918,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
@@ -699,7 +710,7 @@ index 491594c..132d36f 100644
    // The global mode, or, with readback_resolve_rules, that of the rule this
    // resolve matches (rexglue-resolve-readback-rules.patch).
    const ReadbackResolveMode readback_mode = GetReadbackResolveModeFor(
-@@ -5727,6 +5743,249 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -5727,6 +5743,254 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    return true;
  }
  
@@ -714,6 +725,11 @@ index 491594c..132d36f 100644
 +    return;
 +  }
 +  auto fail = [&](const char* reason) {
++    // The resolve that was made is a copy that is not done: the ones that wait go first
++    // (resolve_unscaled_copy_batch), as for a resolve that is not copied.
++    if (!pending_unscaled_copies_.empty()) {
++      FlushUnscaledResolveCopies();
++    }
 +    LogUnscaledResolveCopy(written_address, written_length, rule, reason, false);
 +  };
 +
@@ -949,7 +965,7 @@ index 491594c..132d36f 100644
  void VulkanCommandProcessor::EvictOldReadbackBuffers(
      std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map) {
    if (buffer_map.empty()) {
-@@ -6330,6 +6589,12 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -6330,6 +6594,12 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
  
