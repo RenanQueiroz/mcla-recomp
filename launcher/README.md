@@ -998,7 +998,7 @@ during a build:
   `rexglue-alpha-to-mask-tolerance.patch`), `alpha-to-mask-debug.sdk.patch` (the layer after `frame-log` for `gt-build.ps1 -Layer`, with `tmp_a2m`: alpha to
   mask off, or the offsets 2, 2, 2, 2, switched in a pad with `set`), `fl-a2m.py <frame log>` (the draws with alpha to mask, grouped by shader) and
   `pole-dots.py <picture>` (the dots on the lamp pole of the free-roam spawn at dusk, counted by parity of x and y).
-- `vram-2026-10-28.md` (fork issue #19, 50 to 60 FPS then 5 FPS at 2x on a 6 GB card: what the SDK and the fork allocate on the GPU and how each scales with the resolution scale, the host render targets of the game counted from its frame logs, the three SDK patches that cap and free them and watch the budget, the measurement chain), `vram-rtcensus.py <frame log>` (the render target keys a frame log implies and their size at 1x, 2x, 3x, with a cap on the height), `vram-sampler.py` (Windows' GPU Process Memory and GPU Adapter Memory counters of chosen processes every 500 ms).
+- `vram-2026-10-28.md` (fork issue #19, 50 to 60 FPS then 5 FPS at 2x on a 6 GB card: what the SDK and the fork allocate on the GPU and how each scales with the resolution scale, the host render targets of the game counted from its frame logs, the three SDK patches that cap and free them and watch the budget, the measurement chain), `vram-rtcensus.py <frame log>` (the render target keys a frame log implies and their size at 1x, 2x, 3x, with a cap on the height), `vram-resolveheaps.py <frame log>` (the scaled resolve heaps its resolves imply), `vram-sampler.py` (Windows' GPU Process Memory and GPU Adapter Memory counters of chosen processes every 500 ms).
 
 ## Scripted controller input (unattended runs)
 
