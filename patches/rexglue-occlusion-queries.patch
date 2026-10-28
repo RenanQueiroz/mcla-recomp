@@ -1,5 +1,5 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 828d462..a401126 100644
+index 828d462..49e0b3a 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -13,6 +13,7 @@
@@ -10,7 +10,7 @@ index 828d462..a401126 100644
  #include <functional>
  #include <memory>
  #include <mutex>
-@@ -685,6 +686,39 @@ class CommandProcessor {
+@@ -685,6 +686,40 @@ class CommandProcessor {
                                            uint32_t count);
    virtual bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, uint32_t packet,
                                                    uint32_t count);
@@ -28,8 +28,9 @@ index 828d462..a401126 100644
 +  virtual bool HostOcclusionQueryBegin() { return false; }
 +  // Whether the host query is still recording (a submission ending inside it cuts it).
 +  virtual bool HostOcclusionQueryRecording() const { return false; }
-+  // Ends the recording host query and queues a copy of its count; submission is the one whose
-+  // completion makes the count readable, draws the guest draws that reached the host in it.
++  // Ends the recording host query and queues a copy of its count. submission_out is the submission
++  // whose completion makes the count readable, draws_out the number of guest draws that reached the
++  // host inside the query.
 +  virtual bool HostOcclusionQueryEnd(uint32_t& /*host_index_out*/, uint64_t& /*submission_out*/,
 +                                     uint32_t& /*draws_out*/) {
 +    return false;
@@ -50,7 +51,7 @@ index 828d462..a401126 100644
    bool ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet, const char* opcode_name,
                                uint32_t viz_query_condition, uint32_t count_remaining);
    bool ExecutePacketType3_DRAW_INDX(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
-@@ -798,6 +832,44 @@ class CommandProcessor {
+@@ -798,6 +833,44 @@ class CommandProcessor {
    // name (for explicit-override compatibility).
    const char* legacy_readback_memexport_cvar_name_ = nullptr;
  
