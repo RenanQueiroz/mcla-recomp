@@ -131,9 +131,9 @@ diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_
 index de3fa66..80ad718 100644
 --- a/include/rex/graphics/shared_memory.h
 +++ b/include/rex/graphics/shared_memory.h
-@@ -95,6 +95,14 @@ class SharedMemory {
-   // regions in those pages.
-   void RangeWrittenByGpu(uint32_t start, uint32_t length);
+@@ -106,6 +106,14 @@ class SharedMemory {
+     return EnsureHostGpuMemoryAllocated(start, length);
+   }
  
 +  // The host memory backing the shared memory: what the sparse allocations
 +  // made so far add up to, or all of it if it's not sparse.
