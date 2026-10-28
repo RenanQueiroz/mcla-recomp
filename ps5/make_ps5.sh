@@ -220,6 +220,7 @@ rexglue-resolve-direct-batched-loads.patch src/graphics/pipeline/render_target/c
 rexglue-xma-decoder-fixes.patch src/audio/xma_context.cpp xma_race_fixes
 rexglue-alpha-to-mask-tolerance.patch src/graphics/flags.cpp alpha_to_mask_tolerance
 rexglue-resolve-readback-rules.patch src/graphics/command_processor.cpp readback_resolve_rules
+rexglue-d3d12-hoist-shared-memory-uploads.patch src/graphics/d3d12/command_processor.cpp d3d12_hoist_shared_memory_uploads
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW
