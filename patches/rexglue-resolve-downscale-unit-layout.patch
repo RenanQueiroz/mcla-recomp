@@ -1,0 +1,1154 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index 828d462..0f9ef92 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -715,6 +715,15 @@ class CommandProcessor {
+   // implementations.
+   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
+ 
++  // 1 when the resolve downscale pass (the resolve readback uses it, and
++  // anything else that turns a scaled resolve back into 1x data) is
++  // to find the pixels of a resolution-scaled resolve by the scaled layout's own
++  // addressing, 0 for the pass's original addressing (resolve_downscale_unit_layout;
++  // rexglue-resolve-downscale-unit-layout.patch). The backends' downscale
++  // constants take it as the default of their last field, so every user of the
++  // pass gets it.
++  static uint32_t ResolveDownscaleUnitLayoutConstant();
++
+   // Shared readback resolve mode with backend legacy-flag alias support.
+   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
+   // Shared memexport readback enable state with backend legacy-flag override support.
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index d762036..d464bb0 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -788,6 +788,7 @@ class D3D12CommandProcessor : public CommandProcessor {
+     uint32_t pixel_size_log2;
+     uint32_t tile_count;
+     uint32_t half_pixel_offset;
++    uint32_t unit_layout = ResolveDownscaleUnitLayoutConstant();
+   };
+   enum class ResolveDownscaleRootParameter : UINT {
+     kConstants,
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index fc3b28d..0f8a6a9 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -34,6 +34,7 @@ REXCVAR_DECLARE(bool, resolve_log_new);
+ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+ REXCVAR_DECLARE(bool, readback_memexport);
+ REXCVAR_DECLARE(bool, readback_memexport_fast);
++REXCVAR_DECLARE(bool, resolve_downscale_unit_layout);
+ REXCVAR_DECLARE(bool, occlusion_query_enable);
+ REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
+ 
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 85e9963..269d255 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -560,6 +560,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+     uint32_t tile_count;
+     uint32_t source_offset_bytes;
+     uint32_t half_pixel_offset;
++    uint32_t unit_layout = ResolveDownscaleUnitLayoutConstant();
+   };
+   bool EnsureSwapFxaaSourceImage(uint32_t width, uint32_t height);
+   void DestroySwapFxaaSourceImage();
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index bd96ce5..b6ec251 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -138,6 +138,17 @@ REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
+                     "automatic fallback to full synchronous readback")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(resolve_downscale_unit_layout, true, "GPU",
++                    "When draw resolution scaling is active, the pass that turns a scaled resolve "
++                    "back into the 1x data (the resolve readback of the title's textures) finds "
++                    "each guest pixel's host pixel by the scaled resolve layout's own addressing "
++                    "(host pixels are kept in N x 1 sub-units, column-major, inside one guest "
++                    "unit of N pixels). Off: the pass's original addressing (the pixel's byte "
++                    "address times the scale), which reads the right pixel at 1x and for 8 bytes "
++                    "a pixel at 2x2 only: with 4 bytes a pixel (the custom vinyl texture) half of "
++                    "the pixels at 2x2 come from a neighbouring block")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_INT32(query_occlusion_fake_sample_count, 1000, "GPU",
+                      "Fake sample count for occlusion queries")
+     .range(1, 100000)
+@@ -512,6 +523,10 @@ bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) cons
+   return REXCVAR_GET(readback_memexport);
+ }
+ 
++uint32_t CommandProcessor::ResolveDownscaleUnitLayoutConstant() {
++  return REXCVAR_GET(resolve_downscale_unit_layout) ? 1u : 0u;
++}
++
+ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect) {
+   if (swap_post_effect_desired_ == swap_post_effect) {
+     return;
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h
+index da071c5..8132167 100644
+--- a/src/graphics/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h
+@@ -21,7 +21,7 @@ dcl_resource_raw T0[0:0], space=0
+ dcl_uav_raw U0[0:0], space=0
+ dcl_input vThreadGroupID.x
+ dcl_input vThreadIDInGroup.xy
+-dcl_temps 2
++dcl_temps 3
+ dcl_tgsm_structured g0, 4, 1024
+ dcl_thread_group 32, 32, 1
+ uge r0.x, vThreadGroupID.x, CB0[0][0].w
+@@ -31,19 +31,32 @@ endif
+ imad r0.x, vThreadIDInGroup.y, l(32), vThreadIDInGroup.x
+ ishl r0.yz, l(0, 1, 1024, 0), CB0[0][0].zzzz
+ imul null, r0.w, CB0[0][0].y, CB0[0][0].x
+-ine r1.y, CB0[0][1].x, l(0)
+-ult r1.z, l(1), r0.w
+-and r1.y, r1.z, r1.y
+-if_nz r1.y
+-  ushr r1.yz, CB0[0][0].xxyx, l(0, 1, 1, 0)
+-  imad r1.y, r1.z, CB0[0][0].x, r1.y
+-else
+-  mov r1.y, l(0)
+-endif
+-imul null, r1.xz, r0.wwyw, r0.zzxz
+-imul null, r0.w, r0.w, r1.z
+-imad r0.w, vThreadGroupID.x, r1.x, r0.w
+-imad r0.y, r1.y, r0.y, r0.w
++ine r1.x, CB0[0][1].x, l(0)
++ult r1.y, l(1), r0.w
++and r1.x, r1.y, r1.x
++ushr r1.yz, CB0[0][0].xxyx, l(0, 1, 1, 0)
++and r1.xy, r1.yzyy, r1.xxxx
++iadd r1.z, -CB0[0][0].z, l(4)
++umin r1.z, r1.z, l(3)
++ubfe r1.w, r1.z, l(0), r0.x
++imul null, r2.x, r0.z, vThreadGroupID.x
++ishl r2.y, r0.x, CB0[0][0].z
++bfi r2.y, r1.z, CB0[0][0].z, l(0), r2.y
++imad r2.y, vThreadGroupID.x, r0.z, r2.y
++imad r1.w, r1.w, CB0[0][0].x, r1.x
++ushr r2.z, r1.w, r1.z
++ubfe r1.w, r1.z, l(0), r1.w
++imad r2.z, r2.z, CB0[0][0].y, r1.y
++ishl r1.z, r2.z, r1.z
++iadd r1.z, r1.w, r1.z
++ishl r1.z, r1.z, CB0[0][0].z
++imad r1.z, r2.y, r0.w, r1.z
++imad r1.x, r1.y, CB0[0][0].x, r1.x
++imul null, r1.y, r0.y, r0.x
++imul null, r1.w, r0.w, r1.y
++imad r0.w, r2.x, r0.w, r1.w
++imad r0.y, r1.x, r0.y, r0.w
++movc r0.y, CB0[0][1].y, r1.z, r0.y
+ ult r0.w, CB0[0][0].z, l(2)
+ if_nz r0.w
+   if_z CB0[0][0].z
+@@ -96,7 +109,7 @@ if_nz r0.w
+     endif
+   endif
+ else
+-  imad r0.z, vThreadGroupID.x, r0.z, r1.z
++  imad r0.z, vThreadGroupID.x, r0.z, r1.y
+   ieq r0.x, CB0[0][0].z, l(2)
+   if_nz r0.x
+     ld_raw r0.x, r0.y, T0[0].xxxx
+@@ -114,114 +127,142 @@ ret
+ #endif
+ 
+ const BYTE resolve_downscale_cs[] = {
+-    68,  88,  66, 67, 235, 139, 102, 94, 189, 150, 220, 235, 94,  229, 59, 205, 74,  78,  159, 167,
+-    1,   0,   0,  0,  164, 8,   0,   0,  3,   0,   0,   0,   44,  0,   0,  0,   60,  0,   0,   0,
+-    76,  0,   0,  0,  73,  83,  71,  78, 8,   0,   0,   0,   0,   0,   0,  0,   8,   0,   0,   0,
+-    79,  83,  71, 78, 8,   0,   0,   0,  0,   0,   0,   0,   8,   0,   0,  0,   83,  72,  69,  88,
+-    80,  8,   0,  0,  81,  0,   5,   0,  20,  2,   0,   0,   106, 8,   8,  1,   89,  0,   0,   7,
+-    70,  142, 48, 0,  0,   0,   0,   0,  0,   0,   0,   0,   0,   0,   0,  0,   2,   0,   0,   0,
+-    0,   0,   0,  0,  161, 0,   0,   6,  70,  126, 48,  0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  157, 0,   0,   6,   70,  238, 49, 0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  0,   0,   0,   0,   95,  0,   0,  2,   18,  16,  2,   0,
+-    95,  0,   0,  2,  50,  32,  2,   0,  104, 0,   0,   2,   2,   0,   0,  0,   160, 0,   0,   5,
+-    0,   240, 17, 0,  0,   0,   0,   0,  4,   0,   0,   0,   0,   4,   0,  0,   155, 0,   0,   4,
+-    32,  0,   0,  0,  32,  0,   0,   0,  1,   0,   0,   0,   80,  0,   0,  8,   18,  0,   16,  0,
+-    0,   0,   0,  0,  10,  16,  2,   0,  58,  128, 48,  0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  31,  0,   4,   3,  10,  0,   16,  0,   0,   0,   0,  0,   62,  0,   0,   1,
+-    21,  0,   0,  1,  35,  0,   0,   7,  18,  0,   16,  0,   0,   0,   0,  0,   26,  32,  2,   0,
+-    1,   64,  0,  0,  32,  0,   0,   0,  10,  32,  2,   0,   41,  0,   0,  12,  98,  0,   16,  0,
+-    0,   0,   0,  0,  2,   64,  0,   0,  0,   0,   0,   0,   1,   0,   0,  0,   0,   4,   0,   0,
+-    0,   0,   0,  0,  166, 138, 48,  0,  0,   0,   0,   0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    38,  0,   0,  12, 0,   208, 0,   0,  130, 0,   16,  0,   0,   0,   0,  0,   26,  128, 48,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  0,   0,   0,   0,   10,  128, 48, 0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  39,  0,   0,   9,   34,  0,   16, 0,   1,   0,   0,   0,
+-    10,  128, 48, 0,  0,   0,   0,   0,  0,   0,   0,   0,   1,   0,   0,  0,   1,   64,  0,   0,
+-    0,   0,   0,  0,  79,  0,   0,   7,  66,  0,   16,  0,   1,   0,   0,  0,   1,   64,  0,   0,
+-    1,   0,   0,  0,  58,  0,   16,  0,  0,   0,   0,   0,   1,   0,   0,  7,   34,  0,   16,  0,
+-    1,   0,   0,  0,  42,  0,   16,  0,  1,   0,   0,   0,   26,  0,   16, 0,   1,   0,   0,   0,
+-    31,  0,   4,  3,  26,  0,   16,  0,  1,   0,   0,   0,   85,  0,   0,  12,  98,  0,   16,  0,
+-    1,   0,   0,  0,  6,   129, 48,  0,  0,   0,   0,   0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    2,   64,  0,  0,  0,   0,   0,   0,  1,   0,   0,   0,   1,   0,   0,  0,   0,   0,   0,   0,
+-    35,  0,   0,  11, 34,  0,   16,  0,  1,   0,   0,   0,   42,  0,   16, 0,   1,   0,   0,   0,
+-    10,  128, 48, 0,  0,   0,   0,   0,  0,   0,   0,   0,   0,   0,   0,  0,   26,  0,   16,  0,
+-    1,   0,   0,  0,  18,  0,   0,   1,  54,  0,   0,   5,   34,  0,   16, 0,   1,   0,   0,   0,
+-    1,   64,  0,  0,  0,   0,   0,   0,  21,  0,   0,   1,   38,  0,   0,  8,   0,   208, 0,   0,
+-    82,  0,   16, 0,  1,   0,   0,   0,  246, 13,  16,  0,   0,   0,   0,  0,   166, 8,   16,  0,
+-    0,   0,   0,  0,  38,  0,   0,   8,  0,   208, 0,   0,   130, 0,   16, 0,   0,   0,   0,   0,
+-    58,  0,   16, 0,  0,   0,   0,   0,  42,  0,   16,  0,   1,   0,   0,  0,   35,  0,   0,   8,
+-    130, 0,   16, 0,  0,   0,   0,   0,  10,  16,  2,   0,   10,  0,   16, 0,   1,   0,   0,   0,
+-    58,  0,   16, 0,  0,   0,   0,   0,  35,  0,   0,   9,   34,  0,   16, 0,   0,   0,   0,   0,
+-    26,  0,   16, 0,  1,   0,   0,   0,  26,  0,   16,  0,   0,   0,   0,  0,   58,  0,   16,  0,
+-    0,   0,   0,  0,  79,  0,   0,   9,  130, 0,   16,  0,   0,   0,   0,  0,   42,  128, 48,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  0,   0,   0,   0,   1,   64,  0,  0,   2,   0,   0,   0,
+-    31,  0,   4,  3,  58,  0,   16,  0,  0,   0,   0,   0,   31,  0,   0,  5,   42,  128, 48,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  0,   0,   0,   0,   1,   0,   0,  7,   130, 0,   16,  0,
+-    0,   0,   0,  0,  26,  0,   16,  0,  0,   0,   0,   0,   1,   64,  0,  0,   252, 255, 255, 255,
+-    165, 0,   0,  8,  130, 0,   16,  0,  0,   0,   0,   0,   58,  0,   16, 0,   0,   0,   0,   0,
+-    6,   112, 32, 0,  0,   0,   0,   0,  0,   0,   0,   0,   140, 0,   0,  20,  146, 0,   16,  0,
+-    1,   0,   0,  0,  2,   64,  0,   0,  2,   0,   0,   0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    2,   0,   0,  0,  2,   64,  0,   0,  3,   0,   0,   0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    3,   0,   0,  0,  86,  1,   16,  0,  0,   0,   0,   0,   2,   64,  0,  0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  0,   0,   0,   0,   85,  0,   0,  7,   130, 0,   16,  0,
+-    0,   0,   0,  0,  58,  0,   16,  0,  0,   0,   0,   0,   10,  0,   16, 0,   1,   0,   0,   0,
+-    85,  0,   0,  7,  18,  0,   16,  0,  1,   0,   0,   0,   10,  0,   16, 0,   0,   0,   0,   0,
+-    1,   64,  0,  0,  2,   0,   0,   0,  1,   0,   0,   7,   66,  0,   16, 0,   1,   0,   0,   0,
+-    10,  0,   16, 0,  0,   0,   0,   0,  1,   64,  0,   0,   3,   0,   0,  0,   140, 0,   0,   11,
+-    130, 0,   16, 0,  0,   0,   0,   0,  1,   64,  0,   0,   8,   0,   0,  0,   58,  0,   16,  0,
+-    1,   0,   0,  0,  58,  0,   16,  0,  0,   0,   0,   0,   1,   64,  0,  0,   0,   0,   0,   0,
+-    31,  0,   0,  3,  42,  0,   16,  0,  1,   0,   0,   0,   168, 0,   0,  9,   18,  240, 17,  0,
+-    0,   0,   0,  0,  10,  0,   16,  0,  1,   0,   0,   0,   1,   64,  0,  0,   0,   0,   0,   0,
+-    58,  0,   16, 0,  0,   0,   0,   0,  21,  0,   0,   1,   190, 24,  0,  1,   31,  0,   4,   3,
+-    42,  0,   16, 0,  1,   0,   0,   0,  54,  0,   0,   5,   34,  0,   16, 0,   1,   0,   0,   0,
+-    1,   64,  0,  0,  0,   0,   0,   0,  170, 0,   0,   7,   0,   240, 17, 0,   0,   0,   0,   0,
+-    70,  0,   16, 0,  1,   0,   0,   0,  58,  0,   16,  0,   0,   0,   0,  0,   21,  0,   0,   1,
+-    190, 24,  0,  1,  31,  0,   0,   3,  42,  0,   16,  0,   1,   0,   0,  0,   1,   0,   0,   7,
+-    130, 0,   16, 0,  0,   0,   0,   0,  10,  0,   16,  0,   0,   0,   0,  0,   1,   64,  0,   0,
+-    252, 3,   0,  0,  35,  0,   0,   8,  130, 0,   16,  0,   0,   0,   0,  0,   10,  16,  2,   0,
+-    1,   64,  0,  0,  0,   4,   0,   0,  58,  0,   16,  0,   0,   0,   0,  0,   167, 0,   0,   9,
+-    18,  0,   16, 0,  1,   0,   0,   0,  10,  0,   16,  0,   1,   0,   0,  0,   1,   64,  0,   0,
+-    0,   0,   0,  0,  6,   240, 17,  0,  0,   0,   0,   0,   166, 0,   0,  8,   18,  224, 33,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  58,  0,   16,  0,   0,   0,   0,  0,   10,  0,   16,  0,
+-    1,   0,   0,  0,  21,  0,   0,   1,  18,  0,   0,   1,   1,   0,   0,  7,   130, 0,   16,  0,
+-    0,   0,   0,  0,  26,  0,   16,  0,  0,   0,   0,   0,   1,   64,  0,  0,   252, 255, 255, 255,
+-    165, 0,   0,  8,  130, 0,   16,  0,  0,   0,   0,   0,   58,  0,   16, 0,   0,   0,   0,   0,
+-    6,   112, 32, 0,  0,   0,   0,   0,  0,   0,   0,   0,   41,  0,   0,  7,   18,  0,   16,  0,
+-    1,   0,   0,  0,  26,  0,   16,  0,  0,   0,   0,   0,   1,   64,  0,  0,   3,   0,   0,   0,
+-    1,   0,   0,  7,  18,  0,   16,  0,  1,   0,   0,   0,   10,  0,   16, 0,   1,   0,   0,   0,
+-    1,   64,  0,  0,  16,  0,   0,   0,  85,  0,   0,   7,   130, 0,   16, 0,   0,   0,   0,   0,
+-    58,  0,   16, 0,  0,   0,   0,   0,  10,  0,   16,  0,   1,   0,   0,  0,   85,  0,   0,   7,
+-    18,  0,   16, 0,  1,   0,   0,   0,  10,  0,   16,  0,   0,   0,   0,  0,   1,   64,  0,   0,
+-    1,   0,   0,  0,  1,   0,   0,   7,  66,  0,   16,  0,   1,   0,   0,  0,   10,  0,   16,  0,
+-    0,   0,   0,  0,  1,   64,  0,   0,  1,   0,   0,   0,   140, 0,   0,  11,  18,  0,   16,  0,
+-    0,   0,   0,  0,  1,   64,  0,   0,  1,   0,   0,   0,   1,   64,  0,  0,   4,   0,   0,   0,
+-    10,  0,   16, 0,  0,   0,   0,   0,  1,   64,  0,   0,   0,   0,   0,  0,   140, 0,   0,   11,
+-    18,  0,   16, 0,  0,   0,   0,   0,  1,   64,  0,   0,   16,  0,   0,  0,   10,  0,   16,  0,
+-    0,   0,   0,  0,  58,  0,   16,  0,  0,   0,   0,   0,   1,   64,  0,  0,   0,   0,   0,   0,
+-    31,  0,   0,  3,  42,  0,   16,  0,  1,   0,   0,   0,   168, 0,   0,  9,   18,  240, 17,  0,
+-    0,   0,   0,  0,  10,  0,   16,  0,  1,   0,   0,   0,   1,   64,  0,  0,   0,   0,   0,   0,
+-    10,  0,   16, 0,  0,   0,   0,   0,  21,  0,   0,   1,   190, 24,  0,  1,   31,  0,   4,   3,
+-    42,  0,   16, 0,  1,   0,   0,   0,  54,  0,   0,   5,   34,  0,   16, 0,   1,   0,   0,   0,
+-    1,   64,  0,  0,  0,   0,   0,   0,  170, 0,   0,   7,   0,   240, 17, 0,   0,   0,   0,   0,
+-    70,  0,   16, 0,  1,   0,   0,   0,  10,  0,   16,  0,   0,   0,   0,  0,   21,  0,   0,   1,
+-    190, 24,  0,  1,  31,  0,   0,   3,  42,  0,   16,  0,   1,   0,   0,  0,   41,  0,   0,   7,
+-    18,  0,   16, 0,  0,   0,   0,   0,  10,  0,   16,  0,   1,   0,   0,  0,   1,   64,  0,   0,
+-    2,   0,   0,  0,  35,  0,   0,   8,  18,  0,   16,  0,   0,   0,   0,  0,   10,  16,  2,   0,
+-    1,   64,  0,  0,  0,   8,   0,   0,  10,  0,   16,  0,   0,   0,   0,  0,   167, 0,   0,   9,
+-    130, 0,   16, 0,  0,   0,   0,   0,  10,  0,   16,  0,   1,   0,   0,  0,   1,   64,  0,   0,
+-    0,   0,   0,  0,  6,   240, 17,  0,  0,   0,   0,   0,   166, 0,   0,  8,   18,  224, 33,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  10,  0,   16,  0,   0,   0,   0,  0,   58,  0,   16,  0,
+-    0,   0,   0,  0,  21,  0,   0,   1,  21,  0,   0,   1,   18,  0,   0,  1,   35,  0,   0,   8,
+-    66,  0,   16, 0,  0,   0,   0,   0,  10,  16,  2,   0,   42,  0,   16, 0,   0,   0,   0,   0,
+-    42,  0,   16, 0,  1,   0,   0,   0,  32,  0,   0,   9,   18,  0,   16, 0,   0,   0,   0,   0,
+-    42,  128, 48, 0,  0,   0,   0,   0,  0,   0,   0,   0,   0,   0,   0,  0,   1,   64,  0,   0,
+-    2,   0,   0,  0,  31,  0,   4,   3,  10,  0,   16,  0,   0,   0,   0,  0,   165, 0,   0,   8,
+-    18,  0,   16, 0,  0,   0,   0,   0,  26,  0,   16,  0,   0,   0,   0,  0,   6,   112, 32,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  166, 0,   0,   8,   18,  224, 33, 0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  42,  0,   16,  0,  0,   0,   0,   0,   10,  0,   16, 0,   0,   0,   0,   0,
+-    18,  0,   0,  1,  32,  0,   0,   9,  18,  0,   16,  0,   0,   0,   0,  0,   42,  128, 48,  0,
+-    0,   0,   0,  0,  0,   0,   0,   0,  0,   0,   0,   0,   1,   64,  0,  0,   3,   0,   0,   0,
+-    31,  0,   4,  3,  10,  0,   16,  0,  0,   0,   0,   0,   165, 0,   0,  8,   50,  0,   16,  0,
+-    0,   0,   0,  0,  26,  0,   16,  0,  0,   0,   0,   0,   70,  112, 32, 0,   0,   0,   0,   0,
+-    0,   0,   0,  0,  166, 0,   0,   8,  50,  224, 33,  0,   0,   0,   0,  0,   0,   0,   0,   0,
+-    42,  0,   16, 0,  0,   0,   0,   0,  70,  0,   16,  0,   0,   0,   0,  0,   21,  0,   0,   1,
+-    21,  0,   0,  1,  21,  0,   0,   1,  62,  0,   0,   1};
++    68,  88,  66, 67, 165, 10,  14,  132, 222, 224, 251, 166, 106, 33,  228, 125, 36,  198, 126, 133,
++    1,   0,   0,  0,  220, 10,  0,   0,   3,   0,   0,   0,   44,  0,   0,   0,   60,  0,   0,   0,
++    76,  0,   0,  0,  73,  83,  71,  78,  8,   0,   0,   0,   0,   0,   0,   0,   8,   0,   0,   0,
++    79,  83,  71, 78, 8,   0,   0,   0,   0,   0,   0,   0,   8,   0,   0,   0,   83,  72,  69,  88,
++    136, 10,  0,  0,  81,  0,   5,   0,   162, 2,   0,   0,   106, 8,   8,   1,   89,  0,   0,   7,
++    70,  142, 48, 0,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   2,   0,   0,   0,
++    0,   0,   0,  0,  161, 0,   0,   6,   70,  126, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   157, 0,   0,   6,   70,  238, 49,  0,   0,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   95,  0,   0,   2,   18,  16,  2,   0,
++    95,  0,   0,  2,  50,  32,  2,   0,   104, 0,   0,   2,   3,   0,   0,   0,   160, 0,   0,   5,
++    0,   240, 17, 0,  0,   0,   0,   0,   4,   0,   0,   0,   0,   4,   0,   0,   155, 0,   0,   4,
++    32,  0,   0,  0,  32,  0,   0,   0,   1,   0,   0,   0,   80,  0,   0,   8,   18,  0,   16,  0,
++    0,   0,   0,  0,  10,  16,  2,   0,   58,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  31,  0,   4,   3,   10,  0,   16,  0,   0,   0,   0,   0,   62,  0,   0,   1,
++    21,  0,   0,  1,  35,  0,   0,   7,   18,  0,   16,  0,   0,   0,   0,   0,   26,  32,  2,   0,
++    1,   64,  0,  0,  32,  0,   0,   0,   10,  32,  2,   0,   41,  0,   0,   12,  98,  0,   16,  0,
++    0,   0,   0,  0,  2,   64,  0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   4,   0,   0,
++    0,   0,   0,  0,  166, 138, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++    38,  0,   0,  12, 0,   208, 0,   0,   130, 0,   16,  0,   0,   0,   0,   0,   26,  128, 48,  0,
++    0,   0,   0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   10,  128, 48,  0,   0,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   39,  0,   0,   9,   18,  0,   16,  0,   1,   0,   0,   0,
++    10,  128, 48, 0,  0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   1,   64,  0,   0,
++    0,   0,   0,  0,  79,  0,   0,   7,   34,  0,   16,  0,   1,   0,   0,   0,   1,   64,  0,   0,
++    1,   0,   0,  0,  58,  0,   16,  0,   0,   0,   0,   0,   1,   0,   0,   7,   18,  0,   16,  0,
++    1,   0,   0,  0,  26,  0,   16,  0,   1,   0,   0,   0,   10,  0,   16,  0,   1,   0,   0,   0,
++    85,  0,   0,  12, 98,  0,   16,  0,   1,   0,   0,   0,   6,   129, 48,  0,   0,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   2,   64,  0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++    1,   0,   0,  0,  0,   0,   0,   0,   1,   0,   0,   7,   50,  0,   16,  0,   1,   0,   0,   0,
++    150, 5,   16, 0,  1,   0,   0,   0,   6,   0,   16,  0,   1,   0,   0,   0,   30,  0,   0,   10,
++    66,  0,   16, 0,  1,   0,   0,   0,   42,  128, 48,  128, 65,  0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   1,   64,  0,   0,   4,   0,   0,   0,   84,  0,   0,   7,
++    66,  0,   16, 0,  1,   0,   0,   0,   42,  0,   16,  0,   1,   0,   0,   0,   1,   64,  0,   0,
++    3,   0,   0,  0,  138, 0,   0,   9,   130, 0,   16,  0,   1,   0,   0,   0,   42,  0,   16,  0,
++    1,   0,   0,  0,  1,   64,  0,   0,   0,   0,   0,   0,   10,  0,   16,  0,   0,   0,   0,   0,
++    38,  0,   0,  7,  0,   208, 0,   0,   18,  0,   16,  0,   2,   0,   0,   0,   42,  0,   16,  0,
++    0,   0,   0,  0,  10,  16,  2,   0,   41,  0,   0,   9,   34,  0,   16,  0,   2,   0,   0,   0,
++    10,  0,   16, 0,  0,   0,   0,   0,   42,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  140, 0,   0,   13,  34,  0,   16,  0,   2,   0,   0,   0,   42,  0,   16,  0,
++    1,   0,   0,  0,  42,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++    1,   64,  0,  0,  0,   0,   0,   0,   26,  0,   16,  0,   2,   0,   0,   0,   35,  0,   0,   8,
++    34,  0,   16, 0,  2,   0,   0,   0,   10,  16,  2,   0,   42,  0,   16,  0,   0,   0,   0,   0,
++    26,  0,   16, 0,  2,   0,   0,   0,   35,  0,   0,   11,  130, 0,   16,  0,   1,   0,   0,   0,
++    58,  0,   16, 0,  1,   0,   0,   0,   10,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  10,  0,   16,  0,   1,   0,   0,   0,   85,  0,   0,   7,   66,  0,   16,  0,
++    2,   0,   0,  0,  58,  0,   16,  0,   1,   0,   0,   0,   42,  0,   16,  0,   1,   0,   0,   0,
++    138, 0,   0,  9,  130, 0,   16,  0,   1,   0,   0,   0,   42,  0,   16,  0,   1,   0,   0,   0,
++    1,   64,  0,  0,  0,   0,   0,   0,   58,  0,   16,  0,   1,   0,   0,   0,   35,  0,   0,   11,
++    66,  0,   16, 0,  2,   0,   0,   0,   42,  0,   16,  0,   2,   0,   0,   0,   26,  128, 48,  0,
++    0,   0,   0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   26,  0,   16,  0,   1,   0,   0,   0,
++    41,  0,   0,  7,  66,  0,   16,  0,   1,   0,   0,   0,   42,  0,   16,  0,   2,   0,   0,   0,
++    42,  0,   16, 0,  1,   0,   0,   0,   30,  0,   0,   7,   66,  0,   16,  0,   1,   0,   0,   0,
++    58,  0,   16, 0,  1,   0,   0,   0,   42,  0,   16,  0,   1,   0,   0,   0,   41,  0,   0,   9,
++    66,  0,   16, 0,  1,   0,   0,   0,   42,  0,   16,  0,   1,   0,   0,   0,   42,  128, 48,  0,
++    0,   0,   0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   35,  0,   0,   9,   66,  0,   16,  0,
++    1,   0,   0,  0,  26,  0,   16,  0,   2,   0,   0,   0,   58,  0,   16,  0,   0,   0,   0,   0,
++    42,  0,   16, 0,  1,   0,   0,   0,   35,  0,   0,   11,  18,  0,   16,  0,   1,   0,   0,   0,
++    26,  0,   16, 0,  1,   0,   0,   0,   10,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  10,  0,   16,  0,   1,   0,   0,   0,   38,  0,   0,   8,   0,   208, 0,   0,
++    34,  0,   16, 0,  1,   0,   0,   0,   26,  0,   16,  0,   0,   0,   0,   0,   10,  0,   16,  0,
++    0,   0,   0,  0,  38,  0,   0,   8,   0,   208, 0,   0,   130, 0,   16,  0,   1,   0,   0,   0,
++    58,  0,   16, 0,  0,   0,   0,   0,   26,  0,   16,  0,   1,   0,   0,   0,   35,  0,   0,   9,
++    130, 0,   16, 0,  0,   0,   0,   0,   10,  0,   16,  0,   2,   0,   0,   0,   58,  0,   16,  0,
++    0,   0,   0,  0,  58,  0,   16,  0,   1,   0,   0,   0,   35,  0,   0,   9,   34,  0,   16,  0,
++    0,   0,   0,  0,  10,  0,   16,  0,   1,   0,   0,   0,   26,  0,   16,  0,   0,   0,   0,   0,
++    58,  0,   16, 0,  0,   0,   0,   0,   55,  0,   0,   11,  34,  0,   16,  0,   0,   0,   0,   0,
++    26,  128, 48, 0,  0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   42,  0,   16,  0,
++    1,   0,   0,  0,  26,  0,   16,  0,   0,   0,   0,   0,   79,  0,   0,   9,   130, 0,   16,  0,
++    0,   0,   0,  0,  42,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++    1,   64,  0,  0,  2,   0,   0,   0,   31,  0,   4,   3,   58,  0,   16,  0,   0,   0,   0,   0,
++    31,  0,   0,  5,  42,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++    1,   0,   0,  7,  130, 0,   16,  0,   0,   0,   0,   0,   26,  0,   16,  0,   0,   0,   0,   0,
++    1,   64,  0,  0,  252, 255, 255, 255, 165, 0,   0,   8,   130, 0,   16,  0,   0,   0,   0,   0,
++    58,  0,   16, 0,  0,   0,   0,   0,   6,   112, 32,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    140, 0,   0,  20, 146, 0,   16,  0,   1,   0,   0,   0,   2,   64,  0,   0,   2,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   2,   0,   0,   0,   2,   64,  0,   0,   3,   0,   0,   0,
++    0,   0,   0,  0,  0,   0,   0,   0,   3,   0,   0,   0,   86,  1,   16,  0,   0,   0,   0,   0,
++    2,   64,  0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++    85,  0,   0,  7,  130, 0,   16,  0,   0,   0,   0,   0,   58,  0,   16,  0,   0,   0,   0,   0,
++    10,  0,   16, 0,  1,   0,   0,   0,   85,  0,   0,   7,   18,  0,   16,  0,   1,   0,   0,   0,
++    10,  0,   16, 0,  0,   0,   0,   0,   1,   64,  0,   0,   2,   0,   0,   0,   1,   0,   0,   7,
++    66,  0,   16, 0,  1,   0,   0,   0,   10,  0,   16,  0,   0,   0,   0,   0,   1,   64,  0,   0,
++    3,   0,   0,  0,  140, 0,   0,   11,  130, 0,   16,  0,   0,   0,   0,   0,   1,   64,  0,   0,
++    8,   0,   0,  0,  58,  0,   16,  0,   1,   0,   0,   0,   58,  0,   16,  0,   0,   0,   0,   0,
++    1,   64,  0,  0,  0,   0,   0,   0,   31,  0,   0,   3,   42,  0,   16,  0,   1,   0,   0,   0,
++    168, 0,   0,  9,  18,  240, 17,  0,   0,   0,   0,   0,   10,  0,   16,  0,   1,   0,   0,   0,
++    1,   64,  0,  0,  0,   0,   0,   0,   58,  0,   16,  0,   0,   0,   0,   0,   21,  0,   0,   1,
++    190, 24,  0,  1,  31,  0,   4,   3,   42,  0,   16,  0,   1,   0,   0,   0,   54,  0,   0,   5,
++    34,  0,   16, 0,  1,   0,   0,   0,   1,   64,  0,   0,   0,   0,   0,   0,   170, 0,   0,   7,
++    0,   240, 17, 0,  0,   0,   0,   0,   70,  0,   16,  0,   1,   0,   0,   0,   58,  0,   16,  0,
++    0,   0,   0,  0,  21,  0,   0,   1,   190, 24,  0,   1,   31,  0,   0,   3,   42,  0,   16,  0,
++    1,   0,   0,  0,  1,   0,   0,   7,   130, 0,   16,  0,   0,   0,   0,   0,   10,  0,   16,  0,
++    0,   0,   0,  0,  1,   64,  0,   0,   252, 3,   0,   0,   35,  0,   0,   8,   130, 0,   16,  0,
++    0,   0,   0,  0,  10,  16,  2,   0,   1,   64,  0,   0,   0,   4,   0,   0,   58,  0,   16,  0,
++    0,   0,   0,  0,  167, 0,   0,   9,   18,  0,   16,  0,   1,   0,   0,   0,   10,  0,   16,  0,
++    1,   0,   0,  0,  1,   64,  0,   0,   0,   0,   0,   0,   6,   240, 17,  0,   0,   0,   0,   0,
++    166, 0,   0,  8,  18,  224, 33,  0,   0,   0,   0,   0,   0,   0,   0,   0,   58,  0,   16,  0,
++    0,   0,   0,  0,  10,  0,   16,  0,   1,   0,   0,   0,   21,  0,   0,   1,   18,  0,   0,   1,
++    1,   0,   0,  7,  130, 0,   16,  0,   0,   0,   0,   0,   26,  0,   16,  0,   0,   0,   0,   0,
++    1,   64,  0,  0,  252, 255, 255, 255, 165, 0,   0,   8,   130, 0,   16,  0,   0,   0,   0,   0,
++    58,  0,   16, 0,  0,   0,   0,   0,   6,   112, 32,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    41,  0,   0,  7,  18,  0,   16,  0,   1,   0,   0,   0,   26,  0,   16,  0,   0,   0,   0,   0,
++    1,   64,  0,  0,  3,   0,   0,   0,   1,   0,   0,   7,   18,  0,   16,  0,   1,   0,   0,   0,
++    10,  0,   16, 0,  1,   0,   0,   0,   1,   64,  0,   0,   16,  0,   0,   0,   85,  0,   0,   7,
++    130, 0,   16, 0,  0,   0,   0,   0,   58,  0,   16,  0,   0,   0,   0,   0,   10,  0,   16,  0,
++    1,   0,   0,  0,  85,  0,   0,   7,   18,  0,   16,  0,   1,   0,   0,   0,   10,  0,   16,  0,
++    0,   0,   0,  0,  1,   64,  0,   0,   1,   0,   0,   0,   1,   0,   0,   7,   66,  0,   16,  0,
++    1,   0,   0,  0,  10,  0,   16,  0,   0,   0,   0,   0,   1,   64,  0,   0,   1,   0,   0,   0,
++    140, 0,   0,  11, 18,  0,   16,  0,   0,   0,   0,   0,   1,   64,  0,   0,   1,   0,   0,   0,
++    1,   64,  0,  0,  4,   0,   0,   0,   10,  0,   16,  0,   0,   0,   0,   0,   1,   64,  0,   0,
++    0,   0,   0,  0,  140, 0,   0,   11,  18,  0,   16,  0,   0,   0,   0,   0,   1,   64,  0,   0,
++    16,  0,   0,  0,  10,  0,   16,  0,   0,   0,   0,   0,   58,  0,   16,  0,   0,   0,   0,   0,
++    1,   64,  0,  0,  0,   0,   0,   0,   31,  0,   0,   3,   42,  0,   16,  0,   1,   0,   0,   0,
++    168, 0,   0,  9,  18,  240, 17,  0,   0,   0,   0,   0,   10,  0,   16,  0,   1,   0,   0,   0,
++    1,   64,  0,  0,  0,   0,   0,   0,   10,  0,   16,  0,   0,   0,   0,   0,   21,  0,   0,   1,
++    190, 24,  0,  1,  31,  0,   4,   3,   42,  0,   16,  0,   1,   0,   0,   0,   54,  0,   0,   5,
++    34,  0,   16, 0,  1,   0,   0,   0,   1,   64,  0,   0,   0,   0,   0,   0,   170, 0,   0,   7,
++    0,   240, 17, 0,  0,   0,   0,   0,   70,  0,   16,  0,   1,   0,   0,   0,   10,  0,   16,  0,
++    0,   0,   0,  0,  21,  0,   0,   1,   190, 24,  0,   1,   31,  0,   0,   3,   42,  0,   16,  0,
++    1,   0,   0,  0,  41,  0,   0,   7,   18,  0,   16,  0,   0,   0,   0,   0,   10,  0,   16,  0,
++    1,   0,   0,  0,  1,   64,  0,   0,   2,   0,   0,   0,   35,  0,   0,   8,   18,  0,   16,  0,
++    0,   0,   0,  0,  10,  16,  2,   0,   1,   64,  0,   0,   0,   8,   0,   0,   10,  0,   16,  0,
++    0,   0,   0,  0,  167, 0,   0,   9,   130, 0,   16,  0,   0,   0,   0,   0,   10,  0,   16,  0,
++    1,   0,   0,  0,  1,   64,  0,   0,   0,   0,   0,   0,   6,   240, 17,  0,   0,   0,   0,   0,
++    166, 0,   0,  8,  18,  224, 33,  0,   0,   0,   0,   0,   0,   0,   0,   0,   10,  0,   16,  0,
++    0,   0,   0,  0,  58,  0,   16,  0,   0,   0,   0,   0,   21,  0,   0,   1,   21,  0,   0,   1,
++    18,  0,   0,  1,  35,  0,   0,   8,   66,  0,   16,  0,   0,   0,   0,   0,   10,  16,  2,   0,
++    42,  0,   16, 0,  0,   0,   0,   0,   26,  0,   16,  0,   1,   0,   0,   0,   32,  0,   0,   9,
++    18,  0,   16, 0,  0,   0,   0,   0,   42,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,
++    0,   0,   0,  0,  1,   64,  0,   0,   2,   0,   0,   0,   31,  0,   4,   3,   10,  0,   16,  0,
++    0,   0,   0,  0,  165, 0,   0,   8,   18,  0,   16,  0,   0,   0,   0,   0,   26,  0,   16,  0,
++    0,   0,   0,  0,  6,   112, 32,  0,   0,   0,   0,   0,   0,   0,   0,   0,   166, 0,   0,   8,
++    18,  224, 33, 0,  0,   0,   0,   0,   0,   0,   0,   0,   42,  0,   16,  0,   0,   0,   0,   0,
++    10,  0,   16, 0,  0,   0,   0,   0,   18,  0,   0,   1,   32,  0,   0,   9,   18,  0,   16,  0,
++    0,   0,   0,  0,  42,  128, 48,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++    1,   64,  0,  0,  3,   0,   0,   0,   31,  0,   4,   3,   10,  0,   16,  0,   0,   0,   0,   0,
++    165, 0,   0,  8,  50,  0,   16,  0,   0,   0,   0,   0,   26,  0,   16,  0,   0,   0,   0,   0,
++    70,  112, 32, 0,  0,   0,   0,   0,   0,   0,   0,   0,   166, 0,   0,   8,   50,  224, 33,  0,
++    0,   0,   0,  0,  0,   0,   0,   0,   42,  0,   16,  0,   0,   0,   0,   0,   70,  0,   16,  0,
++    0,   0,   0,  0,  21,  0,   0,   1,   21,  0,   0,   1,   21,  0,   0,   1,   62,  0,   0,   1};
+diff --git a/src/graphics/shaders/resolve_downscale.cs.glsl b/src/graphics/shaders/resolve_downscale.cs.glsl
+index a3c8c12..a77b7ff 100644
+--- a/src/graphics/shaders/resolve_downscale.cs.glsl
++++ b/src/graphics/shaders/resolve_downscale.cs.glsl
+@@ -17,6 +17,16 @@
+ // When xe_downscale_half_pixel_offset is set, samples from (scale/2, scale/2)
+ // within each block to compensate for the half-pixel offset becoming a
+ // full-pixel offset at higher resolutions.
++//
++// Where the pixel is in the scaled data depends on the layout of a resolution-
++// scaled resolve (XeTextureScaledTiledOffset in the xenia shaders): the host
++// pixels of a guest Nx1 unit (N = 8 for 1 and 2 bytes a pixel, 4 for 4 bytes,
++// 2 for 8 bytes) are kept in N x 1 host sub-units, column-major, not as one
++// contiguous block per guest pixel. With xe_downscale_unit_layout set the
++// source is found that way (XeDownscaleSourceOffset, which the layout check in
++// launcher/dev runs as text); without it, the pixel is taken to be at
++// pixel * scale_x * scale_y in the tile's scaled data, which is the block's
++// top-left host pixel only at 1x and for 8 bytes a pixel at 2x2.
+ 
+ layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+ 
+@@ -32,6 +42,8 @@ layout(push_constant) uniform ResolveDownscaleConstants {
+   // games, which at Nx resolution scaling shifts rendered content by
+   // (N/2, N/2) host pixels.
+   uint xe_downscale_half_pixel_offset;
++  // When non-zero, find the pixel by the scaled resolve layout (see above).
++  uint xe_downscale_unit_layout;
+ };
+ 
+ // Source buffer (scaled resolve data)
+@@ -44,6 +56,58 @@ layout(std430, set = 0, binding = 1) writeonly buffer DestBuffer {
+   uint data[];
+ } xe_resolve_dest;
+ 
++// BEGIN XeDownscaleSourceOffset (the same text is in resolve_downscale.cs.hlsl
++// and is what launcher/dev/downscale-layout-check.py runs)
++// The byte offset, from the start of the scaled data of the first tile, of the
++// host pixel to copy for the guest pixel at index pixel_index (the order of the
++// pixels in memory) of 32x32 tile tile_index.
++uint XeDownscaleSourceOffset(uint tile_index, uint pixel_index, uint scale_x,
++                             uint scale_y, uint pixel_size_log2,
++                             uint half_pixel_offset, uint unit_layout) {
++  uint pixel_size = 1u << pixel_size_log2;
++  uint tile_size_1x = 32u * 32u * pixel_size;
++  uint scale_xy = scale_x * scale_y;
++  // Where in the block of scale_x * scale_y host pixels to sample: the top left
++  // one, or, with the half-pixel correction, the one at (scale/2, scale/2) to
++  // compensate for the D3D9-style half-pixel offset shifting content by
++  // (N/2, N/2) pixels at Nx resolution.
++  uint offset_x = 0u;
++  uint offset_y = 0u;
++  if (half_pixel_offset != 0u && scale_xy > 1u) {
++    offset_x = scale_x >> 1u;
++    offset_y = scale_y >> 1u;
++  }
++  uint src_offset;
++  if (unit_layout != 0u) {
++    // Guest units of N pixels consecutive in memory (XeTextureTiled
++    // ConsecutiveBlocksLog2), each scaled to scale_x * scale_y sub-units of N
++    // host pixels in a row, column-major.
++    uint unit_width_log2 = min(4u - pixel_size_log2, 3u);
++    uint unit_mask = (1u << unit_width_log2) - 1u;
++    uint unit_pixel = pixel_index & unit_mask;
++    // The guest unit's byte offset in the 1x data, which the scaled data's unit
++    // is at scale_x * scale_y times.
++    uint unit_offset_1x = tile_index * tile_size_1x +
++                          ((pixel_index & ~unit_mask) << pixel_size_log2);
++    // The host pixel to take, in host pixels along the unit's rows.
++    uint host_x = unit_pixel * scale_x + offset_x;
++    uint sub_unit_x = host_x >> unit_width_log2;
++    uint host_pixel_in_sub_unit = host_x & unit_mask;
++    src_offset = unit_offset_1x * scale_xy +
++                 ((((sub_unit_x * scale_y + offset_y) << unit_width_log2) +
++                   host_pixel_in_sub_unit)
++                  << pixel_size_log2);
++  } else {
++    // The pixel's slot, in pixels, among the tile's scaled pixels.
++    uint block_sample_offset = offset_x + offset_y * scale_x;
++    src_offset = tile_index * tile_size_1x * scale_xy +
++                 pixel_index * pixel_size * scale_xy +
++                 block_sample_offset * pixel_size;
++  }
++  return src_offset;
++}
++// END XeDownscaleSourceOffset
++
+ // Groupshared memory for coalescing sub-32-bit writes
+ shared uint gs_tile_data[32 * 32];
+ 
+@@ -61,28 +125,17 @@ void main() {
+ 
+   uint pixel_size = 1u << xe_downscale_pixel_size_log2;
+   uint tile_size_1x = 32u * 32u * pixel_size;
+-  uint scale_xy = xe_downscale_scale_x * xe_downscale_scale_y;
+-  uint tile_size_scaled = tile_size_1x * scale_xy;
+-
+-  // Compute offset within each scaled block to sample from.
+-  // Without half-pixel correction: sample from (0, 0) = linear offset 0.
+-  // With half-pixel correction: sample from (scale/2, scale/2) to compensate
+-  // for the D3D9-style half-pixel offset shifting content by (N/2, N/2) pixels
+-  // at Nx resolution.
+-  uint block_sample_offset = 0u;
+-  if (xe_downscale_half_pixel_offset != 0u && scale_xy > 1u) {
+-    uint offset_x = xe_downscale_scale_x >> 1u;
+-    uint offset_y = xe_downscale_scale_y >> 1u;
+-    block_sample_offset = offset_x + offset_y * xe_downscale_scale_x;
+-  }
+ 
+-  // Source offset: base of the scaled block plus offset within block
+-  // Add source_offset_bytes to handle buffer-relative addressing
+-  // This must be done before division to preserve sub-dword byte position
+-  uint src_byte_offset = xe_downscale_source_offset_bytes +
+-                         tile_index * tile_size_scaled +
+-                         pixel_index * pixel_size * scale_xy +
+-                         block_sample_offset * pixel_size;
++  // Source offset in bytes: the pixel's slot in the scaled data, plus the
++  // offset of that data in the source buffer (added before the division to
++  // keep the sub-dword byte position).
++  uint src_byte_offset =
++      xe_downscale_source_offset_bytes +
++      XeDownscaleSourceOffset(tile_index, pixel_index, xe_downscale_scale_x,
++                              xe_downscale_scale_y,
++                              xe_downscale_pixel_size_log2,
++                              xe_downscale_half_pixel_offset,
++                              xe_downscale_unit_layout);
+   uint src_offset = src_byte_offset >> 2u;
+ 
+   // Destination offset in 1x buffer
+diff --git a/src/graphics/shaders/resolve_downscale.cs.hlsl b/src/graphics/shaders/resolve_downscale.cs.hlsl
+index 91c2f95..1df7f69 100644
+--- a/src/graphics/shaders/resolve_downscale.cs.hlsl
++++ b/src/graphics/shaders/resolve_downscale.cs.hlsl
+@@ -15,6 +15,16 @@
+ // When xe_downscale_half_pixel_offset is set, samples from (scale/2, scale/2)
+ // within each block to compensate for the half-pixel offset becoming a
+ // full-pixel offset at higher resolutions.
++//
++// Where the pixel is in the scaled data depends on the layout of a resolution-
++// scaled resolve (XeTextureScaledTiledOffset in the xenia shaders): the host
++// pixels of a guest Nx1 unit (N = 8 for 1 and 2 bytes a pixel, 4 for 4 bytes,
++// 2 for 8 bytes) are kept in N x 1 host sub-units, column-major, not as one
++// contiguous block per guest pixel. With xe_downscale_unit_layout set the
++// source is found that way (XeDownscaleSourceOffset, which the layout check in
++// launcher/dev runs as text); without it, the pixel is taken to be at
++// pixel * scale_x * scale_y in the tile's scaled data, which is the block's
++// top-left host pixel only at 1x and for 8 bytes a pixel at 2x2.
+ 
+ cbuffer XeResolveDownscaleConstants : register(b0) {
+   uint xe_downscale_scale_x;         // 1 to kMaxDrawResolutionScaleAlongAxis
+@@ -27,11 +37,65 @@ cbuffer XeResolveDownscaleConstants : register(b0) {
+   // games, which at Nx resolution scaling shifts rendered content by
+   // (N/2, N/2) host pixels.
+   uint xe_downscale_half_pixel_offset;
++  // When non-zero, find the pixel by the scaled resolve layout (see above).
++  uint xe_downscale_unit_layout;
+ };
+ 
+ ByteAddressBuffer xe_resolve_source : register(t0);
+ RWByteAddressBuffer xe_resolve_dest : register(u0);
+ 
++// BEGIN XeDownscaleSourceOffset (the same text is in resolve_downscale.cs.glsl
++// and is what launcher/dev/downscale-layout-check.py runs)
++// The byte offset, from the start of the scaled data of the first tile, of the
++// host pixel to copy for the guest pixel at index pixel_index (the order of the
++// pixels in memory) of 32x32 tile tile_index.
++uint XeDownscaleSourceOffset(uint tile_index, uint pixel_index, uint scale_x,
++                             uint scale_y, uint pixel_size_log2,
++                             uint half_pixel_offset, uint unit_layout) {
++  uint pixel_size = 1u << pixel_size_log2;
++  uint tile_size_1x = 32u * 32u * pixel_size;
++  uint scale_xy = scale_x * scale_y;
++  // Where in the block of scale_x * scale_y host pixels to sample: the top left
++  // one, or, with the half-pixel correction, the one at (scale/2, scale/2) to
++  // compensate for the D3D9-style half-pixel offset shifting content by
++  // (N/2, N/2) pixels at Nx resolution.
++  uint offset_x = 0u;
++  uint offset_y = 0u;
++  if (half_pixel_offset != 0u && scale_xy > 1u) {
++    offset_x = scale_x >> 1u;
++    offset_y = scale_y >> 1u;
++  }
++  uint src_offset;
++  if (unit_layout != 0u) {
++    // Guest units of N pixels consecutive in memory (XeTextureTiled
++    // ConsecutiveBlocksLog2), each scaled to scale_x * scale_y sub-units of N
++    // host pixels in a row, column-major.
++    uint unit_width_log2 = min(4u - pixel_size_log2, 3u);
++    uint unit_mask = (1u << unit_width_log2) - 1u;
++    uint unit_pixel = pixel_index & unit_mask;
++    // The guest unit's byte offset in the 1x data, which the scaled data's unit
++    // is at scale_x * scale_y times.
++    uint unit_offset_1x = tile_index * tile_size_1x +
++                          ((pixel_index & ~unit_mask) << pixel_size_log2);
++    // The host pixel to take, in host pixels along the unit's rows.
++    uint host_x = unit_pixel * scale_x + offset_x;
++    uint sub_unit_x = host_x >> unit_width_log2;
++    uint host_pixel_in_sub_unit = host_x & unit_mask;
++    src_offset = unit_offset_1x * scale_xy +
++                 ((((sub_unit_x * scale_y + offset_y) << unit_width_log2) +
++                   host_pixel_in_sub_unit)
++                  << pixel_size_log2);
++  } else {
++    // The pixel's slot, in pixels, among the tile's scaled pixels.
++    uint block_sample_offset = offset_x + offset_y * scale_x;
++    src_offset = tile_index * tile_size_1x * scale_xy +
++                 pixel_index * pixel_size * scale_xy +
++                 block_sample_offset * pixel_size;
++  }
++  return src_offset;
++}
++// END XeDownscaleSourceOffset
++
+ // Groupshared memory for coalescing sub-32-bit writes
+ // Max tile size at 1x is 32*32*8 bytes = 8KB for 64-bit pixels
+ // We only need this for 8-bit and 16-bit where we coalesce to 32-bit stores
+@@ -55,25 +119,12 @@ void main(uint3 xe_group_id : SV_GroupID,
+ 
+   uint pixel_size = 1u << xe_downscale_pixel_size_log2;
+   uint tile_size_1x = 32 * 32 * pixel_size;
+-  uint scale_xy = xe_downscale_scale_x * xe_downscale_scale_y;
+-  uint tile_size_scaled = tile_size_1x * scale_xy;
+-
+-  // Compute offset within each scaled block to sample from.
+-  // Without half-pixel correction: sample from (0, 0) = linear offset 0.
+-  // With half-pixel correction: sample from (scale/2, scale/2) to compensate
+-  // for the D3D9-style half-pixel offset shifting content by (N/2, N/2) pixels
+-  // at Nx resolution.
+-  uint block_sample_offset = 0u;
+-  [branch] if (xe_downscale_half_pixel_offset != 0u && scale_xy > 1u) {
+-    uint offset_x = xe_downscale_scale_x >> 1u;
+-    uint offset_y = xe_downscale_scale_y >> 1u;
+-    block_sample_offset = offset_x + offset_y * xe_downscale_scale_x;
+-  }
+ 
+-  // Source offset: base of the scaled block plus offset within block
+-  uint src_offset = tile_index * tile_size_scaled +
+-                    pixel_index * pixel_size * scale_xy +
+-                    block_sample_offset * pixel_size;
++  // Source offset (in bytes): the pixel's slot in the scaled data.
++  uint src_offset = XeDownscaleSourceOffset(
++      tile_index, pixel_index, xe_downscale_scale_x, xe_downscale_scale_y,
++      xe_downscale_pixel_size_log2, xe_downscale_half_pixel_offset,
++      xe_downscale_unit_layout);
+ 
+   // Destination offset in 1x buffer
+   uint dst_offset = tile_index * tile_size_1x +
+diff --git a/src/graphics/shaders/vulkan_spirv/resolve_downscale_cs.h b/src/graphics/shaders/vulkan_spirv/resolve_downscale_cs.h
+index fd9d6a7..e7e9840 100644
+--- a/src/graphics/shaders/vulkan_spirv/resolve_downscale_cs.h
++++ b/src/graphics/shaders/vulkan_spirv/resolve_downscale_cs.h
+@@ -3,7 +3,7 @@
+ ; SPIR-V
+ ; Version: 1.0
+ ; Generator: Khronos Glslang Reference Front End; 11
+-; Bound: 25190
++; Bound: 25006
+ ; Schema: 0
+                OpCapability Shader
+           %1 = OpExtInstImport "GLSL.std.450"
+@@ -11,13 +11,14 @@
+                OpEntryPoint GLCompute %5663 "main" %gl_WorkGroupID %gl_LocalInvocationID
+                OpExecutionMode %5663 LocalSize 32 32 1
+                OpDecorate %gl_WorkGroupID BuiltIn WorkgroupId
+-               OpDecorate %_struct_1056 Block
+-               OpMemberDecorate %_struct_1056 0 Offset 0
+-               OpMemberDecorate %_struct_1056 1 Offset 4
+-               OpMemberDecorate %_struct_1056 2 Offset 8
+-               OpMemberDecorate %_struct_1056 3 Offset 12
+-               OpMemberDecorate %_struct_1056 4 Offset 16
+-               OpMemberDecorate %_struct_1056 5 Offset 20
++               OpDecorate %_struct_1080 Block
++               OpMemberDecorate %_struct_1080 0 Offset 0
++               OpMemberDecorate %_struct_1080 1 Offset 4
++               OpMemberDecorate %_struct_1080 2 Offset 8
++               OpMemberDecorate %_struct_1080 3 Offset 12
++               OpMemberDecorate %_struct_1080 4 Offset 16
++               OpMemberDecorate %_struct_1080 5 Offset 20
++               OpMemberDecorate %_struct_1080 6 Offset 24
+                OpDecorate %gl_LocalInvocationID BuiltIn LocalInvocationId
+                OpDecorate %_runtimearr_uint ArrayStride 4
+                OpDecorate %_struct_1948 BufferBlock
+@@ -37,34 +38,36 @@
+        %void = OpTypeVoid
+        %1282 = OpTypeFunction %void
+        %uint = OpTypeInt 32 0
++     %uint_1 = OpConstant %uint 1
++  %uint_1024 = OpConstant %uint 1024
++     %uint_0 = OpConstant %uint 0
++       %bool = OpTypeBool
++     %uint_4 = OpConstant %uint 4
++     %uint_3 = OpConstant %uint 3
+      %v3uint = OpTypeVector %uint 3
+ %_ptr_Input_v3uint = OpTypePointer Input %v3uint
+ %gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input
+-     %uint_0 = OpConstant %uint 0
+ %_ptr_Input_uint = OpTypePointer Input %uint
+-%_struct_1056 = OpTypeStruct %uint %uint %uint %uint %uint %uint
+-%_ptr_PushConstant__struct_1056 = OpTypePointer PushConstant %_struct_1056
+-       %4930 = OpVariable %_ptr_PushConstant__struct_1056 PushConstant
++%_struct_1080 = OpTypeStruct %uint %uint %uint %uint %uint %uint %uint
++%_ptr_PushConstant__struct_1080 = OpTypePointer PushConstant %_struct_1080
++       %4930 = OpVariable %_ptr_PushConstant__struct_1080 PushConstant
+         %int = OpTypeInt 32 1
+       %int_3 = OpConstant %int 3
+ %_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
+-       %bool = OpTypeBool
+ %gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input
+-     %uint_1 = OpConstant %uint 1
+     %uint_32 = OpConstant %uint 32
+       %int_2 = OpConstant %int 2
+-  %uint_1024 = OpConstant %uint 1024
++      %int_4 = OpConstant %int 4
+       %int_0 = OpConstant %int 0
+       %int_1 = OpConstant %int 1
+       %int_5 = OpConstant %int 5
+-      %int_4 = OpConstant %int 4
++      %int_6 = OpConstant %int 6
+      %uint_2 = OpConstant %uint 2
+ %_runtimearr_uint = OpTypeRuntimeArray %uint
+ %_struct_1948 = OpTypeStruct %_runtimearr_uint
+ %_ptr_Uniform__struct_1948 = OpTypePointer Uniform %_struct_1948
+        %3152 = OpVariable %_ptr_Uniform__struct_1948 Uniform
+ %_ptr_Uniform_uint = OpTypePointer Uniform %uint
+-     %uint_3 = OpConstant %uint 3
+      %uint_8 = OpConstant %uint 8
+    %uint_255 = OpConstant %uint 255
+ %_arr_uint_uint_1024 = OpTypeArray %uint %uint_1024
+@@ -106,46 +109,79 @@
+       %13159 = OpLoad %uint %16525
+       %15178 = OpShiftLeftLogical %uint %uint_1 %13159
+       %21815 = OpIMul %uint %uint_1024 %15178
+-      %13000 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_0
++      %13000 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_4
+       %18628 = OpLoad %uint %13000
+-      %21428 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_1
+-      %12166 = OpLoad %uint %21428
+-      %24613 = OpIMul %uint %18628 %12166
+-      %13723 = OpIMul %uint %21815 %24613
+-       %8597 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_5
+-      %21470 = OpLoad %uint %8597
+-      %24311 = OpINotEqual %bool %21470 %uint_0
+-      %23629 = OpUGreaterThan %bool %24613 %uint_1
+-      %11037 = OpLogicalAnd %bool %24311 %23629
+-               OpSelectionMerge %23266 None
+-               OpBranchConditional %11037 %11410 %23266
++      %20154 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_0
++      %22408 = OpLoad %uint %20154
++      %20155 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_1
++      %22409 = OpLoad %uint %20155
++      %20156 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_5
++      %22410 = OpLoad %uint %20156
++      %21428 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_6
++      %12907 = OpLoad %uint %21428
++      %19899 = OpIMul %uint %22408 %22409
++      %20977 = OpINotEqual %bool %22410 %uint_0
++      %13392 = OpUGreaterThan %bool %19899 %uint_1
++      %11037 = OpLogicalAnd %bool %20977 %13392
++               OpSelectionMerge %15645 None
++               OpBranchConditional %11037 %11410 %15645
+       %11410 = OpLabel
+-      %20167 = OpShiftRightLogical %uint %18628 %uint_1
+-      %24779 = OpShiftRightLogical %uint %12166 %uint_1
+-      %16010 = OpIMul %uint %24779 %18628
+-      %19240 = OpIAdd %uint %20167 %16010
+-               OpBranch %23266
+-      %23266 = OpLabel
+-      %19748 = OpPhi %uint %uint_0 %16413 %19240 %11410
+-      %25074 = OpAccessChain %_ptr_PushConstant_uint %4930 %int_4
+-      %25189 = OpLoad %uint %25074
+-       %7507 = OpIMul %uint %15627 %13723
+-      %17182 = OpIAdd %uint %25189 %7507
+-      %19692 = OpIMul %uint %8353 %15178
+-      %16238 = OpIMul %uint %19692 %24613
+-       %6869 = OpIAdd %uint %17182 %16238
+-      %21638 = OpIMul %uint %19748 %15178
+-      %18521 = OpIAdd %uint %6869 %21638
+-       %7572 = OpShiftRightLogical %uint %18521 %uint_2
+-       %6935 = OpIMul %uint %15627 %21815
+-       %9665 = OpIAdd %uint %6935 %19692
+-       %9085 = OpShiftRightLogical %uint %9665 %uint_2
++      %22390 = OpShiftRightLogical %uint %22408 %uint_1
++       %6818 = OpShiftRightLogical %uint %22409 %uint_1
++               OpBranch %15645
++      %15645 = OpLabel
++       %9769 = OpPhi %uint %uint_0 %16413 %6818 %11410
++      %14570 = OpPhi %uint %uint_0 %16413 %22390 %11410
++      %17369 = OpINotEqual %bool %12907 %uint_0
++               OpSelectionMerge %24463 None
++               OpBranchConditional %17369 %19062 %24941
++      %19062 = OpLabel
++      %11202 = OpISub %uint %uint_4 %13159
++      %24840 = OpExtInst %uint %1 UMin %11202 %uint_3
++       %9440 = OpShiftLeftLogical %uint %uint_1 %24840
++       %7519 = OpISub %uint %9440 %uint_1
++      %12036 = OpBitwiseAnd %uint %8353 %7519
++       %7556 = OpIMul %uint %15627 %21815
++      %22554 = OpNot %uint %7519
++      %25005 = OpBitwiseAnd %uint %8353 %22554
++      %14103 = OpShiftLeftLogical %uint %25005 %13159
++       %7955 = OpIAdd %uint %7556 %14103
++      %15441 = OpIMul %uint %12036 %22408
++      %19794 = OpIAdd %uint %15441 %14570
++      %15128 = OpShiftRightLogical %uint %19794 %24840
++      %21807 = OpBitwiseAnd %uint %19794 %7519
++      %24388 = OpIMul %uint %7955 %19899
++       %7217 = OpIMul %uint %15128 %22409
++      %14868 = OpIAdd %uint %7217 %9769
++      %12241 = OpShiftLeftLogical %uint %14868 %24840
++       %7120 = OpIAdd %uint %12241 %21807
++      %19665 = OpShiftLeftLogical %uint %7120 %13159
++      %19302 = OpIAdd %uint %24388 %19665
++               OpBranch %24463
++      %24941 = OpLabel
++       %7985 = OpIMul %uint %9769 %22408
++      %23015 = OpIAdd %uint %14570 %7985
++      %19692 = OpIMul %uint %15627 %21815
++      %16238 = OpIMul %uint %8353 %15178
++       %6945 = OpIAdd %uint %19692 %16238
++      %19693 = OpIMul %uint %19899 %6945
++      %18461 = OpIMul %uint %23015 %15178
++       %7979 = OpIAdd %uint %19693 %18461
++               OpBranch %24463
++      %24463 = OpLabel
++      %11376 = OpPhi %uint %19302 %19062 %7979 %24941
++      %19894 = OpIAdd %uint %18628 %11376
++      %24527 = OpShiftRightLogical %uint %19894 %uint_2
++      %24060 = OpIMul %uint %15627 %21815
++       %6375 = OpIMul %uint %8353 %15178
++      %17475 = OpIAdd %uint %24060 %6375
++       %9085 = OpShiftRightLogical %uint %17475 %uint_2
+                OpSelectionMerge %18023 None
+                OpSwitch %13159 %18023 0 %11881 1 %16414 2 %16415 3 %8158
+       %11881 = OpLabel
+-      %24791 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %7572
++      %24791 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %24527
+       %12865 = OpLoad %uint %24791
+-      %12121 = OpBitwiseAnd %uint %18521 %uint_3
++      %12121 = OpBitwiseAnd %uint %19894 %uint_3
+       %13987 = OpIMul %uint %12121 %uint_8
+       %14461 = OpShiftRightLogical %uint %12865 %13987
+       %15580 = OpBitwiseAnd %uint %14461 %uint_255
+@@ -184,9 +220,9 @@
+       %18021 = OpLabel
+                OpBranch %18023
+       %16414 = OpLabel
+-      %23178 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %7572
++      %23178 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %24527
+       %12866 = OpLoad %uint %23178
+-      %12122 = OpBitwiseAnd %uint %18521 %uint_2
++      %12122 = OpBitwiseAnd %uint %19894 %uint_2
+       %13988 = OpIMul %uint %12122 %uint_8
+       %14462 = OpShiftRightLogical %uint %12866 %13988
+       %15581 = OpBitwiseAnd %uint %14462 %uint_65535
+@@ -225,18 +261,18 @@
+       %18022 = OpLabel
+                OpBranch %18023
+       %16415 = OpLabel
+-      %20633 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %7572
++      %20633 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %24527
+       %15646 = OpLoad %uint %20633
+       %23479 = OpAccessChain %_ptr_Uniform_uint %5522 %int_0 %9085
+                OpStore %23479 %15646
+                OpBranch %18023
+        %8158 = OpLabel
+-      %20634 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %7572
++      %20634 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %24527
+       %15647 = OpLoad %uint %20634
+       %21178 = OpAccessChain %_ptr_Uniform_uint %5522 %int_0 %9085
+                OpStore %21178 %15647
+       %19686 = OpIAdd %uint %9085 %uint_1
+-      %13384 = OpIAdd %uint %7572 %uint_1
++      %13384 = OpIAdd %uint %24527 %uint_1
+       %10810 = OpAccessChain %_ptr_Uniform_uint %3152 %int_0 %13384
+       %15423 = OpLoad %uint %10810
+       %23480 = OpAccessChain %_ptr_Uniform_uint %5522 %int_0 %19686
+@@ -250,127 +286,148 @@
+ #endif
+ 
+ const uint32_t resolve_downscale_cs[] = {
+-    0x07230203, 0x00010000, 0x0008000B, 0x00006266, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
++    0x07230203, 0x00010000, 0x0008000B, 0x000061AE, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
+     0x00000001, 0x4C534C47, 0x6474732E, 0x3035342E, 0x00000000, 0x0003000E, 0x00000000, 0x00000001,
+     0x0007000F, 0x00000005, 0x0000161F, 0x6E69616D, 0x00000000, 0x00000BEF, 0x00000DA3, 0x00060010,
+     0x0000161F, 0x00000011, 0x00000020, 0x00000020, 0x00000001, 0x00040047, 0x00000BEF, 0x0000000B,
+-    0x0000001A, 0x00030047, 0x00000420, 0x00000002, 0x00050048, 0x00000420, 0x00000000, 0x00000023,
+-    0x00000000, 0x00050048, 0x00000420, 0x00000001, 0x00000023, 0x00000004, 0x00050048, 0x00000420,
+-    0x00000002, 0x00000023, 0x00000008, 0x00050048, 0x00000420, 0x00000003, 0x00000023, 0x0000000C,
+-    0x00050048, 0x00000420, 0x00000004, 0x00000023, 0x00000010, 0x00050048, 0x00000420, 0x00000005,
+-    0x00000023, 0x00000014, 0x00040047, 0x00000DA3, 0x0000000B, 0x0000001B, 0x00040047, 0x000007D0,
+-    0x00000006, 0x00000004, 0x00030047, 0x0000079C, 0x00000003, 0x00040048, 0x0000079C, 0x00000000,
+-    0x00000018, 0x00050048, 0x0000079C, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000C50,
+-    0x00000018, 0x00040047, 0x00000C50, 0x00000021, 0x00000000, 0x00040047, 0x00000C50, 0x00000022,
+-    0x00000000, 0x00040047, 0x000007D1, 0x00000006, 0x00000004, 0x00030047, 0x0000079D, 0x00000003,
+-    0x00040048, 0x0000079D, 0x00000000, 0x00000019, 0x00050048, 0x0000079D, 0x00000000, 0x00000023,
+-    0x00000000, 0x00030047, 0x00001592, 0x00000019, 0x00040047, 0x00001592, 0x00000021, 0x00000001,
+-    0x00040047, 0x00001592, 0x00000022, 0x00000000, 0x00040047, 0x000000FC, 0x0000000B, 0x00000019,
+-    0x00020013, 0x00000008, 0x00030021, 0x00000502, 0x00000008, 0x00040015, 0x0000000B, 0x00000020,
+-    0x00000000, 0x00040017, 0x00000014, 0x0000000B, 0x00000003, 0x00040020, 0x00000291, 0x00000001,
+-    0x00000014, 0x0004003B, 0x00000291, 0x00000BEF, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A0A,
+-    0x00000000, 0x00040020, 0x00000288, 0x00000001, 0x0000000B, 0x0008001E, 0x00000420, 0x0000000B,
+-    0x0000000B, 0x0000000B, 0x0000000B, 0x0000000B, 0x0000000B, 0x00040020, 0x0000069D, 0x00000009,
+-    0x00000420, 0x0004003B, 0x0000069D, 0x00001342, 0x00000009, 0x00040015, 0x0000000C, 0x00000020,
++    0x0000001A, 0x00030047, 0x00000438, 0x00000002, 0x00050048, 0x00000438, 0x00000000, 0x00000023,
++    0x00000000, 0x00050048, 0x00000438, 0x00000001, 0x00000023, 0x00000004, 0x00050048, 0x00000438,
++    0x00000002, 0x00000023, 0x00000008, 0x00050048, 0x00000438, 0x00000003, 0x00000023, 0x0000000C,
++    0x00050048, 0x00000438, 0x00000004, 0x00000023, 0x00000010, 0x00050048, 0x00000438, 0x00000005,
++    0x00000023, 0x00000014, 0x00050048, 0x00000438, 0x00000006, 0x00000023, 0x00000018, 0x00040047,
++    0x00000DA3, 0x0000000B, 0x0000001B, 0x00040047, 0x000007D0, 0x00000006, 0x00000004, 0x00030047,
++    0x0000079C, 0x00000003, 0x00040048, 0x0000079C, 0x00000000, 0x00000018, 0x00050048, 0x0000079C,
++    0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000C50, 0x00000018, 0x00040047, 0x00000C50,
++    0x00000021, 0x00000000, 0x00040047, 0x00000C50, 0x00000022, 0x00000000, 0x00040047, 0x000007D1,
++    0x00000006, 0x00000004, 0x00030047, 0x0000079D, 0x00000003, 0x00040048, 0x0000079D, 0x00000000,
++    0x00000019, 0x00050048, 0x0000079D, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00001592,
++    0x00000019, 0x00040047, 0x00001592, 0x00000021, 0x00000001, 0x00040047, 0x00001592, 0x00000022,
++    0x00000000, 0x00040047, 0x000000FC, 0x0000000B, 0x00000019, 0x00020013, 0x00000008, 0x00030021,
++    0x00000502, 0x00000008, 0x00040015, 0x0000000B, 0x00000020, 0x00000000, 0x0004002B, 0x0000000B,
++    0x00000A0D, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A47, 0x00000400, 0x0004002B, 0x0000000B,
++    0x00000A0A, 0x00000000, 0x00020014, 0x00000009, 0x0004002B, 0x0000000B, 0x00000A16, 0x00000004,
++    0x0004002B, 0x0000000B, 0x00000A13, 0x00000003, 0x00040017, 0x00000014, 0x0000000B, 0x00000003,
++    0x00040020, 0x00000291, 0x00000001, 0x00000014, 0x0004003B, 0x00000291, 0x00000BEF, 0x00000001,
++    0x00040020, 0x00000288, 0x00000001, 0x0000000B, 0x0009001E, 0x00000438, 0x0000000B, 0x0000000B,
++    0x0000000B, 0x0000000B, 0x0000000B, 0x0000000B, 0x0000000B, 0x00040020, 0x000006B5, 0x00000009,
++    0x00000438, 0x0004003B, 0x000006B5, 0x00001342, 0x00000009, 0x00040015, 0x0000000C, 0x00000020,
+     0x00000001, 0x0004002B, 0x0000000C, 0x00000A14, 0x00000003, 0x00040020, 0x00000289, 0x00000009,
+-    0x0000000B, 0x00020014, 0x00000009, 0x0004003B, 0x00000291, 0x00000DA3, 0x00000001, 0x0004002B,
+-    0x0000000B, 0x00000A0D, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A6A, 0x00000020, 0x0004002B,
+-    0x0000000C, 0x00000A11, 0x00000002, 0x0004002B, 0x0000000B, 0x00000A47, 0x00000400, 0x0004002B,
+-    0x0000000C, 0x00000A0B, 0x00000000, 0x0004002B, 0x0000000C, 0x00000A0E, 0x00000001, 0x0004002B,
+-    0x0000000C, 0x00000A1A, 0x00000005, 0x0004002B, 0x0000000C, 0x00000A17, 0x00000004, 0x0004002B,
+-    0x0000000B, 0x00000A10, 0x00000002, 0x0003001D, 0x000007D0, 0x0000000B, 0x0003001E, 0x0000079C,
+-    0x000007D0, 0x00040020, 0x00000A19, 0x00000002, 0x0000079C, 0x0004003B, 0x00000A19, 0x00000C50,
+-    0x00000002, 0x00040020, 0x0000028A, 0x00000002, 0x0000000B, 0x0004002B, 0x0000000B, 0x00000A13,
+-    0x00000003, 0x0004002B, 0x0000000B, 0x00000A22, 0x00000008, 0x0004002B, 0x0000000B, 0x00000144,
+-    0x000000FF, 0x0004001C, 0x00000293, 0x0000000B, 0x00000A47, 0x00040020, 0x00000510, 0x00000004,
+-    0x00000293, 0x0004003B, 0x00000510, 0x00000FB1, 0x00000004, 0x00040020, 0x0000028B, 0x00000004,
+-    0x0000000B, 0x0004002B, 0x0000000B, 0x0000015F, 0x00000108, 0x0003001D, 0x000007D1, 0x0000000B,
+-    0x0003001E, 0x0000079D, 0x000007D1, 0x00040020, 0x00000A1B, 0x00000002, 0x0000079D, 0x0004003B,
+-    0x00000A1B, 0x00001592, 0x00000002, 0x0004002B, 0x0000000B, 0x00000147, 0x00000100, 0x0004002B,
+-    0x0000000B, 0x000001C1, 0x0000FFFF, 0x0004002B, 0x0000000B, 0x00000A3A, 0x00000010, 0x0004002B,
+-    0x0000000B, 0x00000447, 0x00000200, 0x0006002C, 0x00000014, 0x000000FC, 0x00000A6A, 0x00000A6A,
+-    0x00000A0D, 0x00050036, 0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x00003B06,
+-    0x000300F7, 0x00003A37, 0x00000000, 0x000300FB, 0x00000A0A, 0x00002E68, 0x000200F8, 0x00002E68,
+-    0x00050041, 0x00000288, 0x000056E5, 0x00000BEF, 0x00000A0A, 0x0004003D, 0x0000000B, 0x00003D0B,
+-    0x000056E5, 0x00050041, 0x00000289, 0x000056D1, 0x00001342, 0x00000A14, 0x0004003D, 0x0000000B,
+-    0x00001BAD, 0x000056D1, 0x000500AE, 0x00000009, 0x00001CED, 0x00003D0B, 0x00001BAD, 0x000300F7,
+-    0x0000401D, 0x00000000, 0x000400FA, 0x00001CED, 0x000055E8, 0x0000401D, 0x000200F8, 0x000055E8,
+-    0x000200F9, 0x00003A37, 0x000200F8, 0x0000401D, 0x00050041, 0x00000288, 0x00005098, 0x00000DA3,
+-    0x00000A0D, 0x0004003D, 0x0000000B, 0x00003D0C, 0x00005098, 0x00050041, 0x00000288, 0x000053B3,
+-    0x00000DA3, 0x00000A0A, 0x0004003D, 0x0000000B, 0x00002F3A, 0x000053B3, 0x00050084, 0x0000000B,
+-    0x0000185A, 0x00003D0C, 0x00000A6A, 0x00050080, 0x0000000B, 0x000020A1, 0x0000185A, 0x00002F3A,
+-    0x00050041, 0x00000289, 0x0000408D, 0x00001342, 0x00000A11, 0x0004003D, 0x0000000B, 0x00003367,
+-    0x0000408D, 0x000500C4, 0x0000000B, 0x00003B4A, 0x00000A0D, 0x00003367, 0x00050084, 0x0000000B,
+-    0x00005537, 0x00000A47, 0x00003B4A, 0x00050041, 0x00000289, 0x000032C8, 0x00001342, 0x00000A0B,
+-    0x0004003D, 0x0000000B, 0x000048C4, 0x000032C8, 0x00050041, 0x00000289, 0x000053B4, 0x00001342,
+-    0x00000A0E, 0x0004003D, 0x0000000B, 0x00002F86, 0x000053B4, 0x00050084, 0x0000000B, 0x00006025,
+-    0x000048C4, 0x00002F86, 0x00050084, 0x0000000B, 0x0000359B, 0x00005537, 0x00006025, 0x00050041,
+-    0x00000289, 0x00002195, 0x00001342, 0x00000A1A, 0x0004003D, 0x0000000B, 0x000053DE, 0x00002195,
+-    0x000500AB, 0x00000009, 0x00005EF7, 0x000053DE, 0x00000A0A, 0x000500AC, 0x00000009, 0x00005C4D,
+-    0x00006025, 0x00000A0D, 0x000500A7, 0x00000009, 0x00002B1D, 0x00005EF7, 0x00005C4D, 0x000300F7,
+-    0x00005AE2, 0x00000000, 0x000400FA, 0x00002B1D, 0x00002C92, 0x00005AE2, 0x000200F8, 0x00002C92,
+-    0x000500C2, 0x0000000B, 0x00004EC7, 0x000048C4, 0x00000A0D, 0x000500C2, 0x0000000B, 0x000060CB,
+-    0x00002F86, 0x00000A0D, 0x00050084, 0x0000000B, 0x00003E8A, 0x000060CB, 0x000048C4, 0x00050080,
+-    0x0000000B, 0x00004B28, 0x00004EC7, 0x00003E8A, 0x000200F9, 0x00005AE2, 0x000200F8, 0x00005AE2,
+-    0x000700F5, 0x0000000B, 0x00004D24, 0x00000A0A, 0x0000401D, 0x00004B28, 0x00002C92, 0x00050041,
+-    0x00000289, 0x000061F2, 0x00001342, 0x00000A17, 0x0004003D, 0x0000000B, 0x00006265, 0x000061F2,
+-    0x00050084, 0x0000000B, 0x00001D53, 0x00003D0B, 0x0000359B, 0x00050080, 0x0000000B, 0x0000431E,
+-    0x00006265, 0x00001D53, 0x00050084, 0x0000000B, 0x00004CEC, 0x000020A1, 0x00003B4A, 0x00050084,
+-    0x0000000B, 0x00003F6E, 0x00004CEC, 0x00006025, 0x00050080, 0x0000000B, 0x00001AD5, 0x0000431E,
+-    0x00003F6E, 0x00050084, 0x0000000B, 0x00005486, 0x00004D24, 0x00003B4A, 0x00050080, 0x0000000B,
+-    0x00004859, 0x00001AD5, 0x00005486, 0x000500C2, 0x0000000B, 0x00001D94, 0x00004859, 0x00000A10,
+-    0x00050084, 0x0000000B, 0x00001B17, 0x00003D0B, 0x00005537, 0x00050080, 0x0000000B, 0x000025C1,
+-    0x00001B17, 0x00004CEC, 0x000500C2, 0x0000000B, 0x0000237D, 0x000025C1, 0x00000A10, 0x000300F7,
+-    0x00004667, 0x00000000, 0x000B00FB, 0x00003367, 0x00004667, 0x00000000, 0x00002E69, 0x00000001,
+-    0x0000401E, 0x00000002, 0x0000401F, 0x00000003, 0x00001FDE, 0x000200F8, 0x00002E69, 0x00060041,
+-    0x0000028A, 0x000060D7, 0x00000C50, 0x00000A0B, 0x00001D94, 0x0004003D, 0x0000000B, 0x00003241,
+-    0x000060D7, 0x000500C7, 0x0000000B, 0x00002F59, 0x00004859, 0x00000A13, 0x00050084, 0x0000000B,
+-    0x000036A3, 0x00002F59, 0x00000A22, 0x000500C2, 0x0000000B, 0x0000387D, 0x00003241, 0x000036A3,
+-    0x000500C7, 0x0000000B, 0x00003CDC, 0x0000387D, 0x00000144, 0x000500C2, 0x0000000B, 0x00004D70,
+-    0x000020A1, 0x00000A10, 0x000500C7, 0x0000000B, 0x00004B2B, 0x000020A1, 0x00000A13, 0x00050084,
+-    0x0000000B, 0x00003722, 0x00004B2B, 0x00000A22, 0x000500C4, 0x0000000B, 0x00005A82, 0x00003CDC,
+-    0x00003722, 0x000500AA, 0x00000009, 0x00003D0D, 0x00004B2B, 0x00000A0A, 0x000300F7, 0x00005193,
+-    0x00000000, 0x000400FA, 0x00003D0D, 0x00002F74, 0x00005193, 0x000200F8, 0x00002F74, 0x00050041,
+-    0x0000028B, 0x0000541D, 0x00000FB1, 0x00004D70, 0x0003003E, 0x0000541D, 0x00005A82, 0x000200F9,
+-    0x00005193, 0x000200F8, 0x00005193, 0x000400E0, 0x00000A10, 0x00000A10, 0x0000015F, 0x000500AB,
+-    0x00000009, 0x00003E3C, 0x00004B2B, 0x00000A0A, 0x000300F7, 0x00002386, 0x00000000, 0x000400FA,
+-    0x00003E3C, 0x00003CBD, 0x00002386, 0x000200F8, 0x00003CBD, 0x00050041, 0x0000028B, 0x000025A5,
+-    0x00000FB1, 0x00004D70, 0x000700F1, 0x0000000B, 0x0000189F, 0x000025A5, 0x00000A0D, 0x00000A0A,
+-    0x00005A82, 0x000200F9, 0x00002386, 0x000200F8, 0x00002386, 0x000400E0, 0x00000A10, 0x00000A10,
+-    0x0000015F, 0x000300F7, 0x00004665, 0x00000000, 0x000400FA, 0x00003D0D, 0x00005192, 0x00004665,
+-    0x000200F8, 0x00005192, 0x00050084, 0x0000000B, 0x000029FB, 0x00003D0B, 0x00000147, 0x00050080,
+-    0x0000000B, 0x0000376A, 0x000029FB, 0x00004D70, 0x00050041, 0x0000028B, 0x000036D4, 0x00000FB1,
+-    0x00004D70, 0x0004003D, 0x0000000B, 0x00003C3D, 0x000036D4, 0x00060041, 0x0000028A, 0x00005BB5,
+-    0x00001592, 0x00000A0B, 0x0000376A, 0x0003003E, 0x00005BB5, 0x00003C3D, 0x000200F9, 0x00004665,
+-    0x000200F8, 0x00004665, 0x000200F9, 0x00004667, 0x000200F8, 0x0000401E, 0x00060041, 0x0000028A,
+-    0x00005A8A, 0x00000C50, 0x00000A0B, 0x00001D94, 0x0004003D, 0x0000000B, 0x00003242, 0x00005A8A,
+-    0x000500C7, 0x0000000B, 0x00002F5A, 0x00004859, 0x00000A10, 0x00050084, 0x0000000B, 0x000036A4,
+-    0x00002F5A, 0x00000A22, 0x000500C2, 0x0000000B, 0x0000387E, 0x00003242, 0x000036A4, 0x000500C7,
+-    0x0000000B, 0x00003CDD, 0x0000387E, 0x000001C1, 0x000500C2, 0x0000000B, 0x00004D71, 0x000020A1,
+-    0x00000A0D, 0x000500C7, 0x0000000B, 0x00004B2C, 0x000020A1, 0x00000A0D, 0x00050084, 0x0000000B,
+-    0x00003723, 0x00004B2C, 0x00000A3A, 0x000500C4, 0x0000000B, 0x00005A83, 0x00003CDD, 0x00003723,
+-    0x000500AA, 0x00000009, 0x00003D0E, 0x00004B2C, 0x00000A0A, 0x000300F7, 0x00005194, 0x00000000,
+-    0x000400FA, 0x00003D0E, 0x00002F75, 0x00005194, 0x000200F8, 0x00002F75, 0x00050041, 0x0000028B,
+-    0x0000541E, 0x00000FB1, 0x00004D71, 0x0003003E, 0x0000541E, 0x00005A83, 0x000200F9, 0x00005194,
+-    0x000200F8, 0x00005194, 0x000400E0, 0x00000A10, 0x00000A10, 0x0000015F, 0x000500AB, 0x00000009,
+-    0x00003E3D, 0x00004B2C, 0x00000A0A, 0x000300F7, 0x00002387, 0x00000000, 0x000400FA, 0x00003E3D,
+-    0x00003CBE, 0x00002387, 0x000200F8, 0x00003CBE, 0x00050041, 0x0000028B, 0x000025A6, 0x00000FB1,
+-    0x00004D71, 0x000700F1, 0x0000000B, 0x000018A0, 0x000025A6, 0x00000A0D, 0x00000A0A, 0x00005A83,
+-    0x000200F9, 0x00002387, 0x000200F8, 0x00002387, 0x000400E0, 0x00000A10, 0x00000A10, 0x0000015F,
+-    0x000300F7, 0x00004666, 0x00000000, 0x000400FA, 0x00003D0E, 0x00005195, 0x00004666, 0x000200F8,
+-    0x00005195, 0x00050084, 0x0000000B, 0x000029FC, 0x00003D0B, 0x00000447, 0x00050080, 0x0000000B,
+-    0x0000376B, 0x000029FC, 0x00004D71, 0x00050041, 0x0000028B, 0x000036D5, 0x00000FB1, 0x00004D71,
+-    0x0004003D, 0x0000000B, 0x00003C3E, 0x000036D5, 0x00060041, 0x0000028A, 0x00005BB6, 0x00001592,
+-    0x00000A0B, 0x0000376B, 0x0003003E, 0x00005BB6, 0x00003C3E, 0x000200F9, 0x00004666, 0x000200F8,
+-    0x00004666, 0x000200F9, 0x00004667, 0x000200F8, 0x0000401F, 0x00060041, 0x0000028A, 0x00005099,
+-    0x00000C50, 0x00000A0B, 0x00001D94, 0x0004003D, 0x0000000B, 0x00003D1E, 0x00005099, 0x00060041,
+-    0x0000028A, 0x00005BB7, 0x00001592, 0x00000A0B, 0x0000237D, 0x0003003E, 0x00005BB7, 0x00003D1E,
+-    0x000200F9, 0x00004667, 0x000200F8, 0x00001FDE, 0x00060041, 0x0000028A, 0x0000509A, 0x00000C50,
+-    0x00000A0B, 0x00001D94, 0x0004003D, 0x0000000B, 0x00003D1F, 0x0000509A, 0x00060041, 0x0000028A,
+-    0x000052BA, 0x00001592, 0x00000A0B, 0x0000237D, 0x0003003E, 0x000052BA, 0x00003D1F, 0x00050080,
+-    0x0000000B, 0x00004CE6, 0x0000237D, 0x00000A0D, 0x00050080, 0x0000000B, 0x00003448, 0x00001D94,
+-    0x00000A0D, 0x00060041, 0x0000028A, 0x00002A3A, 0x00000C50, 0x00000A0B, 0x00003448, 0x0004003D,
+-    0x0000000B, 0x00003C3F, 0x00002A3A, 0x00060041, 0x0000028A, 0x00005BB8, 0x00001592, 0x00000A0B,
+-    0x00004CE6, 0x0003003E, 0x00005BB8, 0x00003C3F, 0x000200F9, 0x00004667, 0x000200F8, 0x00004667,
+-    0x000200F9, 0x00003A37, 0x000200F8, 0x00003A37, 0x000100FD, 0x00010038,
++    0x0000000B, 0x0004003B, 0x00000291, 0x00000DA3, 0x00000001, 0x0004002B, 0x0000000B, 0x00000A6A,
++    0x00000020, 0x0004002B, 0x0000000C, 0x00000A11, 0x00000002, 0x0004002B, 0x0000000C, 0x00000A17,
++    0x00000004, 0x0004002B, 0x0000000C, 0x00000A0B, 0x00000000, 0x0004002B, 0x0000000C, 0x00000A0E,
++    0x00000001, 0x0004002B, 0x0000000C, 0x00000A1A, 0x00000005, 0x0004002B, 0x0000000C, 0x00000A1D,
++    0x00000006, 0x0004002B, 0x0000000B, 0x00000A10, 0x00000002, 0x0003001D, 0x000007D0, 0x0000000B,
++    0x0003001E, 0x0000079C, 0x000007D0, 0x00040020, 0x00000A19, 0x00000002, 0x0000079C, 0x0004003B,
++    0x00000A19, 0x00000C50, 0x00000002, 0x00040020, 0x0000028A, 0x00000002, 0x0000000B, 0x0004002B,
++    0x0000000B, 0x00000A22, 0x00000008, 0x0004002B, 0x0000000B, 0x00000144, 0x000000FF, 0x0004001C,
++    0x00000242, 0x0000000B, 0x00000A47, 0x00040020, 0x000004BF, 0x00000004, 0x00000242, 0x0004003B,
++    0x000004BF, 0x00000FB1, 0x00000004, 0x00040020, 0x0000028B, 0x00000004, 0x0000000B, 0x0004002B,
++    0x0000000B, 0x0000015F, 0x00000108, 0x0003001D, 0x000007D1, 0x0000000B, 0x0003001E, 0x0000079D,
++    0x000007D1, 0x00040020, 0x00000A1B, 0x00000002, 0x0000079D, 0x0004003B, 0x00000A1B, 0x00001592,
++    0x00000002, 0x0004002B, 0x0000000B, 0x00000147, 0x00000100, 0x0004002B, 0x0000000B, 0x000001C1,
++    0x0000FFFF, 0x0004002B, 0x0000000B, 0x00000A3A, 0x00000010, 0x0004002B, 0x0000000B, 0x00000447,
++    0x00000200, 0x0006002C, 0x00000014, 0x000000FC, 0x00000A6A, 0x00000A6A, 0x00000A0D, 0x00050036,
++    0x00000008, 0x0000161F, 0x00000000, 0x00000502, 0x000200F8, 0x00003B06, 0x000300F7, 0x00003A37,
++    0x00000000, 0x000300FB, 0x00000A0A, 0x00002E68, 0x000200F8, 0x00002E68, 0x00050041, 0x00000288,
++    0x000056E5, 0x00000BEF, 0x00000A0A, 0x0004003D, 0x0000000B, 0x00003D0B, 0x000056E5, 0x00050041,
++    0x00000289, 0x000056D1, 0x00001342, 0x00000A14, 0x0004003D, 0x0000000B, 0x00001BAD, 0x000056D1,
++    0x000500AE, 0x00000009, 0x00001CED, 0x00003D0B, 0x00001BAD, 0x000300F7, 0x0000401D, 0x00000000,
++    0x000400FA, 0x00001CED, 0x000055E8, 0x0000401D, 0x000200F8, 0x000055E8, 0x000200F9, 0x00003A37,
++    0x000200F8, 0x0000401D, 0x00050041, 0x00000288, 0x00005098, 0x00000DA3, 0x00000A0D, 0x0004003D,
++    0x0000000B, 0x00003D0C, 0x00005098, 0x00050041, 0x00000288, 0x000053B3, 0x00000DA3, 0x00000A0A,
++    0x0004003D, 0x0000000B, 0x00002F3A, 0x000053B3, 0x00050084, 0x0000000B, 0x0000185A, 0x00003D0C,
++    0x00000A6A, 0x00050080, 0x0000000B, 0x000020A1, 0x0000185A, 0x00002F3A, 0x00050041, 0x00000289,
++    0x0000408D, 0x00001342, 0x00000A11, 0x0004003D, 0x0000000B, 0x00003367, 0x0000408D, 0x000500C4,
++    0x0000000B, 0x00003B4A, 0x00000A0D, 0x00003367, 0x00050084, 0x0000000B, 0x00005537, 0x00000A47,
++    0x00003B4A, 0x00050041, 0x00000289, 0x000032C8, 0x00001342, 0x00000A17, 0x0004003D, 0x0000000B,
++    0x000048C4, 0x000032C8, 0x00050041, 0x00000289, 0x00004EBA, 0x00001342, 0x00000A0B, 0x0004003D,
++    0x0000000B, 0x00005788, 0x00004EBA, 0x00050041, 0x00000289, 0x00004EBB, 0x00001342, 0x00000A0E,
++    0x0004003D, 0x0000000B, 0x00005789, 0x00004EBB, 0x00050041, 0x00000289, 0x00004EBC, 0x00001342,
++    0x00000A1A, 0x0004003D, 0x0000000B, 0x0000578A, 0x00004EBC, 0x00050041, 0x00000289, 0x000053B4,
++    0x00001342, 0x00000A1D, 0x0004003D, 0x0000000B, 0x0000326B, 0x000053B4, 0x00050084, 0x0000000B,
++    0x00004DBB, 0x00005788, 0x00005789, 0x000500AB, 0x00000009, 0x000051F1, 0x0000578A, 0x00000A0A,
++    0x000500AC, 0x00000009, 0x00003450, 0x00004DBB, 0x00000A0D, 0x000500A7, 0x00000009, 0x00002B1D,
++    0x000051F1, 0x00003450, 0x000300F7, 0x00003D1D, 0x00000000, 0x000400FA, 0x00002B1D, 0x00002C92,
++    0x00003D1D, 0x000200F8, 0x00002C92, 0x000500C2, 0x0000000B, 0x00005776, 0x00005788, 0x00000A0D,
++    0x000500C2, 0x0000000B, 0x00001AA2, 0x00005789, 0x00000A0D, 0x000200F9, 0x00003D1D, 0x000200F8,
++    0x00003D1D, 0x000700F5, 0x0000000B, 0x00002629, 0x00000A0A, 0x0000401D, 0x00001AA2, 0x00002C92,
++    0x000700F5, 0x0000000B, 0x000038EA, 0x00000A0A, 0x0000401D, 0x00005776, 0x00002C92, 0x000500AB,
++    0x00000009, 0x000043D9, 0x0000326B, 0x00000A0A, 0x000300F7, 0x00005F8F, 0x00000000, 0x000400FA,
++    0x000043D9, 0x00004A76, 0x0000616D, 0x000200F8, 0x00004A76, 0x00050082, 0x0000000B, 0x00002BC2,
++    0x00000A16, 0x00003367, 0x0007000C, 0x0000000B, 0x00006108, 0x00000001, 0x00000026, 0x00002BC2,
++    0x00000A13, 0x000500C4, 0x0000000B, 0x000024E0, 0x00000A0D, 0x00006108, 0x00050082, 0x0000000B,
++    0x00001D5F, 0x000024E0, 0x00000A0D, 0x000500C7, 0x0000000B, 0x00002F04, 0x000020A1, 0x00001D5F,
++    0x00050084, 0x0000000B, 0x00001D84, 0x00003D0B, 0x00005537, 0x000400C8, 0x0000000B, 0x0000581A,
++    0x00001D5F, 0x000500C7, 0x0000000B, 0x000061AD, 0x000020A1, 0x0000581A, 0x000500C4, 0x0000000B,
++    0x00003717, 0x000061AD, 0x00003367, 0x00050080, 0x0000000B, 0x00001F13, 0x00001D84, 0x00003717,
++    0x00050084, 0x0000000B, 0x00003C51, 0x00002F04, 0x00005788, 0x00050080, 0x0000000B, 0x00004D52,
++    0x00003C51, 0x000038EA, 0x000500C2, 0x0000000B, 0x00003B18, 0x00004D52, 0x00006108, 0x000500C7,
++    0x0000000B, 0x0000552F, 0x00004D52, 0x00001D5F, 0x00050084, 0x0000000B, 0x00005F44, 0x00001F13,
++    0x00004DBB, 0x00050084, 0x0000000B, 0x00001C31, 0x00003B18, 0x00005789, 0x00050080, 0x0000000B,
++    0x00003A14, 0x00001C31, 0x00002629, 0x000500C4, 0x0000000B, 0x00002FD1, 0x00003A14, 0x00006108,
++    0x00050080, 0x0000000B, 0x00001BD0, 0x00002FD1, 0x0000552F, 0x000500C4, 0x0000000B, 0x00004CD1,
++    0x00001BD0, 0x00003367, 0x00050080, 0x0000000B, 0x00004B66, 0x00005F44, 0x00004CD1, 0x000200F9,
++    0x00005F8F, 0x000200F8, 0x0000616D, 0x00050084, 0x0000000B, 0x00001F31, 0x00002629, 0x00005788,
++    0x00050080, 0x0000000B, 0x000059E7, 0x000038EA, 0x00001F31, 0x00050084, 0x0000000B, 0x00004CEC,
++    0x00003D0B, 0x00005537, 0x00050084, 0x0000000B, 0x00003F6E, 0x000020A1, 0x00003B4A, 0x00050080,
++    0x0000000B, 0x00001B21, 0x00004CEC, 0x00003F6E, 0x00050084, 0x0000000B, 0x00004CED, 0x00004DBB,
++    0x00001B21, 0x00050084, 0x0000000B, 0x0000481D, 0x000059E7, 0x00003B4A, 0x00050080, 0x0000000B,
++    0x00001F2B, 0x00004CED, 0x0000481D, 0x000200F9, 0x00005F8F, 0x000200F8, 0x00005F8F, 0x000700F5,
++    0x0000000B, 0x00002C70, 0x00004B66, 0x00004A76, 0x00001F2B, 0x0000616D, 0x00050080, 0x0000000B,
++    0x00004DB6, 0x000048C4, 0x00002C70, 0x000500C2, 0x0000000B, 0x00005FCF, 0x00004DB6, 0x00000A10,
++    0x00050084, 0x0000000B, 0x00005DFC, 0x00003D0B, 0x00005537, 0x00050084, 0x0000000B, 0x000018E7,
++    0x000020A1, 0x00003B4A, 0x00050080, 0x0000000B, 0x00004443, 0x00005DFC, 0x000018E7, 0x000500C2,
++    0x0000000B, 0x0000237D, 0x00004443, 0x00000A10, 0x000300F7, 0x00004667, 0x00000000, 0x000B00FB,
++    0x00003367, 0x00004667, 0x00000000, 0x00002E69, 0x00000001, 0x0000401E, 0x00000002, 0x0000401F,
++    0x00000003, 0x00001FDE, 0x000200F8, 0x00002E69, 0x00060041, 0x0000028A, 0x000060D7, 0x00000C50,
++    0x00000A0B, 0x00005FCF, 0x0004003D, 0x0000000B, 0x00003241, 0x000060D7, 0x000500C7, 0x0000000B,
++    0x00002F59, 0x00004DB6, 0x00000A13, 0x00050084, 0x0000000B, 0x000036A3, 0x00002F59, 0x00000A22,
++    0x000500C2, 0x0000000B, 0x0000387D, 0x00003241, 0x000036A3, 0x000500C7, 0x0000000B, 0x00003CDC,
++    0x0000387D, 0x00000144, 0x000500C2, 0x0000000B, 0x00004D70, 0x000020A1, 0x00000A10, 0x000500C7,
++    0x0000000B, 0x00004B2B, 0x000020A1, 0x00000A13, 0x00050084, 0x0000000B, 0x00003722, 0x00004B2B,
++    0x00000A22, 0x000500C4, 0x0000000B, 0x00005A82, 0x00003CDC, 0x00003722, 0x000500AA, 0x00000009,
++    0x00003D0D, 0x00004B2B, 0x00000A0A, 0x000300F7, 0x00005193, 0x00000000, 0x000400FA, 0x00003D0D,
++    0x00002F74, 0x00005193, 0x000200F8, 0x00002F74, 0x00050041, 0x0000028B, 0x0000541D, 0x00000FB1,
++    0x00004D70, 0x0003003E, 0x0000541D, 0x00005A82, 0x000200F9, 0x00005193, 0x000200F8, 0x00005193,
++    0x000400E0, 0x00000A10, 0x00000A10, 0x0000015F, 0x000500AB, 0x00000009, 0x00003E3C, 0x00004B2B,
++    0x00000A0A, 0x000300F7, 0x00002386, 0x00000000, 0x000400FA, 0x00003E3C, 0x00003CBD, 0x00002386,
++    0x000200F8, 0x00003CBD, 0x00050041, 0x0000028B, 0x000025A5, 0x00000FB1, 0x00004D70, 0x000700F1,
++    0x0000000B, 0x0000189F, 0x000025A5, 0x00000A0D, 0x00000A0A, 0x00005A82, 0x000200F9, 0x00002386,
++    0x000200F8, 0x00002386, 0x000400E0, 0x00000A10, 0x00000A10, 0x0000015F, 0x000300F7, 0x00004665,
++    0x00000000, 0x000400FA, 0x00003D0D, 0x00005192, 0x00004665, 0x000200F8, 0x00005192, 0x00050084,
++    0x0000000B, 0x000029FB, 0x00003D0B, 0x00000147, 0x00050080, 0x0000000B, 0x0000376A, 0x000029FB,
++    0x00004D70, 0x00050041, 0x0000028B, 0x000036D4, 0x00000FB1, 0x00004D70, 0x0004003D, 0x0000000B,
++    0x00003C3D, 0x000036D4, 0x00060041, 0x0000028A, 0x00005BB5, 0x00001592, 0x00000A0B, 0x0000376A,
++    0x0003003E, 0x00005BB5, 0x00003C3D, 0x000200F9, 0x00004665, 0x000200F8, 0x00004665, 0x000200F9,
++    0x00004667, 0x000200F8, 0x0000401E, 0x00060041, 0x0000028A, 0x00005A8A, 0x00000C50, 0x00000A0B,
++    0x00005FCF, 0x0004003D, 0x0000000B, 0x00003242, 0x00005A8A, 0x000500C7, 0x0000000B, 0x00002F5A,
++    0x00004DB6, 0x00000A10, 0x00050084, 0x0000000B, 0x000036A4, 0x00002F5A, 0x00000A22, 0x000500C2,
++    0x0000000B, 0x0000387E, 0x00003242, 0x000036A4, 0x000500C7, 0x0000000B, 0x00003CDD, 0x0000387E,
++    0x000001C1, 0x000500C2, 0x0000000B, 0x00004D71, 0x000020A1, 0x00000A0D, 0x000500C7, 0x0000000B,
++    0x00004B2C, 0x000020A1, 0x00000A0D, 0x00050084, 0x0000000B, 0x00003723, 0x00004B2C, 0x00000A3A,
++    0x000500C4, 0x0000000B, 0x00005A83, 0x00003CDD, 0x00003723, 0x000500AA, 0x00000009, 0x00003D0E,
++    0x00004B2C, 0x00000A0A, 0x000300F7, 0x00005194, 0x00000000, 0x000400FA, 0x00003D0E, 0x00002F75,
++    0x00005194, 0x000200F8, 0x00002F75, 0x00050041, 0x0000028B, 0x0000541E, 0x00000FB1, 0x00004D71,
++    0x0003003E, 0x0000541E, 0x00005A83, 0x000200F9, 0x00005194, 0x000200F8, 0x00005194, 0x000400E0,
++    0x00000A10, 0x00000A10, 0x0000015F, 0x000500AB, 0x00000009, 0x00003E3D, 0x00004B2C, 0x00000A0A,
++    0x000300F7, 0x00002387, 0x00000000, 0x000400FA, 0x00003E3D, 0x00003CBE, 0x00002387, 0x000200F8,
++    0x00003CBE, 0x00050041, 0x0000028B, 0x000025A6, 0x00000FB1, 0x00004D71, 0x000700F1, 0x0000000B,
++    0x000018A0, 0x000025A6, 0x00000A0D, 0x00000A0A, 0x00005A83, 0x000200F9, 0x00002387, 0x000200F8,
++    0x00002387, 0x000400E0, 0x00000A10, 0x00000A10, 0x0000015F, 0x000300F7, 0x00004666, 0x00000000,
++    0x000400FA, 0x00003D0E, 0x00005195, 0x00004666, 0x000200F8, 0x00005195, 0x00050084, 0x0000000B,
++    0x000029FC, 0x00003D0B, 0x00000447, 0x00050080, 0x0000000B, 0x0000376B, 0x000029FC, 0x00004D71,
++    0x00050041, 0x0000028B, 0x000036D5, 0x00000FB1, 0x00004D71, 0x0004003D, 0x0000000B, 0x00003C3E,
++    0x000036D5, 0x00060041, 0x0000028A, 0x00005BB6, 0x00001592, 0x00000A0B, 0x0000376B, 0x0003003E,
++    0x00005BB6, 0x00003C3E, 0x000200F9, 0x00004666, 0x000200F8, 0x00004666, 0x000200F9, 0x00004667,
++    0x000200F8, 0x0000401F, 0x00060041, 0x0000028A, 0x00005099, 0x00000C50, 0x00000A0B, 0x00005FCF,
++    0x0004003D, 0x0000000B, 0x00003D1E, 0x00005099, 0x00060041, 0x0000028A, 0x00005BB7, 0x00001592,
++    0x00000A0B, 0x0000237D, 0x0003003E, 0x00005BB7, 0x00003D1E, 0x000200F9, 0x00004667, 0x000200F8,
++    0x00001FDE, 0x00060041, 0x0000028A, 0x0000509A, 0x00000C50, 0x00000A0B, 0x00005FCF, 0x0004003D,
++    0x0000000B, 0x00003D1F, 0x0000509A, 0x00060041, 0x0000028A, 0x000052BA, 0x00001592, 0x00000A0B,
++    0x0000237D, 0x0003003E, 0x000052BA, 0x00003D1F, 0x00050080, 0x0000000B, 0x00004CE6, 0x0000237D,
++    0x00000A0D, 0x00050080, 0x0000000B, 0x00003448, 0x00005FCF, 0x00000A0D, 0x00060041, 0x0000028A,
++    0x00002A3A, 0x00000C50, 0x00000A0B, 0x00003448, 0x0004003D, 0x0000000B, 0x00003C3F, 0x00002A3A,
++    0x00060041, 0x0000028A, 0x00005BB8, 0x00001592, 0x00000A0B, 0x00004CE6, 0x0003003E, 0x00005BB8,
++    0x00003C3F, 0x000200F9, 0x00004667, 0x000200F8, 0x00004667, 0x000200F9, 0x00003A37, 0x000200F8,
++    0x00003A37, 0x000100FD, 0x00010038,
+ };

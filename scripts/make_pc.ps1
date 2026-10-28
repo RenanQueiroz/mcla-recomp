@@ -438,6 +438,7 @@ $laterPatches = @(
     @{ Patch = "rexglue-resolve-direct-batched-loads.patch"; File = "src\graphics\pipeline\render_target\cache.cpp"; Adds = "resolve_direct_batched_loads" }
     @{ Patch = "rexglue-xma-decoder-fixes.patch"; File = "src\audio\xma_context.cpp"; Adds = "xma_race_fixes" }
     @{ Patch = "rexglue-alpha-to-mask-tolerance.patch"; File = "src\graphics\flags.cpp"; Adds = "alpha_to_mask_tolerance" }
+    @{ Patch = "rexglue-resolve-downscale-unit-layout.patch"; File = "src\graphics\command_processor.cpp"; Adds = "resolve_downscale_unit_layout" }
     @{ Patch = "rexglue-resolve-readback-rules.patch"; File = "src\graphics\command_processor.cpp"; Adds = "readback_resolve_rules" }
     # Small fixes from open pull requests to upstream ReXGlue (patches\README.md credits each).
     @{ Patch = "rexglue-upstream-storage-flush.patch"; File = "src\graphics\vulkan\pipeline_cache.cpp"; Adds = "waiting first would" }

@@ -54,6 +54,7 @@ git apply ../../patches/rexglue-guest-atomics-lock-free.patch
 git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
 git apply ../../patches/rexglue-xma-decoder-fixes.patch
 git apply ../../patches/rexglue-alpha-to-mask-tolerance.patch
+git apply ../../patches/rexglue-resolve-downscale-unit-layout.patch
 git apply ../../patches/rexglue-resolve-readback-rules.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
@@ -1660,6 +1661,22 @@ Where the dots are: x odd, y even on D3D12 and x even, y odd on Vulkan, which ar
 | The thresholds lowered by it | `dxbc_translator_om.cpp` (`CompletePixelShader_AlphaToMaskSample`, also the ROV path), `spirv_translator_rb.cpp` (under `src/graphics/pipeline/shader`; the host render target path and the fragment shader interlock path) | D3D12; Vulkan (PC, PS5) |
 
 The genuine dithering stays: foliage, the distant trees' billboards and the edges of bushes, whose alpha is a fraction, are covered as before (the bush at the window in the pictures). Nothing was measured on the PS5 (the same SDK code, untested there) or on Linux.
+
+## rexglue-resolve-downscale-unit-layout.patch
+
+**Why.** With resolution scaling above 1x, a resolve written to the scaled resolve buffer is turned back into the 1x data by the SDK's `resolve_downscale` compute pass whenever something reads it on the CPU (`readback_resolve`, `readback_resolve_rules`, which the game's vinyl default uses) or copies it on the GPU (the next patch's `resolve_unscaled_copy_rules` of the rain). The pass assumed that the host pixel of a guest pixel sits at slot `pixel * scale_x * scale_y` of its 32x32 tile's scaled data, as if the host pixels of one guest pixel were a contiguous block. They are not: the scaled layout (`XeTextureScaledTiledOffset` of the xenia sources the SDK's resolve shaders are built from, `texture_address.xesli`) keeps host pixels in sub-units of N x 1 (N = 8 for 1 and 2 bytes a pixel, 4 for 4, 2 for 8, 1 for 16), column-major inside one guest unit of N pixels. So the pass reads the top-left host pixel of the block only at 1x and for 8 bytes a pixel at 2x2 (the rain's targets, 4096 of 4096 guest pixels of a 64x64 texture); for 4 bytes a pixel (the custom vinyl texture, `8_8_8_8`) 2048 of 4096 at 2x2 and 1024 of 4096 at 3x3 (the others come from a pixel of a neighbouring block, or a pixel of the own block that is not the top-left one: at 2x2 every second guest pixel repeats its left neighbour), for 1 and 2 bytes 1024 and 512, and with `readback_resolve_half_pixel_offset` the block's centre is wrong at 3x3 for every size (0 of 4096). The vinyl readback was checked at 1x only, where nothing is downscaled.
+
+**What it changes.**
+- `resolve_downscale_unit_layout` (bool, default on; changes during play): the pass finds the host pixel by the unit layout (`XeDownscaleSourceOffset` in `resolve_downscale.cs.hlsl` and `.glsl`: the guest pixel's unit of N pixels, the sub-unit and the pixel inside it, `unit_offset * scale_x * scale_y + (((sub_unit_x * scale_y + offset_y) << unit_width_log2) + pixel_in_sub_unit) << pixel_size_log2`, with the half-pixel offset applied as a host pixel offset inside the block instead of a linear one). Off: the pass's own addressing, bit for bit as before (the old expression is kept as the `else` of the same function).
+- The constants of the pass (D3D12 root constants, Vulkan push constants) gain a last field, `unit_layout`, whose default is the option's value (`CommandProcessor::ResolveDownscaleUnitLayoutConstant`), so every user of the pass gets it, including code that fills the struct field by field.
+- The shader headers for both APIs are rebuilt (`launcher/dev/build_downscale_shaders.py`: fxc `/O3 /all_resources_bound` and glslangValidator with `spirv-opt -O -O --canonicalize-ids --strip-debug` and spirv-dis; with `--check` on the unchanged SDK it rebuilds both of the SDK's headers of this shader byte for byte, disassembly included).
+
+**Checked.** `launcher/dev/downscale-layout-check.py` runs the text of `XeDownscaleSourceOffset` from the two shader sources (translated to Python; the two texts are compared and must be the same) against a transcription of the layout function, for every pixel size, every scale from 1x1 to 3x3, with and without the half-pixel offset, on textures of 64x64, 128x32 and 32x96: the new pass reads the right host pixel for every guest pixel (all of them), the old expression is what it was. The shaders compile (fxc, glslang, spirv-opt) and CI compiles the host code. Not run on a GPU when this was written; the picture check is `launcher/dev/vinyl-downscale-2026-10-28.md`. Nothing ran on Linux or the PS5 (the same SDK code).
+
+| Change | Files | Affects |
+|---|---|---|
+| The addressing, the new constant, the headers | `src/graphics/shaders/resolve_downscale.cs.hlsl`, `src/graphics/shaders/resolve_downscale.cs.glsl`, `src/graphics/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h`, `src/graphics/shaders/vulkan_spirv/resolve_downscale_cs.h` | D3D12, Vulkan |
+| The option and the constants' default | `include/rex/graphics/flags.h`, `include/rex/graphics/command_processor.h`, `src/graphics/command_processor.cpp`, `include/rex/graphics/d3d12/command_processor.h`, `include/rex/graphics/vulkan/command_processor.h` | D3D12, Vulkan |
 
 ## rexglue-resolve-readback-rules.patch
 
