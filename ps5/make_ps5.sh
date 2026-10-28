@@ -221,6 +221,7 @@ rexglue-xma-decoder-fixes.patch src/audio/xma_context.cpp xma_race_fixes
 rexglue-alpha-to-mask-tolerance.patch src/graphics/flags.cpp alpha_to_mask_tolerance
 rexglue-resolve-downscale-unit-layout.patch src/graphics/command_processor.cpp resolve_downscale_unit_layout
 rexglue-resolve-readback-rules.patch src/graphics/command_processor.cpp readback_resolve_rules
+rexglue-resolve-unscaled-copy.patch src/graphics/command_processor.cpp resolve_unscaled_copy_rules
 rexglue-upstream-storage-flush.patch src/graphics/vulkan/pipeline_cache.cpp waiting first would
 rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exceptions masked on every write
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW

@@ -1,0 +1,570 @@
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index bd96ce5..787642f 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -164,6 +164,25 @@ REXCVAR_DEFINE_BOOL(async_pipeline_end_of_frame_wait, false, "GPU",
+                     "left out either way.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++// TMPRAIN: development trace of chosen draws (launcher/dev/rain-trace.sdk.patch).
++REXCVAR_DEFINE_STRING(tmp_draw_trace, "", "GPU",
++                      "TMPRAIN: vertex shader hashes (hex prefixes, comma separated) of the draws "
++                      "to trace; a new value starts a new request")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_UINT32(tmp_draw_trace_count, 6, "GPU", "TMPRAIN: draws traced per request")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(tmp_draw_skip, "", "GPU",
++                      "TMPRAIN: vertex shader hashes (hex prefixes, comma separated) of the draws "
++                      "to leave out")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(tmp_draw_trace_nodepth, false, "GPU",
++                    "TMPRAIN: the draws named by tmp_draw_trace are drawn without a depth test")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(tmp_draw_trace_reupload, false, "GPU",
++                    "TMPRAIN: the vertex buffers of the draws named by tmp_draw_trace are loaded "
++                    "from the guest's memory again for every draw")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ using namespace rex::graphics::xenos;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index d35c107..7004dbb 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -10,10 +10,14 @@
+  */
+ 
+ #include <algorithm>
++#include <cctype>  // TMPRAIN
+ #include <chrono>
+ #include <cstdarg>
++#include <cstdio>  // TMPRAIN
+ #include <cstring>
++#include <map>  // TMPRAIN
+ #include <sstream>
++#include <string>  // TMPRAIN
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -72,6 +76,84 @@ REXCVAR_DEFINE_BOOL(d3d12_threaded_submission_idle_wait, true, "GPU/D3D12",
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++// TMPRAIN: development trace of chosen draws (launcher/dev/rain-trace.sdk.patch; the cvars are
++// defined in the shared command processor's file).
++REXCVAR_DECLARE(std::string, tmp_draw_trace);
++REXCVAR_DECLARE(uint32_t, tmp_draw_trace_count);
++REXCVAR_DECLARE(std::string, tmp_draw_skip);
++REXCVAR_DECLARE(bool, tmp_draw_trace_nodepth);
++REXCVAR_DECLARE(bool, tmp_draw_trace_reupload);
++
++namespace {
++// TMPRAIN
++bool TmpRainMatch(const std::string& list, uint64_t hash) {
++  if (list.empty()) {
++    return false;
++  }
++  char hex[17];
++  std::snprintf(hex, sizeof(hex), "%016llX", static_cast<unsigned long long>(hash));
++  size_t pos = 0;
++  while (pos < list.size()) {
++    size_t end = list.find(',', pos);
++    if (end == std::string::npos) {
++      end = list.size();
++    }
++    std::string item = list.substr(pos, end - pos);
++    for (char& c : item) {
++      c = char(std::toupper(static_cast<unsigned char>(c)));
++    }
++    if (!item.empty() && item.size() <= 16 && std::strncmp(hex, item.c_str(), item.size()) == 0) {
++      return true;
++    }
++    pos = end + 1;
++  }
++  return false;
++}
++void TmpRainAppend(char* buffer, size_t size, int& length, const char* format, ...) {
++  if (length < 0 || static_cast<size_t>(length) >= size) {
++    return;
++  }
++  va_list args;
++  va_start(args, format);
++  const int written = std::vsnprintf(buffer + length, size - static_cast<size_t>(length), format, args);
++  va_end(args);
++  if (written > 0) {
++    length += written;
++  }
++}
++// True for the first tmp_draw_trace_count draws of each vertex shader named by tmp_draw_trace after it got a new value.
++bool TmpRainArmed(const std::string& request, uint64_t hash, uint32_t* index_out) {
++  static std::string last_request;
++  static std::map<uint64_t, uint32_t> issued;
++  if (request != last_request) {
++    last_request = request;
++    issued.clear();
++  }
++  uint32_t& count = issued[hash];
++  if (count >= std::max<uint32_t>(1, REXCVAR_GET(tmp_draw_trace_count))) {
++    return false;
++  }
++  *index_out = count++;
++  return true;
++}
++// Says where a traced draw was left (it logs in the destructor, so every return of IssueDraw is covered).
++struct TmpRainScope {
++  bool matches = false;
++  bool watched = false;
++  bool drawn = false;
++  int step = 0;
++  uint64_t vs = 0;
++  uint32_t n = 0;
++  uint64_t frame = 0;
++  ~TmpRainScope() {
++    if (watched && !drawn) {
++      REXGPU_INFO("RAINTRACE #{} vs={:016X} frame={}: NOT DRAWN, left IssueDraw at step {}", n, vs,
++                  frame, step);
++    }
++  }
++};
++}  // namespace
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -3109,6 +3191,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
+   bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
+ 
++  // TMPRAIN: traced and skipped draws.
++  TmpRainScope tmprain;
++  const std::string tmprain_request = REXCVAR_GET(tmp_draw_trace);
++  if (!tmprain_request.empty() || !REXCVAR_GET(tmp_draw_skip).empty()) {
++    tmprain.vs = vertex_shader->ucode_data_hash();
++    tmprain.frame = frame_current_;
++    if (TmpRainMatch(REXCVAR_GET(tmp_draw_skip), tmprain.vs)) {
++      static uint32_t tmprain_skipped = 0;
++      if (!(tmprain_skipped++ % 600)) {
++        REXGPU_INFO("RAINTRACE vs={:016X}: draws left out ({} so far)", tmprain.vs,
++                    tmprain_skipped);
++      }
++      return true;
++    }
++    tmprain.matches = TmpRainMatch(tmprain_request, tmprain.vs);
++    tmprain.watched = tmprain.matches && TmpRainArmed(tmprain_request, tmprain.vs, &tmprain.n);
++    tmprain.step = 1;
++  }
++
+   // Pixel shader analysis.
+   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
+   bool is_rasterization_done = draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
+@@ -3155,6 +3256,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     return false;
+   }
+   ++submission_draws_;
++  tmprain.step = 2;
+ 
+   // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
+   if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
+@@ -3169,15 +3271,22 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+ 
+   // Process primitives.
+   PrimitiveProcessor::ProcessingResult primitive_processing_result;
++  tmprain.step = 20;
+   if (!primitive_processor_->Process(primitive_processing_result)) {
+     return false;
+   }
++  tmprain.step = 30;
+   if (!primitive_processing_result.host_draw_vertex_count) {
+     // Nothing to draw.
+     return true;
+   }
++  tmprain.step = 3;
+ 
+   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
++  if (tmprain.matches && REXCVAR_GET(tmp_draw_trace_nodepth)) {  // TMPRAIN
++    normalized_depth_control.z_enable = 0;
++    normalized_depth_control.z_write_enable = 0;
++  }
+ 
+   // Shader modifications.
+   uint32_t ps_param_gen_pos = UINT32_MAX;
+@@ -3200,10 +3309,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   uint32_t normalized_color_mask =
+       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                    : 0;
++  tmprain.step = 35;
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+     return false;
+   }
++  tmprain.step = 4;
+   // HDR output: the UI layer may start with this draw.
+   HdrRenderTargetsReady();
+ 
+@@ -3230,12 +3341,14 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   void* pipeline_handle;
+   ID3D12RootSignature* root_signature;
++  tmprain.step = 45;
+   if (!pipeline_cache_->ConfigurePipeline(
+           vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
+           normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
+           bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
+     return false;
+   }
++  tmprain.step = 55;
+   if (REXCVAR_GET(async_shader_compilation)) {
+     // Left out until the pipeline is ready, unless it's ready within the
+     // frame's waiting budget.
+@@ -3250,6 +3363,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
+   }
+ 
++  tmprain.step = 6;
+   // Update the textures - this may bind pipelines.
+   uint32_t used_texture_mask =
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+@@ -3336,14 +3450,33 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+                              primitive_processing_result.host_shader_index_endian, viewport_info,
+                              used_texture_mask, normalized_depth_control, normalized_color_mask);
+ 
++  tmprain.step = 75;
+   // Update constant buffers, descriptors and root parameters.
+   if (!UpdateBindings(vertex_shader, pixel_shader, root_signature, memexport_used)) {
+     return false;
+   }
++  tmprain.step = 8;
+   // Must not call anything that can change the descriptor heap from now on!
+ 
+   // Ensure vertex buffers are resident.
+   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
++  if (tmprain.matches && REXCVAR_GET(tmp_draw_trace_reupload)) {
++    // TMPRAIN: the traced draw's vertex buffers are loaded from the guest's memory again.
++    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
++      uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
++      uint32_t j;
++      while (rex::bit_scan_forward(bits, &j)) {
++        bits &= ~(uint32_t(1) << j);
++        const uint32_t vfetch_index = i * 32 + j;
++        const xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
++        shared_memory_->MemoryInvalidationCallback(uint32_t(vfetch_constant.address) << 2,
++                                                   uint32_t(vfetch_constant.size) << 2, true);
++        vertex_buffers_in_sync_[vfetch_index >> 6] &= ~(uint64_t(1) << (vfetch_index & 63));
++        vertex_buffer_states_[vfetch_index].address = UINT32_MAX;
++        vertex_buffer_states_[vfetch_index].size = UINT32_MAX;
++      }
++    }
++  }
+   for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+     uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+     uint32_t j;
+@@ -3391,6 +3524,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     }
+   }
+ 
++  tmprain.step = 9;
+   // Gather memexport ranges and ensure the heaps for them are resident, and
+   // also load the data surrounding the export and to fill the regions that
+   // won't be modified by the shaders.
+@@ -3484,6 +3618,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   SetPrimitiveTopology(primitive_topology);
+   // Must not call anything that may change the primitive topology from now on!
+ 
++  // TMPRAIN: the pipeline statistics of this draw.
++  static ID3D12QueryHeap* tmprain_query_heap = nullptr;  // never released (development only)
++  ID3D12QueryHeap* tmprain_heap = nullptr;
++  if (tmprain.watched) {
++    if (!tmprain_query_heap) {
++      D3D12_QUERY_HEAP_DESC tmprain_heap_desc = {};
++      tmprain_heap_desc.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
++      tmprain_heap_desc.Count = 1;
++      if (FAILED(device->CreateQueryHeap(&tmprain_heap_desc, IID_PPV_ARGS(&tmprain_query_heap)))) {
++        tmprain_query_heap = nullptr;
++        REXGPU_INFO("RAINTRACE: no pipeline statistics query heap");
++      }
++    }
++    tmprain_heap = tmprain_query_heap;
++    if (tmprain_heap) {
++      deferred_command_list_.D3DBeginQuery(tmprain_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
++    }
++  }
++
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+       PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
+@@ -3562,6 +3715,105 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+       ReleaseScratchGPUBuffer(scratch_index_buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+     }
+   }
++  tmprain.drawn = true;
++  if (tmprain.watched) {
++    // TMPRAIN: wait for the draw and log what the GPU did with it, next to the draw's state and the
++    // first bytes of its vertex buffers in the guest's memory and in the shared memory.
++    struct VertexBufferCopy {
++      uint32_t index, address, size, stride;
++    };
++    VertexBufferCopy vb_copies[8];
++    uint32_t vb_count = 0;
++    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
++      uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
++      uint32_t j;
++      while (rex::bit_scan_forward(bits, &j)) {
++        bits &= ~(uint32_t(1) << j);
++        if (vb_count < 8) {
++          xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(i * 32 + j);
++          vb_copies[vb_count++] = {i * 32 + j, uint32_t(vfetch_constant.address) << 2,
++                                   uint32_t(vfetch_constant.size) << 2,
++                                   uint32_t(vfetch_constant.endian)};
++        }
++      }
++    }
++    ID3D12Resource* tmprain_readback = RequestReadbackBuffer(4096);
++    if (tmprain_readback && tmprain_heap) {
++      deferred_command_list_.D3DEndQuery(tmprain_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
++      deferred_command_list_.D3DResolveQueryData(tmprain_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS,
++                                                 0, 1, tmprain_readback, 0);
++    }
++    if (tmprain_readback && vb_count) {
++      shared_memory_->UseAsCopySource();
++      SubmitBarriers();
++      for (uint32_t k = 0; k < vb_count; ++k) {
++        if (vb_copies[k].size >= 32) {
++          deferred_command_list_.D3DCopyBufferRegion(tmprain_readback, 256 + 32 * k,
++                                                     shared_memory_->GetBuffer(),
++                                                     vb_copies[k].address, 32);
++        }
++      }
++    }
++    char tmprain_text[2048];
++    int tmprain_len = 0;
++    TmpRainAppend(
++        tmprain_text, sizeof(tmprain_text), tmprain_len,
++        "RAINTRACE #%u vs=%016llX frame=%llu scale=%ux%u guest_vertices=%u host_vertices=%u "
++        "topology=%d index_buffer=%d viewport=%u,%u+%ux%u scissor=%u,%u+%ux%u rt_bits=%08X "
++        "texture_mask=%08X",
++        tmprain.n, static_cast<unsigned long long>(tmprain.vs),
++        static_cast<unsigned long long>(tmprain.frame), draw_resolution_scale_x,
++        draw_resolution_scale_y, index_count, primitive_processing_result.host_draw_vertex_count,
++        int(primitive_topology), int(primitive_processing_result.index_buffer_type),
++        viewport_info.xy_offset[0], viewport_info.xy_offset[1], viewport_info.xy_extent[0],
++        viewport_info.xy_extent[1], scissor.offset[0], scissor.offset[1], scissor.extent[0],
++        scissor.extent[1], bound_depth_and_color_render_target_bits, used_texture_mask);
++    if (tmprain_readback && AwaitAllQueueOperationsCompletion()) {
++      D3D12_RANGE tmprain_range = {0, 4096};
++      void* tmprain_mapping = nullptr;
++      if (SUCCEEDED(tmprain_readback->Map(0, &tmprain_range, &tmprain_mapping))) {
++        const uint8_t* bytes = static_cast<const uint8_t*>(tmprain_mapping);
++        if (tmprain_heap) {
++          const D3D12_QUERY_DATA_PIPELINE_STATISTICS* stats =
++              reinterpret_cast<const D3D12_QUERY_DATA_PIPELINE_STATISTICS*>(bytes);
++          TmpRainAppend(
++              tmprain_text, sizeof(tmprain_text), tmprain_len,
++              " | IAVertices=%llu IAPrimitives=%llu VS=%llu GS=%llu GSPrimitives=%llu "
++              "ClipperIn=%llu ClipperOut=%llu PS=%llu",
++              static_cast<unsigned long long>(stats->IAVertices),
++              static_cast<unsigned long long>(stats->IAPrimitives),
++              static_cast<unsigned long long>(stats->VSInvocations),
++              static_cast<unsigned long long>(stats->GSInvocations),
++              static_cast<unsigned long long>(stats->GSPrimitives),
++              static_cast<unsigned long long>(stats->CInvocations),
++              static_cast<unsigned long long>(stats->CPrimitives),
++              static_cast<unsigned long long>(stats->PSInvocations));
++        }
++        for (uint32_t k = 0; k < vb_count; ++k) {
++          const uint8_t* guest = memory_->TranslatePhysical(vb_copies[k].address);
++          char guest_hex[80] = "-";
++          char gpu_hex[80] = "-";
++          if (guest && vb_copies[k].size >= 32) {
++            int at = 0;
++            for (uint32_t b = 0; b < 32; ++b) {
++              at += std::snprintf(guest_hex + at, sizeof(guest_hex) - at, "%02X", guest[b]);
++            }
++            at = 0;
++            for (uint32_t b = 0; b < 32; ++b) {
++              at += std::snprintf(gpu_hex + at, sizeof(gpu_hex) - at, "%02X", bytes[256 + 32 * k + b]);
++            }
++          }
++          TmpRainAppend(
++              tmprain_text, sizeof(tmprain_text), tmprain_len,
++              " | vf%u@%08X size=%u endian=%u guest=%s gpu=%s", vb_copies[k].index,
++              vb_copies[k].address, vb_copies[k].size, vb_copies[k].stride, guest_hex, gpu_hex);
++        }
++        D3D12_RANGE tmprain_nothing = {};
++        tmprain_readback->Unmap(0, &tmprain_nothing);
++      }
++    }
++    REXGPU_INFO("{}", static_cast<const char*>(tmprain_text));
++  }
+ 
+   if (memexport_used) {
+     // Make sure this memexporting draw is ordered with other work using shared
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 491594c..4fd6da0 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -13,9 +13,12 @@
+ #include <chrono>
+ #include <algorithm>
+ #include <array>
++#include <cctype>  // TMPRAIN
+ #include <cstdint>
++#include <cstdio>  // TMPRAIN
+ #include <cstring>
+ #include <iterator>
++#include <map>  // TMPRAIN
+ #include <mutex>
+ #include <string>
+ #include <string_view>
+@@ -101,6 +104,66 @@ REXCVAR_DEFINE_UINT32(vulkan_threaded_submission_split_draws, 1000, "GPU/Vulkan"
+ 
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++// TMPRAIN: development trace of chosen draws (launcher/dev/rain-trace.sdk.patch; the cvars are
++// defined in the shared command processor's file).
++REXCVAR_DECLARE(std::string, tmp_draw_trace);
++REXCVAR_DECLARE(uint32_t, tmp_draw_trace_count);
++REXCVAR_DECLARE(std::string, tmp_draw_skip);
++
++namespace {
++// TMPRAIN
++bool TmpRainMatchVk(const std::string& list, uint64_t hash) {
++  if (list.empty()) {
++    return false;
++  }
++  char hex[17];
++  std::snprintf(hex, sizeof(hex), "%016llX", static_cast<unsigned long long>(hash));
++  size_t pos = 0;
++  while (pos < list.size()) {
++    size_t end = list.find(',', pos);
++    if (end == std::string::npos) {
++      end = list.size();
++    }
++    std::string item = list.substr(pos, end - pos);
++    for (char& c : item) {
++      c = char(std::toupper(static_cast<unsigned char>(c)));
++    }
++    if (!item.empty() && item.size() <= 16 && std::strncmp(hex, item.c_str(), item.size()) == 0) {
++      return true;
++    }
++    pos = end + 1;
++  }
++  return false;
++}
++bool TmpRainArmedVk(const std::string& request, uint64_t hash, uint32_t* index_out) {
++  static std::string last_request;
++  static std::map<uint64_t, uint32_t> issued;
++  if (request != last_request) {
++    last_request = request;
++    issued.clear();
++  }
++  uint32_t& count = issued[hash];
++  if (count >= std::max<uint32_t>(1, REXCVAR_GET(tmp_draw_trace_count))) {
++    return false;
++  }
++  *index_out = count++;
++  return true;
++}
++struct TmpRainScopeVk {
++  bool watched = false;
++  bool drawn = false;
++  int step = 0;
++  uint64_t vs = 0;
++  uint32_t n = 0;
++  ~TmpRainScopeVk() {
++    if (watched && !drawn) {
++      REXGPU_INFO("RAINTRACE (Vulkan) #{} vs={:016X}: NOT DRAWN, left IssueDraw at step {}", n, vs,
++                  step);
++    }
++  }
++};
++}  // namespace
++
+ namespace rex::graphics::vulkan {
+ 
+ // Submissions and blocking fence waits so far, with the time spent in each
+@@ -4572,6 +4635,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   }
+   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
+   bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
++
++  // TMPRAIN: traced and skipped draws.
++  TmpRainScopeVk tmprain;
++  const std::string tmprain_request = REXCVAR_GET(tmp_draw_trace);
++  if (!tmprain_request.empty() || !REXCVAR_GET(tmp_draw_skip).empty()) {
++    tmprain.vs = vertex_shader->ucode_data_hash();
++    if (TmpRainMatchVk(REXCVAR_GET(tmp_draw_skip), tmprain.vs)) {
++      static uint32_t tmprain_skipped = 0;
++      if (!(tmprain_skipped++ % 600)) {
++        REXGPU_INFO("RAINTRACE (Vulkan) vs={:016X}: draws left out ({} so far)", tmprain.vs,
++                    tmprain_skipped);
++      }
++      return true;
++    }
++    tmprain.watched =
++        TmpRainMatchVk(tmprain_request, tmprain.vs) &&
++        TmpRainArmedVk(tmprain_request, tmprain.vs, &tmprain.n);
++    tmprain.step = 1;
++  }
+   if (memexport_used_vertex) {
+     if (!device_properties.vertexPipelineStoresAndAtomics) {
+       REXGPU_ERROR(
+@@ -4673,13 +4755,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     }
+ 
+     // Process primitives.
++    tmprain.step = 2;
+     if (!primitive_processor_->Process(primitive_processing_result)) {
+       return draw_fail("primitive_processing");
+     }
++    tmprain.step = 30;
+     if (!primitive_processing_result.host_draw_vertex_count) {
+       // Nothing to draw.
+       return true;
+     }
++    tmprain.step = 3;
+     if (primitive_processing_result.host_primitive_type == xenos::PrimitiveType::kTriangleFan) {
+       // Vulkan uses the same fan-to-list conversion policy as D3D12.
+       REXGPU_ERROR(
+@@ -4822,6 +4907,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // textures.
+   VkPipeline pipeline;
+   void* pipeline_handle = nullptr;
++  tmprain.step = 45;
+   if (!pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation,
+                                           primitive_processing_result, normalized_depth_control,
+                                           normalized_color_mask,
+@@ -4834,6 +4920,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // may happen between pipeline configuration and binding.
+   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
+                                                 &pipeline_is_placeholder);
++  tmprain.step = 55;
+   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
+     // Left out until the real pipeline is ready, unless it's ready within the
+     // frame's waiting budget.
+@@ -4851,6 +4938,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       return true;
+     }
+   }
++  tmprain.step = 6;
+   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
+     return draw_fail("pipeline_lookup");
+   }
+@@ -5179,6 +5267,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                               0, 0, 0);
+   }
+ 
++  tmprain.drawn = true;
++  if (tmprain.watched) {
++    REXGPU_INFO(
++        "RAINTRACE (Vulkan) #{} vs={:016X}: drawn, guest_vertices={} host_vertices={} "
++        "host_primitive_type={} index_buffer_type={} pipeline_placeholder={} scale={}x{}",
++        tmprain.n, tmprain.vs, index_count, primitive_processing_result.host_draw_vertex_count,
++        uint32_t(primitive_processing_result.host_primitive_type),
++        uint32_t(primitive_processing_result.index_buffer_type), pipeline_is_placeholder,
++        texture_cache_->draw_resolution_scale_x(), texture_cache_->draw_resolution_scale_y());
++  }
++
+   // Invalidate textures in memexported memory and watch for changes.
+   if (!memexport_ranges_.empty()) {
+     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
