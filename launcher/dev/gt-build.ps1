@@ -23,7 +23,7 @@
 #   --mcla_render_markers_all_phases=true     the game's phase markers in the log
 #   --d3d12_threaded_submission_split_draws=0 one submission per frame at 1x and 2x (no mid-frame gaps)
 param([string]$OutDir = "", [ValidateSet("mingw", "msvc")][string]$Toolchain = "mingw", [string[]]$Layer = @(),
-      [switch]$Reverse, [switch]$NoBuild)
+      [switch]$Reverse, [switch]$NoBuild, [string]$ToolsDir = "")
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $sdkDir = "$root\third_party\rexglue-sdk"
@@ -77,7 +77,13 @@ foreach ($name in $Layer) {
 if ($NoBuild) { exit 0 }
 
 # The toolchain on PATH, as the build scripts do it.
-. "$root\scripts\env.ps1" -Toolchain $Toolchain
+if (-not $ToolsDir) {
+    # -Toolchain given to env.ps1 stops it from reading the tools folder of the last build: do it here
+    . "$root\scripts\mcla-lib.ps1"
+    $recorded = Get-BuildOptions $root
+    if ($recorded -and $recorded.Toolchain -eq $Toolchain) { $ToolsDir = $recorded.ToolsDir }
+}
+. "$root\scripts\env.ps1" -Toolchain $Toolchain -ToolsDir $ToolsDir
 if (-not $env:VULKAN_SDK) {
     $v = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
         Sort-Object { [version]$_.Name } | Select-Object -Last 1
