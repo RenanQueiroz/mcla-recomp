@@ -1,0 +1,378 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index fc3b28d..2aaf240 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -35,6 +35,8 @@ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+ REXCVAR_DECLARE(bool, readback_memexport);
+ REXCVAR_DECLARE(bool, readback_memexport_fast);
+ REXCVAR_DECLARE(bool, occlusion_query_enable);
++REXCVAR_DECLARE(bool, occlusion_query_keep_submission_open);
++REXCVAR_DECLARE(int32_t, occlusion_query_log);
+ REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
+ 
+ // GPU Depth / Render Target Behavior
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index bd96ce5..b15ee2d 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -85,6 +85,22 @@ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+ REXCVAR_DEFINE_BOOL(occlusion_query_enable, true, "GPU", "Enable host occlusion query handling")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(occlusion_query_keep_submission_open, true, "GPU",
++                    "While a guest occlusion query is open, the end of a chunk of the primary "
++                    "buffer does not end the host submission. That cut the host query in two: "
++                    "the guest's end then found none, and host occlusion queries were turned "
++                    "off for the rest of the run, the game being told a fake 1000 samples (a "
++                    "fully visible sun) whatever the scene. A query that is cut anyway gets its "
++                    "last real result, and host queries stay on")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(occlusion_query_log, 0, "GPU",
++                     "Log guest occlusion queries at info level: the first N begin and end "
++                     "events, then every 120th end, with counters. A cut query, a fall-back to "
++                     "the fake count and host queries turned off are always logged")
++    .range(0, 1000000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
+                       "Controls CPU readback of render-to-texture resolve results.\n"
+                       " none: Disable readback (default)\n"
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index d35c107..cfb70e6 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -14,6 +14,7 @@
+ #include <cstdarg>
+ #include <cstring>
+ #include <sstream>
++#include <unordered_map>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -224,6 +225,27 @@ std::string D3D12CommandProcessor::ShaderStorageReport(bool shutdown) {
+       graphics_system_->edram_tile_count());
+ }
+ 
++namespace {
++// occlusion_query_keep_submission_open: the last real result told to the game for each sample
++// count buffer, for a query that ends with no host query behind it, and the last raw host count
++// for occlusion_query_log. Only the GPU command thread touches them.
++std::unordered_map<uint32_t, uint64_t>& LastOcclusionSamples() {
++  static std::unordered_map<uint32_t, uint64_t> samples;
++  return samples;
++}
++uint64_t g_last_occlusion_raw_samples = 0;
++// Counters for occlusion_query_log: guest begin and end packets, ends answered by a host query,
++// ends that found no host query (cut), ends whose host query gave no result.
++struct OcclusionCounters {
++  uint64_t begins = 0;
++  uint64_t ends = 0;
++  uint64_t host_results = 0;
++  uint64_t cut = 0;
++  uint64_t no_result = 0;
++};
++OcclusionCounters g_occlusion_counters;
++}  // namespace
++
+ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
+                                                                uint32_t packet, uint32_t count) {
+   if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
+@@ -239,10 +261,29 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
+   auto* sample_counts =
+       memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_addr);
+   if (!sample_counts) {
++    REXGPU_INFO(
++        "D3D12: occlusion query packet with no sample count buffer at {:08X}: "
++        "host occlusion queries off",
++        sample_count_addr);
+     DisableHostOcclusionQueries();
+     return true;
+   }
+ 
++  // occlusion_query_log: the first N events, then every 120th end, with the counters.
++  auto should_log = [](bool is_end_event) -> bool {
++    static uint64_t events = 0;
++    ++events;
++    const int32_t log_events = REXCVAR_GET(occlusion_query_log);
++    return log_events > 0 && (events <= uint64_t(log_events) ||
++                              (is_end_event && g_occlusion_counters.ends % 120 == 0));
++  };
++  auto counters_text = []() -> std::string {
++    return fmt::format("begins {}, ends {}: {} with a host result, {} cut, {} without one",
++                       g_occlusion_counters.begins, g_occlusion_counters.ends,
++                       g_occlusion_counters.host_results, g_occlusion_counters.cut,
++                       g_occlusion_counters.no_result);
++  };
++
+   auto write_fallback_result = [sample_counts, kQueryFinished]() -> bool {
+     auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
+     if (fake_sample_count < 0) {
+@@ -267,27 +308,72 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
+   bool is_end = is_end_via_z_pass || is_end_via_z_fail;
+ 
+   if (!is_end) {
++    ++g_occlusion_counters.begins;
+     if (active_occlusion_query_.valid &&
+         active_occlusion_query_.sample_count_address != sample_count_addr) {
++      REXGPU_INFO(
++          "D3D12: occlusion query begin at {:08X} while the one at {:08X} is open: host "
++          "occlusion queries off",
++          sample_count_addr, active_occlusion_query_.sample_count_address);
+       DisableHostOcclusionQueries();
+       return write_fallback_result();
+     }
+-    if (!BeginGuestOcclusionQuery(sample_count_addr)) {
++    const bool begun = BeginGuestOcclusionQuery(sample_count_addr);
++    if (should_log(false)) {
++      REXGPU_INFO("D3D12: occlusion query begin at {:08X} (swap {}): {}", sample_count_addr,
++                  counter_, begun ? "host query" : "fake count");
++    }
++    if (!begun) {
+       return write_fallback_result();
+     }
+     return true;
+   }
+ 
++  ++g_occlusion_counters.ends;
+   if (!active_occlusion_query_.valid ||
+       active_occlusion_query_.sample_count_address != sample_count_addr) {
++    if (REXCVAR_GET(occlusion_query_keep_submission_open) && !active_occlusion_query_.valid) {
++      // The host query was cut by an end of the submission, or its begin fell back to the fake
++      // count: this one has no host result, and nothing else is wrong. The last real result of
++      // the same query is the best guess, the fake count when it has none; host queries stay on.
++      ++g_occlusion_counters.cut;
++      const auto last = LastOcclusionSamples().find(sample_count_addr);
++      REXGPU_INFO("D3D12: occlusion query end at {:08X} (swap {}) found no host query: {} ({})",
++                  sample_count_addr, counter_,
++                  last != LastOcclusionSamples().end() ? "the last real result" : "the fake count",
++                  counters_text());
++      if (last != LastOcclusionSamples().end()) {
++        WriteGuestOcclusionResult(sample_counts, last->second);
++        return true;
++      }
++      return write_fallback_result();
++    }
++    REXGPU_INFO(
++        "D3D12: occlusion query end at {:08X} (swap {}) found {}: host occlusion queries off ({})",
++        sample_count_addr, counter_,
++        active_occlusion_query_.valid ? "the query of another buffer" : "no host query",
++        counters_text());
+     DisableHostOcclusionQueries();
+     return write_fallback_result();
+   }
+ 
+   if (!EndGuestOcclusionQuery(sample_count_addr, sample_counts)) {
++    ++g_occlusion_counters.no_result;
++    if (should_log(true)) {
++      REXGPU_INFO("D3D12: occlusion query end at {:08X} (swap {}): no result ({})",
++                  sample_count_addr, counter_, counters_text());
++    }
+     return write_fallback_result();
+   }
+-
++  ++g_occlusion_counters.host_results;
++  if (should_log(true)) {
++    REXGPU_INFO(
++        "D3D12: occlusion query end at {:08X} (swap {}): {} samples told to the game ({} on the "
++        "host, scale {}x{}); {}",
++        sample_count_addr, counter_, uint32_t(sample_counts->ZPass_A), g_last_occlusion_raw_samples,
++        texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1,
++        texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1, counters_text());
++  }
+   return true;
+ }
+ 
+@@ -3071,8 +3157,14 @@ void D3D12CommandProcessor::PrepareForWait() {
+ }
+ 
+ void D3D12CommandProcessor::OnPrimaryBufferEnd() {
++  // The end of a chunk of the primary buffer (where the game's last kick left off) can fall
++  // between the begin and the end of a guest occlusion query. Ending the submission there cut the
++  // host query: it is ended by EndSubmission, so the guest's end found none, which turned host
++  // occlusion queries off for the rest of the run. With the query open the submission goes on
++  // with the next chunk, and ends at the next point that is not inside a query.
+   if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
+-      CanEndSubmissionImmediately()) {
++      CanEndSubmissionImmediately() &&
++      !(active_occlusion_query_.valid && REXCVAR_GET(occlusion_query_keep_submission_open))) {
+     EndSubmission(false);
+   }
+ }
+@@ -5928,7 +6020,9 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+   }
+ 
+   uint64_t samples = occlusion_query_readback_mapping_[host_index];
++  g_last_occlusion_raw_samples = samples;
+   samples = NormalizeOcclusionSamples(samples);
++  LastOcclusionSamples()[sample_count_address] = samples;
+   WriteGuestOcclusionResult(sample_counts, samples);
+   return true;
+ }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 491594c..3c79fda 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -20,6 +20,7 @@
+ #include <string>
+ #include <string_view>
+ #include <tuple>
++#include <unordered_map>
+ #include <utility>
+ #include <vector>
+ 
+@@ -741,6 +742,27 @@ std::string VulkanCommandProcessor::ShaderStorageReport(bool shutdown) {
+       graphics_system_->edram_tile_count());
+ }
+ 
++namespace {
++// occlusion_query_keep_submission_open: the last real result told to the game for each sample
++// count buffer, for a query that ends with no host query behind it, and the last raw host count
++// for occlusion_query_log. Only the GPU command thread touches them.
++std::unordered_map<uint32_t, uint64_t>& LastOcclusionSamples() {
++  static std::unordered_map<uint32_t, uint64_t> samples;
++  return samples;
++}
++uint64_t g_last_occlusion_raw_samples = 0;
++// Counters for occlusion_query_log: guest begin and end packets, ends answered by a host query,
++// ends that found no host query (cut), ends whose host query gave no result.
++struct OcclusionCounters {
++  uint64_t begins = 0;
++  uint64_t ends = 0;
++  uint64_t host_results = 0;
++  uint64_t cut = 0;
++  uint64_t no_result = 0;
++};
++OcclusionCounters g_occlusion_counters;
++}  // namespace
++
+ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
+                                                                 uint32_t packet, uint32_t count) {
+   if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
+@@ -756,10 +778,29 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
+   auto* sample_counts =
+       memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_addr);
+   if (!sample_counts) {
++    REXGPU_INFO(
++        "Vulkan: occlusion query packet with no sample count buffer at {:08X}: "
++        "host occlusion queries off",
++        sample_count_addr);
+     DisableHostOcclusionQueries();
+     return true;
+   }
+ 
++  // occlusion_query_log: the first N events, then every 120th end, with the counters.
++  auto should_log = [](bool is_end_event) -> bool {
++    static uint64_t events = 0;
++    ++events;
++    const int32_t log_events = REXCVAR_GET(occlusion_query_log);
++    return log_events > 0 && (events <= uint64_t(log_events) ||
++                              (is_end_event && g_occlusion_counters.ends % 120 == 0));
++  };
++  auto counters_text = []() -> std::string {
++    return fmt::format("begins {}, ends {}: {} with a host result, {} cut, {} without one",
++                       g_occlusion_counters.begins, g_occlusion_counters.ends,
++                       g_occlusion_counters.host_results, g_occlusion_counters.cut,
++                       g_occlusion_counters.no_result);
++  };
++
+   auto write_fallback_result = [sample_counts]() -> bool {
+     auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
+     if (fake_sample_count < 0) {
+@@ -784,26 +825,72 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
+   bool is_end = is_end_via_z_pass || is_end_via_z_fail;
+ 
+   if (!is_end) {
++    ++g_occlusion_counters.begins;
+     if (active_occlusion_query_.valid &&
+         active_occlusion_query_.sample_count_address != sample_count_addr) {
++      REXGPU_INFO(
++          "Vulkan: occlusion query begin at {:08X} while the one at {:08X} is open: host "
++          "occlusion queries off",
++          sample_count_addr, active_occlusion_query_.sample_count_address);
+       DisableHostOcclusionQueries();
+       return write_fallback_result();
+     }
+-    if (!BeginGuestOcclusionQuery(sample_count_addr)) {
++    const bool begun = BeginGuestOcclusionQuery(sample_count_addr);
++    if (should_log(false)) {
++      REXGPU_INFO("Vulkan: occlusion query begin at {:08X} (swap {}): {}", sample_count_addr,
++                  counter_, begun ? "host query" : "fake count");
++    }
++    if (!begun) {
+       return write_fallback_result();
+     }
+     return true;
+   }
+ 
++  ++g_occlusion_counters.ends;
+   if (!active_occlusion_query_.valid ||
+       active_occlusion_query_.sample_count_address != sample_count_addr) {
++    if (REXCVAR_GET(occlusion_query_keep_submission_open) && !active_occlusion_query_.valid) {
++      // The host query was cut by an end of the submission, or its begin fell back to the fake
++      // count: this one has no host result, and nothing else is wrong. The last real result of
++      // the same query is the best guess, the fake count when it has none; host queries stay on.
++      ++g_occlusion_counters.cut;
++      const auto last = LastOcclusionSamples().find(sample_count_addr);
++      REXGPU_INFO("Vulkan: occlusion query end at {:08X} (swap {}) found no host query: {} ({})",
++                  sample_count_addr, counter_,
++                  last != LastOcclusionSamples().end() ? "the last real result" : "the fake count",
++                  counters_text());
++      if (last != LastOcclusionSamples().end()) {
++        WriteGuestOcclusionResult(sample_count_addr, last->second);
++        return true;
++      }
++      return write_fallback_result();
++    }
++    REXGPU_INFO(
++        "Vulkan: occlusion query end at {:08X} (swap {}) found {}: host occlusion queries off ({})",
++        sample_count_addr, counter_,
++        active_occlusion_query_.valid ? "the query of another buffer" : "no host query",
++        counters_text());
+     DisableHostOcclusionQueries();
+     return write_fallback_result();
+   }
+ 
+   if (!EndGuestOcclusionQuery(sample_count_addr)) {
++    ++g_occlusion_counters.no_result;
++    if (should_log(true)) {
++      REXGPU_INFO("Vulkan: occlusion query end at {:08X} (swap {}): no result ({})",
++                  sample_count_addr, counter_, counters_text());
++    }
+     return write_fallback_result();
+   }
++  ++g_occlusion_counters.host_results;
++  if (should_log(true)) {
++    REXGPU_INFO(
++        "Vulkan: occlusion query end at {:08X} (swap {}): {} samples told to the game ({} on the "
++        "host, scale {}x{}); {}",
++        sample_count_addr, counter_, uint32_t(sample_counts->ZPass_A), g_last_occlusion_raw_samples,
++        texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1,
++        texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1, counters_text());
++  }
+   return true;
+ }
+ 
+@@ -4517,8 +4604,11 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
+ }
+ 
+ void VulkanCommandProcessor::OnPrimaryBufferEnd() {
++  // As the Direct3D 12 command processor's: the end of a chunk of the primary buffer inside a
++  // guest occlusion query doesn't end the submission and with it the host query.
+   if (REXCVAR_GET(vulkan_submit_on_primary_buffer_end) && submission_open_ &&
+-      CanEndSubmissionImmediately()) {
++      CanEndSubmissionImmediately() &&
++      !(active_occlusion_query_.valid && REXCVAR_GET(occlusion_query_keep_submission_open))) {
+     EndSubmission(false);
+   }
+ }
+@@ -5945,7 +6035,9 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+   }
+ 
+   const uint64_t* results = reinterpret_cast<const uint64_t*>(occlusion_query_readback_mapping_);
++  g_last_occlusion_raw_samples = results[host_index];
+   uint64_t samples = NormalizeOcclusionSamples(results[host_index]);
++  LastOcclusionSamples()[sample_count_address] = samples;
+   WriteGuestOcclusionResult(sample_count_address, samples);
+   return true;
+ }

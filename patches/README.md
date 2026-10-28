@@ -55,6 +55,7 @@ git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
 git apply ../../patches/rexglue-xma-decoder-fixes.patch
 git apply ../../patches/rexglue-alpha-to-mask-tolerance.patch
 git apply ../../patches/rexglue-resolve-readback-rules.patch
+git apply ../../patches/rexglue-occlusion-query-keep-open.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
@@ -1679,6 +1680,25 @@ The genuine dithering stays: foliage, the distant trees' billboards and the edge
 |---|---|---|
 | The rules, the log, the per-resolve mode, the marker state | `include/rex/graphics/command_processor.h`, `include/rex/graphics/flags.h`, `src/graphics/command_processor.cpp` | D3D12, Vulkan |
 | IssueCopy takes the readback path when rules or the log are there to apply; the mode of the resolve | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12; Vulkan |
+
+## rexglue-occlusion-query-keep-open.patch
+
+**Why.** Fork issue #17: in a daytime race in the rain the rain is gone at `resolution_scale` 2 and 3, on D3D12 and Vulkan, and back at 1x. `launcher/dev/rain-2026-10-28.md` has the analysis with what was measured and what was not. What the frame logs of the arcade race *Sunset and Vine* (rainy, noon, the car standing at the start line, RTX 5080) say: at 1x the frame has one draw that is the rain (vertex shader `284A04E0`, pixel shader `9A0DCE48`, 5,952 indices, the same in both logged frames), and at 2x that draw is not in the game's command stream (none in either of two logged frames, the rest of the frame the same, resolves included), so the SDK did not drop it, the game did not issue it. At 2x a draw with that pipeline reached the pipeline cache and the texture cache once, about 5 s after the race started and 0.3 s before the first picture, and none after; at 3x none ever; none of the fork's scale options changed that (the earlier chain's runs s1 to s5: direct resolve, single tile, clear rectangles, anti-aliasing, texture load, ROV, native 2x MSAA, resolve batching, texture offsets, texture heaps). The same race at midnight, driving its route, in a run of another agent (frame logs of 2026-10-27, an older build) has that draw at 2x and 3x. A difference between day and night that the game's code can see, and that depends on what the SDK tells it, is the sun's visibility query: in the recompiled game, one object (`sub_822DD088`) reads occlusion queries, as a ratio of the samples to an expected count.
+
+**What was found by reading the code** (not yet seen in a run): the SDK ends the host submission at the end of every chunk of the primary buffer it executes (`OnPrimaryBufferEnd`; `d3d12_submit_on_primary_buffer_end` and `vulkan_submit_on_primary_buffer_end`, on by default in the base SDK), and a chunk ends where the game last kicked its write pointer. When that falls between the begin and the end of a guest occlusion query, `EndSubmission` ends the host query (its safety net) and forgets it; the guest's end then finds no host query, and `ExecutePacketType3_EVENT_WRITE_ZPD` turns **host occlusion queries off for the rest of the run**: every later query is answered with `query_occlusion_fake_sample_count` (1,000 samples, a fully visible sun) whatever the scene shows. Nothing is logged. How often a kick falls inside the query of a frame depends on how the game's command buffer fills, which depends on how far the GPU thread lags the game: the render markers log "made room in the command buffer" 4 times in the 1x run and 16 times in the 2x run. That the game reads the fake answer as a visible sun and the rain follows it is a guess, which the chain's runs with the setting on and off test.
+
+**What it changes.**
+- `occlusion_query_keep_submission_open` (bool, default on, changes during play): while a guest occlusion query is open, `OnPrimaryBufferEnd` does not end the submission (D3D12 and Vulkan); it ends at the next point that is not inside a query. A query that is cut anyway (the safety net of `EndSubmission`: a swap, a readback, anything that waits for the GPU inside a query) no longer turns host queries off: the end that finds no host query is answered with the last real result of the same buffer, or with the fake count when there is none, and the next query is a host query again. A begin with another query open, an end for another buffer and a missing buffer still turn host queries off, as before, and now say so in the log.
+- `occlusion_query_log` (int, default 0): logs guest occlusion queries at info level: the first N begin and end events, then every 120th end, with counters (begins, ends, ends with a host result, cut, without one). A cut query, a fall-back to the fake count and host queries turned off are always logged, whatever the value, so a run's log says whether and when host queries went off.
+
+**Exact at 1x by construction** in this sense: behaviour changes only when a chunk of the primary buffer ends inside a query, or another event cuts one; then the real count is kept where the old code switched queries off, and the submission is held open until the end of the query's few packets. Nothing else about submission timing changes.
+
+**Status.** Written against both backends; **not compiled here, not run** (CI compiles it). Whether it brings the rain back is the question of the chain `rain17fix` (`launcher/dev/rain-2026-10-28.md` says how to read it). Not checked: the PS5 (Vulkan, the same code) and Linux.
+
+| Change | Files | Affects |
+|---|---|---|
+| The two settings | `src/graphics/command_processor.cpp`, `include/rex/graphics/flags.h` | D3D12, Vulkan |
+| `OnPrimaryBufferEnd` keeps a submission open inside a query; an end with no host query does not turn host queries off; the log and its counters | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12; Vulkan (PC, PS5) |
 
 ## rexglue-upstream-storage-flush.patch
 
