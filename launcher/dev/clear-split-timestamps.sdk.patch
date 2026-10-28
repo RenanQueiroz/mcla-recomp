@@ -1,15 +1,18 @@
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index 8fc2945..03077ca 100644
+index 8fc2945..23d032a 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
-@@ -5078,11 +5078,21 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -5078,11 +5078,24 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
              dest_d3d12_rt.resource(),
              dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_DEPTH_WRITE),
              D3D12_RESOURCE_STATE_DEPTH_WRITE);
 +        if (g_tmpgt_active) {  // TMPCS
++          D3D12_RESOURCE_DESC tmp_desc = dest_d3d12_rt.resource()->GetDesc();
 +          std::string tmp_cs = "CLRD " + dest_rt_key.GetDebugName() + " rect " +
 +                               std::to_string(clear_rect.right - clear_rect.left) + "x" +
-+                               std::to_string(clear_rect.bottom - clear_rect.top);
++                               std::to_string(clear_rect.bottom - clear_rect.top) + " texture " +
++                               std::to_string(tmp_desc.Width) + "x" + std::to_string(tmp_desc.Height) +
++                               "x" + std::to_string(tmp_desc.SampleDesc.Count);
 +          TmpGtMark(command_list, tmp_cs.c_str());
 +        }
 +        TmpPixMark(command_list, "<cbar");  // TMPCS
@@ -24,14 +27,17 @@ index 8fc2945..03077ca 100644
        } else {
          float color_clear_value[4] = {};
          bool clear_via_drawing = false;
-@@ -5191,12 +5201,26 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -5191,12 +5204,29 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
            command_processor_.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
            command_list.D3DDrawInstanced(3, 1, 0, 0);
          } else {
 +          if (g_tmpgt_active) {  // TMPCS
++            D3D12_RESOURCE_DESC tmp_desc = dest_d3d12_rt.resource()->GetDesc();
 +            std::string tmp_cs = "CLRC " + dest_rt_key.GetDebugName() + " rect " +
 +                                 std::to_string(clear_rect.right - clear_rect.left) + "x" +
-+                                 std::to_string(clear_rect.bottom - clear_rect.top) + " value " +
++                                 std::to_string(clear_rect.bottom - clear_rect.top) + " texture " +
++                                 std::to_string(tmp_desc.Width) + "x" + std::to_string(tmp_desc.Height) +
++                                 "x" + std::to_string(tmp_desc.SampleDesc.Count) + " value " +
 +                                 std::to_string(color_clear_value[0]) + "," +
 +                                 std::to_string(color_clear_value[1]) + "," +
 +                                 std::to_string(color_clear_value[2]) + "," +
