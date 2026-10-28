@@ -1,8 +1,26 @@
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index 8fc2945..23d032a 100644
+index 8fc2945..d73a258 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
-@@ -5078,11 +5078,24 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -2066,6 +2066,17 @@ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(Rend
+   resource_desc.Width = key.GetWidth() * draw_resolution_scale_x();
+   resource_desc.Height =
+       GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) * draw_resolution_scale_y();
++  {  // TMPCS: a diagnosis, not a feature: host render targets at most MCLA_RT_HEIGHT_CAP guest pixels tall
++    char tmp_cap_env[16];
++    DWORD tmp_cap_length = GetEnvironmentVariableA("MCLA_RT_HEIGHT_CAP", tmp_cap_env, sizeof(tmp_cap_env));
++    if (tmp_cap_length && tmp_cap_length < sizeof(tmp_cap_env)) {
++      UINT tmp_cap = 0;
++      for (DWORD i = 0; i < tmp_cap_length; ++i) {
++        tmp_cap = tmp_cap * 10 + UINT(tmp_cap_env[i] - '0');
++      }
++      resource_desc.Height = std::min<UINT>(resource_desc.Height, tmp_cap * draw_resolution_scale_y());
++    }
++  }
+   resource_desc.DepthOrArraySize = 1;
+   resource_desc.MipLevels = 1;
+   if (key.is_depth) {
+@@ -5078,11 +5089,24 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
              dest_d3d12_rt.resource(),
              dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_DEPTH_WRITE),
              D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -27,7 +45,7 @@ index 8fc2945..23d032a 100644
        } else {
          float color_clear_value[4] = {};
          bool clear_via_drawing = false;
-@@ -5191,12 +5204,29 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -5191,12 +5215,29 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
            command_processor_.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
            command_list.D3DDrawInstanced(3, 1, 0, 0);
          } else {
