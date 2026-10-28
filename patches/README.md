@@ -55,6 +55,7 @@ git apply ../../patches/rexglue-resolve-direct-batched-loads.patch
 git apply ../../patches/rexglue-xma-decoder-fixes.patch
 git apply ../../patches/rexglue-alpha-to-mask-tolerance.patch
 git apply ../../patches/rexglue-resolve-readback-rules.patch
+git apply ../../patches/rexglue-resolve-unscaled-copy.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
@@ -1679,6 +1680,25 @@ The genuine dithering stays: foliage, the distant trees' billboards and the edge
 |---|---|---|
 | The rules, the log, the per-resolve mode, the marker state | `include/rex/graphics/command_processor.h`, `include/rex/graphics/flags.h`, `src/graphics/command_processor.cpp` | D3D12, Vulkan |
 | IssueCopy takes the readback path when rules or the log are there to apply; the mode of the resolve | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` | D3D12; Vulkan |
+
+## rexglue-resolve-unscaled-copy.patch
+
+**Why.** The rain of Midnight Club: Los Angeles is not drawn at `resolution_scale` above 1 (fork issue #17). The game simulates the rain's 16,384 drops on the GPU, in four 128x128 `k_32_32_FLOAT` render targets that it resolves every frame to four 128 KB textures, and the rain's vertex shader fetches the same memory as vertex data (render to vertex buffer). At 1x a resolve writes the shared memory, which a vertex fetch reads. With resolution scaling a resolve writes only the scaled resolve buffer, which the GPU reads as a texture, and marks the pages of the shared memory as written by the GPU (valid) without writing them, so the vertex fetch sees zeros or the start-up data. A trace on D3D12 (RTX 5080, 2026-10-28; `launcher/dev/rain-unscaled-copy-2026-10-28.md`) measured it: the rain's draw rasterises about 520,000 pixels at 1x and none at 2x or 3x, and the shared memory holds zeros there. Reading the resolves back to guest memory (`readback_resolve_rules`) did not help, because the data a vertex fetch reads is the shared memory. xenia-canary has no GPU-side route either: its `readback_resolve` is the same CPU readback, and its `draw_resolution_scale_threshold` keeps small render targets at 1x (render targets of two scale classes), which this SDK does not have.
+
+**What it adds.**
+- `resolve_unscaled_copy_rules` (string, default empty = off; changes during play): the rules of `readback_resolve_rules` (`addr`, `len`, `pitch`, `height`, `fmt`, `src`, `phase`; `mode` is not used). With draw resolution scaling, a resolve that matches a rule is, after the resolve itself, downscaled to the 1x layout by the pass the readback uses (`resolve_downscale`: one host pixel of each block of the scaled data) and written straight into the destination range of the shared memory: on D3D12 the shader's destination is a raw UAV of the shared memory buffer, on Vulkan a storage buffer descriptor of it. No readback buffer, no wait, no CPU access. The texture cache is not touched: the pages stay marked as scaled resolves, so a texture of that memory is still loaded from the scaled buffer.
+- `SharedMemory::EnsureRangeAllocated` (public): makes sure the host memory behind a range exists. `RequestRange` returns early when every page is valid (`rexglue-shared-memory-request-fast-path.patch`), which a range marked by a scaled resolve is, whether or not its memory was ever allocated.
+- A resolve that does not fit is left as it was, with the reason logged (`unscaled resolve copy: ... -> not done: ...`): not whole 32x32 tiles, not on a 128-byte boundary, not 8, 16, 32 or 64 bits a pixel, not inside the scaled range the resolve made current. The first 16 copies, every 1024th and (with `resolve_log_frames`) all of them are logged.
+- `IssueCopy` takes its fast path (the resolve and nothing else) when the option is empty, as before; the rules are matched by the same function as the readback's (`FindMatchingReadbackRule`).
+- Both backends. At native resolution the copy is not reached.
+
+**Status.** Written from the SDK's code and the trace; compiled by CI (D3D12 and Vulkan sources); not run when this was written (the chain `rainfix2` runs it). The downscale takes one host pixel of each block (as the readback does; `readback_resolve_half_pixel_offset` moves it to the block's centre); its layout assumption holds for 8 bytes a pixel at 2x2 (the rain's resolves) and is approximate elsewhere (derived from the scaled addressing of the SDK's shaders, `launcher/dev/rain-unscaled-copy-2026-10-28.md`); not measured. Nothing ran on Linux or the PS5.
+
+| Change | Files | Affects |
+|---|---|---|
+| The option, the rules, the match, the log | `include/rex/graphics/command_processor.h`, `include/rex/graphics/flags.h`, `src/graphics/command_processor.cpp` | D3D12, Vulkan |
+| `SharedMemory::EnsureRangeAllocated` | `include/rex/graphics/shared_memory.h` | D3D12, Vulkan |
+| The downscale into the shared memory after a matching scaled resolve; `IssueCopy` takes the longer path when there are rules | `src/graphics/d3d12/command_processor.cpp`, `src/graphics/vulkan/command_processor.cpp` and their headers | D3D12; Vulkan |
 
 ## rexglue-upstream-storage-flush.patch
 

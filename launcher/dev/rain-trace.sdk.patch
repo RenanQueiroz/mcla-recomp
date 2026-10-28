@@ -377,11 +377,11 @@ index d35c107..7004dbb 100644
 +          char gpu_hex[80] = "-";
 +          if (guest && vb_copies[k].size >= 32) {
 +            int at = 0;
-+            for (uint32_t b = 0; b < 16; ++b) {
++            for (uint32_t b = 0; b < 32; ++b) {
 +              at += std::snprintf(guest_hex + at, sizeof(guest_hex) - at, "%02X", guest[b]);
 +            }
 +            at = 0;
-+            for (uint32_t b = 0; b < 16; ++b) {
++            for (uint32_t b = 0; b < 32; ++b) {
 +              at += std::snprintf(gpu_hex + at, sizeof(gpu_hex) - at, "%02X", bytes[256 + 32 * k + b]);
 +            }
 +          }

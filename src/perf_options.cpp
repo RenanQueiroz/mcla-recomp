@@ -53,17 +53,14 @@ REXCVAR_DEFINE_BOOL(mcla_vinyl_readback, true, "MCLA",
                     "the game's own code copies it from (the SDK's readback_resolve_rules; used unless that "
                     "option is set itself). Costs nothing outside that moment (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_STRING(mcla_rain_readback, "full", "MCLA",
-                      "Rain above native resolution (fork issue 17): the game simulates the rain's particles on the GPU "
-                      "(four 128x128 two-float render targets, resolved every frame into the memory its vertex shader "
-                      "then reads as vertex data). With resolution_scale above 1 the SDK keeps a resolve in its scaled "
-                      "buffer and the memory the vertex shader reads stays as the game first wrote it, so no rain is drawn. "
-                      "This reads those four resolves back into the guest's memory (the SDK's readback_resolve_rules; "
-                      "used unless that option is set itself), only with resolution_scale above 1:\n"
-                      " off: not at all\n"
-                      " full: at once, every frame (waits for the GPU four times a frame)\n"
-                      " fast: the previous frame's, no wait (the rain is drawn one frame late) (next start)")
-    .allowed({"off", "full", "fast"})
+REXCVAR_DEFINE_BOOL(mcla_rain_unscaled_copy, true, "MCLA",
+                    "Rain above native resolution (fork issue 17): the game simulates the rain's particles on the GPU "
+                    "(four 128x128 two-float render targets, resolved every frame into the memory its vertex shader "
+                    "then reads as vertex data). With resolution_scale above 1 the SDK keeps a resolve in its scaled "
+                    "buffer and the memory the vertex shader reads stays as the game first wrote it, so no rain is drawn. "
+                    "This also writes the 1x version of those four resolves into that memory, on the GPU, with no wait "
+                    "(the SDK's resolve_unscaled_copy_rules; used unless that option is set itself), only with "
+                    "resolution_scale above 1 (next start)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_vulkan_depth_convert, false, "MCLA",
                     "Vulkan: convert the console's 24-bit float depth in the pixel shader (the SDK's "
@@ -609,9 +606,9 @@ static const char* const kVinylReadbackRules = "len=1048576,pitch=512,height=512
 // position and the velocity of 16,384 drops in four 128x128 k_32_32_FLOAT render targets, updated by one draw
 // of four colour targets in the first render phase and resolved to four 128 KB textures (guest 0x0561F000,
 // 0x0563F000, 0x0565F000, 0x0567F000 in the frame logs), the same memory that the rain's vertex shader fetches
-// as four vertex buffers (launcher/dev/rain-2026-10-28.md). No other resolve has that size, pitch, height and
-// format.
-static const char* const kRainReadbackRule = "len=131072,pitch=128,height=128,fmt=37";
+// as four vertex buffers (launcher/dev/rain-unscaled-copy-2026-10-28.md). No other resolve has that size, pitch,
+// height and format.
+static const char* const kRainUnscaledCopyRule = "len=131072,pitch=128,height=128,fmt=37";
 
 // resolution_scale, or draw_resolution_scale_x / _y, above 1 (what the SDK's texture cache reads, in the same
 // order of precedence; any of them above 1 is enough here).
@@ -635,19 +632,11 @@ void MclaApplyGraphicsFixDefaults(bool vulkan) {
       REXLOG_INFO("graphics fixes: {} = {}", name, value);
     }
   };
-  std::string readback_rules;
   if (REXCVAR_GET(mcla_vinyl_readback)) {
-    readback_rules = kVinylReadbackRules;
+    apply("readback_resolve_rules", kVinylReadbackRules);
   }
-  const std::string rain_readback = REXCVAR_GET(mcla_rain_readback);
-  if (rain_readback != "off" && DrawResolutionScaled()) {
-    if (!readback_rules.empty()) {
-      readback_rules += ';';
-    }
-    readback_rules += std::string(kRainReadbackRule) + ",mode=" + rain_readback;
-  }
-  if (!readback_rules.empty()) {
-    apply("readback_resolve_rules", readback_rules.c_str());
+  if (REXCVAR_GET(mcla_rain_unscaled_copy) && DrawResolutionScaled()) {
+    apply("resolve_unscaled_copy_rules", kRainUnscaledCopyRule);
   }
   if (vulkan && REXCVAR_GET(mcla_vulkan_depth_convert)) {
     apply("depth_float24_convert_in_pixel_shader", "true");
