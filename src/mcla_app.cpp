@@ -81,6 +81,7 @@ bool MclaPrepareShadersIsRequested();  // src/shader_prepare.cpp
 void MclaShaderStorageAfterPreload(rex::Runtime* runtime);
 void MclaMigrateAntiAliasing();  // src/perf_options.cpp
 void MclaApplyPreset();  // src/perf_options.cpp
+void MclaApplyGraphicsFixDefaults(bool vulkan);  // src/perf_options.cpp
 
 #ifdef _WIN32
 // The pause menu's RESTART GAME (src/settings_menu.cpp) starts the game again
@@ -951,6 +952,16 @@ void MclaApp::ApplyPcDefaults() {
 #ifdef _WIN32
   ApplyCpuDefaults();
 #endif
+  // Fixes that are defaults of SDK options too: the custom vinyls' readback, and on Vulkan the depth conversion
+  // (src/perf_options.cpp). "any" is what Automatic decided on Windows (DecideAutomaticBackend, already run by
+  // OnPreSetup); elsewhere the plugin has only Vulkan.
+  const std::string backend = REXCVAR_GET(mcla_gpu_backend);
+#ifdef _WIN32
+  const bool any_is_vulkan = g_automatic.vulkan;
+#else
+  const bool any_is_vulkan = true;
+#endif
+  MclaApplyGraphicsFixDefaults(backend == "vulkan" || (backend == "any" && any_is_vulkan));
 }
 
 // As PC games do with a controller: the pointer goes away during play and
