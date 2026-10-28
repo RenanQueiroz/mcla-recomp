@@ -7,10 +7,10 @@ press_until start left_title every=2s timeout=90s
 mark map_zoom
 wait_until roam 180s
 mark free_roam
-wait 6s
+wait 5s
 mark roam
 include cpup-sample.pad
-wait 10s
+wait 8s
 include cpup-sample.pad
 trigger rt 1 0.35s
 trigger rt 0.6
@@ -18,22 +18,22 @@ stick lx 1 0.28s
 trigger rt 1
 mark drive
 include cpup-sample.pad
-wait 12s
+wait 10s
 include cpup-sample.pad
 release all
 set mcla_fps 120
 mark settle1
-wait 3s
+wait 2s
 mark cap120
 include cpup-sample.pad
-wait 9s
+wait 7s
 include cpup-sample.pad
 set mcla_fps 60
 mark settle2
-wait 3s
+wait 2s
 mark cap60
 include cpup-sample.pad
-wait 9s
+wait 7s
 include cpup-sample.pad
 set mcla_fps 0
 mark end
