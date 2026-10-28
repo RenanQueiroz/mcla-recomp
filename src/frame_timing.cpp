@@ -52,6 +52,12 @@ REXCVAR_DEFINE_INT32(mcla_fps, 30, "MCLA",
 // stay under the display's own limit and the swap to screen stays short). While
 // frame generation is off, or can't run, mcla_fps applies, as it does with HALF
 // DISPLAY on a display under 100 Hz, where half would be under 50 rendered.
+REXCVAR_DEFINE_BOOL(mcla_timer_hr_at_cap, false, "MCLA",
+                    "Windows: while a frame-rate cap is set, the timer thread waits on a high-resolution timer "
+                    "(timer_queue_hr_wait) even where the game leaves that off (6 or more logical processors), "
+                    "which gives back the core it keeps busy: about half of the process's CPU at a 60 FPS cap. "
+                    "Without a cap the value the game started with applies. A timer_queue_hr_wait the player has "
+                    "set is never changed. Off leaves timer_queue_hr_wait alone");
 REXCVAR_DEFINE_INT32(mcla_fps_frame_generation, -1, "MCLA",
                      "Frame-rate cap with frame generation on: -1 is HALF DISPLAY (just under half "
                      "the display's refresh rate), 0 uncapped, or the rendered rate. mcla_fps "
@@ -147,6 +153,8 @@ int32_t CapFromSettings() {
   return half > 0 ? half : fps;
 }
 
+void TimerQueueFollowsCap(int32_t fps);
+
 uint64_t NowMicros() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                    std::chrono::steady_clock::now().time_since_epoch())
@@ -158,6 +166,36 @@ uint64_t NowMicros() {
 // repaid by running the following frames faster. Each call site keeps its own
 // deadline (the template parameter).
 enum PaceSite { kPaceAtTimer, kPaceAtSwap };
+
+// mcla_timer_hr_at_cap: the timer thread's wait on a high-resolution timer (the SDK's timer_queue_hr_wait) while a frame-rate cap is
+// set. The wait gives back the core the timer thread keeps busy otherwise (a whole core at a 30 or 60 FPS cap on 6 or more logical
+// processors, where the game leaves it off by default); what it costs is a frame that is 0.4 to 1.7% longer when the game runs
+// uncapped near 145 FPS, which a cap hides. The value the game started with (the automatic one by processor count, or the player's)
+// is what applies without a cap; a value the player has set is never changed.
+void TimerQueueFollowsCap(int32_t fps) {
+#if defined(_WIN32)
+  if (!REXCVAR_GET(mcla_timer_hr_at_cap)) {
+    return;
+  }
+  constexpr const char* kName = "timer_queue_hr_wait";
+  static bool base_known = false;
+  static bool base_on = false;
+  if (rex::cvar::GetFlagSource(kName) != rex::cvar::Source::kDefault) {
+    return;  // set by the player (the command line, mcla.toml, the overlay): theirs
+  }
+  if (!base_known) {
+    base_known = true;
+    base_on = rex::cvar::GetFlagByName(kName) == "true";
+  }
+  const bool want = fps > 0 || base_on;
+  if ((rex::cvar::GetFlagByName(kName) == "true") != want && rex::cvar::SetDefaultValue(kName, want ? "true" : "false")) {
+    REXLOG_INFO("frame timing: timer queue high-resolution wait {} ({})", want ? "on" : "off",
+                fps > 0 ? "a frame-rate cap is set" : "no cap");
+  }
+#else
+  (void)fps;
+#endif
+}
 
 // CapFromSettings, read at most every 250 ms: the frame limiter runs once or twice a
 // frame.
@@ -172,6 +210,7 @@ int32_t EffectiveFps() {
     if (cap.exchange(value, std::memory_order_relaxed) != value) {
       REXLOG_INFO("frame timing: the frame-rate cap is now {} FPS{}", value,
                   value == 0 ? " (uncapped)" : "");
+      TimerQueueFollowsCap(value);
     }
     return value;
   }
