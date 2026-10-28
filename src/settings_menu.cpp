@@ -683,6 +683,11 @@ constexpr double kDensityScales[] = {0.0, 0.5, 1.0};
 // How often an off-screen pass is drawn (src/perf_options.cpp): 0 is every frame.
 constexpr double kPassIntervals[] = {0.0, 2.0, 4.0, 8.0};
 constexpr double kTrafficDistances[] = {250.0, 325.0, 400.0};
+// anisotropic_override (the SDK's, hot-reloadable: the samplers are worked out again for every draw):
+// -1 leaves the game's own choice, 0 turns it off, then 2x, 4x (the default), 8x and 16x; 1x is
+// trilinear, which OFF is for all but the textures that ask for a point mip filter, so it has no row.
+constexpr double kAnisotropicLevels[] = {-1.0, 0.0, 2.0, 3.0, 4.0, 5.0};
+constexpr const char* kAnisotropicLabels[] = {"GAME DEFAULT", "OFF", "2X", "4X", "8X", "16X"};
 
 const ItemDef kPerformanceItems[] = {
     {"PM_MxSingleTile", ItemKind::kToggle, "mcla_single_tile", "SINGLE TILE RENDERING"},
@@ -713,6 +718,8 @@ const ItemDef kPerformanceItems[] = {
      kAntiAliasingValues, kAntiAliasingLabels, nullptr, kAntiAliasingCount},
     {"PM_MxFsrSharpness", ItemKind::kNumberChoice, "temporal_aa_sharpness", "FSR SHARPNESS",
      nullptr, nullptr, kSharpness, 6, "%.1f", "OFF"},
+    {"PM_MxAnisotropic", ItemKind::kNumberChoice, "anisotropic_override", "ANISOTROPIC FILTERING",
+     nullptr, kAnisotropicLabels, kAnisotropicLevels, 6},
 };
 
 const ItemDef kControlItems[] = {

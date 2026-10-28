@@ -224,6 +224,20 @@ static class GameSettings
         Offered = (file, value) => SettingValues.Same(value, "off") || FsrRuntimeBuilt(file),
         Unavailable = "not built for this graphics API",
     };
+    // anisotropic_override (the SDK's, src/graphics/pipeline/texture/cache.cpp: 0 off, 1 to 5 are 1x, 2x, 4x, 8x and 16x,
+    // -1 leaves what the game asks for): applied to every texture with mip levels and linear filtering, as the samplers are
+    // worked out for each draw, so it changes during play too (the pause menu's PERFORMANCE rows). 1x is left out: it is
+    // trilinear, which Off already is for all but the textures that ask for point mip filtering.
+    public static readonly GameSetting Anisotropic = new("anisotropic_override", "Anisotropic filtering",
+        [new("Game default (as on the console)", -1L), new("Off", 0L), new("2×", 2L), new("4× (default)", 3L),
+         new("8×", 4L), new("16×", 5L)], 3L)
+    {
+        Info = "Keeps textures sharp where they are seen at a slant: the road stretching away from the car, "
+             + "the pavement, the sides of buildings. Without it they turn to a smear a little way off. 4× (the "
+             + "default) is clearly sharper than Off; 8× and 16× sharpen the far end of a road further. "
+             + "Game default is what the game itself asks for, which is the console's own. Changes during play "
+             + "in the pause menu (PERFORMANCE).",
+    };
     static bool FsrRuntimeBuilt(IReadOnlyDictionary<string, string> file)
     {
         var api = file.TryGetValue("mcla_gpu_backend", out var raw) ? SettingValues.Parse(raw) : "any";
@@ -472,7 +486,7 @@ static class GameSettings
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0, string? recommendedApi = null) =>
         [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
-         FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
+         Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Language, Intro, Prompts];
