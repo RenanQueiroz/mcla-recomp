@@ -17,6 +17,8 @@
 
 using namespace mcla_handoff;
 
+void MclaPumpPreWake(uint32_t ring_offset);  // src/poll_wait.cpp (mcla_pump_wake_early)
+
 namespace {
 
 thread_local uint32_t t_ring_turns = 0;
@@ -43,9 +45,11 @@ void mcla_ho_ring_end(PPCRegister& r3) {
   MclaHandoffEvent(kRingEnd, t_ring_turns, t_ring_turns ? 1 : 0);
 }
 
-// 0x82161880, after the last store of sub_82161210: the head of the ring (r10 = ring * 8) is r8, the slot published.
+// 0x82161880, after the last store of sub_82161210: the head of the ring (r10 = ring * 8) is r8, the slot published. Also where
+// mcla_pump_wake_early wakes the frame-pacing thread (src/poll_wait.cpp); with it off this is only the trace.
 void mcla_ho_ring_advance(PPCRegister& r10, PPCRegister& r8) {
   MclaHandoffEvent(kRingAdvance, r10.u32, r8.u32);
+  MclaPumpPreWake(r10.u32);  // mcla_pump_wake_early
 }
 
 // 0x82144888, the first instruction of sub_82144888, one round of the thread that frees the slots.

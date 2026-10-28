@@ -96,6 +96,14 @@ REXCVAR_DEFINE_BOOL(mcla_pump_wake_on_demand, false, "MCLA",
                     "nothing where the frame takes longer, or under a frame-rate cap below that. A steady audio "
                     "underrun while it runs turns it off for the rest of the session. Off is the game's own Sleep. "
                     "Has no effect while mcla_pump_sleep_max_ms is 0 or more");
+REXCVAR_DEFINE_BOOL(mcla_pump_wake_early, false, "MCLA",
+                    "With mcla_pump_wake_on_demand: the main thread also wakes the frame-pacing thread as soon as it has "
+                    "published a slot of the command ring (the last statement of the game's world update), while that thread "
+                    "is waiting and its last wait was ended early, so that the round that frees the slot runs while the main "
+                    "thread does the rest of its frame and the slot is free when it asks for it: the wake-up and the round "
+                    "are off its critical path. The thread's rounds still come once a frame; nothing changes under a frame-rate "
+                    "cap or where the frame takes longer than its wait (its last wait then ran out). Experimental. Off is the "
+                    "wake on demand alone");
 REXCVAR_DEFINE_INT32(mcla_pump_wake_test_trip_s, 0, "MCLA",
                      "Development: with mcla_pump_wake_on_demand, this many seconds after the first early wake the "
                      "audio watchdog trips as if the audio had run dry (0 = never), to test the way back to the "
@@ -138,6 +146,8 @@ struct Wake {
   std::atomic<bool> pump_waiting{false};  // the pump thread is inside its wait: the main thread may set the event
   std::atomic<bool> off{false};           // the audio watchdog tripped: the game's own Sleep from now on
   std::atomic<bool> set_recorded{false};  // the hand-off trace has the main thread's first set in this wait
+  std::atomic<bool> last_early{false};    // the pump thread's last wait was ended early (by either wake)
+  std::atomic<uint64_t> pre_signals{0};   // mcla_pump_wake_early: wake-ups at the publication of a slot
   std::atomic<uint64_t> waits{0}, early{0}, timed_out{0}, signals{0}, other_ring{0}, ring_calls{0};
   std::atomic<int64_t> first_early_ns{0}, last_early_ns{0};
   uint64_t steady_seen = 0;  // the pump thread's alone
@@ -194,9 +204,11 @@ void MaybeLog() {
     if (REXCVAR_GET(mcla_pump_wake_on_demand)) {
       REXLOG_INFO(
           "poll tick: wake on demand{}: {} waits, {} ended early (the main thread set the event), {} ran out; the ring wait "
-          "saw the thread waiting {} times, {} of them for another ring, and set the event {} times",
+          "saw the thread waiting {} times, {} of them for another ring, and set the event {} times; {} wake-ups right after "
+          "the main thread published a slot (mcla_pump_wake_early)",
           g_wake.off.load() ? " (OFF: the audio watchdog tripped)" : "", g_wake.waits.load(), g_wake.early.load(),
-          g_wake.timed_out.load(), g_wake.ring_calls.load(), g_wake.other_ring.load(), g_wake.signals.load());
+          g_wake.timed_out.load(), g_wake.ring_calls.load(), g_wake.other_ring.load(), g_wake.signals.load(),
+          g_wake.pre_signals.load());
     }
   }
 }
@@ -369,6 +381,7 @@ bool PumpWait(uint32_t ms) {
   g_wake.pump_waiting.store(true, std::memory_order_seq_cst);
   const bool early = PumpWakeWait(wait_ms);
   g_wake.pump_waiting.store(false, std::memory_order_seq_cst);
+  g_wake.last_early.store(early, std::memory_order_relaxed);
   MclaHandoffEvent(mcla_handoff::kPumpSleepEnd, early ? 1 : 0);
   g_wake.waits.fetch_add(1, std::memory_order_relaxed);
   if (early) {
@@ -679,6 +692,23 @@ bool mcla_poll_tick(PPCRegister& r3) {
   }
   // With the cap set the experiment is the game's Sleep with a smaller argument, not this wait.
   return cap < 0 && REXCVAR_GET(mcla_pump_wake_on_demand) && PumpWait(asked);
+}
+
+// The main thread, right after it publishes a slot of the ring: the last statement of the game's world update (sub_82161210,
+// the hook of config/handoff_trace.toml), which makes the ring full for it until the pump thread frees a slot. With
+// mcla_pump_wake_early the pump thread, if it is waiting and its last wait was ended early (the regime where the main thread
+// waits for it: the frame is shorter than its rhythm), is woken now instead of when the main thread asks, so that the round
+// runs beside the rest of the main thread's frame. Ring 0 only, the ring that thread frees.
+void MclaPumpPreWake(uint32_t ring_offset) {
+  if (ring_offset != 0 || !REXCVAR_GET(mcla_pump_wake_early) || !g_wake.pump_waiting.load(std::memory_order_acquire) ||
+      !g_wake.last_early.load(std::memory_order_relaxed)) {
+    return;
+  }
+  g_wake.pre_signals.fetch_add(1, std::memory_order_relaxed);
+  if (!g_wake.set_recorded.load(std::memory_order_relaxed) && !g_wake.set_recorded.exchange(true, std::memory_order_relaxed)) {
+    MclaHandoffEvent(mcla_handoff::kPumpWakeSet, 1);
+  }
+  PumpWakeSet();
 }
 
 // Rounds the freeing thread has made since the start (src/dev_pad.cpp's `state`).
