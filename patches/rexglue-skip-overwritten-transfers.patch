@@ -1,0 +1,616 @@
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 97ea0a4..de07374 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -191,6 +191,14 @@ class RenderTargetCache {
+                           const Shader* pixel_shader, reg::RB_DEPTHCONTROL normalized_depth_control,
+                           uint32_t normalized_color_mask);
+ 
++  // For host render targets: tells Update, which the draw calls next, the
++  // pixel shader of the draw (null if it has none), to find out if the draw
++  // rewrites a rectangle of the render targets completely, in which case the
++  // ownership transfers into that rectangle, whose contents the draw doesn't
++  // use, are skipped (the skip_overwritten_transfers setting). Needed for every
++  // draw, as the shader is forgotten by the Update.
++  void SetUpdatePixelShader(const Shader* pixel_shader) { update_pixel_shader_ = pixel_shader; }
++
+   // Returns bits where 0 is whether a depth render target is currently bound on
+   // the host and 1... are whether the same applies to color render targets, and
+   // formats (resource formats, but if needed, with gamma taken into account) of
+@@ -573,6 +581,13 @@ class RenderTargetCache {
+     assert_true(GetPath() == Path::kHostRenderTargets);
+     return last_update_transfers_;
+   }
++  // The rectangle of all the render targets of the last update that its draw
++  // rewrites completely (not to be transferred into), as the clear rectangle
++  // of the transfers (a cutout), or null if there isn't one.
++  const Transfer::Rectangle* last_update_overwritten_rectangle() const {
++    assert_true(GetPath() == Path::kHostRenderTargets);
++    return last_update_overwritten_rectangle_valid_ ? &last_update_overwritten_rectangle_ : nullptr;
++  }
+ 
+   HostDepthStoreRenderTargetConstant GetHostDepthStoreRenderTargetConstant(
+       uint32_t pitch_tiles, bool msaa_2x_supported) const {
+@@ -711,6 +726,17 @@ class RenderTargetCache {
+   ClearRectangleWaitingForDraw clear_rectangles_waiting_for_draw_[2];
+   std::vector<Transfer> clear_rectangle_transfers_[2];
+ 
++  // For draws that rewrite what they draw to completely, skipping the transfers
++  // there. Whether the draw rewrites every sample of a rectangle of its color
++  // render targets, whatever they held before, and the rectangle (in pixels in
++  // the draw's MSAA mode). Only for what can be proven, otherwise false.
++  bool GetOverwrittenRectangle(const Shader& vertex_shader, const Shader& pixel_shader,
++                               reg::RB_DEPTHCONTROL normalized_depth_control,
++                               uint32_t normalized_color_mask, Transfer::Rectangle& rectangle_out);
++  const Shader* update_pixel_shader_ = nullptr;
++  Transfer::Rectangle last_update_overwritten_rectangle_ = {};
++  bool last_update_overwritten_rectangle_valid_ = false;
++
+   // Temporary storage for GetDirectResolveSource.
+   mutable std::vector<ResolveCopyDumpRectangle> direct_resolve_rectangles_;
+ 
+diff --git a/include/rex/graphics/pipeline/shader/interpreter.h b/include/rex/graphics/pipeline/shader/interpreter.h
+index 3e4fe7c..4561ef4 100644
+--- a/include/rex/graphics/pipeline/shader/interpreter.h
++++ b/include/rex/graphics/pipeline/shader/interpreter.h
+@@ -53,6 +53,26 @@ class ShaderInterpreter {
+     }
+     return true;
+   }
++  // Whether the interpreter can run a shader at all, with the results of its
++  // texture fetches being zeros: then IsExportTainted must be asked about what
++  // is used, and anything tainted not used (see there).
++  static bool CanInterpretShaderWithTaint(const Shader& shader) {
++    assert_true(shader.is_ucode_analyzed());
++    return true;
++  }
++  // After Execute: whether what was exported to the register may depend on the
++  // result of a texture fetch, which is not evaluated here (it is zero), and so
++  // the exported value can't be trusted. Conservative: tracked for each whole
++  // temporary register (any component), from the sources of an instruction to
++  // its results, through the previous scalar value, and a predicate or an
++  // address register set from something tainted taints every export.
++  // For exports of values that don't depend on texture fetches, such as the
++  // position of the usual full-screen rectangle whose vertex shader fetches
++  // the exposure for the pixel shader, the answer is false.
++  bool IsExportTainted(ucode::ExportRegister export_register) const {
++    return state_.control_tainted ||
++           ((state_.tainted_exports >> (uint32_t(export_register) & 63)) & 1);
++  }
+   void SetShader(xenos::ShaderType shader_type, const uint32_t* ucode) {
+     shader_type_ = shader_type;
+     ucode_ = ucode;
+@@ -77,6 +97,18 @@ class ShaderInterpreter {
+     int32_t address_register;
+     bool predicate;
+ 
++    // Taint tracking, see IsExportTainted.
++    bool temp_tainted[xenos::kMaxShaderTempRegisters];
++    bool previous_scalar_tainted;
++    // The index of the last full vertex fetch was tainted (the mini fetches
++    // that follow use its address).
++    bool vfetch_address_tainted;
++    // Something unknown decided what is executed or the register addressing: a
++    // predicate or the address register set from a tainted value.
++    bool control_tainted;
++    // Bits of the export registers (0...63).
++    uint64_t tainted_exports;
++
+     void Reset() { std::memset(this, 0, sizeof(*this)); }
+ 
+     int32_t GetLoopAddress() const {
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 04d246b..46e9641 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -3200,6 +3200,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   uint32_t normalized_color_mask =
+       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                    : 0;
++  render_target_cache_->SetUpdatePixelShader(pixel_shader);
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+     return false;
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 4292b0d..8fc2945 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1439,7 +1439,8 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
+       RenderTarget* const* depth_and_color_render_targets =
+           last_update_accumulated_render_targets();
+       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+-                                       depth_and_color_render_targets, last_update_transfers());
++                                       depth_and_color_render_targets, last_update_transfers(),
++                                       nullptr, last_update_overwritten_rectangle());
+       SetCommandListRenderTargets(depth_and_color_render_targets);
+     } break;
+     case Path::kPixelShaderInterlock: {
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 5d22593..79904d1 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <bitset>
++#include <cfloat>
+ #include <cmath>
+ #include <cstring>
+ #include <iterator>
+@@ -46,6 +47,13 @@ REXCVAR_DEFINE_BOOL(clear_rectangle_draws, true, "GPU",
+                     "MSAA mode the range was drawn with next before, instead of transferring "
+                     "render targets between MSAA modes for them");
+ 
++REXCVAR_DEFINE_BOOL(skip_overwritten_transfers, true, "GPU",
++                    "With host render targets, don't copy the old contents of the EDRAM range "
++                    "into a render target where the draw rewrites everything it covers (a "
++                    "screen-space rectangle with no blending, no depth, stencil or discarding, "
++                    "such as a full-screen post-processing pass), only where it can be proven")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_UINT32(edram_tiles, 2048, "GPU",
+                       "Size of the EDRAM emulated, in tiles: 2048 as on the console, or 4096 for "
+                       "titles patched to draw more at once than the console could hold (a "
+@@ -451,6 +459,11 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+   const RegisterFile& regs = register_file();
+   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
+ 
++  // Only for this draw.
++  const Shader* pixel_shader = update_pixel_shader_;
++  update_pixel_shader_ = nullptr;
++  last_update_overwritten_rectangle_valid_ = false;
++
+   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+   xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
+   assert_true(msaa_samples <= xenos::MsaaSamples::k4X);
+@@ -754,11 +767,33 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+   // draw with whatever contents currently are in the render target in this
+   // case).
+ 
++  // If the draw rewrites a rectangle of the color render targets completely,
++  // there is no need to transfer what's there into them. Looked for only if a
++  // transfer would happen (the analysis runs the vertex shader on the CPU).
++  if (!interlock_barrier_only && pixel_shader && is_rasterization_done &&
++      REXCVAR_GET(skip_overwritten_transfers)) {
++    bool transfers_needed = false;
++    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
++      if (WouldOwnershipChangeRequireTransfers(rt_keys[edram_bases_sorted[i].second], 0,
++                                               rt_lengths_tiles[i])) {
++        transfers_needed = true;
++        break;
++      }
++    }
++    if (transfers_needed &&
++        GetOverwrittenRectangle(vertex_shader, *pixel_shader, normalized_depth_control,
++                                normalized_color_mask, last_update_overwritten_rectangle_)) {
++      last_update_overwritten_rectangle_valid_ = true;
++    }
++  }
++
+   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
+     uint32_t rt_bit_index = rt_base_index.second;
+     ChangeOwnership(rt_keys[rt_bit_index], 0, rt_lengths_tiles[i],
+-                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
++                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index],
++                    last_update_overwritten_rectangle_valid_ ? &last_update_overwritten_rectangle_
++                                                              : nullptr);
+   }
+ 
+   if (interlock_barrier_only) {
+@@ -1323,6 +1358,222 @@ bool RenderTargetCache::ClearRectangleDraw(bool is_rasterization_done, const Sha
+   return true;
+ }
+ 
++bool RenderTargetCache::GetOverwrittenRectangle(const Shader& vertex_shader,
++                                                const Shader& pixel_shader,
++                                                reg::RB_DEPTHCONTROL normalized_depth_control,
++                                                uint32_t normalized_color_mask,
++                                                Transfer::Rectangle& rectangle_out) {
++  const RegisterFile& regs = register_file();
++
++  // One rectangle (the host draws a rectangle list as two triangles that cover
++  // it exactly, with the fourth vertex mirrored across the diagonal).
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (vgt_draw_initiator.prim_type != xenos::PrimitiveType::kRectangleList ||
++      vgt_draw_initiator.num_indices != 3 ||
++      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex ||
++      (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type) &&
++       regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
++           xenos::VGTOutputPath::kTessellationEnable)) {
++    return false;
++  }
++  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
++  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (pa_cl_clip_cntl.ucp_ena || pa_su_sc_mode_cntl.cull_front || pa_su_sc_mode_cntl.cull_back ||
++      pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
++      pa_su_sc_mode_cntl.poly_offset_front_enable || pa_su_sc_mode_cntl.poly_offset_back_enable ||
++      pa_su_sc_mode_cntl.poly_offset_para_enable) {
++    return false;
++  }
++
++  // Nothing but color, all components of every color render target replaced:
++  // the blending is a plain replacement, and nothing masked, discarded or
++  // tested away.
++  if (normalized_depth_control.z_enable || normalized_depth_control.stencil_enable ||
++      !normalized_color_mask) {
++    return false;
++  }
++  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++    uint32_t rt_write_mask = (normalized_color_mask >> (4 * i)) & 0b1111;
++    if (!rt_write_mask) {
++      continue;
++    }
++    if (rt_write_mask != 0b1111) {
++      return false;
++    }
++    auto rb_blendcontrol =
++        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++    if (rb_blendcontrol.color_srcblend != xenos::BlendFactor::kOne ||
++        rb_blendcontrol.color_destblend != xenos::BlendFactor::kZero ||
++        rb_blendcontrol.color_comb_fcn != xenos::BlendOp::kAdd ||
++        rb_blendcontrol.alpha_srcblend != xenos::BlendFactor::kOne ||
++        rb_blendcontrol.alpha_destblend != xenos::BlendFactor::kZero ||
++        rb_blendcontrol.alpha_comb_fcn != xenos::BlendOp::kAdd) {
++      return false;
++    }
++  }
++  auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
++  if (pixel_shader.kills_pixels() ||
++      (rb_colorcontrol.alpha_test_enable &&
++       rb_colorcontrol.alpha_func != xenos::CompareFunction::kAlways) ||
++      rb_colorcontrol.alpha_to_mask_enable) {
++    return false;
++  }
++  auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
++  if (msaa_samples > xenos::MsaaSamples::k4X || !rb_surface_info.surface_pitch) {
++    return false;
++  }
++
++  // The vertices, on the CPU. The vertex shader may fetch textures (the tone
++  // map's reads the exposure for the pixel shader), whose results are not
++  // known, but only if the position and the vertex kill flag don't depend on
++  // them.
++  ShaderInterpreter& interpreter = clear_rectangle_shader_interpreter_;
++  ClearRectangleVertexExportSink vertices[3];
++  interpreter.SetShader(vertex_shader.type(), vertex_shader.ucode_dwords());
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++  bool vertices_known = true;
++  for (uint32_t i = 0; i < 3 && vertices_known; ++i) {
++    interpreter.SetExportSink(&vertices[i]);
++    // Like the host's registers, zero except for the vertex index.
++    float* temps = interpreter.temp_registers();
++    std::fill(temps, temps + 4 * xenos::kMaxShaderTempRegisters, 0.0f);
++    temps[0] = float(std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF)));
++    interpreter.Execute();
++    vertices_known =
++        !interpreter.IsExportTainted(ucode::ExportRegister::kVSPosition) &&
++        !interpreter.IsExportTainted(ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex);
++  }
++  interpreter.SetExportSink(nullptr);
++  if (!vertices_known) {
++    return false;
++  }
++
++  // The vertices in pixels, as the host shaders transform them: the division
++  // by W if it hasn't been done, the viewport, the window and the half-pixel
++  // offsets.
++  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
++  float viewport_scale[2] = {
++      pa_cl_vte_cntl.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f,
++      pa_cl_vte_cntl.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f,
++  };
++  float offset[2] = {
++      pa_cl_vte_cntl.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f,
++      pa_cl_vte_cntl.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f,
++  };
++  if (pa_su_sc_mode_cntl.vtx_window_offset_enable) {
++    auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    offset[0] += float(pa_sc_window_offset.window_x_offset);
++    offset[1] += float(pa_sc_window_offset.window_y_offset);
++  }
++  if (REXCVAR_GET(half_pixel_offset) &&
++      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero) {
++    offset[0] += 0.5f;
++    offset[1] += 0.5f;
++  }
++  float pixels[3][2];
++  for (uint32_t i = 0; i < 3; ++i) {
++    const ClearRectangleVertexExportSink& vertex = vertices[i];
++    float w = vertex.position[3];
++    if (vertex.killed || vertex.position_mask != 0b1111 || !(w > 0.0f) || !(w < FLT_MAX)) {
++      return false;
++    }
++    // The factor the host shaders multiply by: 1 / W, or W as it is if the
++    // vertex shader gives 1 / W.
++    float w_factor = pa_cl_vte_cntl.vtx_w0_fmt ? 1.0f / w : w;
++    float xy_factor = pa_cl_vte_cntl.vtx_xy_fmt ? 1.0f : w_factor;
++    if (!pa_cl_clip_cntl.clip_disable) {
++      // Not clipped away by the near and the far planes.
++      float z = vertex.position[2] * (pa_cl_vte_cntl.vtx_z_fmt ? 1.0f : w_factor);
++      if (!(z >= (pa_cl_clip_cntl.dx_clip_space_def ? 0.0f : -1.0f) && z <= 1.0f)) {
++        return false;
++      }
++    }
++    for (uint32_t j = 0; j < 2; ++j) {
++      pixels[i][j] = vertex.position[j] * xy_factor * viewport_scale[j] + offset[j];
++    }
++  }
++  // Three corners of one axis-aligned rectangle.
++  float edges[2][2];
++  for (uint32_t i = 0; i < 2; ++i) {
++    float a = pixels[0][i], b = pixels[1][i], c = pixels[2][i];
++    edges[i][0] = std::min(a, std::min(b, c));
++    edges[i][1] = std::max(a, std::max(b, c));
++    if (!(edges[i][0] < edges[i][1]) || (a != edges[i][0] && a != edges[i][1]) ||
++        (b != edges[i][0] && b != edges[i][1]) || (c != edges[i][0] && c != edges[i][1]) ||
++        !(edges[i][0] > -4096.0f) || !(edges[i][1] < 4096.0f)) {
++      return false;
++    }
++  }
++  for (uint32_t i = 0; i < 3; ++i) {
++    for (uint32_t j = i + 1; j < 3; ++j) {
++      if (pixels[i][0] == pixels[j][0] && pixels[i][1] == pixels[j][1]) {
++        return false;
++      }
++    }
++  }
++
++  // What's rewritten: the pixels whose whole area is surely covered, by the
++  // rectangle and within the viewport (as the host sets it) and the scissor.
++  // Without MSAA the host covers a pixel if its center is within the
++  // rectangle, or on its left or upper edge (the top-left rule); the vertices
++  // are rounded to 1/256 of a pixel (at least 1/16 on Vulkan), the center
++  // stands exactly at a 1/2 of a pixel, so a vertex that is within 1/1024 of
++  // the center on the left or the upper edge is still rounded to it, and one
++  // on the lower or the right edge needs the center to be 1/256 inside. With
++  // MSAA, all the samples in the pixel, at least 1/8 of it from its sides, are
++  // taken to be covered 1/64 inside the rectangle. With resolution scaling, a
++  // guest pixel is surely covered when all its host pixels are, which doesn't
++  // hold for the first one when the half-pixel offset moves the left side to
++  // the middle of a guest pixel: this is left to be transferred.
++  draw_util::ViewportInfo viewport_info;
++  draw_util::GetHostViewportInfo(regs, 1, 1, false, 4096, 4096, true, normalized_depth_control,
++                                 false, false, false, viewport_info);
++  draw_util::Scissor scissor;
++  draw_util::GetScissor(regs, scissor);
++  uint32_t pitch_tiles_at_32bpp =
++      ((rb_surface_info.surface_pitch << uint32_t(msaa_samples >= xenos::MsaaSamples::k4X)) +
++       (xenos::kEdramTileWidthSamples - 1)) /
++      xenos::kEdramTileWidthSamples;
++  uint32_t limits[2] = {
++      rb_surface_info.surface_pitch,
++      GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples),
++  };
++  int32_t covered[2][2];
++  for (uint32_t i = 0; i < 2; ++i) {
++    float scale = float(i ? draw_resolution_scale_y() : draw_resolution_scale_x());
++    float host_low = edges[i][0] * scale;
++    float host_high = edges[i][1] * scale;
++    float low_pixel, high_pixel_exclusive;
++    if (msaa_samples == xenos::MsaaSamples::k1X) {
++      low_pixel = std::ceil((host_low - 0.5f - 1.0f / 1024.0f) / scale);
++      high_pixel_exclusive =
++          std::floor((host_high - 0.5f - 1.0f / 256.0f - scale + 1.0f) / scale) + 1.0f;
++    } else {
++      low_pixel = std::ceil((host_low - 0.109375f) / scale);
++      high_pixel_exclusive = std::floor((host_high + 0.109375f) / scale);
++    }
++    int32_t low = int32_t(std::max(low_pixel, 0.0f));
++    int32_t high = int32_t(std::min(high_pixel_exclusive, 4096.0f));
++    low = std::max(low, int32_t(std::max(viewport_info.xy_offset[i], scissor.offset[i])));
++    high = std::min(high, int32_t(std::min(viewport_info.xy_offset[i] + viewport_info.xy_extent[i],
++                                           scissor.offset[i] + scissor.extent[i])));
++    high = std::min(high, int32_t(limits[i]));
++    if (low >= high) {
++      return false;
++    }
++    covered[i][0] = low;
++    covered[i][1] = high;
++  }
++  rectangle_out.x_pixels = uint32_t(covered[0][0]);
++  rectangle_out.y_pixels = uint32_t(covered[1][0]);
++  rectangle_out.width_pixels = uint32_t(covered[0][1] - covered[0][0]);
++  rectangle_out.height_pixels = uint32_t(covered[1][1] - covered[1][0]);
++  return true;
++}
++
+ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
+     uint32_t* depth_and_color_formats_out) const {
+   if (GetPath() != Path::kHostRenderTargets) {
+diff --git a/src/graphics/pipeline/shader/interpreter.cpp b/src/graphics/pipeline/shader/interpreter.cpp
+index cc726b7..19e7cc5 100644
+--- a/src/graphics/pipeline/shader/interpreter.cpp
++++ b/src/graphics/pipeline/shader/interpreter.cpp
+@@ -100,6 +100,10 @@ void ShaderInterpreter::Execute() {
+               float zero_result[4] = {};
+               StoreFetchResult(fetch_instr.dest(), fetch_instr.is_dest_relative(),
+                                fetch_instr.dest_swizzle(), zero_result);
++              // The result is not the real one: tainted (the fetch may also
++              // write only some of the components, but not telling which).
++              state_.temp_tainted[GetTempRegisterIndex(fetch_instr.dest(),
++                                                       fetch_instr.is_dest_relative())] = true;
+             }
+           } else {
+             const ucode::AluInstruction& alu_instr =
+@@ -258,6 +262,11 @@ const std::array<float, 4> ShaderInterpreter::GetFloatConstant(uint32_t address,
+ }
+ 
+ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
++  // Whether the vector and the scalar results depend on a texture fetch result
++  // (see IsExportTainted).
++  bool vector_tainted = false;
++  bool scalar_tainted = false;
++
+   // Vector operation.
+   float vector_result[4] = {};
+   ucode::AluVectorOpcode vector_opcode = instr.vector_opcode();
+@@ -280,6 +289,9 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+                             ucode::AluInstruction::is_src_temp_relative(vector_src_register));
+         vector_src_absolute =
+             ucode::AluInstruction::is_src_temp_value_absolute(vector_src_register);
++        vector_tainted |= state_.temp_tainted[GetTempRegisterIndex(
++            ucode::AluInstruction::src_temp_reg(vector_src_register),
++            ucode::AluInstruction::is_src_temp_relative(vector_src_register))];
+       } else {
+         vector_src_float_constant =
+             GetFloatConstant(vector_src_register, instr.src_const_is_addressed(1 + i),
+@@ -300,6 +312,13 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+       }
+     }
+ 
++    if (vector_tainted && (vector_opcode_info.changed_state &
++                           (ucode::kAluOpChangedStatePredicate |
++                            ucode::kAluOpChangedStateAddressRegister))) {
++      // What is executed or addressed depends on it from now on.
++      state_.control_tainted = true;
++    }
++
+     bool replicate_vector_result_x = false;
+     switch (vector_opcode) {
+       case ucode::AluVectorOpcode::kAdd: {
+@@ -585,6 +604,9 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+                             ucode::AluInstruction::is_src_temp_relative(scalar_src_register));
+         scalar_src_absolute =
+             ucode::AluInstruction::is_src_temp_value_absolute(scalar_src_register);
++        scalar_tainted |= state_.temp_tainted[GetTempRegisterIndex(
++            ucode::AluInstruction::src_temp_reg(scalar_src_register),
++            ucode::AluInstruction::is_src_temp_relative(scalar_src_register))];
+       } else {
+         scalar_src_float_constant =
+             GetFloatConstant(scalar_src_register, instr.src_const_is_addressed(3),
+@@ -611,8 +633,29 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+       scalar_operands[1] = GetTempRegister(
+           instr.scalar_const_reg_op_src_temp_reg(),
+           false)[ucode::AluInstruction::GetSwizzledComponentIndex(scalar_src_swizzle, 0)];
++      scalar_tainted |=
++          state_.temp_tainted[GetTempRegisterIndex(instr.scalar_const_reg_op_src_temp_reg(), false)];
+     } break;
+   }
++  // The operations that use the previous scalar result.
++  switch (scalar_opcode) {
++    case ucode::AluScalarOpcode::kAddsPrev:
++    case ucode::AluScalarOpcode::kMulsPrev:
++    case ucode::AluScalarOpcode::kMulsPrev2:
++    case ucode::AluScalarOpcode::kSubsPrev:
++    case ucode::AluScalarOpcode::kRetainPrev:
++      scalar_tainted |= state_.previous_scalar_tainted;
++      break;
++    default:
++      break;
++  }
++  if (scalar_tainted && (scalar_opcode_info.changed_state &
++                         (ucode::kAluOpChangedStatePredicate |
++                          ucode::kAluOpChangedStateAddressRegister))) {
++    // What is executed or addressed depends on it from now on.
++    state_.control_tainted = true;
++  }
++  state_.previous_scalar_tainted = scalar_tainted;
+   if (scalar_operand_component_count) {
+     uint32_t scalar_src_absolute_mask = ~(uint32_t(scalar_src_absolute) << 31);
+     uint32_t scalar_src_negate_bit = uint32_t(instr.src_negate(3)) << 31;
+@@ -838,6 +881,10 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+ 
+   uint32_t scalar_result_write_mask = instr.GetScalarOpResultWriteMask();
+   if (instr.is_export()) {
++    if ((vector_result_write_mask && vector_tainted) ||
++        (scalar_result_write_mask && scalar_tainted)) {
++      state_.tainted_exports |= uint64_t(1) << (instr.vector_dest() & 63);
++    }
+     if (export_sink_) {
+       float export_value[4];
+       uint32_t export_constant_1_mask = instr.GetConstant1WriteMask();
+@@ -869,6 +916,15 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+           vector_dest[i] = vector_result[i];
+         }
+       }
++      // Tainted by a tainted result; clean again only when all of it is
++      // overwritten by a clean one.
++      bool& vector_dest_tainted = state_.temp_tainted[GetTempRegisterIndex(
++          instr.vector_dest(), instr.is_vector_dest_relative())];
++      if (vector_tainted) {
++        vector_dest_tainted = true;
++      } else if (vector_result_write_mask == 0b1111) {
++        vector_dest_tainted = false;
++      }
+     }
+     if (scalar_result_write_mask) {
+       float* scalar_dest = GetTempRegister(instr.scalar_dest(), instr.is_scalar_dest_relative());
+@@ -877,6 +933,13 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
+           scalar_dest[i] = scalar_result;
+         }
+       }
++      bool& scalar_dest_tainted = state_.temp_tainted[GetTempRegisterIndex(
++          instr.scalar_dest(), instr.is_scalar_dest_relative())];
++      if (scalar_tainted) {
++        scalar_dest_tainted = true;
++      } else if (scalar_result_write_mask == 0b1111) {
++        scalar_dest_tainted = false;
++      }
+     }
+   }
+ }
+@@ -933,6 +996,8 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
+         std::floor(GetTempRegister(instr.src(), instr.is_src_relative())[instr.src_swizzle()] +
+                    (instr.is_index_rounded() ? 0.5f : 0.0f)));
+     state_.vfetch_address_dwords = instr.stride() * vertex_index + fetch_constant.address;
++    state_.vfetch_address_tainted =
++        state_.temp_tainted[GetTempRegisterIndex(instr.src(), instr.is_src_relative())];
+   }
+ 
+   // TODO(Triang3l): Find the default values for unused components.
+@@ -1130,6 +1195,25 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
+   }
+ 
+   StoreFetchResult(instr.dest(), instr.is_dest_relative(), instr.dest_swizzle(), result);
++
++  // The result depends on where it was fetched from; clean again only if all of
++  // the register is overwritten by a clean one.
++  bool& dest_tainted =
++      state_.temp_tainted[GetTempRegisterIndex(instr.dest(), instr.is_dest_relative())];
++  if (state_.vfetch_address_tainted) {
++    dest_tainted = true;
++  } else {
++    bool dest_fully_written = true;
++    for (uint32_t i = 0; i < 4; ++i) {
++      if (ucode::GetFetchDestinationComponentSwizzle(dest_swizzle, i) ==
++          ucode::FetchDestinationSwizzle::kKeep) {
++        dest_fully_written = false;
++      }
++    }
++    if (dest_fully_written) {
++      dest_tainted = false;
++    }
++  }
+ }
+ 
+ }  // namespace rex::graphics
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index d1965f4..fa486a9 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4810,6 +4810,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+ 
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
+   // Set up the render targets - this may perform dispatches and draws.
++  render_target_cache_->SetUpdatePixelShader(pixel_shader);
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+     return draw_fail("render_target_update");
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index d6e82a4..8aee3b1 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -2261,7 +2261,8 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+           last_update_accumulated_render_targets();
+ 
+       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+-                                       depth_and_color_render_targets, last_update_transfers());
++                                       depth_and_color_render_targets, last_update_transfers(),
++                                       nullptr, last_update_overwritten_rectangle());
+ 
+       if (depth_and_color_render_targets[0]) {
+         render_pass_key.depth_and_color_used |= 1 << 0;
