@@ -61,12 +61,13 @@ REXCVAR_DEFINE_BOOL(mcla_prefer_dedicated_gpu, true, "MCLA",
                     "d3d12_adapter or vulkan_device you set always wins. Takes effect at the next "
                     "start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(mcla_small_cpu_defaults, false, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_small_cpu_defaults, true, "MCLA",
                     "With 5 or fewer logical processors the game also turns on mcla_poll_wait (the main thread's wait "
                     "for a ring slot on a timer) and mcla_pump_wake_on_demand (the frame-pacing thread woken when the "
-                    "main thread waits for it), next to the timer queue's high-resolution wait it already turns on "
-                    "there. A value you set for any of them wins. Off while the measurement that decides it is "
-                    "pending (launcher/dev/small-cpu-2026-10-28.md). Takes effect at the next start")
+                    "main thread waits for it), next to the timer queue's high-resolution wait it turns on there "
+                    "anyway. A value you set for any of them wins. Off leaves only the high-resolution wait on "
+                    "there (v0.2.x). Nothing changes with 6 or more logical processors "
+                    "(launcher/dev/small-cpu-2026-10-28.md). Takes effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 // Read by NVIDIA's Optimus and AMD's PowerXpress drivers when the exe loads: on a laptop with
@@ -868,9 +869,9 @@ static uint32_t LogicalProcessorsAvailable() {
 // and "The timer queue and the frame-pacing thread by processor count"; A/B of 3 runs a side
 // at 16, 8, 6 and 4 logical processors, uncapped and at caps of 120, 60 and 30):
 // - 6 or more: mcla_pump_wake_on_demand. It lifts the 145 FPS the game's own Sleep holds the
-//   uncapped game to (+49 to +65%, the caps unchanged, no audio underrun at 16, 8 and 6); at 4
-//   logical it gained only 11 to 16%, and one run in three ran the audio dry for 2 frames and
-//   cap 120 had a 19% longer p99, so it is left off there.
+//   uncapped game to (+49 to +65%, the caps unchanged, no audio underrun at 16, 8 and 6); on its
+//   own at 4 logical it gained only 11 to 16%, and one run in three ran the audio dry for 2 frames
+//   and cap 120 had a 19% longer p99, so it is left off there unless mcla_small_cpu_defaults (below).
 // - 5 or fewer: timer_queue_hr_wait. It gives back the core the timer thread spins on: at 4
 //   logical +17 to 21% FPS uncapped, p99 27-30 ms to 10-12 ms, cap 120 held (117 to 120), the
 //   process 23 to 58% less CPU and the late audio wake-ups ~300 to ~20 a run, with no
@@ -880,9 +881,11 @@ static uint32_t LogicalProcessorsAvailable() {
 // (SetDefaultValue then only records the default), and none is saved. Both are read where they
 // are used (the timer thread at every wait, the pump thread at every round), so the default
 // set here is in effect for the whole run. Not on Linux and the PS5, which keep both off.
-// With mcla_small_cpu_defaults (off until its measurement is in) the 5-or-fewer case also turns on
+// With mcla_small_cpu_defaults (on since v0.3.0) the 5-or-fewer case also turns on
 // mcla_pump_wake_on_demand and mcla_poll_wait: at 4 logical processors the update thread loses 47% of
-// the frame to the pump's 7 ms Sleep, and the main thread's ring wait spins a core.
+// the frame to the pump's 7 ms Sleep, and the main thread's ring wait spins a core. Measured at 4
+// logical (2 cores with SMT) and 5 logical (5 cores) processors: uncapped frame -31 to -40%, caps
+// unchanged (launcher/dev/small-cpu-2026-10-28.md; at 4 cores without SMT 3 of 5 runs, see there).
 static void ApplyCpuDefaults() {
   constexpr uint32_t kWakeOnDemandFrom = 6;
   const uint32_t logical = LogicalProcessorsAvailable();
