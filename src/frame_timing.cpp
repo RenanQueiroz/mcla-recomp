@@ -1062,6 +1062,114 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   return false;
 }
 
+// Held menu buttons repeat by counting updates, not time.
+//
+// The UI input object (sub_82223CD8, the update of the object the UI manager keeps at +52, once per
+// UI manager update) turns the 24 inputs of the menus (d-pad, left stick, A, B, bumpers, ...) into key
+// events: a key down on the update a button is first seen pressed (0x822240C0 is that branch), and
+// then, for as long as it stays down, a repeat after 7 updates and every [object+803] = 6 updates
+// after that (0x822241BC: a byte counter per input at the address in r29, a byte threshold per input
+// at r28; the count reaching the threshold sends the key down again). On the console's 30 updates a
+// second that is 233 ms, then every 200 ms. At 120 FPS it is 58 ms and then 50 ms, which a press of
+// 60 to 150 ms always meets: one tap of "down" moved two or three rows, a tap on a two-value row
+// (a checkbox, ON/OFF) flipped it twice and so changed nothing, and a held direction ran at 20 rows
+// a second, ahead of the menu's movies, which since mcla_ui_timing_fix move at 30 a second
+// (the highlight lags a few rows behind what is selected and a release lands too far).
+//
+// mcla_ui_repeat_fix waits for the time as well: when the game's count says a repeat is due
+// (count + 1 == threshold, the compare at 0x822241D0), the repeat goes ahead only if
+// mcla_ui_repeat_delay_ms (after the key down) or mcla_ui_repeat_interval_ms (after the last
+// repeat) have passed, less a quarter of a 30 Hz update; otherwise the count is put back by one so
+// that the next update asks again, and the compare is made to fail. At 30 FPS and below nothing
+// changes (the count is what is slower). The defaults are the console's: 7/30 s and 6/30 s.
+REXCVAR_DEFINE_BOOL(mcla_ui_repeat_fix, false, "MCLA",
+                    "Repeat a held menu button or direction after mcla_ui_repeat_delay_ms and then "
+                    "every mcla_ui_repeat_interval_ms, as at the console's 30 updates a second, not "
+                    "after 7 and every 6 updates (58 and 50 ms at 120 FPS, which made a tap step a "
+                    "menu two or three times)");
+REXCVAR_DEFINE_INT32(mcla_ui_repeat_delay_ms, 233, "MCLA",
+                     "With mcla_ui_repeat_fix: how long a menu button is held before it repeats "
+                     "(the game's 7 updates at 30 a second)")
+    .range(0, 2000);
+REXCVAR_DEFINE_INT32(mcla_ui_repeat_interval_ms, 200, "MCLA",
+                     "With mcla_ui_repeat_fix: the time between repeats of a held menu button (the "
+                     "game's 6 updates at 30 a second)")
+    .range(0, 2000);
+REXCVAR_DEFINE_BOOL(mcla_ui_input_log, false, "MCLA",
+                    "Development: log every menu key down and repeat (which of the 24 inputs, its "
+                    "key code, the time)");
+
+namespace {
+constexpr size_t kUiInputCount = 24;
+
+struct UiKeyTime {
+  uint64_t last_us = 0;  // the key down, or the last repeat
+  uint64_t need_us = 0;  // how long after it the next repeat is due
+};
+UiKeyTime g_ui_key[kUiInputCount];
+
+void WriteGuestU8(uint32_t address, uint8_t value) {
+  if (address < 0x10000) {
+    return;
+  }
+  *(rex::Runtime::instance()->virtual_membase() + address) = value;
+}
+
+void LogUiKey(const char* kind, uint32_t input, int32_t key, uint64_t now_us) {
+  REXLOG_INFO("ui key: {} input={} key={} t={}.{:03} ms fix={}", kind, input, key, now_us / 1000,
+              now_us % 1000, REXCVAR_GET(mcla_ui_repeat_fix));
+}
+}  // namespace
+
+// 0x822240C0: the branch where a button is first seen pressed (r31 = the input, r4 = its key code or -1).
+void mcla_ui_key_press(PPCRegister& r31, PPCRegister& r4) {
+  const uint32_t input = r31.u32;
+  if (input >= kUiInputCount) {
+    return;
+  }
+  const uint64_t now = NowMicros();
+  g_ui_key[input] = {now, uint64_t(std::max(0, REXCVAR_GET(mcla_ui_repeat_delay_ms))) * 1000};
+  if (REXCVAR_GET(mcla_ui_input_log)) {
+    LogUiKey("down", input, r4.s32, now);
+  }
+}
+
+// 0x822241D0: the compare of the count with the threshold (r8 = the count, already stored; r10 =
+// the threshold; r29 = the counts' array; r31 = the input; r4 = its key code or -1). Equal: the
+// game sends a repeat.
+void mcla_ui_key_repeat(PPCRegister& r10, PPCRegister& r8, PPCRegister& r29, PPCRegister& r31,
+                        PPCRegister& r4) {
+  if (r8.u32 != r10.u32) {
+    return;  // no repeat on this update, the usual case
+  }
+  const uint32_t input = r31.u32;
+  if (input >= kUiInputCount) {
+    return;
+  }
+  const uint64_t now = NowMicros();
+  UiKeyTime& key = g_ui_key[input];
+  if (!OriginalTiming() && REXCVAR_GET(mcla_ui_repeat_fix)) {
+    if (!key.last_us) {
+      // Down before this was watching (a button held when the menu came up): from now.
+      key = {now, uint64_t(std::max(0, REXCVAR_GET(mcla_ui_repeat_delay_ms))) * 1000};
+    }
+    constexpr int64_t kSlackUs = 1'000'000 / 30 / 4;
+    const int64_t late = int64_t(now) - int64_t(key.last_us + key.need_us);
+    if (late < -kSlackUs) {
+      // Too early: the count one short, so that the next update asks again, and no repeat now.
+      WriteGuestU8(r29.u32 + input, uint8_t(r8.u32 - 1));
+      r8.u64 = (r10.u32 + 1) & 0xFF;
+      return;
+    }
+    // On time: the next one is due from when this one was due, unless it came a lot later.
+    key.last_us = late < int64_t(key.need_us / 2) ? key.last_us + key.need_us : now;
+    key.need_us = uint64_t(std::max(0, REXCVAR_GET(mcla_ui_repeat_interval_ms))) * 1000;
+  }
+  if (REXCVAR_GET(mcla_ui_input_log)) {
+    LogUiKey("repeat", input, r4.s32, now);
+  }
+}
+
 static bool SkipIntro() {
   return REXCVAR_GET(mcla_skip_intro) || REXCVAR_GET(mcla_intro) == "skip";
 }

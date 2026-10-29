@@ -108,6 +108,27 @@ address = 0x825EDC6C
 registers = ["r25", "r31"]
 jump_address_on_true = 0x825EDD44
 
+# --- Menu key repeat ----------------------------------------------------------
+# sub_82223CD8 is the UI input object's update (once per UI manager update, called from
+# sub_82224920): for each of the 24 menu inputs (r31 = 0..23; r4 = its key code, -1 for none) it
+# sends a key down when the button is first seen pressed and, while it is held, again when a
+# counter (byte array at r29) reaches a threshold (byte array at r28): 7 updates after the key
+# down, then [object+803] = 6. Counted in updates, so it was 58 ms then 50 ms at 120 FPS.
+# See src/frame_timing.cpp (mcla_ui_repeat_fix).
+
+# 0x822240C0 (`stbx r27,r31,r28`): the branch of a button first seen pressed.
+[[midasm_hook]]
+name = "mcla_ui_key_press"
+address = 0x822240C0
+registers = ["r31", "r4"]
+
+# 0x822241D0 (`cmplw cr6,r10,r8`): r8 = the count after this update (just stored), r10 = the
+# threshold. Equal sends the repeat. The hook can make it not equal and put the count back.
+[[midasm_hook]]
+name = "mcla_ui_key_repeat"
+address = 0x822241D0
+registers = ["r10", "r8", "r29", "r31", "r4"]
+
 # --- Intro movies ------------------------------------------------------------
 # The start-up legal screens and logos are not paced by the engine timer; they
 # are held to 30 per second in mcla_present_interval (see src/frame_timing.cpp).

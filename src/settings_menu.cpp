@@ -1382,7 +1382,10 @@ void SyncRowsFromOptions(int menu) {
 // 4,000 nits in under three seconds at 150 FPS and at 30. Whether an event
 // repeats a held direction comes from the pad (MclaTickSettingsMenu), or,
 // where the pad doesn't show the direction (another input), from the time
-// since the last event.
+// since the last event. (With mcla_ui_repeat_fix, src/frame_timing.cpp, the game's
+// repeats come 233 ms after the press and then every 200 ms at any frame rate; the
+// steps above are then 1 at the press, 0 at 233 ms, 1 at each repeat to 1.2 s, 4 from
+// there and 16 from 2.2 s. Computed from this function, not yet measured.)
 constexpr uint64_t kHoldGapMs = 100;
 constexpr uint64_t kHoldDelayMs = 400;
 constexpr uint64_t kHoldIntervalMs = 100;
@@ -1739,6 +1742,30 @@ bool NodeReachesList(uint32_t node, uint32_t list, int depth, int& budget) {
 // What was changed in these menus, saved now: the window is closing.
 void MclaSaveMenuSettings() {
   SaveSettingsIfChanged();
+}
+
+// Development (src/dev_pad.cpp, "uisel" and the ui_* conditions): the list the game rendered last
+// (the pause menu's, or the one of a submenu of ours), as the game keeps it: the selected row, how far
+// the list is scrolled, how many rows it holds, and the selected row's own value slot (an option row's
+// index; meaningless for a plain button). False until a list has been rendered.
+bool MclaMenuListState(uint32_t& list, int32_t& select, int32_t& scroll, int32_t& count,
+                       int32_t& row_value) {
+  list = g_last_list.load(std::memory_order_relaxed);
+  if (!list || !Membase()) {
+    return false;
+  }
+  select = int32_t(Read32(list + kListSelect));
+  scroll = int32_t(Read32(list + kListScroll));
+  count = int32_t(Read16(list + kListCountCap));
+  row_value = -1;
+  const auto in_heap = [](uint32_t address) { return address >= 0x40000000u && address < 0xE0000000u; };
+  const uint32_t rows = Read32(list + kListRows);
+  if (in_heap(rows) && select >= 0 && select < count) {
+    if (const uint32_t row = Read32(rows + 4u * uint32_t(select)); in_heap(row)) {
+      row_value = int32_t(Read32(row + kRowSelect));
+    }
+  }
+  return true;
 }
 
 // Every frame, on the thread that polls input (src/frame_timing.cpp): while a
