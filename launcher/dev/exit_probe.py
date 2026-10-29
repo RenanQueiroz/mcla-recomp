@@ -66,47 +66,52 @@ def p(*a):
 
 
 # ---- the plans -------------------------------------------------------------------------------------------------------------------------
-def plan_h1():
-    """Hold 1: the stressed cell with every mode (known to hang), the unstarved baseline, Vulkan, 0x55 alone. The first run of a cell/API is a warm-up of the shader storage."""
-    seq = [
-        ("U", "0", "pause", True),    # warm-up of the D3D12 storage (counted apart)
-        ("S", "0", "pause", False),   # the known-bad cell first: a hang to look at
+def plan_h1(stage, rows):
+    """Hold 1 (one stage): how often it happens as shipped, mostly with all threads (cell U), a few runs on Vulkan (V), at 0x55 (A) and in the stressed cell (S, where it
+    hung 11 of 14) so that a hang is there to look at. The first run on each API is a warm-up of the shader storage (counted apart)."""
+    if stage > 0:
+        return None
+    return [
+        ("U", "0", "pause", True),    # warm-up of the D3D12 storage
+        ("S", "0", "pause", False),   # a hang to look at, early
         ("U", "0", "close", False),
-        ("S", "D", "close", False),
-        ("S", "T", "pause", False),
-        ("S", "DT", "close", False),
+        ("U", "0", "pause", False),
+        ("A", "0", "close", False),
+        ("U", "0", "close", False),
+        ("V", "0", "pause", True),    # warm-up of the Vulkan storage
+        ("V", "0", "close", False),
         ("U", "0", "pause", False),
         ("S", "0", "close", False),
-        ("S", "D", "pause", False),
-        ("S", "T", "close", False),
-        ("S", "DT", "pause", False),
-        ("V", "0", "pause", True),    # warm-up of the Vulkan storage
-        ("A", "0", "close", False),
-        ("V", "0", "close", False),
         ("U", "0", "close", False),
-        ("A", "0", "pause", False),
         ("U", "0", "pause", False),
-        ("V", "0", "pause", False),
+        ("A", "0", "pause", False),
+        ("U", "0", "close", False),
+        ("U", "0", "pause", False),
+        ("U", "0", "close", False),
     ]
-    return seq
 
 
-def plan_h2(results):
-    """Hold 2: the mode that did best in hold 1 (no hang, quickest exits), checked where hangs are common (S) and where they are rare (U), Vulkan, and 0 once more as the control."""
-    best = choose_best(results)
-    modes = [best] if best else ["DT", "D"]
-    seq = [("U", "0", "pause", True)]
-    for i in range(4):
-        for m in modes:
-            seq.append(("S", m, "pause" if i % 2 == 0 else "close", False))
-    seq.append(("S", "0", "close", False))   # control: still hangs in this session?
-    for i in range(7):
-        for m in modes:
-            seq.append(("U", m, "pause" if i % 2 == 0 else "close", False))
-    seq.append(("V", modes[0], "pause", True))
-    for i in range(2):
-        seq.append(("V", modes[0], "close" if i % 2 == 0 else "pause", False))
-    return seq
+def plan_h2(stage, rows):
+    """Hold 2. Stage 0: every fix mode twice in the stressed cell S (where hangs are common) and the control (mode 0) once. Stage 1: the mode that did best (the least
+    intrusive with no slow exit in S; DT and D if none did) where hangs are rare (U, the bulk), in S twice more and on Vulkan twice."""
+    if stage == 0:
+        return [("S", "T", "pause", False), ("S", "D", "close", False), ("S", "DT", "pause", False), ("S", "0", "close", False),
+                ("S", "T", "close", False), ("S", "D", "pause", False), ("S", "DT", "close", False)]
+    if stage == 1:
+        best = choose_best(rows)
+        modes = [best] if best else ["DT", "D"]
+        seq = []
+        for i in range(24):
+            m = modes[i % len(modes)]
+            q = "pause" if i % 2 == 0 else "close"
+            if i in (3, 11):
+                seq.append(("S", m, q, False))
+            elif i in (6, 14):
+                seq.append(("V", m, q, i == 6))
+            else:
+                seq.append(("U", m, q, False))
+        return seq
+    return None
 
 
 def choose_best(rows):
@@ -816,55 +821,62 @@ def read_results(out):
 def batch(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    rows = read_results(out)
-    if args.plan == "h1":
-        seq = plan_h1()
-    elif args.plan == "h2":
-        seq = plan_h2(rows)
-    else:
+    planner = {"h1": plan_h1, "h2": plan_h2}.get(args.plan)
+    if planner is None:
         raise SystemExit(f"unknown plan {args.plan!r}")
-    done = {r["tag"] for r in rows if not r.get("setup_error")}
     deadline = args.deadline_epoch or (time.time() + 25 * 60)
-    p(f"exit_probe: plan {args.plan}, {len(seq)} runs, deadline {datetime.datetime.fromtimestamp(deadline):%H:%M:%S}; exe {devrun.EXE}")
-    zombie_left = False
+    p(f"exit_probe: plan {args.plan}, deadline {datetime.datetime.fromtimestamp(deadline):%H:%M:%S}; exe {devrun.EXE}")
+    zombie_left = stop = False
+    rows = read_results(out)
     pause_broken = any(r.get("quit") == "pause" and r.get("quit_failed") for r in rows)
     failed_in_a_row = 0
-    for i, (cell, mode, quit_how, warm) in enumerate(seq, 1):
-        tag = f"{args.plan}-{i:02d}-{cell}{mode}-{quit_how}"
-        if tag in done:
-            continue
-        if quit_how == "pause" and pause_broken:
-            quit_how = "close"   # the pause menu pad did not quit once: the rest of the budget goes to runs that do
-            tag = f"{args.plan}-{i:02d}-{cell}{mode}-{quit_how}-instead-of-pause"
-        remaining = deadline - time.time()
-        need = EST_RUN_S + (EST_HANG_S if cell in ("S", "A") and mode == "0" else 0)
-        if remaining < need:
-            p(f"{tag}: not started, {remaining:.0f} s left and the run needs about {need:.0f} s")
-            continue
-        run = {"tag": tag, "plan": args.plan, "cell": cell, "mode": mode, "quit": quit_how, "warm": warm}
-        p(f"{tag}: {CELLS[cell]['what']}; mode {mode} ({MODE_WHAT[mode]}); quit by {quit_how}{' (warm-up)' if warm else ''}")
-        row = run_one(run)
-        with open(out / "results.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
-        p(f"{tag}: line_to_exit_s={row.get('line_to_exit_s')} close_to_line_s={row.get('close_to_line_s')} gpu_stop={row.get('gpu_stop')} zombie={row.get('zombie', False)}"
-          f" {('ERROR ' + row['error'].splitlines()[-1]) if row.get('error') else ''}{(' SETUP ' + row['setup_error']) if row.get('setup_error') else ''}"
-          f"{(' QUIT-FAILED') if row.get('quit_failed') else ''}")
-        if row.get("REAL_DATA_CHANGED"):
-            p(f"STOP: the real data changed: {row['REAL_DATA_CHANGED']}")
+    for stage in range(4):
+        rows = read_results(out)
+        seq = planner(stage, rows)
+        if seq is None or stop:
             break
-        if row.get("zombie") and row.get("zombie_gone_after_limit_s") is None:
-            p(f"STOP: pid {row.get('pid')} is still alive {HANG_LIMIT_S + 60:.0f} s after the line; the batch ends (a zombie holds the GPU and the shader storage)")
-            zombie_left = True
-            break
-        if row.get("quit_failed") and run["quit"] == "pause":
-            pause_broken = True
-        failed_in_a_row = failed_in_a_row + 1 if (row.get("error") or row.get("quit_failed") or row.get("no_line")) else 0
-        if failed_in_a_row >= 3:
-            p("STOP: three runs in a row failed (an error, a quit that did not happen, or a crash before the exit line); see results.jsonl")
-            break
-        if row.get("setup_error"):
-            p(f"STOP: {row['setup_error']}")
-            break
+        done = {r["tag"] for r in rows if not r.get("setup_error")}
+        p(f"exit_probe: stage {stage}: {len(seq)} runs planned")
+        for i, (cell, mode, quit_how, warm) in enumerate(seq, 1):
+            tag = f"{args.plan}-{stage}{i:02d}-{cell}{mode}-{quit_how}"
+            if tag in done:
+                continue
+            if quit_how == "pause" and pause_broken:
+                quit_how = "close"   # the pause menu pad did not quit once: the rest of the budget goes to runs that do
+                tag = f"{args.plan}-{stage}{i:02d}-{cell}{mode}-close-instead-of-pause"
+            remaining = deadline - time.time()
+            need = EST_RUN_S + (EST_HANG_S if mode == "0" and cell in ("S", "A") else 0)
+            if remaining < need:
+                p(f"{tag}: not started, {remaining:.0f} s left and the run needs about {need:.0f} s")
+                continue
+            run = {"tag": tag, "plan": args.plan, "stage": stage, "cell": cell, "mode": mode, "quit": quit_how, "warm": warm}
+            p(f"{tag}: {CELLS[cell]['what']}; mode {mode} ({MODE_WHAT[mode]}); quit by {quit_how}{' (warm-up)' if warm else ''}")
+            row = run_one(run)
+            with open(out / "results.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, default=str) + "\n")
+            p(f"{tag}: line_to_exit_s={row.get('line_to_exit_s')} close_to_line_s={row.get('close_to_line_s')} gpu_stop={row.get('gpu_stop')} exit_code={row.get('exit_code')}"
+              f" zombie={row.get('zombie', False)}"
+              f" {('ERROR ' + row['error'].splitlines()[-1]) if row.get('error') else ''}{(' SETUP ' + row['setup_error']) if row.get('setup_error') else ''}"
+              f"{(' QUIT-FAILED') if row.get('quit_failed') else ''}{(' NO-LINE') if row.get('no_line') else ''}")
+            if row.get("REAL_DATA_CHANGED"):
+                p(f"STOP: the real data changed: {row['REAL_DATA_CHANGED']}")
+                stop = True
+                break
+            if row.get("zombie") and row.get("zombie_gone_after_limit_s") is None:
+                p(f"STOP: pid {row.get('pid')} is still alive {HANG_LIMIT_S + 60:.0f} s after the line; the batch ends (a zombie holds the GPU and the shader storage)")
+                zombie_left = stop = True
+                break
+            if row.get("quit_failed") and run["quit"] == "pause":
+                pause_broken = True
+            failed_in_a_row = failed_in_a_row + 1 if (row.get("error") or row.get("quit_failed") or row.get("no_line")) else 0
+            if failed_in_a_row >= 3:
+                p("STOP: three runs in a row failed (an error, a quit that did not happen, or a crash before the exit line); see results.jsonl")
+                stop = True
+                break
+            if row.get("setup_error"):
+                p(f"STOP: {row['setup_error']}")
+                stop = True
+                break
     text = report(read_results(out))
     (out / "SUMMARY.txt").write_text(text, encoding="utf-8")
     p(text)
@@ -955,14 +967,15 @@ def report(rows):
         L("EXITHANG MODE %s (%s): %d runs (%d in the stressed cell S), exit within %.0f s in every run: %s" % (mode, MODE_WHAT[mode], len(rs), len(s_rs), GOOD_S, "YES" if all_fast else "NO"))
     best = choose_best(good)
     L("EXITHANG BEST MODE so far (least intrusive with no slow exit in at least 2 stressed runs): %s" % (best or "none"))
-    fixed = [r for r in good if r["mode"] != "0" and not r.get("warm")]
-    s_fixed = [r for r in fixed if r["cell"] == "S"]
-    u_fixed = [r for r in fixed if r["cell"] in ("U", "V")]
-    if fixed and all(not is_slow(r) for r in fixed) and len(s_fixed) >= 4 and len(u_fixed) >= 8:
-        L("EXITHANG DEFAULT: every run with a fix mode exited within %.0f s (%d runs, %d stressed): the default of the mode that did best can be turned on" % (GOOD_S, len(fixed), len(s_fixed)))
+    mine = [r for r in good if best and r["mode"] == best and not r.get("warm")]
+    s_mine = [r for r in mine if r["cell"] == "S"]
+    u_mine = [r for r in mine if r["cell"] in ("U", "V")]
+    if best and mine and all(not is_slow(r) for r in mine) and len(s_mine) >= 4 and len(u_mine) >= 8:
+        L("EXITHANG DEFAULT: mode %s (%s) exited within %.0f s in all %d runs (%d stressed, %d unstarved): its option can be turned on by default" % (
+            best, MODE_WHAT[best], GOOD_S, len(mine), len(s_mine), len(u_mine)))
     else:
-        L("EXITHANG DEFAULT: NOT enough to turn a mode on by default (needs every fix-mode run within %.0f s, at least 4 in cell S and 8 unstarved): %d fix-mode runs, %d in S, %d unstarved, %s" % (
-            GOOD_S, len(fixed), len(s_fixed), len(u_fixed), "all fast" if fixed and all(not is_slow(r) for r in fixed) else "some slow"))
+        L("EXITHANG DEFAULT: NOT enough to turn an option on by default (needs the best mode %s with every run within %.0f s, at least 4 in cell S and 8 unstarved): it has %d runs, %d in S, %d unstarved, %s" % (
+            best or "-", GOOD_S, len(mine), len(s_mine), len(u_mine), "all fast" if mine and all(not is_slow(r) for r in mine) else "some slow or none"))
     return "\n".join(lines) + "\n"
 
 
@@ -1010,7 +1023,7 @@ def selftest(args):
     ]
     print(report(fake))
     assert choose_best(fake) == "T"
-    assert plan_h2(fake)[1][1] == "T"
+    assert plan_h2(1, fake)[1][1] == "T"
     print("selftest ok")
     return 0
 
