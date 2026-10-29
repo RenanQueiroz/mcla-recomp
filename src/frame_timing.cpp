@@ -1759,6 +1759,10 @@ struct UiSeries {
 };
 std::unordered_map<uint64_t, UiSeries> g_series;  // under g_inst_mutex
 uint64_t g_series_sweep_us = 0;
+// Per movie slot: the step in which a change of the camera or the panels was last taken for a cut. Everything else that
+// changes in that step is a cut too (the script switching between its 2D and 3D layouts moves the eye, the target, the field
+// of view and the panels at once; blending only some of them would swing the picture for a step).
+std::array<uint32_t, 32> g_scene_cut_serial{};
 
 // Blends the n numbers (1 to 3) that the script gave for one property of one object of the context ctx, between
 // its last two steps, with the rule of the display list. Returns true when v was changed to the blended value.
@@ -1827,13 +1831,18 @@ bool UiSceneBlend(uint32_t ctx, uint32_t obj, const SceneSpec& spec, float* v, i
     }
     const double move = std::sqrt(move2);
     const bool gap = serial - s.seen_serial > 1;
-    const bool cut = move > spec.snap;
+    uint32_t& cut_serial = g_scene_cut_serial[size_t(step - g_ui_step.data()) % g_scene_cut_serial.size()];
+    const bool own_cut = move > spec.snap;
+    const bool cut = own_cut || cut_serial == serial;
+    if (own_cut) {
+      cut_serial = serial;
+    }
     std::memcpy(s.from, (gap || cut) ? v : s.shown, bytes);
     std::memcpy(s.to, v, bytes);
     s.t0_us = step_us;
     if (cut && log) {
-      REXLOG_INFO("ui interp event: {} kind=snap why=scene3d what={} obj={:08X} move={:.3f} limit={:.3f}", step->name, spec.name, obj,
-                  move, spec.snap);
+      REXLOG_INFO("ui interp event: {} kind=snap why=scene3d what={} obj={:08X} move={:.3f} limit={:.3f} own={}", step->name, spec.name, obj,
+                  move, spec.snap, own_cut ? 1 : 0);
     }
   }
   s.seen_serial = serial;

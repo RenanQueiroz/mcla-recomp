@@ -697,7 +697,8 @@ their steps. Every one of those Flash movies steps 30 times a second, as on the 
 between the last two steps, so they move smoothly at 50 FPS and more without running faster. The price is one step
 (up to 33 ms) of delay, and what the game cuts or swaps (an icon that changes, text) still appears at once. It
 replaced *HUD updates* (`mcla_ui_hud_rate`) and the pause menu's MENU UPDATES: the HUD ticker now scrolls at the
-console's speed, half of what HUD updates 60 gave, and the needles still move smoothly. With Smooth UI off the HUD
+console's speed, half of what HUD updates 60 gave, and the needles still move smoothly. The pause menu's camera and
+3D panels glide too (`mcla_ui_interp_camera`, on; `dev\ui-camera-2026-10-29.md`). With Smooth UI off the HUD
 steps 60 times a second (`mcla_ui_hud_rate`, a mcla.toml option or `--mcla_ui_hud_rate=30`, 120, 0) and the menus 30
 (`mcla_ui_menu_rate`), unblended; both options are read only then (`KNOWN-ISSUES.md`,
 `dev\ui-interpolation-2026-10-29.md`). Menus and pop-ups answer a key press at once (`mcla_ui_advance_on_input`, on).

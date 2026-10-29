@@ -4,8 +4,8 @@ r"""Check of the interpolated pause-menu camera and 3D panels (mcla_ui_interp_ca
   ui_camera.py report <run folder> [--shots <folder>] [--out FILE]
                                                    read the run (devrun.py's folder: game*.log) and say what the option did
 
-The run (devrun.py, a scratch save, D3D12, per-frame log on) goes to the city and then opens the pause menu, changes tab, enters a submenu and its
-page and closes the menu again (Start, LB and RB, A and B), the option off, on, off, on at a 120 FPS cap and off, on at 60. Each of the four
+The run (devrun.py, a scratch save, D3D12, per-frame log on) goes to the city and then opens the pause menu, changes tab twice, enters a submenu and its
+page and closes the menu again (Start, RB twice, A and B), the option off, on, off, on at a 120 FPS cap and off, on at 60. Each of the four
 moves is a cell (`copen`, `ctab`, `csub`, `cclose`); bursts of consecutive pictures of the opening, the submenu and the closing are cells of their own.
 
 What the game logs (src/frame_timing.cpp, with mcla_ui_interp_log on):
@@ -31,7 +31,7 @@ OFF_ON = ("off", "on")
 STEP_MS = U.STEP_MS
 KINDS = ("copen", "ctab", "csub", "cclose")
 BURSTS = ("bopen", "bsub", "bclose")
-NAMES = {"copen": "the menu opening", "ctab": "a tab change (LB then RB)", "csub": "a submenu and back (A then B)", "cclose": "the menu closing"}
+NAMES = {"copen": "the menu opening", "ctab": "two tab changes (RB, RB)", "csub": "a submenu and back (A then B)", "cclose": "the menu closing"}
 SHOT_SCALE = "0.5"
 
 # --- the pad ---
@@ -47,9 +47,18 @@ def _to_row0(add):
     add("wait 400ms")
 
 
+def _to_settings(add):
+    """The pause menu reopens on its first tab (the settings-pages pad presses RB twice after every Start to reach the Settings tab, closed and
+    reopened in between): two tab changes."""
+    add("press rb 4f")
+    add("wait 1600ms")
+    add("press rb 4f")
+    add("wait 1600ms")
+
+
 def _moves(add, variant, cap, k):
-    """The four moves of one round; the pause menu starts closed (in the city) and ends closed. It reopens on the tab it was left on (Settings),
-    whose first row (OPTIONS) is a submenu; LB and RB leave the tab and come back."""
+    """The four moves of one round; the pause menu starts closed (in the city) and ends closed. It opens on its first tab; RB twice reaches the Settings
+    tab, whose first row (OPTIONS) is a submenu (A), B comes back, Start closes."""
     tag = f"variant={variant} cap={cap} id={k}"
     _setopt(add, variant, cap)
     add("wait 1200ms 96f")
@@ -58,13 +67,9 @@ def _moves(add, variant, cap, k):
     add("press start 100ms")
     add("wait 2500ms")
     add("log UI end")
-    _to_row0(add)
     add(f"log UI cell=ctab {tag}")
     add("log UI phase=press")
-    add("press lb 4f")
-    add("wait 1600ms")
-    add("press rb 4f")
-    add("wait 1600ms")
+    _to_settings(add)
     add("log UI end")
     _to_row0(add)
     add(f"log UI cell=csub {tag}")
@@ -74,7 +79,6 @@ def _moves(add, variant, cap, k):
     add("press b 4f")
     add("wait 1800ms")
     add("log UI end")
-    _to_row0(add)
     add(f"log UI cell=cclose {tag}")
     add("log UI phase=press")
     add("press start 100ms")
@@ -94,6 +98,7 @@ def _bursts(add, shots, variant, n=20):
     add(f"burst {shots}/bopen-{variant}-120 {n} {SHOT_SCALE}")
     add("wait 2500ms")
     add("log UI end")
+    _to_settings(add)
     _to_row0(add)
     add(f"log UI cell=bsub {tag}")
     add("log UI phase=press")
@@ -103,7 +108,6 @@ def _bursts(add, shots, variant, n=20):
     add("press b 4f")
     add("wait 1800ms")
     add("log UI end")
-    _to_row0(add)
     add(f"log UI cell=bclose {tag}")
     add("log UI phase=press")
     add("press start 100ms")
@@ -121,17 +125,6 @@ def pad_lines(shots):
     add("get mcla_ui_interpolate mcla_ui_interp_camera mcla_ui_timing_fix mcla_ui_advance_on_input")
     add("set mcla_ui_interp_camera true")
     add("set mcla_ui_interp_log true")
-    # one visit of the pause menu to its Settings tab, so that it reopens there; then closed again
-    add("log UI setup pause")
-    add("press start 4f")
-    add("wait 1500ms 90f")
-    for _ in range(2):
-        add("press rb 4f")
-        add("wait 1000ms 60f")
-    add("wait_until ui_count >= 0 20s")
-    add("uisel")
-    add("press start 100ms")
-    add("wait 2500ms")
     k = 0
     for cap in (120, 60):
         for variant in OFF_ON * (2 if cap == 120 else 1):
