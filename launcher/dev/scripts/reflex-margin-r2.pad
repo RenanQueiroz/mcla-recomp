@@ -1,0 +1,156 @@
+# The margin sweep of the Reflex sleep assist (dev note launcher/dev/reflex-assist-margin-2026-10-28.md), run r2: standing at the spawn point in the
+# city, real-time steps (no --mcla_fixed_dt), --mcla_fps=0 and --mcla_timer_hr_at_cap=true. The assist and its margin are changed with `set` during the run
+# (the options are read every frame). Variants: off = assist off; f15 = margin_us 1500; p10 / p20 = the larger of 1500 us and 10 / 20 % of the frame interval;
+# dx = 1000 us + 17 % (DXVK's rule). Order at 60 FPS: p10 p20 dx off f15; at 30 FPS the reverse.
+# Marks: title, map_zoom, free_roam, settle0, u_off_a/u_off_b (uncapped, assist off), then c60_<variant>_a/_b and c30_<variant>_a/_b (the measured stretches),
+# u_dx_a/u_dx_b (uncapped again, assist on with the dx margin: not engaged without a cap), end.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+get ll_status mcla_reflex_sleep_assist mcla_reflex_sleep_margin_us mcla_reflex_sleep_margin_pct mcla_reflex_sleep_margin_sum mcla_timer_hr_at_cap low_latency_limiter low_latency mcla_fps
+mark settle0
+wait 2s
+set mcla_reflex_sleep_assist false
+mark u_off_a
+include cpup-sample.pad
+wait 8s
+include cpup-sample.pad
+mark u_off_b
+set mcla_fps 60
+mark settle60
+wait 3s
+get ll_status mcla_fps
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1500
+set mcla_reflex_sleep_margin_pct 10
+set mcla_reflex_sleep_margin_sum false
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c60_p10_a
+include cpup-sample.pad
+wait 10s
+include cpup-sample.pad
+mark c60_p10_b
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1500
+set mcla_reflex_sleep_margin_pct 20
+set mcla_reflex_sleep_margin_sum false
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c60_p20_a
+include cpup-sample.pad
+wait 10s
+include cpup-sample.pad
+mark c60_p20_b
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1000
+set mcla_reflex_sleep_margin_pct 17
+set mcla_reflex_sleep_margin_sum true
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c60_dx_a
+include cpup-sample.pad
+wait 10s
+include cpup-sample.pad
+mark c60_dx_b
+set mcla_reflex_sleep_assist false
+wait 2.2s
+mark c60_off_a
+include cpup-sample.pad
+wait 10s
+include cpup-sample.pad
+mark c60_off_b
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1500
+set mcla_reflex_sleep_margin_pct 0
+set mcla_reflex_sleep_margin_sum false
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c60_f15_a
+include cpup-sample.pad
+wait 10s
+include cpup-sample.pad
+mark c60_f15_b
+set mcla_fps 30
+mark settle30
+wait 3s
+get ll_status mcla_fps
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1500
+set mcla_reflex_sleep_margin_pct 0
+set mcla_reflex_sleep_margin_sum false
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c30_f15_a
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+mark c30_f15_b
+set mcla_reflex_sleep_assist false
+wait 2.2s
+mark c30_off_a
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+mark c30_off_b
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1000
+set mcla_reflex_sleep_margin_pct 17
+set mcla_reflex_sleep_margin_sum true
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c30_dx_a
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+mark c30_dx_b
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1500
+set mcla_reflex_sleep_margin_pct 20
+set mcla_reflex_sleep_margin_sum false
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c30_p20_a
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+mark c30_p20_b
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1500
+set mcla_reflex_sleep_margin_pct 10
+set mcla_reflex_sleep_margin_sum false
+set mcla_reflex_sleep_assist true
+wait 2.2s
+mark c30_p10_a
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+mark c30_p10_b
+set mcla_fps 0
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1000
+set mcla_reflex_sleep_margin_pct 17
+set mcla_reflex_sleep_margin_sum true
+set mcla_reflex_sleep_assist true
+wait 3s
+get ll_status mcla_reflex_sleep_assist mcla_reflex_sleep_margin_us mcla_reflex_sleep_margin_pct mcla_reflex_sleep_margin_sum mcla_timer_hr_at_cap low_latency_limiter low_latency mcla_fps
+mark u_dx_a
+include cpup-sample.pad
+wait 8s
+include cpup-sample.pad
+mark u_dx_b
+set mcla_reflex_sleep_assist false
+mark end
