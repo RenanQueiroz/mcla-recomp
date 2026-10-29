@@ -115,23 +115,66 @@ patches in the same order.
 
 ## Release checklist (before anyone publishes a draft)
 
-1. Run the workflow from `main` with the version tag; all jobs green.
-2. Download the draft's files; `sha256sum -c SHA256SUMS`; `gh attestation verify` on `MCLA-Setup.exe` and the zips.
-3. **The FidelityFX DLLs in the game, with the draft's own DLLs, on both APIs** (CI cannot: a runner
-   has no GPU): on a PC with the game built from this commit,
+This checks what is specific to the release's files and to how players get them: **install and update**.
+It does not test the game again (menus, pictures, speed, settings, saves): that belongs to the
+pre-release testing of the same commit, before the workflow is run. If the commit changes after that
+testing, it is tested again on the new commit; this list does not replace it.
+
+Run the workflow from `main` with the version tag; all jobs green. Then, on the draft:
+
+1. **The release files.** Download the draft's assets. `sha256sum -c SHA256SUMS`; `gh attestation verify`
+   on every asset (workflow `Release (draft only)`, `release.yml` on `main`, the draft's commit).
+   `release.json` against the files and the commit: tag, commit, every size and SHA-256, the installer's
+   version, the patches digest in both asset names, and `launcher.sourceCommit`, which is the last commit
+   that changed `launcher/src` or `launcher/build-launcher.ps1`
+   (`git log -1 --format=%H -- launcher/src launcher/build-launcher.ps1`), **not** the release commit.
+   Read `NOTICES.txt`. List the source archive (no `.git`, no game files). The patches in the SDK bundle
+   equal `patches/` at the commit.
+2. **The installer.** `MCLA-Setup.exe --silent` into a scratch folder (it is unsigned, so SmartScreen
+   warns when it is run by hand: **More info**, **Run anyway**). The installed folder equals the launcher
+   zip, file by file; the installed launcher starts and shows the wizard; the player's own folders
+   (`%LOCALAPPDATA%\Programs\MCLA`, shortcuts, settings, saves) are the same before and after.
+3. **A fresh install through the setup wizard, with the draft's bundle** (needs the game's disc image and
+   about 10 GB): `launcher\dev\wizard-check` runs the wizard's engine without a window, with a release
+   source that is a folder (`release.json` and the assets of the draft, plus a `dev-source.json` naming a
+   clone of the fork that has the tag; a draft has no tag yet):
+   `wizard-check.exe install <folder> <install folder> <iso>`. It must end with all six steps done, and
+   print the longest path of the install, which must not be longer than `PathBudget.LongestBelowRoot` (when
+   `tools.json` changes a tool's version, this is where a longer path shows up). Then one short boot of
+   the built game through `devrun.py` (see `launcher\README.md`).
+4. **The update path (required).** The previous release's install, updated to the candidate the way the
+   launcher does it, has to build and boot. Players update more often than they install, and a fresh
+   install does not show what an update keeps from the old build (v0.3.1 passed a list of fresh installs
+   and broke every update from v0.3.0, [#23](https://github.com/RenanQueiroz/mcla-recomp/issues/23)).
+   `scripts\ci\check-update.ps1` clones the previous tag and builds it with that release's own SDK
+   bundle, then does what the launcher does (the same git steps, `build-options.json`, and
+   `launcher\build-game.ps1` with the candidate's bundle) and prints PASS or FAIL lines:
+
+       powershell -File scripts\ci\check-update.ps1 -PreviousTag v0.3.1 -PreviousBundle <its SDK bundle zip> `
+         -Candidate <the tag, or the commit while the draft has no tag> -CandidateBundle <the draft's SDK bundle zip> `
+         -Root <an empty scratch folder> -GameData <the extracted game> -ToolsDir <the tools folder>
+
+   A bundle's hash is read from a `release.json` beside its zip, or given with `-PreviousBundleSha256` and
+   `-CandidateBundleSha256`. It builds twice (about a minute each on a fast PC): run it as a build, not a
+   measurement. It never touches the player's install: it refuses a `-Root` that is not empty or that is
+   in (or holds) `%LOCALAPPDATA%\Programs\MCLA`. Booting what it built needs the dev tools (Python, a GPU)
+   and is done from the update's checkout, `<Root>\update\mcla-recomp`, as the script's last lines say:
+   `MCLA_GAME_DATA` and `MCLA_DEV_ROOT` set, then
+   `python -I launcher\dev\devrun.py run --script launcher\dev\scripts\boot-to-roam.pad`.
+
+   **When the previous release could leave an install half-updated** (its update failed on some PCs, as
+   v0.3.1's did), add `-EarlierTag` and `-EarlierBundle` (the release before it). The script then also
+   installs that release, updates it to the previous one (allowed to fail: a failed update is the state
+   under test), and updates what is left to the candidate, which has to build.
+
+   A pass shows that the files and the steps work on that PC. It does not recreate every player's file
+   times: the v0.3.0 to v0.3.1 update that failed for a player built fine on the maintainer's PC.
+5. **The FSR and frame-generation DLLs the workflow built, on both APIs** (CI cannot: a runner has no
+   GPU): on a PC with the game built from this commit,
    `powershell -File scripts\ci\smoke-release-dlls.ps1 -Bundle <the draft's rexglue-sdk-*.zip>`.
    It runs FSR anti-aliasing and FSR frame generation on Direct3D 12 and on Vulkan through `devrun.py`
    and needs "loaded amd_fidelityfx_*.dll", "FSR 3.1 ready" and "frame generation: ready" in each log
    (four PASS lines). The GPU must be otherwise idle.
-4. Read `NOTICES.txt`; run `MCLA-Setup.exe` (SmartScreen will warn: it is unsigned; **More info**, **Run anyway**) and
-   check that the launcher installs in `%LOCALAPPDATA%\Programs\MCLA`, starts, and shows the wizard, on a PC without .NET.
-5. **The setup wizard, end to end, from the draft** (needs the game's disc image and about 10 GB):
-   `launcher\dev\wizard-check` runs the wizard's engine without a window, with a release source that is a
-   folder (`release.json` and the assets of the draft, plus a `dev-source.json` naming a clone of the fork
-   that has the tag; a draft has no tag yet): `wizard-check.exe install <folder> <install folder> <iso>`.
-   It must end with all six steps done, and print the longest path of the install, which must not be
-   longer than `PathBudget.LongestBelowRoot` (when `tools.json` changes a tool's version, this is where a
-   longer path shows up). Then start the built game through `devrun.py` (see `launcher\README.md`).
 6. Publish in the GitHub UI **without changing the Target**; look that the tag points at
    `release.json.commit`.
 
@@ -170,6 +213,7 @@ change `tools.json` and, for llvm-mingw and Clang, the same pins in `scripts/mak
 | `make-source-archive.py`, `make-sdk-bundle.py`, `cilib.py` | the source archive and the SDK bundle zip |
 | `verify-bundle.ps1`, `linktest/` | the look at the unpacked bundle |
 | `assemble-release.py`, `verify_tools.py`, `create-draft-release.ps1` | `release.json` and the rest, and the draft |
-| `smoke-release-dlls.ps1` | the in-game check of a draft's FidelityFX DLLs (checklist step 3) |
+| `check-update.ps1` | the update path: the previous release's install updated to the candidate the way the launcher does, and built (checklist step 4) |
+| `smoke-release-dlls.ps1` | the in-game check of a draft's FidelityFX DLLs (checklist step 5) |
 | `make-game-files.py`, `game-files.json` | the fingerprints of the game's files (`release.json.game`) |
 | `tools.json`, `licenses/` | the pins; licence texts that packages do not carry |
