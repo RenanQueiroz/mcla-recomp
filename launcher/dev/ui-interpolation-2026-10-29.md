@@ -92,8 +92,9 @@ Options (all in `src/frame_timing.cpp`, rows in `docs/off-switches.md`):
 |---|---|---|
 | `mcla_ui_interpolate` | false | the feature |
 | `mcla_ui_interp_window_pct` | 100 (10 to 100) | the share of a step period over which a node glides |
-| `mcla_ui_interp_snap_px` | 400 | a node that moves farther than this in one step is not glided |
-| `mcla_ui_interp_log` | false | development: logs the gliding nodes, a census of each step and a self-check; also works with the feature off, then it logs what would have been drawn |
+| `mcla_ui_interp_snap_px` | 160 (was 400) | a node that moves farther than this in one step is not glided; one that turns round and jumps more than 40 px (and 8 times the step before) is not glided either |
+| `mcla_ui_interp_log` | false | development: logs the gliding nodes, a census of each step, the nodes that snap or change character and a self-check; also works with the feature off, then it logs what would have been drawn |
+| `mcla_ui_interp_stats` | false | development: once a second, the calls of the hook, their total and worst time (the time stamp counter around each call; cheap enough to measure frame times with) |
 
 Log lines (with `mcla_ui_interp_log`): `ui interp: <screen> inst=<node> d=<depth> ser=<step> t=<ms> alpha=.. live=(x,y) shown=(x,y) world=(x,y) applied=0|1` for each gliding node of each drawn frame (live = the step's local translation, shown = what the blend gives, world = the node's drawn world translation); `ui interp step: <screen> ser=.. moved=.. cx=.. fresh=.. snapped=.. gap=.. max_move=..px tracked=..` for each step (the census: how many nodes moved, changed colour, were new or another character, were snapped, how large the biggest move was); `ui interp movie: <screen> ctx=.. swf_fps=.. period=.. us` once per movie; `ui interp check: nodes=.. matrix_off=.. (worst ..) cxform_off=.. gliding=.. applied=..` every 3 s: the player's own world values for every node compared with this code's arithmetic on the same local values (a mismatch would be an error in the formulas above; expected 0).
 
@@ -111,3 +112,21 @@ The run (D3D12, native resolution, a scratch save): to the city; **hud** (HUD at
 - the **census** per screen (how many nodes moved, changed colour, were new or another character, snapped, the largest move) and the SWF frame rates: the figures that say how much of the UI glides. The burst pictures are for looking at only: a picture takes tens of milliseconds, so they are not aligned to steps.
 
 Not in the chain: frame time or CPU cost of the hook (a measured run would need the option on without the log; the log makes the hook many times dearer), Vulkan, frame generation, 3x (the same code, nothing resolution dependent), a real controller, the pictures of the other screens (pop-ups, prompts, transitions, title). Those come after the first look.
+
+## Round 2 (2026-10-29, agent uiinterp2)
+
+### Why round 1's report had missing cells (found in its data, nothing re-run)
+The game rotates its log at 5 MB (`game.4.log` oldest to `game.1.log`, then `game.log`). Round 1's per-frame log was 21 MB, and the report read `game.log` only (the last 1.6 MB): the pad had run every cell, the report never saw the cap-120 and opening cells. `ui_interp.read_log()` reads the files in order now, and the runs pass `--log_max_file_size_mb=100`. Re-reading round 1's folder gave 10 cells and 70,807 rows: at a 120 FPS cap the HUD ticker (`HUDGAUGE` depth 3) and the pause rows are drawn at 4 different positions per 33 ms step with the option on, at 1 with it off; 0 differences in 8,113,592 node draws; applied in 3446 of 3446 gliding draws at cap 60, 0 of 1790 at cap 30. The rest pictures differed in a 21 x 19 px box on the selected tab's icon: its dashed ring turns by itself (looked at in the crop; round 2 checks it with three pictures per variant and the difference of two pictures of the same variant).
+
+### What round 1's data says about snapping (measured, option off)
+Largest single-step moves per node: the HUD ticker's wrap, 373.4 px in one step (-615.8 to -242.4), which the old 400 px limit let glide across the screen; the pause menu's opening slides, up to 62.8 px per step; the pause rows 8 px; everything else under 6 px. So: `mcla_ui_interp_snap_px` is 160 now, and a node that turns round and jumps more than 40 px, more than 8 times as far as the step before, is shown at once (the ticker's wrap), with a log line each (`ui interp event: .. kind=snap why=turned|far|flip`). A character swap (another shape at the same depth) is shown as it is and logged (`kind=swap`, the first 3, the 10th and the 100th of each node).
+
+### Other changes
+- With the option on every movie steps 30 times a second (all SWF files seen declare 7680 = 30.0 frames a second in 8.8 fixed point), whatever `mcla_ui_menu_rate` and `mcla_ui_hud_rate` say: the HUD's default 60 runs the ticker twice as fast as the console, and interpolation is the replacement for it.
+- The rows of the log carry the matrix and colour (`lm`, `sm`, `cx`), so rotating and scaling nodes (needles, fills) are counted as movers, not only translating ones.
+- Pad command `burst <prefix> <n> [scale] [x0 y0 x1 y1]`: n pictures of consecutive swaps, cropped (fractions of the frame), written after the last; the swap numbers are logged, so skipped frames show.
+
+### The round-2 chain (queued by the main session; results in the agent's notes)
+`launcher/dev/ui_interp.py pad trace|cost|big` writes the three pads, `report` reads them. One exclusive hold (about 16 to 22 minutes, 33 at most): build, then three game runs. **trace** (1x, per-frame log): the title screen, the HUD (full throttle then braking; the default rates; a burst of the ticker), the pause menu's closing and opening (cap 120 four times, cap 60 twice), the highlight moving (taps and a hold), three pictures at rest per variant, a burst, at caps 120 and 60 with the option off and on and at cap 30 with it on, a probe for a pop-up. **cost** (1x, no log): the HUD and the pause menu at cap 120 and uncapped, option off, on, off, on, 10 s each: the hook's own time (`mcla_ui_interp_stats`), the process's CPU per frame (`--mcla_profile_thread_log`, rows of one second inside the cell) and the frame times (median, p99) from `frames.csv` marks. **big** (3x): bursts, then the same cost cells.
+
+Results: not in this note yet (the chain had not run when it was written).

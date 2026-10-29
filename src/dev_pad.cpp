@@ -21,7 +21,7 @@
 //   burst <prefix> <n> [scale] [x0 y0 x1 y1] (n guest-output pictures, one per swap, as fast as
 //     the capture goes, cropped to a part of the frame (fractions) and written as <prefix>-<k>.png
 //     after the last; the swap numbers and times are logged, a capture that is slower than a frame
-//     skips frames and the numbers show it)
+//     skips frames and the numbers show it; a failed capture is logged and does not end the script)
 //     (mcla_pad_timeout_shot=<file.png>: the same picture when a wait_until or
 //     press_until times out)
 //   screen <file.png> [scale] (Windows: the game window's client area as the screen shows
@@ -2149,7 +2149,12 @@ std::string Execute(const std::string& line) {
       }
     }
     std::string result;
-    return Burst(args[1], int(count), scale, rect[0], rect[1], rect[2], rect[3], result) ? "ok " + result : "err " + result;
+    if (Burst(args[1], int(count), scale, rect[0], rect[1], rect[2], rect[3], result)) {
+      return "ok " + result;
+    }
+    // Not an "err": a failed capture does not put the rest of the script out of step, and the cells after it still measure.
+    REXLOG_WARN("dev pad: burst {} failed: {}", args[1], result);
+    return "ok burst failed: " + result;
   }
   if (cmd == "screen") {
 #if defined(_WIN32)
