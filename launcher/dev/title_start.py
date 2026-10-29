@@ -1,7 +1,7 @@
 r"""The title screen's Start presses (fork issue, owner's report 2026-10-29): pads for the dev pad, and a report on the
 lines the probe (mcla_pad_probe, src/pad_probe.cpp) and the dev pad leave in a run's game.log.
 
-  python -I title_start.py pad <kind> <out.pad> [--hold MS] [--every MS] [--settle S] [--idle S] [--shots DIR]
+  python -I title_start.py pad <kind> <out.pad> [--hold MS] [--every MS] [--settle S] [--idle S] [--shots DIR] [--at FRAME]
   python -I title_start.py report <run folder>... [--out FILE]
 
 Pad kinds (all end with `quit`):
@@ -13,6 +13,9 @@ Pad kinds (all end with `quit`):
   idle     sit at the title for <idle> seconds after engine frame 20 (shots every 30 s, then four more in the last
            part: the attract video starts about 120 s after launch), then 16 Start presses (every <every> ms) with a
            shot 700 ms after each: does the first press stop the video, and which press leaves the title?
+  attract  wait for engine frame <at> (the attract video starts at about frame 13970 to 13990 at a 120 FPS cap), then
+           8 Start presses 400 ms apart, a shot 150 ms after each: is there a minimum play time (how early after the
+           start of the video does a press stop it)?
 
 `left_title` is NOT the press: the dev pad reads bit 0 of a function-local static's guard (0x82836A28) that the city's
 lighting set-up sets the first time it runs, which can be some seconds after a press that was accepted.
@@ -41,7 +44,7 @@ from pathlib import Path
 PEEKS = ["peeku 0x82836A28 1", "peeku 0x8288D000 1", "peeku 0x8286CF54 1"]  # city guard, game state, city pending
 
 
-def pad_lines(kind, hold=100, every=1500, settle=4, idle=150, shots=None):
+def pad_lines(kind, hold=100, every=1500, settle=4, idle=150, shots=None, at=14030):
     out = [f"# Made by title_start.py ({kind}). Do not edit: change the generator."]
 
     def shot(name, scale=0.2):
@@ -51,6 +54,14 @@ def pad_lines(kind, hold=100, every=1500, settle=4, idle=150, shots=None):
     if kind == "repro":
         out += ["wait 8s", "mark title", "press_until start left_title every=2s timeout=90s", "mark city"]
         out += PEEKS + ["wait 1s", "quit"]
+        return out
+    if kind == "attract":
+        out += ["wait_until frames 20 90s", f"wait_until frames {at} 400s", "mark attract"] + PEEKS
+        for i in range(8):
+            out += [f"press start {hold}ms", "wait 150ms"]
+            shot(f"press{i + 1:02d}", 0.15)
+            out.append(f"wait {max(100, 400 - hold - 150)}ms")
+        out += ["mark presses_end"] + PEEKS + ["wait 1s", "quit"]
         return out
     out += ["wait_until frames 20 90s", f"wait {settle}s", "mark title"] + PEEKS
     if kind == "press":
@@ -110,8 +121,8 @@ UPD = re.compile(r"update[= ](\d+)")
 NATIVE_NAMES = {"822C8AB0": "IS_BUTTON_DOWN", "822C8AF8": "IS_PAD_BUTTON_DOWN", "822CC808": "MoviePlayer_StopMovie",
                 "822CBEF8": "MoviePlayer_StartMovie", "822C8ED8": "IsChildFinished", "822C8A58": "Game_FadeLoadscreenLogo",
                 "822C8A78": "Game_GetLoadingDone"}
-READ = re.compile(r"TS padread thread=([0-9A-F]{8}) pad=(\d+) button=(\d+) real=(\d) latched=(\d) update=(\d+) t=(\d+) "
-                  r"press_age_us=(\d+) previous_poll_us_ago=(\d+)")
+READ = re.compile(r"TS padread thread=([0-9A-F]{8}) program=([0-9A-F]{8}) pc=(\d+) pad=(\d+) button=(\d+) real=(\d) latched=(\d) "
+                  r"update=(\d+) t=(\d+) press_age_us=(\d+) previous_poll_us_ago=(\d+)")
 TRUN = re.compile(r"TS thread (run|update) ([0-9A-F]{8}) update=(\d+) t=(\d+)")
 SCRIPT_SEC = re.compile(r"TS 1s-script t=(\d+) start_reads=(\d+) start_real=(\d+) start_latched=(\d+) pad_reads=(\d+) "
                         r"thread_runs=(\d+) thread_updates=(\d+) latch_ms=(\d+)")
@@ -159,6 +170,7 @@ def report_one(folder, vtables=None):
     last_start = -1
     caps = []  # (seconds in the log, cap)
     states = []  # (1 s line number, modal scenes, child form vtable)
+    movie_calls = []
     script_sec = []  # (start reads, real, latched, pad reads, thread runs, thread updates, latch ms) per second
     first_edge_s = None
     for line in lines:
@@ -194,9 +206,13 @@ def report_one(folder, vtables=None):
             if m.group(13) is not None:
                 states.append((len(sec) - 1, int(m.group(13)), m.group(14)))
             continue
+        if t.startswith("TS movie player"):
+            movie_calls.append(t[3:].replace("movie player: ", "").replace(" t=", " t=")[:60])
         ts_lines.append((last_start, t))
     out.append(f"press_until: {press[0] if press else 'no result line (the pad did not get that far)'}")
     out.append("marks: " + ", ".join(f"{k}@frame {v[1]}" for k, v in marks.items()))
+    if movie_calls:
+        out.append("movie player calls in the run: " + "; ".join(re.sub(r" t=\d+", "", c) for c in movie_calls[:14]))
     if caps:
         ref = first_edge_s if first_edge_s is not None else caps[0][0]
         out.append("frame-rate cap changes (s after the first Start press): " + ", ".join(f"{c} FPS at {t - ref:+.1f}" for t, c in caps))
@@ -218,7 +234,7 @@ def report_one(folder, vtables=None):
         movie = [x for x in mine if x.startswith("TS movie player")]
         reads = [READ.match(x) for x in mine if x.startswith("TS padread")]
         reads = [r for r in reads if r]
-        hit = next((r for r in reads if r.group(4) == "1" or r.group(5) == "1"), None)
+        hit = next((r for r in reads if r.group(6) == "1" or r.group(7) == "1"), None)
         runs = [TRUN.match(x) for x in mine if x.startswith("TS thread ")]
         runs = [r for r in runs if r]
         stop = next((x for x in movie if "StopMovie" in x), None)
@@ -234,9 +250,9 @@ def report_one(folder, vtables=None):
                     natives.append([fn, 0])
                 natives[[n[0] for n in natives].index(fn)][1] += 1
         if hit:
-            kind = "latched" if hit.group(5) == "1" else "real"
-            verdict = (f"SAW (script read of Start {kind} at +{int(hit.group(6)) - upd} updates, press age "
-                       f"{int(hit.group(8)) / 1000.0:.1f} ms)")
+            kind = "latched" if hit.group(7) == "1" else "real"
+            verdict = (f"SAW (script read of Start {kind} at +{int(hit.group(8)) - upd} updates, press age "
+                       f"{int(hit.group(10)) / 1000.0:.1f} ms)")
             saw_n += 1
             saw_latched += kind == "latched"
         elif reads:
@@ -252,8 +268,9 @@ def report_one(folder, vtables=None):
                    + f"; movie ticks in the press update {ticks_here}, mapper runs {mapper_here}, events posted {len(events)}"
                    + (f"; the old detector EVENT_START_SCREEN_EXIT came {exit_upd} updates later" if exit_line else ""))
         if reads:
-            out.append("    Start reads (update offset, thread, real/latched): " + ", ".join(
-                f"+{int(r.group(6)) - upd} {r.group(1)} {r.group(4)}/{r.group(5)}" for r in reads[:12]) + (" ..." if len(reads) > 12 else ""))
+            out.append("    Start reads (update offset, thread, program:pc, pad, real/latched): " + ", ".join(
+                f"+{int(r.group(8)) - upd} {r.group(1)} {r.group(2)}:{r.group(3)} p{r.group(4)} {r.group(6)}/{r.group(7)}" for r in reads[:12])
+                + (" ..." if len(reads) > 12 else ""))
         if runs:
             by = {}
             for r in runs:
@@ -314,13 +331,14 @@ def main():
     p.add_argument("--settle", type=float, default=4)
     p.add_argument("--idle", type=float, default=150)
     p.add_argument("--shots", default=None)
+    p.add_argument("--at", type=int, default=14030)
     r = sub.add_parser("report")
     r.add_argument("folders", nargs="+")
     r.add_argument("--out", default=None)
     r.add_argument("--vtables", default=None)
     a = ap.parse_args()
     if a.cmd == "pad":
-        lines = pad_lines(a.kind, a.hold, a.every, a.settle, a.idle, a.shots)
+        lines = pad_lines(a.kind, a.hold, a.every, a.settle, a.idle, a.shots, a.at)
         Path(a.out).write_text("\n".join(lines) + "\n", encoding="ascii")
         print(f"{a.out}: {len(lines)} lines")
     else:

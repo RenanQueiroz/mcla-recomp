@@ -77,7 +77,10 @@ constexpr uint32_t kStartBit = 2048;
 // The script button number of Start (the bit number in the pad record's masks).
 constexpr uint32_t kStartButton = 11;
 // scrThread::Run (sub_82554E20) stores the thread it runs here (and the previous one back after).
+// In the thread: +8 the program, +16 the program counter of the opcode being run.
 constexpr uint32_t kCurrentThread = 0x828DA3BC;
+constexpr uint32_t kThreadProgram = 8;
+constexpr uint32_t kThreadPc = 16;
 // Bit 0 of a function-local static's guard: 0 until the city's lighting set-up has run.
 constexpr uint32_t kCityGuard = 0x82836A28;
 // The dev pad's "game state" word and the "city pending" word (src/dev_pad.cpp), logged to see
@@ -167,44 +170,64 @@ std::mutex g_latch_mutex;
 std::array<std::array<uint32_t, kButtons>, kPadCount> g_edge_seq{};
 std::array<std::array<uint64_t, kButtons>, kPadCount> g_edge_us{};
 
-// What one script thread has done with one (pad, button).
+// What one script call site has done with one (pad, button). A call site is a place in a script's
+// code (the thread's program and program counter), not a thread: it is the same whichever thread
+// runs it, and still the same if the script starts a new thread for each pass of its loop.
 struct PollState {
   uint64_t last_poll_us = 0;  // its last read of this button
   uint32_t seen_seq = 0;      // the press it has been told about (the real edge or the latched one)
   uint64_t seen_update = 0;   // the pad update it was told in
   bool seen_latched = false;  // ... by the latch (later reads in that update answer the same)
 };
-struct ThreadPolls {
-  uint32_t thread = 0;  // the scrThread's address
+struct SitePolls {
+  uint64_t site = 0;  // (program << 32 | pc) with the top bit set; 0 = the slot is free
   uint64_t last_any_poll_us = 0;
   std::array<std::array<PollState, kButtons>, kPadCount> state{};
 };
-constexpr size_t kThreadSlots = 64;
-std::array<ThreadPolls, kThreadSlots> g_threads{};
+constexpr size_t kSiteSlots = 128;
+std::array<SitePolls, kSiteSlots> g_sites{};
 
-// The slot of a script thread (the one that polled longest ago is replaced when all are used).
+// The slot of a call site (the one that polled longest ago is replaced when all are used).
 // Called with g_latch_mutex held.
-ThreadPolls& ThreadSlot(uint32_t thread) {
+SitePolls& SiteSlot(uint64_t site) {
   size_t oldest = 0;
-  for (size_t i = 0; i < kThreadSlots; i++) {
-    if (g_threads[i].thread == thread) {
-      return g_threads[i];
+  for (size_t i = 0; i < kSiteSlots; i++) {
+    if (g_sites[i].site == site) {
+      return g_sites[i];
     }
-    if (g_threads[i].last_any_poll_us < g_threads[oldest].last_any_poll_us) {
+    if (g_sites[i].last_any_poll_us < g_sites[oldest].last_any_poll_us) {
       oldest = i;
     }
   }
-  g_threads[oldest] = ThreadPolls{};
-  g_threads[oldest].thread = thread;
-  return g_threads[oldest];
+  g_sites[oldest] = SitePolls{};
+  g_sites[oldest].site = site;
+  return g_sites[oldest];
 }
 
-// Did this script thread poll the pad in the last second (for the thread trace)?
+// The script threads that read the pad in the last second (for the trace of their runs).
+constexpr size_t kPollThreads = 32;
+std::array<std::pair<uint32_t, uint64_t>, kPollThreads> g_poll_threads{};
+
+// Called with g_latch_mutex held.
+void NotePollThread(uint32_t thread, uint64_t now) {
+  size_t oldest = 0;
+  for (size_t i = 0; i < kPollThreads; i++) {
+    if (g_poll_threads[i].first == thread) {
+      g_poll_threads[i].second = now;
+      return;
+    }
+    if (g_poll_threads[i].second < g_poll_threads[oldest].second) {
+      oldest = i;
+    }
+  }
+  g_poll_threads[oldest] = {thread, now};
+}
+
 bool IsPadPoller(uint32_t thread, uint64_t now) {
   std::lock_guard<std::mutex> lock(g_latch_mutex);
-  for (const ThreadPolls& t : g_threads) {
-    if (t.thread == thread) {
-      return t.last_any_poll_us && now - t.last_any_poll_us < 1'000'000;
+  for (const auto& t : g_poll_threads) {
+    if (t.first == thread) {
+      return t.second && now - t.second < 1'000'000;
     }
   }
   return false;
@@ -387,9 +410,9 @@ void mcla_pad_probe_update(PPCRegister& r31) {
 //
 // A script thread that runs only every 2nd to 4th update (the title's, above 30 FPS) asks in about
 // one update in 3 at 120 FPS and so misses most presses. With mcla_script_pad_latch_ms > 0 and the
-// title screen up, a thread that is not given the real press is told about it once, at its next
-// poll, when
-//  - it polled this button within 200 ms before the press (it is a poller: a thread that starts
+// title screen up, a call site in a script (program and program counter of the thread) that is not
+// given the real press is told about it once, at its next poll, when
+//  - it polled this button within 200 ms before the press (it is a poller: a call site that starts
 //    asking after the press is not told, so one press does not also answer the next screen),
 //  - it has not been told about this press (by the real edge, or earlier),
 //  - the press is at most mcla_script_pad_latch_ms old.
@@ -406,6 +429,9 @@ void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
     return;
   }
   const uint32_t thread = ReadGuestU32(kCurrentThread);
+  const uint32_t program = thread ? ReadGuestU32(thread + kThreadProgram) : 0;
+  const uint32_t pc = thread ? ReadGuestU32(thread + kThreadPc) : 0;
+  const uint64_t site = (uint64_t(program) << 32) | pc | (uint64_t(1) << 63);
   const uint64_t now = NowUs();
   const bool real = (r8.u32 != 0);
   bool latched = false;
@@ -413,7 +439,7 @@ void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
   uint64_t before_us = 0;
   {
     std::lock_guard<std::mutex> lock(g_latch_mutex);
-    ThreadPolls& t = ThreadSlot(thread);
+    SitePolls& t = SiteSlot(site);
     PollState& st = t.state[pad][button];
     const uint32_t seq = g_edge_seq[pad][button];
     const uint64_t edge_us = g_edge_us[pad][button];
@@ -438,6 +464,7 @@ void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
     before_us = st.last_poll_us ? now - st.last_poll_us : 0;
     st.last_poll_us = now;
     t.last_any_poll_us = now;
+    NotePollThread(thread, now);
   }
   if (latched) {
     r8.u64 = 1;
@@ -456,9 +483,9 @@ void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
     }
     if (Window()) {
       REXLOG_INFO(
-          "TS padread thread={:08X} pad={} button={} real={} latched={} update={} t={} "
-          "press_age_us={} previous_poll_us_ago={}",
-          thread, pad, button, real ? 1 : 0, latched ? 1 : 0,
+          "TS padread thread={:08X} program={:08X} pc={} pad={} button={} real={} latched={} update={} "
+          "t={} press_age_us={} previous_poll_us_ago={}",
+          thread, program, pc, pad, button, real ? 1 : 0, latched ? 1 : 0,
           g_update.load(std::memory_order_relaxed), now, age_us, before_us);
     }
   }
