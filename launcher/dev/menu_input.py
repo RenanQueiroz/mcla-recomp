@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 TAP_LENS = [60, 100, 150, 80, 120, 60, 100, 150]
-CAPS = [30, 60, 120, 0]
+CAPS = [120, 0, 60, 30]  # the caps that matter first: a run cut short still has them
 # (timing fix, repeat fix): A = as shipped in v0.3.0, B = the repeat fix, C = the timing fix off (the
 # workaround), D = both off the shipped way round (timing fix off, repeat fix on).
 VARIANTS = {"A": (1, 0), "B": (1, 1), "C": (0, 0), "D": (0, 1)}
