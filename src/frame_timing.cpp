@@ -1105,6 +1105,7 @@ struct UiStepState {
   std::atomic<uint32_t> period_us{0};  // the nominal time between its steps
   std::atomic<uint64_t> step_us{0};    // when the last step belongs on its schedule
   std::atomic<uint32_t> frame_us{0};   // the time between updates (smoothed), as the hook sees them
+  std::atomic<uint32_t> calls{0};      // updates that reached the hook (one per drawn frame, as the draw sees it)
   std::atomic<uint64_t> last_call_us{0};
   char name[32]{};
 };
@@ -1121,6 +1122,7 @@ void TouchUiStep(size_t slot, uint32_t context, uint64_t now_us, const char* nam
     s.last_call_us.store(0, std::memory_order_relaxed);
     s.context.store(context, std::memory_order_release);
   }
+  s.calls.fetch_add(1, std::memory_order_relaxed);
   const uint64_t last = s.last_call_us.load(std::memory_order_relaxed);
   if (last && now_us > last && now_us - last < 250'000) {
     const uint32_t d = uint32_t(now_us - last);
@@ -1309,6 +1311,22 @@ uint64_t g_inst_sweep_us = 0;
 uint64_t g_check_n = 0, g_check_matrix_bad = 0, g_check_cx_bad = 0, g_check_glide = 0, g_check_applied = 0;
 double g_check_max_err = 0;
 uint64_t g_check_log_us = 0;
+// What each step changed, per context (mcla_ui_interp_log): how many nodes moved, changed their colour transform,
+// were new or another character (shown as they are), jumped (snapped), and the largest move.
+struct UiCensus {
+  uint32_t serial = 0;
+  uint32_t moved = 0, cx = 0, fresh = 0, snapped = 0, gap = 0;
+  double max_move = 0;
+};
+std::array<UiCensus, 32> g_census;
+// One time for all the nodes of a frame (and of the passes that draw it more than once): the update it
+// belongs to and the time of its first node. Else a mask and what it masks, drawn a moment apart, would
+// glide a fraction of a pixel apart.
+struct UiFrameTime {
+  uint32_t calls = 0;
+  uint64_t now_us = 0;
+};
+std::array<UiFrameTime, 32> g_frame_time;
 }  // namespace
 
 void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
@@ -1343,7 +1361,7 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
   // Worth doing only when several frames are drawn per step; else it would only add delay.
   const bool fast_enough = frame_us && uint64_t(frame_us) * 10 <= uint64_t(period_us) * 6;
   const bool apply = apply_opt && fast_enough;
-  const uint64_t now = NowMicros();
+  const uint32_t calls = step->calls.load(std::memory_order_relaxed);
   const uint64_t window_us =
       std::max<uint64_t>(1, uint64_t(period_us) * uint64_t(std::clamp(REXCVAR_GET(mcla_ui_interp_window_pct), 10, 100)) / 100);
 
@@ -1368,10 +1386,33 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
   }
 
   std::lock_guard lock(g_inst_mutex);
-  if (now - g_inst_sweep_us > 2'000'000) {
-    g_inst_sweep_us = now;
+  UiFrameTime& frame_time = g_frame_time[size_t(step - g_ui_step.data()) % g_frame_time.size()];
+  const uint64_t real_now = NowMicros();
+  if (frame_time.calls != calls || real_now - frame_time.now_us > 6000) {
+    frame_time = {calls, real_now};
+  }
+  const uint64_t now = frame_time.now_us;
+  UiCensus* census = nullptr;
+  if (log) {
+    census = &g_census[size_t(step - g_ui_step.data()) % g_census.size()];
+    if (census->serial != serial) {
+      if (census->serial) {
+        size_t tracked = 0;
+        for (const auto& kv : g_inst) {
+          tracked += kv.second.ctx == ctx;
+        }
+        REXLOG_INFO("ui interp step: {} ser={} moved={} cx={} fresh={} snapped={} gap={} max_move={:.1f}px tracked={}",
+                    step->name, census->serial, census->moved, census->cx, census->fresh, census->snapped, census->gap,
+                    census->max_move, tracked);
+      }
+      *census = {};
+      census->serial = serial;
+    }
+  }
+  if (real_now - g_inst_sweep_us > 2'000'000) {
+    g_inst_sweep_us = real_now;
     for (auto it = g_inst.begin(); it != g_inst.end();) {
-      it = now - it->second.seen_us > 5'000'000 ? g_inst.erase(it) : std::next(it);
+      it = real_now - it->second.seen_us > 5'000'000 ? g_inst.erase(it) : std::next(it);
     }
   }
 
@@ -1394,8 +1435,8 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
     g_check_matrix_bad += worst > 0.01;
     g_check_cx_bad += cx_bad;
     g_check_max_err = std::max(g_check_max_err, worst);
-    if (now - g_check_log_us > 3'000'000) {
-      g_check_log_us = now;
+    if (real_now - g_check_log_us > 3'000'000) {
+      g_check_log_us = real_now;
       REXLOG_INFO("ui interp check: nodes={} matrix_off={} (worst {:.5f}) cxform_off={} gliding={} applied={}", g_check_n,
                   g_check_matrix_bad, g_check_max_err, g_check_cx_bad, g_check_glide, g_check_applied);
     }
@@ -1409,6 +1450,9 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
   const bool fresh = e.ctx != ctx || e.def != def || e.depth != depth || e.charid != charid || e.parent != parent;
   if (fresh) {
     // New, or another character at this place: shown as it is.
+    if (census) {
+      census->fresh++;
+    }
     e = {};
     e.ctx = ctx;
     e.def = def;
@@ -1427,6 +1471,12 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
     // A step changed this node (or something else did): glide from what was shown to the new values,
     // unless steps went by without a draw of it (then nothing to glide from).
     const bool gap = serial - e.serial > 1;
+    if (census) {
+      census->gap += gap;
+      census->moved += std::memcmp(live_m, e.to_m, sizeof live_m) != 0;
+      census->cx += std::memcmp(live_c, e.to_c, sizeof live_c) != 0;
+      census->max_move = std::max(census->max_move, std::hypot(double(live_m[4]) - e.to_m[4], double(live_m[5]) - e.to_m[5]));
+    }
     std::memcpy(e.from_m, gap ? live_m : e.shown_m, sizeof live_m);
     std::memcpy(e.from_c, gap ? live_c : e.shown_c, sizeof live_c);
     std::memcpy(e.to_m, live_m, sizeof live_m);
@@ -1441,10 +1491,13 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
     if (std::fabs(double(e.to_m[4]) - e.from_m[4]) > snap || std::fabs(double(e.to_m[5]) - e.from_m[5]) > snap ||
         scale_jump > 0.75) {
       std::memcpy(e.from_m, live_m, sizeof live_m);
+      if (census) {
+        census->snapped++;
+      }
     }
   }
   e.serial = serial;
-  e.seen_us = now;
+  e.seen_us = real_now;
 
   double alpha = 1.0;
   if (now < e.t0_us) {
