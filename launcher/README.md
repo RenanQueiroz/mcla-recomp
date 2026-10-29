@@ -514,6 +514,24 @@ clicking it, or Enter or the controller's A on it, shows the same text in a
 flyout. The texts are in `src\GameSettings.cs`, checked against the code and
 the measurements in these notes.
 
+The settings are laid out two to a row, in two columns of equal width (`Pairs`, `src\LauncherApp.cs`):
+every section of the page (Graphics, HDR, Game) shares the window's width in halves, whatever the
+drop-downs hold. A drop-down is as wide as its column; a choice too long for it ends in an ellipsis in the
+closed box, and the open list is as wide as its longest choice and shows it in full. Until v0.3.0 the
+columns took the width of their contents. The cause, as read from the code and not looked at in a running
+window: the settings page's scroll viewer could scroll sideways, so it measured its content with no width
+limit (the setup wizard's page already turned that off), and a star-sized column then takes the width of what
+it holds, so the one long label of Graphics API ("Automatic (Vulkan on Intel and AMD RDNA integrated
+graphics, Direct3D 12 otherwise)") made its column wide and squeezed the other. The page now scrolls only up
+and down, so its content is measured with the window's width, and the label is "Automatic (default)"; what
+Automatic does is in the "i" next to *Graphics API*. Not checked by a test: nothing in the launcher renders
+this page without a window (the wizard's `MCLA_DEV_SHOTS` pictures are of the wizard's pages only). To look at
+it, build the launcher in a scratch clone with `launcher\build-launcher.ps1 -NoShortcut` (without the switch it
+rewrites the desktop shortcut) and start that clone's `launcher\app\MclaLauncher.exe`: in Graphics, the two
+columns are equal at the window's default width (920) and at its minimum (720), *Graphics API* reads
+"Automatic (default)" and its list opens with the three choices in full, a long choice in any drop-down ends in
+an ellipsis, and the HDR and Game sections are laid out as before.
+
 *Display gamma* (`mcla_display_gamma`) picks the gamma ramp the picture goes
 through on its way to the screen, and it switches during play too (the pause
 menu's DISPLAY > DISPLAY GAMMA). *TV* (`tv`, the default) is the console's ramp
@@ -628,7 +646,7 @@ Lowest is Low-end and the real-time shadows off too (`mcla_shadows`, the pause m
 Radeon (Vulkan, native resolution, a frozen race start: Low-end 34.2 ms, 12.3% below; Lowest 28.8 ms) and 17% at 3x on an RTX 5080,
 at the price of every sun shadow, the one under the car too (`dev\aniso-2026-10-27.md`).
 
-*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, which is
+*Graphics API* picks the GPU plugin's backend (`mcla_gpu_backend`: `any`, shown as "Automatic (default)" (its tip says what it picks), which is
 Vulkan on AMD's integrated graphics of the RDNA generation and on Intel graphics and
 Direct3D 12 on everything else (AMD graphics cards, NVIDIA, and the integrated Vega graphics
 of the older Ryzen APUs), `d3d12` or `vulkan`). The setting marks the one Automatic picks for

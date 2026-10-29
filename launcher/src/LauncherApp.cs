@@ -38,6 +38,29 @@ sealed class LauncherApp : Component
 
     static bool GameIsRunning() => GameSettings.GameIsRunning();
 
+    // How a drop-down shows its choices: on one line, with an ellipsis where the box is too narrow for the
+    // text. The open list is as wide as its longest choice and shows it in full. Made once, on the UI thread
+    // (the first drop-down to be built); if it can't be loaded the choices are clipped, not trimmed, as before.
+    static Microsoft.UI.Xaml.DataTemplate? trimmedChoice;
+    static bool trimmedChoiceTried;
+
+    static Microsoft.UI.Xaml.DataTemplate? TrimmedChoice()
+    {
+        if (trimmedChoiceTried) return trimmedChoice;
+        trimmedChoiceTried = true;
+        try
+        {
+            trimmedChoice = (Microsoft.UI.Xaml.DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+                "<DataTemplate xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\">"
+                + "<TextBlock Text=\"{Binding}\" TextTrimming=\"CharacterEllipsis\" MaxLines=\"1\"/></DataTemplate>");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"drop-down item template: {ex.Message}");
+        }
+        return trimmedChoice;
+    }
+
     public override Element Render()
     {
         // Loading the settings also moves an older launcher's choices into
@@ -959,6 +982,7 @@ sealed class LauncherApp : Component
                 SettingTitle(setting.Header, setting.Info),
                 ComboBox(choices.Select(c => c.Label).ToArray(), index,
                          i => { if (i >= 0 && i < choices.Length && i != index) SetGameSetting(setting.Key, choices[i].Value); })
+                    .Set(box => { if (box.ItemTemplate is null && TrimmedChoice() is { } template) box.ItemTemplate = template; })
                     .AutomationName(setting.Header)
                     .HAlign(HorizontalAlignment.Stretch)
                     .IsEnabled(!gameRunning));
@@ -1066,7 +1090,10 @@ sealed class LauncherApp : Component
         static Element OptionCheckBox(bool value, Action<bool> onChanged, string label, string info) =>
             HStack(2, CheckBox(value, onChanged, label), InfoTip(label, info));
 
-        // Two to a row, in reading order.
+        // Two to a row, in reading order. The two columns are equal stars, so they share the page's width
+        // whatever the controls in them hold: that holds only while the page is measured with the window's
+        // width (Settings keeps the scroll viewer from scrolling sideways; with the width unbounded a star
+        // column takes the width of its content, and a long choice in one drop-down squeezed the other column).
         static Element Pairs(params Element[] items) =>
             Grid(
                 columns: [GridSize.Star(), GridSize.Star()],
@@ -1075,7 +1102,7 @@ sealed class LauncherApp : Component
                                               .WithKey(i.ToString())).ToArray());
 
         Element Settings() =>
-            ScrollViewer(VStack(12,
+            (ScrollViewer(VStack(12,
                 Subtitle("Graphics"),
                 Pairs(GameSettings.GraphicsFor(gameSettings, DisplayRefresh.Main.Value,
                                                GpuVendor.For(ShaderStamp.LastAdapterVendor(GameOptions.Arguments(settingsRef.Current), Paths.BuildDir),
@@ -1087,8 +1114,7 @@ sealed class LauncherApp : Component
                     .Select((line, i) => TextBlock(line).Foreground(Theme.SecondaryText).WithKey(i.ToString())).ToArray()),
                 Subtitle("Game"),
                 Pairs([.. GameSettings.Game.Select(SettingCombo), PlayerNameBox()]),
-                // Lines short enough for the window: in this scroll viewer a
-                // TextBlock is measured without a width limit, so it doesn't wrap.
+                // Lines short enough for the window: these TextBlocks don't wrap.
                 VStack(2, preparing
                     ? [TextBlock("Shaders are being prepared with these settings.").Foreground(Theme.SecondaryText),
                        TextBlock("They can be changed again in a few seconds, when it's done.").Foreground(Theme.SecondaryText)]
@@ -1114,7 +1140,7 @@ sealed class LauncherApp : Component
                             OptionCheckBox(settings.AutoPlay, v => updateSettings(s => s with { AutoPlay = v }),
                                            "Start the game right away when there's nothing to update", GameSettings.AutoPlayInfo)))
                 ).HAlign(HorizontalAlignment.Stretch).HorizontalContentAlignment(HorizontalAlignment.Stretch)
-            ).Padding(0, 0, 12, 0)).Margin(0, 16, 0, 0);
+            ).Padding(0, 0, 12, 0)) with { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }).Margin(0, 16, 0, 0);
 
         Element Actions()
         {

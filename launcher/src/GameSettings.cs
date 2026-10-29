@@ -300,10 +300,13 @@ static class GameSettings
              + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
     };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
-        [new("Automatic (Vulkan on Intel and AMD RDNA integrated graphics, Direct3D 12 otherwise)", "any"),
+        [new("Automatic (default)", "any"),
          new("Direct3D 12", "d3d12"), new("Vulkan", "vulkan")], "any")
     {
-        Info = "Which graphics system the game uses. Automatic picks Vulkan on Intel graphics and on AMD's "
+        // The label is short on purpose: what Automatic does is said in the tip (the "i"), not in the closed
+        // drop-down, where the long label made its column wider than the other (LauncherApp.cs, Settings).
+        Info = "Which graphics system the game uses. Automatic (the default) picks Vulkan on Intel and AMD RDNA "
+             + "integrated graphics and Direct3D 12 otherwise. In detail: Vulkan on Intel graphics and on AMD's "
              + "integrated graphics of the RDNA generation (the Radeon graphics of a Ryzen 7000 or 9000 "
              + "processor, which share the CPU's memory), and Direct3D 12 on NVIDIA, on AMD graphics cards and "
              + "on AMD's older integrated Vega graphics (the Ryzen 5000G and before: a Ryzen 7 5700G showed the HUD, "
