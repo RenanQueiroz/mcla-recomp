@@ -16,6 +16,12 @@
     <Compile Include="..\..\..\src\ShaderStamp.cs" />
     <Compile Include="..\..\..\src\ShaderPrep.cs" />
     <Compile Include="..\..\..\src\DisplayHdr.cs" />
+    <!-- Backend.cs names the setup wizard's types (Setup.UpdateTarget in RepoStatus), so the Setup
+         folder and what it uses are compiled in too, as in wizard-check's project. -->
+    <Compile Include="..\..\..\src\Setup\*.cs" />
+    <Compile Include="..\..\..\src\SelfUpdate.cs" />
+    <Compile Include="..\..\..\src\Net.cs" />
+    <Compile Include="..\..\..\installer\FolderSwap.cs" />
   </ItemGroup>
 
 </Project>
