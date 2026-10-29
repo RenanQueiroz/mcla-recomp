@@ -967,11 +967,51 @@ REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 60, "MCLA",
                      "ticker, 30 as on the console, 0 for every frame")
     .range(0, 240);
 
+// The menus' rate, like the HUD's. 30 is what the console ran them at and what the menus'
+// animations were made for. A higher rate makes the highlight, the page changes and the pop-ups
+// arrive sooner, and every animation of the UI screens runs that many times as fast (60: twice,
+// 120: four times, 0: every frame, as without mcla_ui_timing_fix).
+REXCVAR_DEFINE_INT32(mcla_ui_menu_rate, 30, "MCLA",
+                     "How many times a second the menus, the pause menu, pop-ups and map panels (the "
+                     "UI manager's screens, not the HUD) advance: 30 (the default, as on the console), "
+                     "60 or 120 for snappier menus with animations that run 2 or 4 times as fast, 0 for "
+                     "every frame")
+    .range(0, 240);
+
+// A menu key event (a press, or a repeat of a held direction) is answered on the update it is
+// delivered in, without waiting for the screens' next slot (up to 33 ms at 30 a second, 17 on
+// average). The key events come from the UI input object (sub_82223CD8, hooks mcla_ui_key_press and
+// mcla_ui_key_repeat below), which the UI manager's update runs before it steps the movies, so the
+// movies that step in that update show the widgets' reaction (the highlight moving, the new value).
+// Each UI screen takes one extra advance per key event and its schedule restarts from it, so the
+// animations keep near the console's speed: a tap adds half a movie frame on average, a held
+// direction at most 5 extra advances a second. Not the HUD (its own rate), and not an update that
+// follows another input advance of the same screen by less than 100 ms.
+REXCVAR_DEFINE_BOOL(mcla_ui_advance_on_input, false, "MCLA",
+                    "Advance the UI's menus, pop-ups and map screens on the update a menu key event "
+                    "(a press or a repeat) is delivered in, instead of waiting for their next slot "
+                    "(mcla_ui_menu_rate): the highlight answers a press at once, not 0 to 33 ms later");
+REXCVAR_DEFINE_BOOL(mcla_ui_advance_log, false, "MCLA",
+                    "Development: log every advance of a UI screen (its name, the time, and whether a "
+                    "key event caused it), for measuring how soon the menus answer a press");
+
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
 // count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
 // context). From LARecomp's notes, used with its author's permission.
 constexpr uint32_t kUiManagerPtr = 0x8286D804;
+
+// The last menu key event (a press or a repeat that the UI input object delivers): a counter and the
+// time. Written by the key hooks and read by the movie advance, one after the other in the same
+// update of the same thread.
+std::atomic<uint32_t> g_ui_input_seq{0};
+std::atomic<uint64_t> g_ui_input_us{0};
+// A key event older than this when a movie comes to look at it belongs to an update long gone (the
+// movie was not stepped meanwhile): not answered.
+constexpr uint64_t kUiInputWindowUs = 100'000;
+// Least time between two extra advances of one screen, whatever the key events do (with
+// mcla_ui_repeat_fix off a held direction repeats every 50 ms at 120 FPS).
+constexpr uint64_t kUiInputGapUs = 100'000;
 
 uint32_t ReadGuestU32(uint32_t address) {
   if (address < 0x10000) {
@@ -981,18 +1021,10 @@ uint32_t ReadGuestU32(uint32_t address) {
   return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
 }
 
-bool GuestStringIs(uint32_t address, const char* text) {
-  if (address < 0x10000) {
-    return false;
-  }
-  const char* s = reinterpret_cast<const char*>(rex::Runtime::instance()->virtual_membase() +
-                                                address);
-  return std::strncmp(s, text, std::strlen(text) + 1) == 0;
-}
-
-// Whether a player context belongs to one of the UI manager's screens other
-// than the HUD map.
-bool IsUiScreen(uint32_t context) {
+// Finds the UI manager's screen that owns a player context. Returns false for a movie outside its map
+// (the HUD's gauge movie); else copies the screen's name (HUDMAPMOVIE, PAUSEMOVIE, POPUPMOVIE, ...).
+bool UiScreenName(uint32_t context, char (&name)[32]) {
+  name[0] = 0;
   const uint32_t manager = ReadGuestU32(kUiManagerPtr);
   if (!manager) {
     return false;
@@ -1005,11 +1037,31 @@ bool IsUiScreen(uint32_t context) {
       const uint32_t holder = ReadGuestU32(node + 8);
       const uint32_t movie = holder ? ReadGuestU32(holder) : 0;
       if (movie && ReadGuestU32(movie + 56) == context) {
-        return !GuestStringIs(ReadGuestU32(node), "HUDMAPMOVIE");
+        const uint32_t text = ReadGuestU32(node);
+        if (text >= 0x10000) {
+          const char* s = reinterpret_cast<const char*>(rex::Runtime::instance()->virtual_membase() + text);
+          size_t n = 0;
+          for (; n + 1 < sizeof name && s[n]; n++) {
+            name[n] = s[n];
+          }
+          name[n] = 0;
+        }
+        return true;
       }
     }
   }
   return false;
+}
+
+// Whether a player context belongs to one of the UI manager's screens other
+// than the HUD map.
+bool IsUiScreen(uint32_t context, char (&name)[32]) {
+  return UiScreenName(context, name) && std::strcmp(name, "HUDMAPMOVIE") != 0;
+}
+
+void NoteUiKeyEvent(uint64_t now_us) {
+  g_ui_input_us.store(now_us, std::memory_order_relaxed);
+  g_ui_input_seq.fetch_add(1, std::memory_order_release);
 }
 }  // namespace
 
@@ -1018,12 +1070,14 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
       !g_engine_timer_started.load(std::memory_order_relaxed)) {
     return false;
   }
-  constexpr uint64_t kScreenPeriodMicros = 1'000'000ull / 30;
   struct Schedule {
     uint32_t context;
     uint64_t next_us;
     uint64_t checked_us;  // when IsUiScreen was last asked: movies come and go
+    uint64_t input_us;    // the last extra advance because of a key event
+    uint32_t input_seq;   // the last key event this movie has looked at
     bool screen;
+    char name[32];
   };
   static std::mutex mutex;
   static std::array<Schedule, 32> schedules{};
@@ -1040,25 +1094,58 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   }
   if (!schedule) {
     schedule = &schedules[replace++ % schedules.size()];
-    *schedule = {context, 0, 0, false};
+    *schedule = {context, 0, 0, 0, g_ui_input_seq.load(std::memory_order_acquire), false, {}};
   }
   if (now - schedule->checked_us > 1'000'000) {
     schedule->checked_us = now;
-    schedule->screen = IsUiScreen(context);
+    schedule->screen = IsUiScreen(context, schedule->name);
   }
-  uint64_t period_us = kScreenPeriodMicros;
-  if (!schedule->screen) {
+  const bool log_adv = schedule->screen && REXCVAR_GET(mcla_ui_advance_log);
+  uint64_t period_us;
+  bool by_input = false;
+  if (schedule->screen) {
+    const int32_t menu_rate = REXCVAR_GET(mcla_ui_menu_rate);
+    if (menu_rate <= 0) {
+      if (log_adv) {
+        REXLOG_INFO("ui adv: {} ctx={:08X} t={}.{:03} ms in=0", schedule->name, context, now / 1000, now % 1000);
+      }
+      return false;
+    }
+    period_us = 1'000'000ull / uint64_t(menu_rate);
+    const uint32_t seq = g_ui_input_seq.load(std::memory_order_acquire);
+    if (seq != schedule->input_seq) {
+      schedule->input_seq = seq;
+      // A key event was delivered since this movie was last looked at, in the update that is running
+      // now (the input object runs before the movies). Answer it with an advance, unless the movie
+      // is due anyway, an earlier answer is too recent, or the event is old.
+      by_input = REXCVAR_GET(mcla_ui_advance_on_input) &&
+                 now - g_ui_input_us.load(std::memory_order_relaxed) <= kUiInputWindowUs &&
+                 now - schedule->input_us >= kUiInputGapUs;
+    }
+  } else {
     const int32_t hud_rate = REXCVAR_GET(mcla_ui_hud_rate);
     if (hud_rate <= 0) {
       return false;
     }
     period_us = 1'000'000ull / uint64_t(hud_rate);
   }
-  if (schedule->next_us && now + period_us / 4 < schedule->next_us) {
+  const bool not_due = schedule->next_us && now + period_us / 4 < schedule->next_us;
+  if (not_due && !by_input) {
     return true;
   }
-  const bool behind = !schedule->next_us || now > schedule->next_us + period_us;
-  schedule->next_us = behind ? now + period_us : schedule->next_us + period_us;
+  if (not_due) {
+    // The extra advance: the schedule restarts from it.
+    schedule->next_us = now + period_us;
+    schedule->input_us = now;
+  } else {
+    by_input = false;
+    const bool behind = !schedule->next_us || now > schedule->next_us + period_us;
+    schedule->next_us = behind ? now + period_us : schedule->next_us + period_us;
+  }
+  if (log_adv) {
+    REXLOG_INFO("ui adv: {} ctx={:08X} t={}.{:03} ms in={}", schedule->name, context, now / 1000, now % 1000,
+                by_input ? 1 : 0);
+  }
   return false;
 }
 
@@ -1131,6 +1218,7 @@ void mcla_ui_key_press(PPCRegister& r31, PPCRegister& r4) {
   }
   const uint64_t now = NowMicros();
   g_ui_key[input] = {now, uint64_t(std::max(0, REXCVAR_GET(mcla_ui_repeat_delay_ms))) * 1000};
+  NoteUiKeyEvent(now);
   if (REXCVAR_GET(mcla_ui_input_log)) {
     LogUiKey("down", input, r4.s32, now);
   }
@@ -1167,6 +1255,7 @@ void mcla_ui_key_repeat(PPCRegister& r10, PPCRegister& r8, PPCRegister& r29, PPC
     key.last_us = late < int64_t(key.need_us / 2) ? key.last_us + key.need_us : now;
     key.need_us = uint64_t(std::max(0, REXCVAR_GET(mcla_ui_repeat_interval_ms))) * 1000;
   }
+  NoteUiKeyEvent(now);
   if (REXCVAR_GET(mcla_ui_input_log)) {
     LogUiKey("repeat", input, r4.s32, now);
   }
