@@ -1,0 +1,11 @@
+# Boot -> title -> map zoom-out loading -> free roam, then the script ends and the dev pad quits the game (mcla_pad_exit_on_end, the window's RequestClose).
+# For launcher/dev/exit_probe.py (the exit hang). Run it without --keep-open.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+log exit: end of the script
+mark end

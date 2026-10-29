@@ -1,0 +1,13 @@
+# Boot -> title -> map zoom-out loading -> free roam, then close the window the way its close button does (WM_CLOSE).
+# For launcher/dev/exit_probe.py (the exit hang). Run it with --keep-open.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+log exit: window close
+mark end
+close
+wait 60s

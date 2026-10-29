@@ -2032,6 +2032,27 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 |---|---|---|
 | The warning logged once per run (`affinity_warning_once`); `debug_affinity_logical_processors` | `src/system/xthread.cpp` | all platforms with fewer than 6 logical processors (and the debug option anywhere) |
 
+## rexglue-exit-gpu-drain.patch
+
+**Why.** Quitting the game ends the process with `std::_Exit(0)` right after `TerminateTitle` (`ReXApp::OnClosing`, `src/ui/rex_app.cpp`). `TerminateTitle` stops the game's own threads; the host GPU threads (the command processor, the submission thread, the pipeline-creation threads, the storage writer) are left running and are ended by the exit wherever they are, in the middle of calls into the GPU driver. In 11 of 14 scripted runs with the game limited to 4 logical processors and 4 busy processes beside it, and in one earlier run, the process then stayed alive with one idle thread ("D3D Background Thread 0") until the test driver gave up (`KNOWN-ISSUES.md`, `launcher/dev/exit-hang-2026-10-29.md`). **The cause is inferred, not measured**; this patch is a candidate fix and an instrument, both off.
+
+**What it changes** (`src/ui/rex_app.cpp`, `include/rex/system/interfaces/graphics.h`, `include/rex/graphics/graphics_system.h`, `src/graphics/graphics_system.cpp`).
+- `exit_gpu_drain_ms` (int, default 0 = off): when the window closes, after `TerminateTitle` and before the hard exit, `IGraphicsSystem::StopForProcessExit(N)` is called. `GraphicsSystem` runs `CommandProcessor::Shutdown()` on a thread of its own and waits up to N ms for it: the worker thread waits for the GPU to finish the submitted work (`AwaitAllQueueOperationsCompletion`), ends the submission thread, joins the pipeline-creation threads and the storage writer, and releases the host GPU objects. The presenter and the provider are left as they are (no swap chain teardown), and nothing shuts the command processor down a second time, because the process ends next. If it did not stop in time the process ends anyway, N ms later. The log says `Exit: the GPU command processor stopped in N ms.` or `... did not stop within N ms; ending the process.` before the usual `Title terminated; hard-exiting process.`.
+- `exit_terminate_process` (bool, default false): the process ends with `TerminateProcess(GetCurrentProcess(), 0)` instead of `std::_Exit(0)` (Windows; `std::_Exit` stays the fallback), so the DLLs get no `DLL_PROCESS_DETACH`.
+- With both off nothing changes: the same calls in the same order.
+
+**Risks.** The command processor's shutdown is the SDK's normal one, run on the exit path for the first time; it was not run in the game before this patch. It may take long under load (it joins the pipeline-creation threads), which is why it is bounded. A game thread that is still running (a straggler `TerminateTitle` left) and calls into the GPU after it is stopped is not guarded against.
+
+**Upstream:** not offered for now (all upstream work is parked).
+
+**Checked.** CI compiles it against the patched SDK on Windows (llvm-mingw). **Not run in the game**: the chain in `launcher/dev/exit-hang-2026-10-29.md` is the first run. Not built on Linux or the PS5.
+
+| Change | Files | Affects |
+|---|---|---|
+| `exit_gpu_drain_ms`, `exit_terminate_process`; the log lines | `src/ui/rex_app.cpp` | the window's close, all platforms (`exit_terminate_process` only on Windows) |
+| `IGraphicsSystem::StopForProcessExit` (default: nothing) | `include/rex/system/interfaces/graphics.h` | the interface (a default, no change for other implementations) |
+| `GraphicsSystem::StopForProcessExit` | `include/rex/graphics/graphics_system.h`, `src/graphics/graphics_system.cpp` | the Xenos GPU plugin, when `exit_gpu_drain_ms` is set |
+
 ## rexglue-mingw.patch
 
 **Why.** Builds the SDK, `rexglue.exe` and the game with llvm-mingw 20250709 (Clang 20.1.8, lld, libc++ and mingw-w64 on Windows' UCRT), so that a PC needs no Microsoft compiler (`scripts\make_pc.ps1 -Toolchain mingw`). Found by building the SDK that way: every change is small, and guarded or without effect for the Microsoft toolchain (checked: the msvc build's `mcla.exe`, `rexruntime.dll`, `rexgpu-xenos.dll` and the code `rexglue codegen` writes are unchanged). A game built this way was compared with the msvc build's (the same Clang version, 62 scripted runs on both APIs, 2026-10-24): the same pictures, saves and behaviour, and frame times within the benchmarks' own spread.

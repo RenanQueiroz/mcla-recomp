@@ -1,0 +1,25 @@
+# Boot -> title -> map zoom-out loading -> free roam, then quit the way a player does: the pause menu's QUIT GAME (the Settings tab's last row).
+# For launcher/dev/exit_probe.py (the exit hang, launcher/dev/exit-hang-2026-10-29.md). Run it with --keep-open (the game ends by the menu, not by the script).
+# The Settings list on Windows is OPTIONS, STATISTICS, CHEAT CODES, MUSIC PLAYLISTS, DISPLAY, PERFORMANCE, CONTROLS, RESTART GAME, QUIT GAME: 9 rows, QUIT GAME is row 8.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+log exit: pause menu
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press rb 4f
+wait 1000ms 60f
+wait_until ui_count == 9 10s
+press_until down ui_select == 8 every=700ms hold=150ms timeout=30s
+wait 600ms 36f
+log exit: QUIT GAME selected
+uisel
+press a 4f
+mark end
+wait 60s
