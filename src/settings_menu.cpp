@@ -1741,6 +1741,30 @@ void MclaSaveMenuSettings() {
   SaveSettingsIfChanged();
 }
 
+// Development (src/dev_pad.cpp, "uisel" and the ui_* conditions): the list the game rendered last
+// (the pause menu's, or the one of a submenu of ours), as the game keeps it: the selected row, how far
+// the list is scrolled, how many rows it holds, and the selected row's own value slot (an option row's
+// index; meaningless for a plain button). False until a list has been rendered.
+bool MclaMenuListState(uint32_t& list, int32_t& select, int32_t& scroll, int32_t& count,
+                       int32_t& row_value) {
+  list = g_last_list.load(std::memory_order_relaxed);
+  if (!list || !Membase()) {
+    return false;
+  }
+  select = int32_t(Read32(list + kListSelect));
+  scroll = int32_t(Read32(list + kListScroll));
+  count = int32_t(Read16(list + kListCountCap));
+  row_value = -1;
+  const auto in_heap = [](uint32_t address) { return address >= 0x40000000u && address < 0xE0000000u; };
+  const uint32_t rows = Read32(list + kListRows);
+  if (in_heap(rows) && select >= 0 && select < count) {
+    if (const uint32_t row = Read32(rows + 4u * uint32_t(select)); in_heap(row)) {
+      row_value = int32_t(Read32(row + kRowSelect));
+    }
+  }
+  return true;
+}
+
 // Every frame, on the thread that polls input (src/frame_timing.cpp): while a
 // submenu is open, whether left and right are down (d-pad or left stick), for
 // telling a held direction from new presses (HoldSteps).

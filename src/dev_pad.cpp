@@ -36,6 +36,9 @@
 //   play <recording.csv> [from=<mark>]   record start <file.csv> | record stop
 //   cars (race cars' positions)   watch <every> | watch stop (log them)
 //   screens (the UI manager's movies)
+//   uisel (the list the game rendered last: its selected row, scroll, row count and the selected
+//     row's value slot; for checking how many steps a menu press made; the conditions ui_select,
+//     ui_count and ui_rowval <op> <value> wait for them, and mcla_ui_input_log logs every key event)
 //   follow <route> [speed=1] | follow stop | follow status (drive a route; a car knocked off it
 //     is brought back, see "Route following")
 //   autocontinue on | off | status (press A when a dialog over the race stops the world)
@@ -127,6 +130,8 @@ REXCVAR_DEFINE_BOOL(mcla_freeze, false, "MCLA",
                     "of one moment (A/B of rendering options, temporal AA convergence)");
 
 bool MclaSaveInProgress();  // src/save_wait.cpp
+bool MclaMenuListState(uint32_t& list, int32_t& select, int32_t& scroll, int32_t& count,
+                       int32_t& row_value);  // src/settings_menu.cpp
 
 uint64_t MclaPumpRounds();  // src/poll_wait.cpp: rounds of the thread that frees the command ring's slots
 uint64_t MclaPumpEarlyWakes();  // src/poll_wait.cpp: of those, the ones the main thread's ring wait called early
@@ -1597,11 +1602,12 @@ bool Compare(double a, const std::string& op, double b, bool& ok) {
 }
 
 struct Condition {
-  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam } kind = kFrames;
+  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kUiList } kind = kFrames;
   bool is_float = false;
   std::string address;
   std::string op;
   double value = 0;
+  int ui_field = 0;  // kUiList: 0 select, 1 count, 2 row value, 3 scroll
 };
 
 bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& c,
@@ -1623,6 +1629,21 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     i += 2;
     return true;
   }
+  if (word == "ui_select" || word == "ui_count" || word == "ui_rowval" || word == "ui_scroll") {
+    c.kind = Condition::kUiList;
+    c.ui_field = word == "ui_select" ? 0 : word == "ui_count" ? 1 : word == "ui_rowval" ? 2 : 3;
+    bool op_ok = false;
+    if (i + 2 < args.size()) {
+      Compare(0, args[i + 1], 0, op_ok);
+    }
+    if (!op_ok || !ParseNumber(args[i + 2], c.value)) {
+      error = word + " <op> <value>";
+      return false;
+    }
+    c.op = args[i + 1];
+    i += 3;
+    return true;
+  }
   if (word == "u32" || word == "f32") {
     c.kind = Condition::kMemory;
     c.is_float = word == "f32";
@@ -1640,7 +1661,7 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     i += 4;
     return true;
   }
-  error = "condition: left_title, loading, roam, frames N, u32|f32 <addr> <op> <value>";
+  error = "condition: left_title, loading, roam, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
   return false;
 }
 
@@ -1656,6 +1677,16 @@ bool Evaluate(const Condition& c) {
       float xyz[3];
       return ReadWord(kLeftTitle) == 1 && GameState() == 0 && ReadWord(kCityPending) == 0 &&
              PlayerPosition(xyz);
+    }
+    case Condition::kUiList: {
+      uint32_t list;
+      int32_t select, scroll, count, row_value;
+      if (!MclaMenuListState(list, select, scroll, count, row_value)) {
+        return false;
+      }
+      const int32_t fields[] = {select, count, row_value, scroll};
+      bool ok;
+      return Compare(fields[c.ui_field], c.op, c.value, ok);
     }
     case Condition::kMemory: {
       uint32_t address, raw;
@@ -2255,6 +2286,17 @@ std::string Execute(const std::string& line) {
     g_watch_last = -1;
     g_watching = g_watch_every > 0;
     return "ok cars=" + std::to_string(g_watch_cars.size());
+  }
+  if (cmd == "uisel") {
+    uint32_t list;
+    int32_t select, scroll, count, row_value;
+    if (!MclaMenuListState(list, select, scroll, count, row_value)) {
+      return "ok none";
+    }
+    char text[128];
+    std::snprintf(text, sizeof text, "list=0x%08X select=%d scroll=%d count=%d rowval=%d", list,
+                  select, scroll, count, row_value);
+    return std::string("ok ") + text;
   }
   if (cmd == "screens") {
     std::string reply = "ok";
