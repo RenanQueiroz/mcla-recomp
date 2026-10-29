@@ -71,6 +71,7 @@ git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
 git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
+git apply ../../patches/rexglue-affinity-warning-once.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -2012,6 +2013,23 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | Two codegen options, off | `include/rex/codegen/config.h`, `src/codegen/config.cpp`, `src/codegen/project_recompiler.cpp`, `config/codegen_options.toml`, `mcla_manifest.toml` | the generated code of every title, when set |
 | Sixteen builders ask no mode; the cheap switch calls | `src/codegen/builders/*.cpp` | the generated code, when set |
 | Four inline methods | `include/rex/ppc/context.h` | the generated code, when set (x86-64; others forward to the old calls) |
+
+## rexglue-affinity-warning-once.patch
+
+**Why.** With fewer than 6 logical processors, `XThread::SetActiveCpu` (`src/system/xthread.cpp`) did not set the thread's affinity and logged "Too few processor cores - scheduling will be wonky" instead, on every call. The game calls it through `KeSetAffinityThread` about 1,000 times a second: a reporter with 4 cores and 4 threads (fork issue #21, v0.3.0) had that line 58,797 times in 57 s, 54,134 of them from one guest thread. A log line at warning level is a file write and a flush (the log flushes at info) and a debugger message, under the log sinks' lock that every thread shares (the audio threads' warnings too). Whether the flood costs frame time or audio on a slow CPU is measured by the chain in `launcher/dev/affinity-log-2026-10-29.md`; **until that has run, it is not known that it does**. Nothing else on that path differs by processor count: with the default `ignore_thread_affinities=true` no affinity is applied on any PC, so the warning was also misleading on a PC with 6 or more.
+
+**What it changes.**
+- `affinity_warning_once` (default true): the warning is logged once per run, and says what it means (the number of logical processors, that the game's thread affinities are not applied, and that they are ignored on any PC while `ignore_thread_affinities` is on). `--affinity_warning_once=false` logs it on every call, as before (the text is new). It can be changed during play.
+- `debug_affinity_logical_processors` (default 0): a debug option. 0 uses the real count (`std::thread::hardware_concurrency`); N makes `SetActiveCpu` behave as if the PC had N logical processors, so the path of a 4-core PC can be taken on a 16-thread one. Only `SetActiveCpu` reads it: the other users of the count (`mcla_small_cpu_defaults` reads the affinity mask and the topology itself, the pipeline creation threads and the Vulkan translation threads use `logical_processor_count()`) are not changed.
+- Nothing else in `xthread.cpp` or `xboxkrnl_threading.cpp` logs per call at warning or above: the other log calls there are errors and warnings on failures (a thread that is not found, an allocation that failed, a bad APC), and the import traces are noisy-trace and debug level.
+
+**Upstream:** not offered for now (all upstream work is parked).
+
+**Checked.** The patch applies to the patched SDK of `origin/main` (`git apply --check`). Built by CI only (Windows, llvm-mingw); not built on Linux or the PS5, and not run before the chain.
+
+| Change | Files | Affects |
+|---|---|---|
+| The warning logged once per run (`affinity_warning_once`); `debug_affinity_logical_processors` | `src/system/xthread.cpp` | all platforms with fewer than 6 logical processors (and the debug option anywhere) |
 
 ## rexglue-mingw.patch
 

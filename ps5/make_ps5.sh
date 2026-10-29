@@ -236,6 +236,7 @@ rexglue-upstream-host-fp-state.patch include/rex/ppc/context.h Keep host FP exce
 rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW
 rexglue-upstream-small-fixes.patch include/rex/system/xam/user_profile.h Settings are owned, and replaced, through
 rexglue-codegen-csr-lazy.patch src/codegen/config.cpp csr_mode_free_ops
+rexglue-affinity-warning-once.patch src/system/xthread.cpp affinity_warning_once
 LATER
 
 # ---------------------------------------------------------------------------

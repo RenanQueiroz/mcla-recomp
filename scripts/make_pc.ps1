@@ -457,6 +457,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-upstream-small-fixes.patch"; File = "include\rex\system\xam\user_profile.h"; Adds = "Settings are owned, and replaced, through" }
     # The code generator's MXCSR switches: two options in config\mcla.toml (csr_mode_free_ops, csr_cheap_switch), off unless set.
     @{ Patch = "rexglue-codegen-csr-lazy.patch"; File = "src\codegen\config.cpp"; Adds = "csr_mode_free_ops" }
+    # The "too few processor cores" warning of the thread affinity code, once per run (issue #21), and a debug option to take that path on a larger PC.
+    @{ Patch = "rexglue-affinity-warning-once.patch"; File = "src\system\xthread.cpp"; Adds = "affinity_warning_once" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.
