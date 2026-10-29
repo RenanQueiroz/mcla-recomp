@@ -77,6 +77,7 @@ Each change is kept separate, so that it can be offered upstream as a pull reque
 | A display gamma setting: the console's TV ramp (the default) or sRGB for PC monitors, switched during play | on a PC monitor the shadows as the game drew them: a night scene's average brightness 46 to 60 of 255 |
 | The launcher edits `mcla.toml` instead of passing options | the launcher and the pause menu show and change the same settings; a choice made in the game sticks |
 | Menus, pop-ups and map panels at the console's pace above 30 FPS; the HUD at 60 a second by default, or 30 (the console's pace), 120 or every frame | the pause menu opens in 0.88 s at 120 FPS (0.93 s at 30; 0.18 s before); the song title under the speedometer scrolls at its original speed |
+| Menus answer a key press at once instead of up to 33 ms later (on by default); the menus' update rate as a setting (DISPLAY › MENU UPDATES: 30, 60, 120 or every frame) | the wait from a press to the menu's next advance: median 8.5 to 0.2 ms at a 120 FPS cap, 16.9 to 0.2 ms uncapped (scripted pad, RTX 5080) |
 | Alpha to mask compared with a tolerance on its thresholds | no lattice of dots, one pixel in every 2x2 quad, on lamp poles, palm trunks and shelter posts: at the dusk spawn of free roam 61 dots on a pole's rows against 8 with alpha to mask off (D3D12, 1x); the dithered foliage is as it was; fork issue #8 |
 
 Upstream's own fixes, such as the car reflections and the camera-flight warp that never ended, are in the fork too.

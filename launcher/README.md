@@ -699,7 +699,9 @@ original speed and the needles move in 30 Hz steps; 60 and 120 make the needles
 smoother and the ticker two and four times as fast (at a 120 FPS cap: 59, 118,
 237 and 239 px/s at 720p for 30, 60, 120 and every frame). Menus, pop-ups and the
 GPS panels keep the console's pace whatever it is set to (`mcla_ui_timing_fix`,
-`KNOWN-ISSUES.md`).
+`KNOWN-ISSUES.md`); their own rate is `mcla_ui_menu_rate` (the pause menu's
+DISPLAY › MENU UPDATES, no launcher setting), and they answer a key press at once
+(`mcla_ui_advance_on_input`, on).
 
 *Player name* (`user_name`, a text box rather than a drop-down; the SDK's, from
 `patches\rexglue-user-name.patch`) is the name of the profile the game is signed in

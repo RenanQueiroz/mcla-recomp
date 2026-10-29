@@ -1,7 +1,7 @@
 # 4 cores without SMT and two audio options join the small-CPU defaults (v0.3.1, 2026-10-29)
 
 **State.** Decided by the owner on 2026-10-29 for v0.3.1, after the `audio21` chain (below). Implemented in `ApplyCpuDefaults` (`src/mcla_app.cpp`, Windows only). The chain that
-checks the new build's log lines and option values is `smalldef` (results in the work folder; its numbers are added here when it has run: "Check of the build" at the end).
+checks the new build's log lines and option values is `smalldef`; it has run ("Check of the build" at the end: all PASS).
 
 ## What changed
 
@@ -77,5 +77,14 @@ as before, and now the audio options too, which no run covers).
 
 ## Check of the build
 
-(The chain `smalldef` builds this branch with `fast-setup.ps1` and checks the `CPU:` and `PC defaults:` lines and the option values at 0x55, 0xF and all threads, and at 0x55 with the
-player's values. Result lines are added here after it has run.)
+Chain `smalldef` (2026-10-29, 3.9 minutes): it built this branch (c1ff3f3) with `fast-setup.ps1` (exe sha256 starting 168b4a73e23478e2) and started the game for 44 to 57 s per case, reading the `CPU:` and `PC defaults:` lines, the options (`get`) and the SDK's audio lines. All five cases passed. It measured no frame time and no audio, only that the build does what this note says.
+
+| Case | What the log and the options showed | Result |
+|---|---|---|
+| 0x55: 4 logical processors on 4 cores | timer queue high-resolution wait, pump wake on demand and poll wait on, `audio_thread_priority` 3, `audio_adaptive_queue` on; the line ends "automatic; 5 or fewer, with mcla_small_cpu_defaults"; the SDK's 3 audio lines present | PASS |
+| 0x55 with `--audio_thread_priority=0 --audio_adaptive_queue=false` | the line says "audio thread priority 0 (set by the player), audio adaptive queue off (set by the player)"; the other three still on; the SDK's audio lines 0 of 3 | PASS |
+| 0xF: 4 logical processors on 2 cores with SMT | the same as 0x55 | PASS |
+| all logical processors (16) | unchanged: the line says "automatic; 6 or more", no poll wait, no audio option (priority 0, adaptive queue off) | PASS |
+| 0x55 with `--mcla_small_cpu_defaults=false` | all of it back: wake on demand off, poll wait off, audio 0 and off (the v0.2.x rule) | PASS |
+
+Not covered by this check: the integrated v0.3.1 tree (the branch alone was built), a real 4-core CPU, Linux and the PS5 (not built or run: the code is Windows only).

@@ -15,4 +15,9 @@
 
 ## Measured
 
-Nothing yet: the chain has not run (2026-10-29). Not built or run: Linux and the PS5 (`src/settings_menu.cpp` is shared with both).
+The chain `menurow` (2026-10-29): RTX 5080, Direct3D 12, the build of `feat/menu-rate-row` a1eaf74 (with `mcla_ui_advance_on_input` still off by default, which the row does not depend on). **4 of 4 checks passed.**
+
+- Function (native resolution, a 120 FPS cap): DISPLAY opened with 16 rows. `get mcla_ui_menu_rate` after each step was 30, 60, 120, 0, 30, 0, 120, 60, 60 (right goes round from EVERY FRAME to 30, left from 30 to EVERY FRAME), and the menu's own log lines read 60, 120, 0, 30, 0, 120, 60. With the page open for 3 s at each value, `PAUSEMOVIE` advanced 30.0, 60.0, 120.0 and 120.0 times a second at 30, 60, 120 and EVERY FRAME (the game ran 120.0 updates a second). The page was left at 60: the run's `mcla.toml` got one new line, `mcla_ui_menu_rate = 60`, and lost none.
+- Width (the movie's own `menu.width`, cap 750), at 1x and at 3x: DISPLAY 653 with 16 rows, the same as the code without the row (widest label GRAPHICS API (RESTART) 263 px, widest value 120 PER SECOND 169 px: the row's texts are not the longest); PERFORMANCE 719 with 19 rows. No page fell back to text level 2. CONTROLS gave no width line (the page was open under 0.6 s).
+- Pictures: `scripts/menu-pages.pad` at 3x and at 1x (18 pictures each; Xbox and PlayStation glyphs) and the row at its four values at 3x. Looked at by hand: the four values, and the bottom of DISPLAY at 3x with Xbox glyphs: the hint row whole, the scroll bar visible, MENU UPDATES with its label and value aligned with the rows around it, the last row clear of the frame. The other pictures were judged by their widths only (the contact sheets are in the work folder, `C:\mcv\menurow\sheets`).
+- Not measured: Vulkan; the launcher (no row there); Linux and the PS5 (not built or run, as above).

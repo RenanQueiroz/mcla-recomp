@@ -2025,7 +2025,7 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 
 **Upstream:** not offered for now (all upstream work is parked).
 
-**Checked.** The patch applies to the patched SDK of `origin/main` (`git apply --check`). Built by CI only (Windows, llvm-mingw); not built on Linux or the PS5, and not run before the chain.
+**Checked.** The patch applies to the patched SDK of `origin/main` (`git apply --check`). Built by CI only (Windows, llvm-mingw); not built on Linux or the PS5. Run in the chain `affinitylog` (2026-10-29; RTX 5080, Direct3D 12, 30 FPS cap, 4 logical processors by an affinity mask and `debug_affinity_logical_processors=4`, 3 runs a side): 1 warning a run against 108,987 with `--affinity_warning_once=false` (1,060 a second while driving); frame time, the audio pump, silent audio frames and the process's CPU stayed inside the run-to-run noise, also with 4 busy processes on the same cores. It is log hygiene, not a speed-up (`launcher/dev/affinity-log-2026-10-29.md`).
 
 | Change | Files | Affects |
 |---|---|---|

@@ -1,6 +1,6 @@
 # The "too few processor cores" warning, once per run (issue #21, 2026-10-29)
 
-**State: the patch is written and checked to apply; the chain below has not run, so nothing here about the cost of the flood is measured.** Linux and the PS5 build were not built or run.
+**State: the patch is built and compile-checked by CI, and the chain below ran on 2026-10-29 (Results at the end): the change is log hygiene, not a speed-up.** Linux and the PS5 build were not built or run.
 
 ## What the report showed
 
@@ -23,7 +23,7 @@ A warning-level line is written to the rotating log file and flushed (the log fl
 - Everything else that counts processors is untouched (`mcla_small_cpu_defaults` reads the mask and the topology itself; the pipeline creation threads use `logical_processor_count()`).
 - Other per-call logs on that path: none. Everything else in `xthread.cpp` and `xboxkrnl_threading.cpp` at warning or above reports a failure.
 
-## The chain (not run yet)
+## The chain (as planned; what ran differently is under Results)
 
 One exclusive hold of at most 40 minutes (scripts kept outside the repository: chain `affinitylog`): the branch `fix/affinity-warn-once` built once with its own SDK, then runs on that one build, scratch save and shader storage only, Direct3D 12 on the RTX 5080, native resolution, `--mcla_fps=30`, `--audio_stats=true --audio_stats_interval=1`, `--debug_affinity_logical_processors=4`:
 
@@ -39,4 +39,30 @@ What it cannot show: one machine (Ryzen 7 9800X3D, cores two to three times as f
 
 ## Results
 
-Not run yet. This section is to be filled from the chain's report; until then the docs say "not measured".
+Ran on 2026-10-29, one hold. Differences from the plan above: the route was the audio work's pad `au-ab.pad` (the warm-up car moved 380 units in 24 s, 15.9 units/s, not stuck) and there were 3 blocks, so 3 runs a side in each group: 12 runs, all usable, none skipped or discarded, plus the warm-up. The build was the branch's own (cut from `main`), not the integrated tree. RTX 5080, Direct3D 12, native resolution, a 30 FPS cap, mask 0x55, `--debug_affinity_logical_processors=4`. A = a warning on every call, B = once. Mean over the 3 runs; the difference B - A with its 95% interval (Welch).
+
+| Group P: mask 0x55, nothing else running | A | B | B - A |
+|---|---|---|---|
+| warnings a run | 108,987 | 1 | -109,000 |
+| warnings a second while driving | 1,060 | 0 | |
+| log file | 11.3 MB | 0.2 MB | |
+| audio pump round, mean | 742 us | 726 us | -15.5 us (-98 to +67): noise |
+| pump rounds that started 8 ms or more late, per 10 s | 995.1 | 994.4 | noise |
+| silent audio frames a minute | 0 | 0 | |
+| frame time, median / 99th percentile | 33.32 / 34.08 ms | 33.33 / 34.09 ms | noise |
+| process CPU while driving | 0.707 cores | 0.680 cores | -0.027 (-0.134 to +0.080): noise |
+| audio pump round, longest | 3,028 us | 3,673 us | +645 us (+63 to +1,230): outside the noise |
+
+| Group S: 0x55 and 4 busy processes | A | B | B - A |
+|---|---|---|---|
+| warnings a run | 111,667 | 1 | |
+| warnings a second while driving | 1,052 | 0 | |
+| audio pump round, mean / longest | 3,785 / 68,343 us | 3,769 / 68,421 us | noise |
+| pump rounds that started 8 ms or more late, per 10 s | 281.9 | 295.2 | noise |
+| silent audio frames a minute | 185.8 | 190.4 | noise (-260 to +269) |
+| frame time, median / 99th percentile | 32.40 / 110.07 ms | 32.42 / 112.06 ms | noise |
+| process CPU while driving | 1.022 cores | 1.051 cores | noise (-0.020 to +0.078) |
+
+With the 4 busy processes the game could not hold its 30 FPS cap (25.9 and 26.3 FPS), so the emulation of a slow CPU worked, and the old behaviour's 1,052 warnings a second made no difference to it.
+
+Reading: the warning count fell from about 109,000 a run to 1, as intended, and nothing the player feels changed: the frame time, the audio pump, the silent audio frames and the process's CPU are inside the run-to-run noise in both groups. One measure was outside it, the longest single pump round without the busy processes (3.0 against 3.7 ms, B longer): it is one of 16 measures of the group, the change gives no reason for it, and it is read as chance, not shown. So this is log hygiene, not a speed-up, and the flood is not what makes the audio stutter on the test PC; the reporter's cause is still open. What it cannot show: 3 runs a side is a coarse test (the intervals above are the limit of what it can see); one machine with cores two to three times as fast as a 3rd-generation i5's; the busy processes are an emulation; the sound was not listened to; Direct3D 12 only. Linux and the PS5 build: not built or run.
