@@ -234,6 +234,7 @@ def report_one(folder, vtables=None):
         movie = [x for x in mine if x.startswith("TS movie player")]
         reads = [READ.match(x) for x in mine if x.startswith("TS padread")]
         reads = [r for r in reads if r]
+        # (the pad presses only Start: a true read of any button after it is the answer to it)
         hit = next((r for r in reads if r.group(6) == "1" or r.group(7) == "1"), None)
         runs = [TRUN.match(x) for x in mine if x.startswith("TS thread ")]
         runs = [r for r in runs if r]
@@ -256,7 +257,7 @@ def report_one(folder, vtables=None):
             saw_n += 1
             saw_latched += kind == "latched"
         elif reads:
-            verdict = f"MISSED (the script read Start {len(reads)} times in the window, never true)"
+            verdict = f"MISSED (the script read the pad {len(reads)} times in the window, never true)"
         elif any(x.startswith("TS padread") for (_, x) in ts_lines):
             verdict = "not asked (no script read of Start in the window)"
         else:
@@ -268,7 +269,8 @@ def report_one(folder, vtables=None):
                    + f"; movie ticks in the press update {ticks_here}, mapper runs {mapper_here}, events posted {len(events)}"
                    + (f"; the old detector EVENT_START_SCREEN_EXIT came {exit_upd} updates later" if exit_line else ""))
         if reads:
-            out.append("    Start reads (update offset, thread, program:pc, pad, real/latched): " + ", ".join(
+            btns = sorted({int(r.group(5)) for r in reads})
+            out.append(f"    pad reads in the window, buttons {btns} (Start = 11) (update offset, thread, program:pc, pad, real/latched): " + ", ".join(
                 f"+{int(r.group(8)) - upd} {r.group(1)} {r.group(2)}:{r.group(3)} p{r.group(4)} {r.group(6)}/{r.group(7)}" for r in reads[:12])
                 + (" ..." if len(reads) > 12 else ""))
         if runs:

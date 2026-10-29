@@ -235,6 +235,9 @@ bool IsPadPoller(uint32_t thread, uint64_t now) {
 
 std::atomic<uint64_t> g_start_reads{0}, g_start_real{0}, g_start_latched{0}, g_pad_reads{0},
     g_thread_runs{0}, g_thread_updates{0};
+// Reads of buttons other than Start logged in this window (the first few after each Start press:
+// they show which buttons the script asks about and so that Start is button 11).
+std::atomic<uint32_t> g_other_reads_logged{0};
 
 // The script interpreter's native calls (sub_82554E20, the call at 0x82555CC8): how often each
 // native function was called in the last second (a small table, probed linearly), and the first
@@ -389,6 +392,7 @@ void mcla_pad_probe_update(PPCRegister& r31) {
     if (probe) {
       g_window_until_us.store(now + kWindowUs, std::memory_order_relaxed);
       g_native_window_logged.store(0, std::memory_order_relaxed);
+      g_other_reads_logged.store(0, std::memory_order_relaxed);
     }
   }
   if (probe && (pressed || released)) {
@@ -488,6 +492,12 @@ void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
           thread, program, pc, pad, button, real ? 1 : 0, latched ? 1 : 0,
           g_update.load(std::memory_order_relaxed), now, age_us, before_us);
     }
+  } else if (Window() && g_other_reads_logged.fetch_add(1, std::memory_order_relaxed) < 48) {
+    REXLOG_INFO(
+        "TS padread thread={:08X} program={:08X} pc={} pad={} button={} real={} latched={} update={} "
+        "t={} press_age_us={} previous_poll_us_ago={}",
+        thread, program, pc, pad, button, real ? 1 : 0, latched ? 1 : 0,
+        g_update.load(std::memory_order_relaxed), now, age_us, before_us);
   }
 }
 
