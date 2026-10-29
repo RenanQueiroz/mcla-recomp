@@ -1813,7 +1813,8 @@ void WatchLayout(int menu) {
     REXLOG_INFO("settings menu: '{}' layout: menu.width {} height {} count {} List_max {} (texts at level {})",
                 kMenus[menu].label, width, height, count, list_max, TextLevel());
   }
-  if (cap > 0 && width > cap && TextLevel() < 2) {
+  // Level 0 is the old wording, whatever the width: it stays (the switch for seeing the page as it was).
+  if (cap > 0 && width > cap && REXCVAR_GET(mcla_menu_text_level) >= 1 && TextLevel() < 2) {
     const int level = TextLevel() + 1;
     g_auto_text_level.store(level, std::memory_order_relaxed);
     g_layout_watch.Reset();
