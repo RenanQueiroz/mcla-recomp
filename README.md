@@ -118,6 +118,8 @@ Use your console's address, and start the FTP payload first. Without `--console`
 
 After the upload, let the mounter pick up `/data/homebrew/PPSA99779`; "Midnight Club: Los Angeles" appears on the home screen. On the console, `/data/mcla/game` holds the game data, `/data/mcla/mcla.toml` the settings and `/data/mcla/mcla-play.log` the log of the last start.
 
+**DualSense haptics and adaptive triggers (optional).** The game's rumble works on a DualSense out of the box. For haptics from the game's sound and the car (road, gear changes, crashes, nitro) and throttle and brake resistance on R2 and L2, add `mcla_pad_haptics = true` and `mcla_adaptive_triggers = true` to `/data/mcla/mcla.toml`. Tuning options are listed in `ps5/game/ps5_haptics.h` and `ps5/game/ps5_triggers.h`.
+
 **Your own tile and theme (optional).** No artwork or music ships here. `--tile IMAGE` takes any common image (for example the [official cover art](https://assets-prd.ignimgs.com/2022/04/17/midnightcomplete-1650239367276.jpg)); `--theme FILE.at9` takes an ATRAC9 file. For a theme, turn the audio down first (`ffmpeg -i in.m4a -af loudnorm=I=-28:TP=-2 -ar 48000 -ac 2 quiet.wav`), then convert it with [AT9-AT3 Converter](https://github.com/BMK-Studio/AT9-AT3_Converter/releases) (AT9, PS4, bitrate 72). The console keeps a title's tile and sound from when it was first registered.
 
 | If | Then |
