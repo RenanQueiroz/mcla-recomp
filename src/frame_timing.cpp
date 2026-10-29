@@ -986,8 +986,10 @@ REXCVAR_DEFINE_INT32(mcla_ui_menu_rate, 30, "MCLA",
 // Each UI screen takes one extra advance per key event and its schedule restarts from it, so the
 // animations keep near the console's speed: a tap adds half a movie frame on average, a held
 // direction at most 5 extra advances a second. Not the HUD (its own rate), and not an update that
-// follows another input advance of the same screen by less than 100 ms.
-REXCVAR_DEFINE_BOOL(mcla_ui_advance_on_input, false, "MCLA",
+// follows another input advance of the same screen by less than 100 ms. On by default (v0.3.1):
+// measured with a scripted pad, the median wait from a key press to the menu's next advance went
+// from 8.5 to 0.2 ms at a 120 FPS cap and from 16.9 to 0.2 ms uncapped (launcher/dev/menu-lag-2026-10-29.md).
+REXCVAR_DEFINE_BOOL(mcla_ui_advance_on_input, true, "MCLA",
                     "Advance the UI's menus, pop-ups and map screens on the update a menu key event "
                     "(a press or a repeat) is delivered in, instead of waiting for their next slot "
                     "(mcla_ui_menu_rate): the highlight answers a press at once, not 0 to 33 ms later");
