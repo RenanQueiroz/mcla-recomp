@@ -49,6 +49,7 @@ set(MCLA_SOURCES
     src/save_wait.cpp
     src/display_gamma.cpp
     src/render_markers.cpp
+    src/vehicle_telemetry.cpp
     src/sampling_profiler.cpp
     src/code_pointer_scan.cpp
     # The shader pack's import and --mcla_prepare_shaders.
