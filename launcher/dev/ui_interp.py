@@ -306,10 +306,19 @@ def plot(series, path, title):
     img.save(path)
 
 
+def read_log(folder):
+    """The run's log in time order. The game rotates its log at 5 MB (game.4.log is the oldest, game.1.log the newest rotated
+    file, game.log the one being written), so a run that logs every glide spreads over all of them: reading game.log alone lost
+    every cell before the last 1.6 MB (round 1: the cap-120 and opening cells)."""
+    folder = Path(folder)
+    parts = sorted(folder.glob("game.[0-9]*.log"), key=lambda p: -int(p.name.split(".")[1]))
+    parts.append(folder / "game.log")
+    return "".join(p.read_text(encoding="utf-8", errors="replace") for p in parts if p.exists())
+
+
 def report(folder, out=None, shots=None, plot_path=None, echo=True):
     folder = Path(folder)
-    log = folder / "game.log"
-    text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+    text = read_log(folder)
     cells, checks, movies = parse(text)
     lines = [f"ui_interp report of {folder}", f"{len(cells)} cells, {sum(len(r) for c in cells for r in c['phases'].values())} interp rows, {len(checks)} self-check lines"]
     lines.append("movies seen drawn (the SWF's own frame rate, the pace they are stepped at): " + (", ".join(
