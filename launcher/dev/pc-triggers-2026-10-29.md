@@ -1,6 +1,6 @@
 # DualSense adaptive triggers on the PC (2026-10-29, v0.3.1)
 
-`src/pc_triggers.cpp`. Off by default (`mcla_adaptive_triggers`). The behaviour is upstream's PS5 triggers (`ps5/game/ps5_triggers.h`, Zaid Naeem, merged the same day);
+`src/pc_triggers.cpp`. On by default since the owner tried it on a DualSense (`mcla_adaptive_triggers`); both R2 buzzes are off by default, the owner preferred none: the top of a gear (`mcla_trigger_rev_limiter`, tried and found unwelcome) and the nitro (`mcla_trigger_vibration`, never tried by hand: the car had no nitro). The behaviour is upstream's PS5 triggers (`ps5/game/ps5_triggers.h`, Zaid Naeem, merged the same day);
 the PC sends it to the pad through SDL3. This note is the design, what was read to get the bytes right, what the chain `pctrig` checks, and what is left.
 
 ## What each state does

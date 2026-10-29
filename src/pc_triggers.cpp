@@ -64,19 +64,19 @@
 // The names and defaults are the PS5 build's (ps5/game/ps5_triggers.h); the PS5's other half is in
 // mcla.toml of the console. The PC differs in two ways: mcla_trigger_vibration buzzes R2 while the nitro
 // burns (the PS5 buzzes on rumble peaks), and the options below it are the PC's own.
-REXCVAR_DEFINE_BOOL(mcla_adaptive_triggers, false, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_adaptive_triggers, true, "MCLA",
                     "DualSense adaptive triggers: throttle spring on R2, brake resistance on L2 (needs a "
                     "DualSense; other controllers are not touched)");
 REXCVAR_DEFINE_INT32(mcla_trigger_throttle, 3, "MCLA",
                      "R2 resistance at the end of its travel, 1 to 8").range(1, 8);
 REXCVAR_DEFINE_INT32(mcla_trigger_brake, 6, "MCLA",
                      "L2 resistance at the end of its travel, 1 to 8").range(1, 8);
-REXCVAR_DEFINE_BOOL(mcla_trigger_vibration, true, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_trigger_vibration, false, "MCLA",
                     "R2 buzzes while the nitro burns with the throttle floored (the PS5 build also buzzes "
                     "on wheelspin, hard braking and hits; the PC has no rumble level to read)");
 REXCVAR_DEFINE_INT32(mcla_trigger_vibration_strength, 3, "MCLA",
                      "Strength of those buzzes, 1 to 8").range(1, 8);
-REXCVAR_DEFINE_BOOL(mcla_trigger_rev_limiter, true, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_trigger_rev_limiter, false, "MCLA",
                     "R2 buzzes near the top of each gear with the throttle floored (after the game has "
                     "shifted up once in that gear: the shift speeds are learnt)");
 REXCVAR_DEFINE_BOOL(mcla_trigger_release_unfocused, true, "MCLA",
