@@ -69,7 +69,7 @@ The ones you are most likely to want:
 | Faster pause menu and GPS map | `--mcla_larger_tiles=false` |
 | Sun glare follows the real sun | `--occlusion_query_async=false` |
 | Less CPU while a frame-rate cap is set | `--mcla_timer_hr_at_cap=false`, `--mcla_reflex_sleep_assist=false` |
-| Faster on CPUs with 5 or fewer threads | `--mcla_small_cpu_defaults=false` |
+| Faster on CPUs with 5 or fewer threads, and audio set up for them | `--mcla_small_cpu_defaults=false` |
 | Less video memory at 2x and 3x | `--render_target_max_height=0` |
 | Rain at 2x and 3x | `--mcla_rain_unscaled_copy=false` |
 | Vinyls on the opponents' cars | `--mcla_vinyl_readback=false` |
@@ -117,7 +117,6 @@ Upstream's build plays on a jailbroken PS5; the fork's patches have not been bui
 
 - The fork has not been tried on discrete AMD cards, Vega-based Ryzen graphics, Intel graphics, Linux or the PS5.
 - On a first run, in new places, or after a driver update, objects can be missing for a moment while their shaders compile. The launcher's shader preparation covers most of it.
-- CPUs with 4 cores and no Hyper-Threading don't get the small-CPU speed-up yet.
 - Fine dots may remain at the edges of palm leaves against the sky and in some soft shadows.
 
 Each change, how it was checked and what is not verified: [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
