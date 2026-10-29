@@ -1,6 +1,6 @@
 # Race start: does the countdown keep up with the real start? (2026-10-29)
 
-**Status: not measured yet.** This note says what was reported, what was read, what was added to measure it and how to read the result. The measurement is one chain (`C:\mcv\racestart\chain\chain.ps1`, see the end); nothing here has run in the game. It also repeats the race finish measurement of `race-finish-2026-10-29.md` (same runs), so that chain need not be queued as well.
+**Status (2026-10-29): measured; the cause is in `race-countdown-2026-10-29.md`.** The chain ran once (the paragraph under "Measured"): the countdown ring runs at the HUD gauge movie's steps per game update, so it lags with the HUD at 60 steps a second and more with Smooth UI. This note says what was reported, what was read, what was added to measure it and how to read the result (the chain is `C:\mcv\racestart\chain\chain.ps1`). It also repeats the race finish measurement of `race-finish-2026-10-29.md` (same runs), so that chain need not be queued as well.
 
 ## The report
 
@@ -75,4 +75,4 @@ One exclusive hold, `--max-min 40`: `C:\mcv\racestart\chain\chain.ps1` (protecte
 
 ## Measured
 
-Nothing yet.
+One chain (2026-10-29, RTX 5080, Direct3D 12): `c30`, `c120`, `c120-sm`, `c120-off` as full runs, `c60` full and `x3` start only; the `fix` runs of the plan were skipped because no movie was flagged, which is right: the countdown is not a movie that comes and goes but a clip in the HUD gauge movie, which stays. START (the player's car moves) was found in every run, the game clock ran 1.002 to 1.003 s per wall second and the updates a second were steady (30, 60 or 120) in the 4 s before START. What the pictures say, from `race_start.py ring_summary` (how long each number of the ring stays; 1.0 s on the console): `c30` 1.0 s with "GO" at START; `c120` (HUD 60) 1.8 to 2.0 s; `c120-sm` (30 steps a second) 3.6 to 4.0 s; `c120-off` (a step every update) 1.0 s; `x3` (HUD 60) 1.8 to 2.0 s; `c60` (Smooth UI) 1.8 to 2.0 s. No movie of the UI manager came and went around START; the HUD gauge movie and the map were stepped once per update at cap 30, 60 times a second at cap 120 (HUD 60) and 30 times a second with Smooth UI. So the countdown follows steps per update, not steps per second: `race-countdown-2026-10-29.md` has the table, the code and the fix. The finish part of the full runs flagged no slow UI-manager movie (`race-finish-2026-10-29.md`).
