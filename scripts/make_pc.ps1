@@ -382,6 +382,32 @@ function UseSdkBundle {
     }
     # The unpacked one is ours; a folder given is not written into.
     if ($mingw -and $dir -eq $bundleDir) { CopyMingwRuntime "$dir\bin" -OnlyIfMissing }
+    # The bundle's zip gives every file one fixed date (a reproducible build), older
+    # than what the last build made from the previous SDK, so Ninja would keep that
+    # build's precompiled header and clang would refuse it as stale (fork issue #23).
+    # Once per unpacked bundle (the marker holds its SHA-256, so an install already
+    # stuck on such a build is mended too): date the bundle's files now and drop the
+    # game's precompiled headers, so they are made again from this SDK.
+    if ($dir -eq $bundleDir -and (Test-Path -LiteralPath "$bundleDir\.mcla-bundle")) {
+        $bundleHash = (Get-Content -LiteralPath "$bundleDir\.mcla-bundle" -TotalCount 1).Trim()
+        $datedMarker = "$root\third_party\.mcla-bundle-dated"
+        $dated = if (Test-Path -LiteralPath $datedMarker) { (Get-Content -LiteralPath $datedMarker -TotalCount 1).Trim() } else { "" }
+        if ($bundleHash -and $dated -ne $bundleHash) {
+            $now = Get-Date
+            Get-ChildItem -LiteralPath $bundleDir -Recurse -File -Force | ForEach-Object { $_.LastWriteTime = $now }
+            if (Test-Path -LiteralPath "$root\out\build") {
+                foreach ($presetDir in Get-ChildItem -LiteralPath "$root\out\build" -Directory) {
+                    $pchDir = Join-Path $presetDir.FullName "CMakeFiles\mcla_recomp.dir"
+                    if (Test-Path -LiteralPath $pchDir) {
+                        Get-ChildItem -LiteralPath $pchDir -File | Where-Object { $_.Name -like "cmake_pch*.pch" -or $_.Name -like "cmake_pch*.gch" } |
+                            Remove-Item -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            Set-Content -LiteralPath $datedMarker -Encoding Ascii $bundleHash
+            "SDK bundle files dated now; the game's precompiled header will be made again"
+        }
+    }
     $script:install = $dir
 }
 
