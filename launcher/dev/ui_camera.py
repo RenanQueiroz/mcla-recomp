@@ -278,31 +278,31 @@ def _first(rows, pred):
 
 
 def timing(cell):
-    """The camera's blend over a `copen` or `cclose` cell, in ms from the press: when it left 0 / reached 1 / came back to 0 as the script set it
-    (live_ctrl) and as the game got it (ctrl)."""
+    """The camera's blend over a `copen` or `cclose` cell, in ms from the press: when it crossed 0.1, 0.5 and 0.9 (rising when the menu opens, falling
+    when it closes), as the script set it (live_ctrl) and as the game got it (ctrl). Crossings of the middle of the curve, not of its ends, which
+    it only approaches (a threshold of 0.9999 is sensitive to the last glide). `span` is the time from 0.1 to 0.9, `delay` the shown 0.5 after the live 0.5."""
     press = cell["phase_walls"].get("press", cell["t0"])
     rows = sorted((r for r in cell["cam"] if r["wall"] >= press - 0.01), key=lambda r: r["wall"])
     if not rows:
         return None
-    ms = lambda r: (r["wall"] - press) * 1000.0  # noqa: E731
+    rising = cell["kind"] == "copen"
+    levels = (0.1, 0.5, 0.9)
+
+    def cross(key, level):
+        r = _first(rows, (lambda r: r[key] >= level) if rising else (lambda r: r[key] <= level))
+        if r is None and not rising and rows and rows[-1]["wall"] < cell["t1"] - 0.2:
+            r = rows[-1]  # the rows stop when the blend is 0: it fell below the level by then
+        return (r["wall"] - press) * 1000.0 if r else None
+
     out = {"rows": len(rows)}
-    if cell["kind"] == "copen":
-        a = _first(rows, lambda r: r["live"] > 0)
-        b = _first(rows, lambda r: r["live"] >= 0.9999)
-        c = _first(rows, lambda r: r["ctrl"] > 0)
-        d = _first(rows, lambda r: r["ctrl"] >= 0.9999)
-        out.update(live_start=ms(a) if a else None, live_full=ms(b) if b else None, shown_start=ms(c) if c else None, shown_full=ms(d) if d else None)
-        out["live_span"] = out["live_full"] - out["live_start"] if a and b else None
-        out["shown_span"] = out["shown_full"] - out["shown_start"] if c and d else None
-    else:
-        live_pos = [r for r in rows if r["live"] > 0]
-        shown_pos = [r for r in rows if r["ctrl"] > 0]
-        a = _first(rows, lambda r: r["live"] < 0.9999)
-        out.update(live_start=ms(a) if a else None, live_end=ms(live_pos[-1]) if live_pos else None,
-                   shown_end=ms(shown_pos[-1]) if shown_pos else None)
-        out["live_span"] = out["live_end"] - out["live_start"] if a and live_pos else None
-        out["shown_span"] = out["shown_end"] - out["live_start"] if a and shown_pos else None
-    out["live_steps"] = len({r["ser"] for r in rows if 0 < r["live"] < 0.9999})
+    for key, name in (("live", "live"), ("ctrl", "shown")):
+        c = [cross(key, lv) for lv in levels]
+        if not rising:
+            c = c[::-1]  # falling: 0.9 comes first
+        out[name] = c  # times of the first, middle and last of the three crossings, in time order
+        out[name + "_span"] = c[2] - c[0] if None not in (c[0], c[2]) else None
+    out["delay"] = out["shown"][1] - out["live"][1] if None not in (out["shown"][1], out["live"][1]) else None
+    out["live_steps"] = len({r["ser"] for r in rows if 0.1 <= r["live"] <= 0.9})
     return out
 
 
@@ -361,34 +361,36 @@ def transition_verdicts(cells, lines, verdict):
     for kind in ("copen", "cclose"):
         for cap in (120, 60):
             res = {}
+            word = "rose" if kind == "copen" else "fell"
             for v in OFF_ON:
                 cs = [c for c in cells if c["kind"] == kind and c["cap"] == cap and c["variant"] == v]
                 res[v] = [t for t in (timing(c) for c in cs) if t]
                 for c, t in zip(cs, res[v]):
-                    if kind == "copen":
-                        lines.append(f"   {kind} cap {cap} {v:3s} id {c['id']}: the script's blend left 0 at {_f(t['live_start'])} ms and reached 1 at {_f(t['live_full'])} ms "
-                                     f"({t['live_steps']} steps between); the game's: left 0 at {_f(t['shown_start'])} ms, reached 1 at {_f(t['shown_full'])} ms")
-                    else:
-                        lines.append(f"   {kind} cap {cap} {v:3s} id {c['id']}: the script's blend left 1 at {_f(t['live_start'])} ms and was last above 0 at "
-                                     f"{_f(t['live_end'])} ms ({t['live_steps']} steps between); the game's was last above 0 at {_f(t['shown_end'])} ms")
+                    lines.append(f"   {kind} cap {cap} {v:3s} id {c['id']}: the script's blend {word} through 0.1 / 0.5 / 0.9 at "
+                                 f"{' / '.join(_f(x) for x in t['live'])} ms from the press ({t['live_steps']} steps between 0.1 and 0.9); "
+                                 f"the game got it at {' / '.join(_f(x) for x in t['shown'])} ms (delay at 0.5: {_f(t['delay'])} ms)")
             if not res["off"] or not res["on"]:
                 continue
             tag = f"transition {kind} cap {cap}"
             frame = 1000.0 / cap
             tol = STEP_MS + frame
-            # the movie's own length (equal by construction: same steps)
             sl_off, sl_on = _med([t["live_span"] for t in res["off"]]), _med([t["live_span"] for t in res["on"]])
             ss_off, ss_on = _med([t["shown_span"] for t in res["off"]]), _med([t["shown_span"] for t in res["on"]])
             st_off, st_on = _med([t["live_steps"] for t in res["off"]]), _med([t["live_steps"] for t in res["on"]])
+            d_on = _med([t["delay"] for t in res["on"]])
             if None in (sl_off, sl_on, ss_off, ss_on):
-                verdict.append(f"CHECK {tag}: no blend values in some cells (script's span off {sl_off}, on {sl_on}; game's off {ss_off}, on {ss_on})")
+                verdict.append(f"CHECK {tag}: the blend did not cross 0.1 and 0.9 in some cells (script's span off {sl_off}, on {sl_on}; game's off {ss_off}, on {ss_on})")
                 continue
             ok_live = abs(sl_on - sl_off) <= STEP_MS and abs(st_on - st_off) <= 1.01
             ok_shown = abs(ss_on - ss_off) <= tol
-            verdict.append(f"{'PASS' if ok_live else 'FAIL'} {tag} (the script's own): from the blend leaving its end to reaching the other "
-                           f"{sl_off:.0f} ms with the option off, {sl_on:.0f} ms on ({st_off:.0f} and {st_on:.0f} steps; equal within one step, {STEP_MS:.0f} ms)")
+            verdict.append(f"{'PASS' if ok_live else 'FAIL'} {tag} (the script's own): the blend takes {sl_off:.0f} ms to go from 0.1 to 0.9 with the option off, "
+                           f"{sl_on:.0f} ms on ({st_off:.0f} and {st_on:.0f} steps; equal within one step, {STEP_MS:.0f} ms)")
             verdict.append(f"{'PASS' if ok_shown else 'FAIL'} {tag} (what the game got): {ss_off:.0f} ms with the option off, {ss_on:.0f} ms on "
-                           f"(equal within one step and a frame, {tol:.0f} ms; the glide trails the script by up to one step by design)")
+                           f"(equal within one step and a frame, {tol:.0f} ms)")
+            if d_on is not None:
+                ok_delay = -frame <= d_on <= 2 * STEP_MS + frame
+                verdict.append(f"{'PASS' if ok_delay else 'CHECK'} {tag} (delay): the middle of the transition reaches the game {d_on:.0f} ms after the script set it "
+                               f"(by design one step behind: 33 ms, a little more in a curve that bends; up to {2 * STEP_MS + frame:.0f} ms expected)")
 
 
 def event_verdicts(cells, lines, verdict):
