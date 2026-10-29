@@ -1,6 +1,7 @@
-# Title screen input: a development trace and two options (src/pad_probe.cpp). Off unless
-# --mcla_pad_probe=true, --mcla_title_fps=N or --mcla_title_pad_hold_ms=N is given: each hook starts
-# with one cvar read. Addresses are from the recompiled code of the Xbox 360 image.
+# Title screen input: the script pad latch (mcla_script_pad_latch_ms) and a development trace
+# (src/pad_probe.cpp). Off unless --mcla_script_pad_latch_ms=N, --mcla_pad_probe=true or
+# --mcla_title_fps=N is given: each hook starts with one cvar read. Addresses are from the
+# recompiled code of the Xbox 360 image.
 
 # 0x82615048: in sub_82614D30 (the per-pad update, once per game update), where the branches that
 # set the button bits of the pad record's new mask (+8) meet. r31 = the pad record
@@ -166,4 +167,27 @@ registers = ["r11"]
 [[midasm_hook]]
 name = "mcla_tsp_action_down"
 address = 0x8221D660
+registers = ["r3"]
+
+# --- The script side: the title thread's polling of Start ---
+# 0x822C8B34 in sub_822C8AF8 (the script native IS_PAD_BUTTON_DOWN(pad, button), really "pressed in
+# this update"): `cntlzw r6,r8`. r8 = the press (nonzero = pressed; the hook may set it), r6 = the
+# pad, r5 = the button (bit number; Start = 11). The latch for threads that poll less often than the
+# game updates (src/pad_probe.cpp, mcla_script_pad_read).
+[[midasm_hook]]
+name = "mcla_script_pad_read"
+address = 0x822C8B34
+registers = ["r8", "r6", "r5"]
+
+# sub_82554E20 = scrThread::Run (r3 = the thread) and sub_82553C10 = scrThread::Update (vtable[3],
+# adds 16 ms to the thread's clocks, calls Run): the trace logs them for the threads that poll the
+# pad, in the 1.5 s after a Start press.
+[[midasm_hook]]
+name = "mcla_tsp_thread_run"
+address = 0x82554E20
+registers = ["r3"]
+
+[[midasm_hook]]
+name = "mcla_tsp_thread_update"
+address = 0x82553C10
 registers = ["r3"]

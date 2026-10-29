@@ -1,38 +1,40 @@
-// Title screen input: a development trace, and two options that work around Start needing many
-// presses on the title screen and the attract video (fork issue; owner's report 2026-10-29).
+// Title screen input: the fix for Start having to be pressed many times on the title screen and
+// the attract video (fork issue; owner's report 2026-10-29), and a development trace.
 //
 // What the image does with a controller (read in the recompiled code, not changed by the fork):
 // once per game update sub_82614D30 reads XInput into a 64-byte pad record (pad n at
 // 0x82905388 + 64 n): the word at +12 is the previous update's button mask, the word at +8 the
 // new one (LB 4, RB 8, Y 16, B 32, A 64, X 128, Back 256, left stick 512, right stick 1024,
-// Start 2048, up 4096, right 8192, down 16384, left 32768). A press is "just pressed" for ONE
-// update: (+8 xor +12) and +8. The menus' UI input object (sub_82223CD8) turns it into a key event
-// (Start = key 17) once per UI manager update and hands it to sub_82209C38, which offers it to the
-// modal scenes, the main form and its current child form, and last to the "UserInterface" object;
-// whichever takes it, the title's own decision is made there. The title is the statechart state
-// StartScreen, which waits for the event UI.startscreenexit (EVENT_START_SCREEN_EXIT, handled in
-// sub_821FAD78).
+// Start 2048, up 4096, right 8192, down 16384, left 32768; the script button number is the bit
+// number, Start = 11). A press is "just pressed" for ONE update: (+8 xor +12) and +8.
+//
+// The title screen and the attract video are decided by a game SCRIPT thread, not by the menus'
+// key path (the UI input object, sub_82223CD8, turns the press into a key event that the scene
+// stack takes but the title does not use). The thread asks the script native IS_PAD_BUTTON_DOWN
+// (sub_822C8AF8: the "just pressed" test above, 8 buttons a loop, Start among them) and runs its
+// loop only about every 25 to 33 ms: every 3rd game update at 120 FPS, every 2nd at 60, every update
+// at 30. A press that comes in an update in which the thread does not run is gone by the next run:
+// the chance a press counts is about 1/3 at 120 FPS (measured: 25 of 25 presses with a thread run
+// in the press's update were accepted, 0 of 27 without), which is "press Start several times".
+//
+// mcla_script_pad_latch_ms: a thread that polls a button and misses its press in the update it
+// happened in is told about the press once, at its next poll, if that is within this many
+// milliseconds (see mcla_script_pad_read).
 //
 // mcla_pad_probe (development): logs, with the time and the update number of the pad, every
 // button edge of the pad records, and for 1.5 s after each Start press the decisions of that key
-// path: which of the three ways took the key (the object and its vtable, the function), the main
-// form's child, events posted, EVENT_START_SCREEN_EXIT, the movie player's start and stop, and
-// how many times the movies ticked, the input mapper ran and the scripts asked "just pressed" in
-// each update. Once a second it prints the counts. Every line starts with "TS ". The vtable
-// addresses are the class (the report script reads them from a table made from the image's RTTI).
+// path (which of the three ways took the key, the main form's child, events posted, the movie
+// player's start and stop, how many times the movies ticked and the input mapper ran in each
+// update), and the script side: every read of Start by a script thread (which thread, whether it
+// got the real edge or the latched one), the runs and updates of the threads that poll the pad.
+// Once a second it prints the counts. Every line starts with "TS ". The vtable addresses are the
+// class (the report script reads them from a table made from the image's RTTI).
 //
-// mcla_title_fps (off by default, NOT measured as a fix yet): while the title screen, the
-// start-up and the attract video run (the lighting set-up that comes with the city has not run
-// yet: the guard bit at 0x82836A28 is 0), the frame-rate cap is this many frames a second, except
-// for a short time after a Start press (so that the load after it runs at the player's cap).
-// Everything measured so far says Start is accepted at the first press at 30 FPS and by chance
-// at 60 FPS and above.
-//
-// mcla_title_pad_hold_ms (off by default, NOT measured as a fix yet): while the same is true,
-// a press of Start or A stays down in the pad record for this many milliseconds, also when the
-// button is let go sooner, whatever the game's readers do with it. The chance that a press was
-// accepted rose with its length in the first round's runs (300 ms always, 100 ms about a third),
-// which fits a check that looks at the button level every 250 to 300 ms.
+// mcla_title_fps: while the title screen, the start-up and the attract video run (the lighting
+// set-up that comes with the city has not run yet: the guard bit at 0x82836A28 is 0), the
+// frame-rate cap is this many frames a second, except for a short time after a Start press (so
+// that the load after it runs at the player's cap). A coarse workaround for the same problem: at
+// 30 updates a second the script thread runs in every update.
 
 #include "generated/default/mcla_init.h"
 
@@ -41,6 +43,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -58,10 +61,12 @@ REXCVAR_DEFINE_INT32(mcla_title_fps, 0, "MCLA",
                      "On the title screen and the attract video the frame-rate cap is this many "
                      "frames a second (0 = the player's cap), except just after a Start press")
     .range(0, 120);
-REXCVAR_DEFINE_INT32(mcla_title_pad_hold_ms, 0, "MCLA",
-                     "On the title screen and the attract video a press of Start or A stays "
-                     "down in the pad record for this many milliseconds, also when the button is "
-                     "let go sooner (0 = as long as the button is held, as the game does)")
+REXCVAR_DEFINE_INT32(mcla_script_pad_latch_ms, 0, "MCLA",
+                     "On the title screen and the attract video a script that polls a button "
+                     "and misses its press (it runs only every 2nd to 4th update above 30 FPS) "
+                     "is told about the press once, at its next poll, up to this many "
+                     "milliseconds later (0 = as the game does: the press is seen only by a "
+                     "script run in the same update)")
     .range(0, 500);
 
 namespace {
@@ -69,7 +74,10 @@ constexpr uint32_t kPadBase = 0x82905388;
 constexpr uint32_t kPadStride = 64;
 constexpr uint32_t kPadCount = 4;
 constexpr uint32_t kStartBit = 2048;
-constexpr uint32_t kHoldMask = 2048 | 64;  // Start, A
+// The script button number of Start (the bit number in the pad record's masks).
+constexpr uint32_t kStartButton = 11;
+// scrThread::Run (sub_82554E20) stores the thread it runs here (and the previous one back after).
+constexpr uint32_t kCurrentThread = 0x828DA3BC;
 // Bit 0 of a function-local static's guard: 0 until the city's lighting set-up has run.
 constexpr uint32_t kCityGuard = 0x82836A28;
 // The dev pad's "game state" word and the "city pending" word (src/dev_pad.cpp), logged to see
@@ -102,17 +110,6 @@ uint32_t ReadGuestU8(uint32_t address) {
     return 0;
   }
   return *(rex::Runtime::instance()->virtual_membase() + address);
-}
-
-void WriteGuestU32(uint32_t address, uint32_t value) {
-  if (address < 0x10000) {
-    return;
-  }
-  uint8_t* p = rex::Runtime::instance()->virtual_membase() + address;
-  p[0] = uint8_t(value >> 24);
-  p[1] = uint8_t(value >> 16);
-  p[2] = uint8_t(value >> 8);
-  p[3] = uint8_t(value);
 }
 
 bool InTitlePhase() {
@@ -158,8 +155,63 @@ std::atomic<uint64_t> g_ui_updates{0}, g_mapper_calls{0}, g_movie_adv{0}, g_movi
 
 // Only the game's thread (the one that runs the updates) touches these.
 std::array<uint64_t, kPadCount> g_updates{};
-std::array<uint32_t, kPadCount> g_hold_bits{};
-std::array<uint64_t, kPadCount> g_hold_until_us{};
+
+// ---- The latch for script threads (mcla_script_pad_latch_ms) ----
+// Per pad and button: how many presses the pad record has shown, and when the last one came.
+// Written by the pad update hook, read by the native's hook (both run on the game's thread; the
+// mutex is for any other reader).
+constexpr uint32_t kButtons = 16;
+// A script thread polls a button if it read it within this long before the press.
+constexpr uint64_t kPollerUs = 200'000;
+std::mutex g_latch_mutex;
+std::array<std::array<uint32_t, kButtons>, kPadCount> g_edge_seq{};
+std::array<std::array<uint64_t, kButtons>, kPadCount> g_edge_us{};
+
+// What one script thread has done with one (pad, button).
+struct PollState {
+  uint64_t last_poll_us = 0;  // its last read of this button
+  uint32_t seen_seq = 0;      // the press it has been told about (the real edge or the latched one)
+  uint64_t seen_update = 0;   // the pad update it was told in
+  bool seen_latched = false;  // ... by the latch (later reads in that update answer the same)
+};
+struct ThreadPolls {
+  uint32_t thread = 0;  // the scrThread's address
+  uint64_t last_any_poll_us = 0;
+  std::array<std::array<PollState, kButtons>, kPadCount> state{};
+};
+constexpr size_t kThreadSlots = 64;
+std::array<ThreadPolls, kThreadSlots> g_threads{};
+
+// The slot of a script thread (the one that polled longest ago is replaced when all are used).
+// Called with g_latch_mutex held.
+ThreadPolls& ThreadSlot(uint32_t thread) {
+  size_t oldest = 0;
+  for (size_t i = 0; i < kThreadSlots; i++) {
+    if (g_threads[i].thread == thread) {
+      return g_threads[i];
+    }
+    if (g_threads[i].last_any_poll_us < g_threads[oldest].last_any_poll_us) {
+      oldest = i;
+    }
+  }
+  g_threads[oldest] = ThreadPolls{};
+  g_threads[oldest].thread = thread;
+  return g_threads[oldest];
+}
+
+// Did this script thread poll the pad in the last second (for the thread trace)?
+bool IsPadPoller(uint32_t thread, uint64_t now) {
+  std::lock_guard<std::mutex> lock(g_latch_mutex);
+  for (const ThreadPolls& t : g_threads) {
+    if (t.thread == thread) {
+      return t.last_any_poll_us && now - t.last_any_poll_us < 1'000'000;
+    }
+  }
+  return false;
+}
+
+std::atomic<uint64_t> g_start_reads{0}, g_start_real{0}, g_start_latched{0}, g_pad_reads{0},
+    g_thread_runs{0}, g_thread_updates{0};
 
 // The script interpreter's native calls (sub_82554E20, the call at 0x82555CC8): how often each
 // native function was called in the last second (a small table, probed linearly), and the first
@@ -229,6 +281,12 @@ void MaybeReport(uint64_t now) {
       ReadGuestU32(kCityPending), ModalCount(), ChildFormVtable(), g_action_queries.exchange(0),
       TopNatives());
   g_report_updates = g_updates[0];
+  REXLOG_INFO(
+      "TS 1s-script t={} start_reads={} start_real={} start_latched={} pad_reads={} thread_runs={} "
+      "thread_updates={} latch_ms={}",
+      now, g_start_reads.exchange(0), g_start_real.exchange(0), g_start_latched.exchange(0),
+      g_pad_reads.exchange(0), g_thread_runs.exchange(0), g_thread_updates.exchange(0),
+      REXCVAR_GET(mcla_script_pad_latch_ms));
 }
 
 // What the key path looks at when Start is pressed: the modal ring, the main form and its child.
@@ -280,18 +338,28 @@ void mcla_pad_probe_update(PPCRegister& r31) {
     return;
   }
   const bool probe = Probe();
-  const int32_t hold_ms = REXCVAR_GET(mcla_title_pad_hold_ms);
-  if (!probe && hold_ms <= 0 && REXCVAR_GET(mcla_title_fps) <= 0) {
+  const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
+  if (!probe && latch_ms <= 0 && REXCVAR_GET(mcla_title_fps) <= 0) {
     return;
   }
   const uint64_t now = NowUs();
   const uint64_t update = ++g_updates[pad];
-  uint32_t cur = ReadGuestU32(r31.u32 + 8);
-  uint32_t last = ReadGuestU32(r31.u32 + 12);
+  const uint32_t cur = ReadGuestU32(r31.u32 + 8);
+  const uint32_t last = ReadGuestU32(r31.u32 + 12);
   const uint32_t pressed = cur & ~last;
   const uint32_t released = last & ~cur;
   if (pad == 0) {
     g_update.store(update, std::memory_order_relaxed);
+  }
+  if (pressed) {
+    // Count the presses for the script latch: the native sees each one for this update only.
+    std::lock_guard<std::mutex> lock(g_latch_mutex);
+    for (uint32_t b = 0; b < kButtons; b++) {
+      if (pressed & (1u << b)) {
+        g_edge_seq[pad][b]++;
+        g_edge_us[pad][b] = now;
+      }
+    }
   }
   if (pressed & kStartBit) {
     g_last_start_us.store(now, std::memory_order_relaxed);
@@ -307,30 +375,125 @@ void mcla_pad_probe_update(PPCRegister& r31) {
       LogState(pad, update);
     }
   }
-  if (hold_ms > 0 && InTitlePhase()) {
-    // Keep a press of Start or A down for hold_ms, also when the button is let go sooner: the bit
-    // stays set in the new mask. The "previous" mask of the next update is copied from this one,
-    // so the game sees one press (one edge) that lasts hold_ms, not a new press every update.
-    if (pressed & kHoldMask) {
-      g_hold_bits[pad] |= pressed & kHoldMask;
-      g_hold_until_us[pad] = now + uint64_t(hold_ms) * 1000;
-    }
-    if (g_hold_bits[pad] && now < g_hold_until_us[pad]) {
-      const uint32_t new_cur = cur | g_hold_bits[pad];
-      if (new_cur != cur) {
-        WriteGuestU32(r31.u32 + 8, new_cur);
-      }
-    } else {
-      g_hold_bits[pad] = 0;
-    }
-  } else {
-    g_hold_bits[pad] = 0;
-  }
   if (probe && pad == 0) {
     MaybeReport(now);
   }
 }
 
+// 0x822C8B34 in sub_822C8AF8, the script native IS_PAD_BUTTON_DOWN(pad, button), which is really
+// "this button was pressed in this update": the instruction `cntlzw r6,r8` that turns r8 (the press:
+// ((+8 xor +12) and the button's bit) and +8, nonzero = pressed) into the answer. r6 = the pad,
+// r5 = the button (its bit number).
+//
+// A script thread that runs only every 2nd to 4th update (the title's, above 30 FPS) asks in about
+// one update in 3 at 120 FPS and so misses most presses. With mcla_script_pad_latch_ms > 0 and the
+// title screen up, a thread that is not given the real press is told about it once, at its next
+// poll, when
+//  - it polled this button within 200 ms before the press (it is a poller: a thread that starts
+//    asking after the press is not told, so one press does not also answer the next screen),
+//  - it has not been told about this press (by the real edge, or earlier),
+//  - the press is at most mcla_script_pad_latch_ms old.
+// Later polls in the update it was told in answer the same, as they would for the real edge.
+void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
+  const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
+  const bool probe = Probe();
+  if (latch_ms <= 0 && !probe) {
+    return;
+  }
+  const uint32_t pad = r6.u32;
+  const uint32_t button = r5.u32;
+  if (pad >= kPadCount || button >= kButtons) {
+    return;
+  }
+  const uint32_t thread = ReadGuestU32(kCurrentThread);
+  const uint64_t now = NowUs();
+  const bool real = (r8.u32 != 0);
+  bool latched = false;
+  uint64_t age_us = 0;
+  uint64_t before_us = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_latch_mutex);
+    ThreadPolls& t = ThreadSlot(thread);
+    PollState& st = t.state[pad][button];
+    const uint32_t seq = g_edge_seq[pad][button];
+    const uint64_t edge_us = g_edge_us[pad][button];
+    const uint64_t update = g_updates[pad];
+    if (real) {
+      st.seen_seq = seq;
+      st.seen_update = update;
+      st.seen_latched = false;
+    } else if (latch_ms > 0 && seq != 0) {
+      if (st.seen_seq == seq) {
+        latched = st.seen_latched && st.seen_update == update;
+      } else if (InTitlePhase() && st.last_poll_us != 0 && st.last_poll_us < edge_us &&
+                 edge_us - st.last_poll_us <= kPollerUs &&
+                 now - edge_us <= uint64_t(latch_ms) * 1000) {
+        latched = true;
+        st.seen_seq = seq;
+        st.seen_update = update;
+        st.seen_latched = true;
+      }
+    }
+    age_us = edge_us ? now - edge_us : 0;
+    before_us = st.last_poll_us ? now - st.last_poll_us : 0;
+    st.last_poll_us = now;
+    t.last_any_poll_us = now;
+  }
+  if (latched) {
+    r8.u64 = 1;
+  }
+  if (!probe) {
+    return;
+  }
+  g_pad_reads.fetch_add(1, std::memory_order_relaxed);
+  if (button == kStartButton) {
+    g_start_reads.fetch_add(1, std::memory_order_relaxed);
+    if (real) {
+      g_start_real.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (latched) {
+      g_start_latched.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (Window()) {
+      REXLOG_INFO(
+          "TS padread thread={:08X} pad={} button={} real={} latched={} update={} t={} "
+          "press_age_us={} previous_poll_us_ago={}",
+          thread, pad, button, real ? 1 : 0, latched ? 1 : 0,
+          g_update.load(std::memory_order_relaxed), now, age_us, before_us);
+    }
+  }
+}
+
+// 0x82554E20: scrThread::Run (sub_82554E20; r3 = the thread). 0x82553C10: scrThread::Update
+// (vtable[3]: adds 16 ms to the thread's clocks and calls Run). Logged in the window after a Start
+// press for the threads that poll the pad, to see how often they run against the game's updates.
+void mcla_tsp_thread_run(PPCRegister& r3) {
+  if (!Probe()) {
+    return;
+  }
+  g_thread_runs.fetch_add(1, std::memory_order_relaxed);
+  if (Window()) {
+    const uint64_t now = NowUs();
+    if (IsPadPoller(r3.u32, now)) {
+      REXLOG_INFO("TS thread run {:08X} update={} t={}", r3.u32,
+                  g_update.load(std::memory_order_relaxed), now);
+    }
+  }
+}
+
+void mcla_tsp_thread_update(PPCRegister& r3) {
+  if (!Probe()) {
+    return;
+  }
+  g_thread_updates.fetch_add(1, std::memory_order_relaxed);
+  if (Window()) {
+    const uint64_t now = NowUs();
+    if (IsPadPoller(r3.u32, now)) {
+      REXLOG_INFO("TS thread update {:08X} update={} t={}", r3.u32,
+                  g_update.load(std::memory_order_relaxed), now);
+    }
+  }
+}
 
 // 0x822240E4 in sub_82223CD8: after a menu key down was sent to the scene stack (sub_82209C38).
 // r30 = whether something took it, r31 = the input (7 = Start), r4 = its key code or -1 (and

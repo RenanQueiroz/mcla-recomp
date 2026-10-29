@@ -15,9 +15,15 @@ Pad kinds (all end with `quit`):
            shot 700 ms after each: does the first press stop the video, and which press leaves the title?
 
 `left_title` is NOT the press: the dev pad reads bit 0 of a function-local static's guard (0x82836A28) that the city's
-lighting set-up sets the first time it runs, which can be some seconds after a press that was accepted. A press was
-ACCEPTED when the trace shows `EVENT_START_SCREEN_EXIT handled` within 1.5 s of it (the title's statechart leaves
-StartScreen on that event).
+lighting set-up sets the first time it runs, which can be some seconds after a press that was accepted.
+
+What decides a press (found 2026-10-29 in the round-2 logs): a script thread polls the native IS_PAD_BUTTON_DOWN
+(sub_822C8AF8, "pressed in this update": true for ONE update) in a loop that runs every 2nd to 4th update above 30 FPS.
+A press is SEEN when that thread reads Start (button 11) with a true answer in the press's update (`real`), or, with
+--mcla_script_pad_latch_ms, at a later poll (`latched`). The report says SAW / MISSED per press from the `TS padread`
+lines, and shows the script thread's Run/Update calls around the press (`TS thread run|update`) and MoviePlayer_StopMovie
+(the title exit follows a seen press by 3 updates, the end of the attract video by about 40). EVENT_START_SCREEN_EXIT never
+comes (the old detector).
 
 Report, per run (needs the probe: --mcla_pad_probe=true): the press_until result, per Start edge of the pad record the
 update and the time after the first one, the way the key took (A modal scene, B1 main form and its child, B2 user
@@ -101,8 +107,14 @@ MARK = re.compile(r"dev pad: mark (\w+) at engine frame (\d+), swap (\d+)")
 CAP = re.compile(r"frame timing: the frame-rate cap is now (\d+) FPS")
 UPD = re.compile(r"update[= ](\d+)")
 # script natives known from the code (sub_82554E20 calls them; the wrapper's address)
-NATIVE_NAMES = {"822C8AB0": "IS_PAD_BUTTON_JUST_PRESSED", "822CC808": "MoviePlayer_StopMovie", "822CBEF8": "MoviePlayer_StartMovie",
-                "822CCC00": "MoviePlayer_IsMoviePlaying?"}
+NATIVE_NAMES = {"822C8AB0": "IS_BUTTON_DOWN", "822C8AF8": "IS_PAD_BUTTON_DOWN", "822CC808": "MoviePlayer_StopMovie",
+                "822CBEF8": "MoviePlayer_StartMovie", "822C8ED8": "IsChildFinished", "822C8A58": "Game_FadeLoadscreenLogo",
+                "822C8A78": "Game_GetLoadingDone"}
+READ = re.compile(r"TS padread thread=([0-9A-F]{8}) pad=(\d+) button=(\d+) real=(\d) latched=(\d) update=(\d+) t=(\d+) "
+                  r"press_age_us=(\d+) previous_poll_us_ago=(\d+)")
+TRUN = re.compile(r"TS thread (run|update) ([0-9A-F]{8}) update=(\d+) t=(\d+)")
+SCRIPT_SEC = re.compile(r"TS 1s-script t=(\d+) start_reads=(\d+) start_real=(\d+) start_latched=(\d+) pad_reads=(\d+) "
+                        r"thread_runs=(\d+) thread_updates=(\d+) latch_ms=(\d+)")
 HEX8 = re.compile(r"\b(?:vtable|vt) ([0-9A-F]{8})")
 
 
@@ -147,6 +159,7 @@ def report_one(folder, vtables=None):
     last_start = -1
     caps = []  # (seconds in the log, cap)
     states = []  # (1 s line number, modal scenes, child form vtable)
+    script_sec = []  # (start reads, real, latched, pad reads, thread runs, thread updates, latch ms) per second
     first_edge_s = None
     for line in lines:
         m = CAP.search(line)
@@ -171,6 +184,10 @@ def report_one(folder, vtables=None):
                 if first_edge_s is None:
                     first_edge_s = secs(line)
             continue
+        m = SCRIPT_SEC.match(t)
+        if m:
+            script_sec.append(tuple(int(m.group(i)) for i in range(2, 9)))
+            continue
         m = SEC.match(t)
         if m:
             sec.append(tuple(int(m.group(i)) for i in range(1, 12)) + (m.group(12),))
@@ -185,6 +202,7 @@ def report_one(folder, vtables=None):
         out.append("frame-rate cap changes (s after the first Start press): " + ", ".join(f"{c} FPS at {t - ref:+.1f}" for t, c in caps))
     start_edges = [e for e in edges if e[0] == 0 and e[3] & 0x800]
     accepted_n = 0
+    saw_n = saw_latched = stopped_n = 0
     for i, (pad, t, upd, down, up) in enumerate(start_edges):
         mine = [x for (j, x) in ts_lines if j == i]
         exit_line = next((x for x in mine if x.startswith("TS EVENT_START_SCREEN_EXIT")), None)
@@ -198,6 +216,16 @@ def report_one(folder, vtables=None):
         ticks_here = sum(1 for x in mine if x.startswith("TS movie tick") and f"(update {upd})" in x)
         mapper_here = sum(1 for x in mine if x.startswith("TS mapper update") and f"(update {upd})" in x)
         movie = [x for x in mine if x.startswith("TS movie player")]
+        reads = [READ.match(x) for x in mine if x.startswith("TS padread")]
+        reads = [r for r in reads if r]
+        hit = next((r for r in reads if r.group(4) == "1" or r.group(5) == "1"), None)
+        runs = [TRUN.match(x) for x in mine if x.startswith("TS thread ")]
+        runs = [r for r in runs if r]
+        stop = next((x for x in movie if "StopMovie" in x), None)
+        stop_upd = None
+        if stop:
+            mu = UPD.search(stop)
+            stop_upd = int(mu.group(1)) - upd if mu else None
         natives = []
         for x in mine:
             if x.startswith("TS native "):
@@ -205,9 +233,33 @@ def report_one(folder, vtables=None):
                 if fn not in [n[0] for n in natives]:
                     natives.append([fn, 0])
                 natives[[n[0] for n in natives].index(fn)][1] += 1
-        out.append(f"press {i + 1:2d}: update {upd}, +{(t - start_edges[0][1]) / 1000.0:.0f} ms: "
-                   + ("ACCEPTED (EVENT_START_SCREEN_EXIT" + (f" {exit_upd} updates later)" if exit_upd is not None else ")") if exit_line else "not accepted")
-                   + f"; movie ticks in the press update {ticks_here}, mapper runs {mapper_here}, events posted {len(events)}")
+        if hit:
+            kind = "latched" if hit.group(5) == "1" else "real"
+            verdict = (f"SAW (script read of Start {kind} at +{int(hit.group(6)) - upd} updates, press age "
+                       f"{int(hit.group(8)) / 1000.0:.1f} ms)")
+            saw_n += 1
+            saw_latched += kind == "latched"
+        elif reads:
+            verdict = f"MISSED (the script read Start {len(reads)} times in the window, never true)"
+        elif any(x.startswith("TS padread") for (_, x) in ts_lines):
+            verdict = "not asked (no script read of Start in the window)"
+        else:
+            verdict = "script reads not traced (old log)"
+        if stop_upd is not None:
+            verdict += f"; StopMovie +{stop_upd} updates"
+            stopped_n += 1
+        out.append(f"press {i + 1:2d}: update {upd}, +{(t - start_edges[0][1]) / 1000.0:.0f} ms: " + verdict
+                   + f"; movie ticks in the press update {ticks_here}, mapper runs {mapper_here}, events posted {len(events)}"
+                   + (f"; the old detector EVENT_START_SCREEN_EXIT came {exit_upd} updates later" if exit_line else ""))
+        if reads:
+            out.append("    Start reads (update offset, thread, real/latched): " + ", ".join(
+                f"+{int(r.group(6)) - upd} {r.group(1)} {r.group(4)}/{r.group(5)}" for r in reads[:12]) + (" ..." if len(reads) > 12 else ""))
+        if runs:
+            by = {}
+            for r in runs:
+                by.setdefault((r.group(1), r.group(2)), []).append(int(r.group(3)) - upd)
+            for (kind, thread), offs in by.items():
+                out.append(f"    thread {thread} {kind} at update offsets: " + ", ".join(f"{o:+d}" for o in offs[:16]) + (" ..." if len(offs) > 16 else ""))
         for x in mine:
             if x.startswith("TS state"):
                 out.append("    " + named(x[3:], table))
@@ -222,7 +274,12 @@ def report_one(folder, vtables=None):
             out.append(f"    the UI action Start (7) was asked 'is it down' {len(queries)} times in the window")
         if natives:
             out.append("    script natives called in the window (first 200 calls; function, count): " + ", ".join(f"{NATIVE_NAMES.get(fn, fn)} x{n}" for fn, n in natives))
-    out.append(f"Start edges {len(start_edges)}; accepted {accepted_n}")
+    out.append(f"Start edges {len(start_edges)}; script saw {saw_n} (latched {saw_latched}); StopMovie followed {stopped_n}; "
+               f"old detector (EVENT_START_SCREEN_EXIT) {accepted_n}")
+    if script_sec:
+        med_s = lambda i: sorted(x[i] for x in script_sec)[len(script_sec) // 2]
+        out.append(f"1 s-script lines: {len(script_sec)}; a second (median): reads of Start {med_s(0)} (real {med_s(1)}, latched {med_s(2)}), "
+                   f"pad reads {med_s(3)}, thread runs {med_s(4)}, thread updates {med_s(5)}, latch {med_s(6)} ms")
     keys = [KEY.match(x) for (_, x) in ts_lines if x.startswith("TS menu key down")]
     key_start = [k for k in keys if k and int(k.group(1)) == 7]
     out.append(f"menu key downs for Start {len(key_start)} (taken by the scene stack {sum(1 for k in key_start if int(k.group(3)))})")
