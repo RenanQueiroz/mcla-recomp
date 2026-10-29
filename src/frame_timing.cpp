@@ -1047,18 +1047,31 @@ REXCVAR_DEFINE_BOOL(mcla_ui_interp_stats, false, "MCLA",
 // motion, and exempts movies with HUD, RACE, POST, RESULT, PODIUM, CINE or END in their names from it. Whether
 // that happens in this build, and with which movie, is for the measurement (mcla_ui_pace_log). Until it is known
 // these two options change nothing by default.
+// Race start check (launcher/dev/race-start-2026-10-29.md). The owner sees the race start while the "2" (cap 120, HUD
+// stepped 60 a second) or the "3" (Smooth UI, every movie 30 a second) of the countdown is still on screen. The rule
+// below is the tool for it: a rate for the movies it names, kept by a schedule that catches up (several movie frames
+// in one update when it is behind) and, if asked, counted in the game's own seconds.
 REXCVAR_DEFINE_STRING(mcla_ui_movie_rates, "", "MCLA",
-                      "Development: steps a second for chosen UI movies instead of the usual rule (30 with "
+                      "Development: how often chosen UI movies step, instead of the usual rule (30 with "
                       "mcla_ui_interpolate, else mcla_ui_menu_rate and mcla_ui_hud_rate). A comma list of "
                       "NAME=RATE: NAME is a movie's name (POPUPMOVIE; a trailing * matches a prefix, a lone "
-                      "* every movie, HUDGAUGE is the gauge movie of the HUD); RATE is a number a second "
-                      "(0: every update, as without mcla_ui_timing_fix) or 'game' (the inverse of the "
-                      "engine timer's own step, 30 on the console). Empty (the default): the usual rule for "
-                      "every movie");
+                      "* every movie, HUDGAUGE is the gauge movie of the HUD); RATE is a number of steps a "
+                      "second, 0 (every update, as without mcla_ui_timing_fix), 'game' (the inverse of the "
+                      "engine timer's own step, 30 on the console) or 'swf' (the movie's own frame rate); "
+                      "g:RATE (g:30, g:swf) counts the seconds on the game's clock (the engine timer's total "
+                      "time) instead of the wall clock, so the movie keeps to the game through a slowdown. A "
+                      "named movie that is behind steps several frames in one update to catch up (up to 8); "
+                      "the interpolation glides over the whole change. Empty (the default): the usual rule "
+                      "for every movie");
 REXCVAR_DEFINE_BOOL(mcla_ui_pace_log, false, "MCLA",
-                    "Development: once a second, log how many engine updates there were, for each UI movie "
-                    "how many times the engine asked to advance it and how many of those advanced it, and the "
-                    "engine timer's clocks (for telling what runs at what speed in the race finish sequence)");
+                    "Development: once a second (mcla_ui_pace_log_ms), log how many engine updates there "
+                    "were, for each UI movie how many times the engine asked to advance it and how many "
+                    "frames it stepped, and the engine timer's clocks (for telling what runs at what speed in "
+                    "the race start and finish sequences)");
+REXCVAR_DEFINE_INT32(mcla_ui_pace_log_ms, 1000, "MCLA",
+                     "Development: the length of the window of each mcla_ui_pace_log line, in milliseconds "
+                     "(1000; 50 to 100 for the race start, which the dev pad sets with `set`)")
+    .range(20, 10000);
 
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
@@ -1181,6 +1194,14 @@ void NoteUiStep(size_t slot, uint64_t step_us, uint32_t period_us) {
 // --- mcla_ui_movie_rates: a rate for chosen movies ---
 constexpr int32_t kRateNone = -1;  // no entry for the movie: the usual rule
 constexpr int32_t kRateGame = -2;  // 'game': the inverse of the engine timer's own step
+constexpr int32_t kRateSwf = -3;   // 'swf': the movie's own frame rate
+// Most movie frames one update may step for a movie with a rate of its own (when it is behind).
+constexpr int kMaxCatchUpSteps = 8;
+
+struct UiRateRule {
+  int32_t rate = kRateNone;  // steps a second, 0, kRateGame or kRateSwf; kRateNone: no entry
+  bool game_clock = false;   // g:RATE: the seconds are the game's (engine timer total time), not the wall clock's
+};
 
 std::string TrimmedCopy(const std::string& text) {
   size_t begin = 0, end = text.size();
@@ -1193,8 +1214,8 @@ std::string TrimmedCopy(const std::string& text) {
   return text.substr(begin, end - begin);
 }
 
-// The rate the list gives the movie called name (the first item that matches), kRateNone if it gives none.
-int32_t UiMovieRateFor(const std::string& list, const char* name) {
+// The rule the list gives the movie called name (the first item that matches), kRateNone if it gives none.
+UiRateRule UiMovieRateFor(const std::string& list, const char* name) {
   size_t pos = 0;
   while (pos <= list.size()) {
     size_t end = list.find(',', pos);
@@ -1208,7 +1229,7 @@ int32_t UiMovieRateFor(const std::string& list, const char* name) {
       continue;
     }
     const std::string pattern = TrimmedCopy(item.substr(0, eq));
-    const std::string value = TrimmedCopy(item.substr(eq + 1));
+    std::string value = TrimmedCopy(item.substr(eq + 1));
     bool match = pattern == name;
     if (!match && !pattern.empty() && pattern.back() == '*') {
       match = std::strncmp(name, pattern.c_str(), pattern.size() - 1) == 0;
@@ -1216,14 +1237,25 @@ int32_t UiMovieRateFor(const std::string& list, const char* name) {
     if (!match) {
       continue;
     }
-    if (value == "game") {
-      return kRateGame;
+    UiRateRule rule;
+    if (value.rfind("g:", 0) == 0) {
+      rule.game_clock = true;
+      value = TrimmedCopy(value.substr(2));
     }
-    char* tail = nullptr;
-    const long rate = std::strtol(value.c_str(), &tail, 10);
-    return (tail != value.c_str() && *tail == 0 && rate >= 0 && rate <= 240) ? int32_t(rate) : kRateNone;
+    if (value == "game") {
+      rule.rate = kRateGame;
+    } else if (value == "swf") {
+      rule.rate = kRateSwf;
+    } else {
+      char* tail = nullptr;
+      const long rate = std::strtol(value.c_str(), &tail, 10);
+      if (tail != value.c_str() && *tail == 0 && rate >= 0 && rate <= 240) {
+        rule.rate = int32_t(rate);
+      }
+    }
+    return rule;
   }
-  return kRateNone;
+  return {};
 }
 
 // What the engine timer's own step says the game runs at: [timer + 32] is its fixed step in seconds (1/30 on the
@@ -1236,11 +1268,39 @@ int32_t GameStepRate(int32_t fallback) {
   return fallback;
 }
 
+// The frame rate the movie's SWF file declares (the halfword at +48 of its definition, which the advance divides
+// into 1 s to get the length of a movie frame), the fallback if it is not a usable rate.
+int32_t SwfFrameRate(uint32_t context, int32_t fallback) {
+  const uint32_t definition = ReadGuestU32(context + 28);
+  const uint32_t fps = definition ? (ReadGuestU32(definition + 48) >> 16) : 0;
+  return (fps >= 1 && fps <= 240) ? int32_t(fps) : fallback;
+}
+
+// The game's clock in microseconds: the engine timer's total time (+20), which advances by the time-scaled elapsed
+// time of every update and starts again from 0 when a mode loads.
+uint64_t GameClockUs() {
+  const double seconds = ReadGuestFloat(kGuestTimer + 20);
+  return seconds > 0.0 && seconds < 1.0e6 ? uint64_t(seconds * 1.0e6) : 0;
+}
+
+void WriteGuestFloat(uint32_t address, float value) {
+  if (address < 0x10000) {
+    return;
+  }
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof bits);
+  uint8_t* p = rex::Runtime::instance()->virtual_membase() + address;
+  p[0] = uint8_t(bits >> 24);
+  p[1] = uint8_t(bits >> 16);
+  p[2] = uint8_t(bits >> 8);
+  p[3] = uint8_t(bits);
+}
+
 // --- mcla_ui_pace_log: what the engine asks of the UI movies, and what the timer's clocks do ---
 struct UiPaceCount {
   uint32_t context = 0;
   uint32_t calls = 0;     // asks to advance in the one-frame mode (the mode the UI manager uses)
-  uint32_t steps = 0;     // of them, those that were let through
+  uint32_t steps = 0;     // movie frames stepped (the asks that were let through, and the frames a catch-up added)
   uint32_t dt_calls = 0;  // asks in the elapsed-time mode (never held back by the pacing)
 };
 std::mutex g_pace_mutex;
@@ -1248,7 +1308,7 @@ std::array<UiPaceCount, 48> g_pace;
 uint32_t g_pace_updates = 0;
 uint64_t g_pace_window_us = 0;
 
-void CountUiAdvance(uint32_t context, bool one_frame, bool stepped) {
+void CountUiAdvance(uint32_t context, bool one_frame, uint32_t stepped) {
   std::lock_guard lock(g_pace_mutex);
   UiPaceCount* slot = nullptr;
   UiPaceCount* spare = nullptr;
@@ -1268,7 +1328,7 @@ void CountUiAdvance(uint32_t context, bool one_frame, bool stepped) {
   }
   if (one_frame) {
     slot->calls++;
-    slot->steps += stepped ? 1 : 0;
+    slot->steps += stepped;
   } else {
     slot->dt_calls++;
   }
@@ -1288,7 +1348,7 @@ void UiPaceLogTick() {
     g_pace_updates = 0;
     return;
   }
-  if (now - g_pace_window_us < 1'000'000) {
+  if (now - g_pace_window_us < uint64_t(REXCVAR_GET(mcla_ui_pace_log_ms)) * 1000) {
     return;
   }
   std::string movies;
@@ -1314,27 +1374,85 @@ void UiPaceLogTick() {
   const double span_ms = double(now - g_pace_window_us) / 1000.0;
   REXLOG_INFO(
       "ui pace: span_ms={:.1f} updates={} movies(name:ctx:swf_fps:calls/steps/dtcalls){} | timer dt={:.5f} rate={:.2f} "
-      "mode_t={:.3f} total_t={:.3f} total2_t={:.3f} step={:.5f} scale={:.3f} frames={} state={}",
+      "mode_t={:.3f} total_t={:.3f} total2_t={:.3f} step={:.5f} scale={:.3f} frames={} state={} us={}",
       span_ms, g_pace_updates, movies.empty() ? " none" : movies, ReadGuestFloat(kGuestTimer + 8),
       ReadGuestFloat(kGuestTimer + 12), ReadGuestFloat(kGuestTimer + 16), ReadGuestFloat(kGuestTimer + 20),
       ReadGuestFloat(kGuestTimer + 24), ReadGuestFloat(kGuestTimer + 32), ReadGuestFloat(kGuestTimer + 84),
-      ReadGuestU32(kGuestTimer + 44), ReadGuestU32(0x8288D000));
+      ReadGuestU32(kGuestTimer + 44), ReadGuestU32(0x8288D000), now);
   g_pace_window_us = now;
   g_pace_updates = 0;
 }
 }  // namespace
 
-static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31);
+static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31, PPCRegister& f30, PPCRegister& f31, PPCCRRegister& cr6,
+                           uint32_t& frames);
 
-bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
-  const bool hold = UiMovieAdvance(r25, r31);
+// The hook (config/frame_timing.toml): r25 is the one-frame flag, r31 the movie's player context, f30 the elapsed time
+// the caller passed and f31 the length of one movie frame (both in seconds), cr6 the compare of r25 with 0 that the
+// next instruction branches on. True holds the advance back; for a movie with a rule of its own that is behind, the
+// hook flips the call into the elapsed-time mode (r25 and cr6) with an accumulator that makes it step several frames.
+bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31, PPCRegister& f30, PPCRegister& f31,
+                           PPCCRRegister& cr6) {
+  const bool one_frame = r25.u32 != 0;
+  uint32_t frames = 1;  // movie frames this call steps, if it is let through
+  const bool hold = UiMovieAdvance(r25, r31, f30, f31, cr6, frames);
   if (REXCVAR_GET(mcla_ui_pace_log)) {
-    CountUiAdvance(r31.u32, r25.u32 != 0, !hold);
+    CountUiAdvance(r31.u32, one_frame, hold ? 0 : frames);
   }
   return hold;
 }
 
-static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31) {
+// The movie has a rule in mcla_ui_movie_rates: its own schedule, in the wall clock or the game's, that steps as many
+// frames as are due (up to kMaxCatchUpSteps) and tells the interpolation. `next` is when the next frame is due, in the
+// clock the rule counts in (next_game_clock says which). Returns true to hold the call back.
+static bool UiRuleAdvance(UiRateRule rule, uint32_t context, size_t slot, uint64_t now, uint64_t& next,
+                          bool& next_game_clock, PPCRegister& r25, PPCRegister& f30, PPCRegister& f31,
+                          PPCCRRegister& cr6, uint32_t& frames) {
+  int32_t rate = rule.rate == kRateGame ? GameStepRate(30) : rule.rate == kRateSwf ? SwfFrameRate(context, 30) : rule.rate;
+  if (rate <= 0) {
+    return false;  // every update
+  }
+  const uint64_t period = 1'000'000ull / uint64_t(rate);
+  const uint64_t clock = rule.game_clock ? GameClockUs() : now;
+  if (!next || next_game_clock != rule.game_clock || (rule.game_clock && next > clock + 2 * period + 1'000'000)) {
+    // First call, the clock changed, or the game's clock started again (a mode loaded): due now.
+    next = clock;
+    next_game_clock = rule.game_clock;
+  }
+  uint32_t due = 0;
+  while (due < uint32_t(kMaxCatchUpSteps) && clock + period / 4 >= next) {
+    due++;
+    next += period;
+  }
+  if (due == 0) {
+    return true;
+  }
+  if (due == uint32_t(kMaxCatchUpSteps) && clock + period / 4 >= next) {
+    next = clock + period;  // far behind (a long stall): the rest of the backlog is dropped
+  }
+  frames = due;
+  if (due > 1) {
+    // Several frames in this call: the elapsed-time mode steps while its accumulator holds a whole frame. The
+    // accumulator is [movie + 24]; the mode adds the caller's elapsed time to it before the loop, so it is set to
+    // (due + 0.5) frames less that, and the loop steps exactly `due` times, leaving half a frame.
+    double elapsed = f30.f64;
+    if (!(elapsed >= 0.0 && elapsed < 1.0)) {
+      elapsed = 0.0;
+    }
+    WriteGuestFloat(context + 24, float((double(due) + 0.5) * f31.f64 - elapsed));
+    r25.u32 = 0;
+    cr6.eq = 1;
+    cr6.lt = 0;
+    cr6.gt = 0;
+  }
+  // The step belongs on its schedule when the wall clock keeps it, else now (the interpolation's time base).
+  const uint64_t ideal = next - period;
+  NoteUiStep(slot, (!rule.game_clock && now - ideal <= period) ? ideal : now, uint32_t(period));
+  return false;
+}
+
+static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31, PPCRegister& f30, PPCRegister& f31, PPCCRRegister& cr6,
+                           uint32_t& frames) {
   if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
       !g_engine_timer_started.load(std::memory_order_relaxed)) {
     return false;
@@ -1347,7 +1465,9 @@ static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31) {
     uint32_t input_seq;   // the last key event this movie has looked at
     bool screen;
     char name[32];
-    int32_t rate;         // mcla_ui_movie_rates for this movie: kRateNone, kRateGame or steps a second
+    UiRateRule rule;      // mcla_ui_movie_rates for this movie (rate kRateNone: none)
+    uint64_t rule_next;   // with a rule: when its next frame is due, in the clock the rule counts in
+    bool rule_clock;      // which clock rule_next is in (true: the game's)
   };
   static std::mutex mutex;
   static std::array<Schedule, 32> schedules{};
@@ -1364,28 +1484,31 @@ static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31) {
   }
   if (!schedule) {
     schedule = &schedules[replace++ % schedules.size()];
-    *schedule = {context, 0, 0, 0, g_ui_input_seq.load(std::memory_order_acquire), false, {}, kRateNone};
+    *schedule = Schedule{};
+    schedule->context = context;
+    schedule->input_seq = g_ui_input_seq.load(std::memory_order_acquire);
   }
   if (now - schedule->checked_us > 1'000'000) {
     schedule->checked_us = now;
     schedule->screen = IsUiScreen(context, schedule->name);
     const std::string rates = REXCVAR_GET(mcla_ui_movie_rates);
-    schedule->rate = rates.empty() ? kRateNone : UiMovieRateFor(rates, schedule->name[0] ? schedule->name : "HUDGAUGE");
+    schedule->rule = rates.empty() ? UiRateRule{} : UiMovieRateFor(rates, schedule->name[0] ? schedule->name : "HUDGAUGE");
   }
   const size_t slot = size_t(schedule - schedules.data());
   TouchUiStep(slot, context, now, schedule->name[0] ? schedule->name : "HUDGAUGE");
   const bool log_adv = schedule->screen && REXCVAR_GET(mcla_ui_advance_log);
+  if (schedule->rule.rate != kRateNone) {
+    // A movie with a rule of its own: its schedule, catching up (no menu key answers: it is a chosen movie).
+    return UiRuleAdvance(schedule->rule, context, slot, now, schedule->rule_next, schedule->rule_clock, r25, f30, f31,
+                         cr6, frames);
+  }
   uint64_t period_us;
   bool by_input = false;
   // With the interpolation on, every movie steps 30 times a second (the SWF files' own rate, the console's)
   // whatever the two rate options say: the glide supplies the frames in between, nothing runs faster.
   const bool smooth = REXCVAR_GET(mcla_ui_interpolate);
-  // A rate from mcla_ui_movie_rates replaces the usual one for that movie.
-  auto rate_for = [&](int32_t usual) {
-    return schedule->rate == kRateNone ? usual : schedule->rate == kRateGame ? GameStepRate(usual) : schedule->rate;
-  };
   if (schedule->screen) {
-    const int32_t menu_rate = rate_for(smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_menu_rate));
+    const int32_t menu_rate = smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_menu_rate);
     if (menu_rate <= 0) {
       if (log_adv) {
         REXLOG_INFO("ui adv: {} ctx={:08X} t={}.{:03} ms in=0", schedule->name, context, now / 1000, now % 1000);
@@ -1404,7 +1527,7 @@ static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31) {
                  now - schedule->input_us >= kUiInputGapUs;
     }
   } else {
-    const int32_t hud_rate = rate_for(smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_hud_rate));
+    const int32_t hud_rate = smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_hud_rate);
     if (hud_rate <= 0) {
       return false;
     }

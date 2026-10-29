@@ -54,15 +54,52 @@ def stamp(line):
     return dt.datetime(y, mo, d, h, mi, s, ms * 1000).timestamp()
 
 
-def pad_lines(route, boot, shots, finish_s=70, every_s=5, scale=0.3, speed=1.0):
-    """The pad. The shots folder must exist before the run (the game does not make it)."""
+def pad_lines(route, boot, shots, finish_s=70, every_s=5, scale=0.3, speed=1.0, start=True, finish=True, pictures=True,
+              res=1, picture_every_ms=120, picture_count=100):
+    """The pad. The shots folder must exist before the run (the game does not make it).
+
+    start: the race start is measured too (race_start.py): the UI pace log in 100 ms windows and the cars' positions every
+    3 ticks (50 ms of the mode timer) from the intro on, the throttle held through the countdown by the follower, and, with
+    `pictures`, a picture of the whole frame about every picture_every_ms from 3 s of the mode timer (the countdown starts
+    after it; the race starts at about 9.3) for picture_count pictures. Those pictures are scaled by 0.3 / res, so a 3x run
+    makes the same size. `mark race` comes after them (at about 15 s of the mode timer; the finish reading counts from it, so it
+    is a few seconds later than in a run without the start part).
+    finish=False ends the script a few seconds after the start (a run for the start alone)."""
     lines = [
-        "# The race to its finish line and what follows (race_finish.py pad). Nothing is pressed after the route:",
+        "# The race start, and the race to its finish line and what follows (race_finish.py pad). Nothing is pressed after the route:",
         "# the follower hands the car back with the throttle open, and the pad waits and takes pictures.",
         f"include {boot}",
-        f"follow {route} speed={speed}",
-        "wait_until f32 0x827D7510 >= 9.3 300s",
-        "mark race",
+    ]
+    if start:
+        lines += [
+            "# The start: fine log windows, every car's position (the player first), the throttle held from the intro on.",
+            "set mcla_ui_pace_log_ms 100",
+            "watch 3",
+            f"follow {route} speed={speed}",
+            "wait_until f32 0x827D7510 >= 3.0 120s",
+            "mark countdown",
+        ]
+        if pictures:
+            pic_scale = round(scale / max(1, res), 3)
+            lines.append(f"burst {shots}\\cd {picture_count} {pic_scale} 0 0 1 1 every={picture_every_ms}")
+        else:
+            lines.append("wait_until f32 0x827D7510 >= 15 120s")
+        lines += [
+            "wait_until f32 0x827D7510 >= 9.3 120s",
+            "mark race",
+            "watch stop",
+            "set mcla_ui_pace_log_ms 1000",
+        ]
+        if not finish:
+            lines += ["wait 6s", "mark start_end"]
+            return lines
+    else:
+        lines += [
+            f"follow {route} speed={speed}",
+            "wait_until f32 0x827D7510 >= 9.3 300s",
+            "mark race",
+        ]
+    lines += [
         "wait_until follow_done 330s",
         "mark route_end",
         "trigger rt 1",
