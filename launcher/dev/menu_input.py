@@ -564,6 +564,12 @@ def lag_report(paths, out, echo=True):
                          f"(answered by an input advance: {res['tap_by_input']}, no advance within {LAG_MAX_MS:.0f} ms: {res['tap_missed']}); "
                          f"hold n={len(hl)} median {_fmt(_percentile(hl, 0.5), 2)} max {_fmt(max(hl) if hl else None, 2)} "
                          f"(by input {res['hold_by_input']}, missed {res['hold_missed']})")
+            for n in sorted(res["names"]):
+                if n == name or res["names"][n] < 5:
+                    continue
+                ol, oi, om = _lags(cell, n, LAG_TESTS)
+                lines.append(f"  (other screen {n}: lag of its next advance after a tap: n={len(ol)} median "
+                             f"{_fmt(_percentile(ol, 0.5), 2)} max {_fmt(max(ol) if ol else None, 2)}, by input {oi}, missed {om})")
             for n, r in sorted(res["rates"].items()):
                 lines.append(f"  advances a second of {n}: idle {_fmt(r.get('idle'))}, taps every 450 ms {_fmt(r.get('taps'))} "
                              f"(input advances {r.get('taps_in', '-')}), in the 1 s hold {_fmt(r.get('hold'), 0)} "
