@@ -98,7 +98,7 @@ The README lists these shortly.
 
 - [mcla-recomp](https://github.com/holdmysocks/mcla-recomp) by holdmysocks, the project this fork builds on.
 - ReXGlue SDK by Tom Clay and contributors; Xenia by Ben Vanik and contributors.
-- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from. In the fork, the motorcycle lean fix builds on the gyro function LARecomp identified (its pull request #9), and the menu pacing on its notes on the UI manager, used with its author's permission.
+- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from. In the fork, the motorcycle lean fix builds on the gyro function LARecomp identified (its pull request #9), and the menu pacing on its notes on the UI manager.
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by mihawk-99 (GPL-3): the RADV port and toolchain the PS5 version is built on.
 - XenonRecomp by hedge-dev, on which ReXGlue's analysis builds.
 - The Linux build by [@MoonFuji](https://github.com/MoonFuji).
