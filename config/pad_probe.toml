@@ -1,5 +1,6 @@
-# Title screen input: a probe and an option (src/pad_probe.cpp). Off unless --mcla_pad_probe=true
-# or --mcla_title_edge_hold_ms=N is given: each hook starts with one cvar read.
+# Title screen input: a development trace and two options (src/pad_probe.cpp). Off unless
+# --mcla_pad_probe=true, --mcla_title_fps=N or --mcla_title_pad_hold_ms=N is given: each hook starts
+# with one cvar read. Addresses are from the recompiled code of the Xbox 360 image.
 
 # 0x82615048: in sub_82614D30 (the per-pad update, once per game update), where the branches that
 # set the button bits of the pad record's new mask (+8) meet. r31 = the pad record
@@ -9,14 +10,6 @@ name = "mcla_pad_probe_update"
 address = 0x82615048
 registers = ["r31"]
 
-# 0x822C8030: `cntlzw r11,r3` in sub_822C7FC8, a script native "was this button just pressed":
-# r3 = ((new xor previous) and new) and (1 << button), r11 = the pad record, r30 = the button
-# number. Changing r3 changes the answer.
-[[midasm_hook]]
-name = "mcla_pad_probe_native"
-address = 0x822C8030
-registers = ["r3", "r11", "r30"]
-
 # 0x822240E4: `clrlwi r11,r30,24` in sub_82223CD8 (the UI input object's update), after a menu key
 # down was sent to sub_82209C38 (both ways meet here). r30 = whether the scene stack took it,
 # r31 = the input, r4 = its key code or -1.
@@ -24,3 +17,126 @@ registers = ["r3", "r11", "r30"]
 name = "mcla_pad_probe_key"
 address = 0x822240E4
 registers = ["r30", "r31", "r4"]
+
+# --- The key path: sub_82209C38(this = the UI logic at 0x8286D8D4, r4 = key, r5 = taken before) ---
+[[midasm_hook]]
+name = "mcla_tsp_dispatch"
+address = 0x82209C38
+registers = ["r3", "r4", "r5"]
+
+# way A: a modal scene (ring of three at the UI manager's +0x40724): `lwz r7,276(r8)`, r8 = vtable.
+[[midasm_hook]]
+name = "mcla_tsp_dispatch_a"
+address = 0x82209CE0
+registers = ["r3", "r4", "r8"]
+
+# ... what it answered (`clrlwi r6,r3,24`).
+[[midasm_hook]]
+name = "mcla_tsp_dispatch_a_res"
+address = 0x82209CEC
+registers = ["r3"]
+
+# way B1: the main form at the UI logic + 0x13F80: `lwz r10,32(r11)`, r11 = vtable.
+[[midasm_hook]]
+name = "mcla_tsp_dispatch_b1"
+address = 0x82209D34
+registers = ["r3", "r4", "r11"]
+
+# ... what it answered (`clrlwi r9,r3,24`).
+[[midasm_hook]]
+name = "mcla_tsp_dispatch_b1_res"
+address = 0x82209D40
+registers = ["r3"]
+
+# way B2: the "UserInterface" object ([UI manager + 40]): `lwz r10,276(r11)`, r11 = vtable.
+[[midasm_hook]]
+name = "mcla_tsp_dispatch_b2"
+address = 0x82209D60
+registers = ["r3", "r4", "r11"]
+
+# ... what it answered (`clrlwi r9,r3,24`).
+[[midasm_hook]]
+name = "mcla_tsp_dispatch_b2_res"
+address = 0x82209D6C
+registers = ["r3"]
+
+# --- The main form (sub_826439E0) hands the key to its child form ---
+# `lwz r10,276(r11)`: r3 = the child, r11 = its vtable.
+[[midasm_hook]]
+name = "mcla_tsp_child"
+address = 0x82643B0C
+registers = ["r3", "r4", "r11"]
+
+# `lwz r9,0(r31)` after the child's call: r3 = its answer.
+[[midasm_hook]]
+name = "mcla_tsp_child_res"
+address = 0x82643B18
+registers = ["r3"]
+
+# --- The form key handler sub_82631E20 (most child forms): entry, and after the form's own handler ---
+[[midasm_hook]]
+name = "mcla_tsp_form_key"
+address = 0x82631E20
+registers = ["r3", "r4"]
+
+# `mr r31,r3` after `lwz r10,32(r11); bctrl`: r3 = the answer.
+[[midasm_hook]]
+name = "mcla_tsp_form_key_res"
+address = 0x82631E78
+registers = ["r3"]
+
+# --- Events and the title's exit ---
+# 0x8268EE10: an event is posted (r3 = from, r4 = the code (Start = 55), r5 = the argument).
+[[midasm_hook]]
+name = "mcla_tsp_event"
+address = 0x8268EE10
+registers = ["r3", "r4", "r5"]
+
+# 0x821FAE10 in sub_821FAD78 (the UI manager's event handler): the first instruction after the
+# compare with EVENT_START_SCREEN_EXIT (the id at the UI manager's +10668). r4 = the event.
+[[midasm_hook]]
+name = "mcla_tsp_exit_event"
+address = 0x821FAE10
+registers = ["r4"]
+
+# The movie player: StopMovie (script native, sets [movie + 80] = 5) and the start of a movie.
+[[midasm_hook]]
+name = "mcla_tsp_movie_stop"
+address = 0x822CC808
+
+[[midasm_hook]]
+name = "mcla_tsp_movie_start"
+address = 0x822CBEF8
+
+# --- Counters ---
+# sub_82223CD8: the UI input object's update.
+[[midasm_hook]]
+name = "mcla_tsp_ui_update"
+address = 0x82223CD8
+
+# sub_8260B990: the input mapper update (r3 = the mapper object).
+[[midasm_hook]]
+name = "mcla_tsp_mapper"
+address = 0x8260B990
+registers = ["r3"]
+
+# sub_825EDC08: a movie is stepped; 0x825EDCB0: one movie frame is run (r31 = the movie).
+[[midasm_hook]]
+name = "mcla_tsp_movie_adv"
+address = 0x825EDC08
+
+[[midasm_hook]]
+name = "mcla_tsp_movie_tick"
+address = 0x825EDCB0
+registers = ["r31"]
+
+# sub_822C7FC8: the script native "button just pressed" (r4 = the button, 11 = Start), at its
+# entry and past its "a modal scene blocks input" check (0x822C7FFC).
+[[midasm_hook]]
+name = "mcla_tsp_native_entry"
+address = 0x822C7FC8
+registers = ["r4"]
+
+[[midasm_hook]]
+name = "mcla_tsp_native_pass"
+address = 0x822C7FFC

@@ -15,13 +15,17 @@ Pad kinds (all end with `quit`):
            shot 700 ms after each: does the first press stop the video, and which press leaves the title?
 
 `left_title` is NOT the press: the dev pad reads bit 0 of a function-local static's guard (0x82836A28) that the city's
-lighting set-up sets the first time it runs, which can be some seconds after a press that was accepted. The report
-therefore also gives, per Start edge of the pad record, whether a script read it (the `TS ... script read` lines) and
-whether the menu's key event was taken by the scene stack (`TS menu key down ... taken=`).
+lighting set-up sets the first time it runs, which can be some seconds after a press that was accepted. A press was
+ACCEPTED when the trace shows `EVENT_START_SCREEN_EXIT handled` within 1.5 s of it (the title's statechart leaves
+StartScreen on that event).
 
-Report, per run: the press_until result, the Start edges (time in ms after the first one, the update number), for each
-whether a script read "just pressed" for button 11 (Start) in the same update or later (lag in updates), the
-scripts' reads per second (the 1 s lines: updates, native calls, calls for Start), and when the title phase ended.
+Report, per run (needs the probe: --mcla_pad_probe=true): the press_until result, per Start edge of the pad record the
+update and the time after the first one, the way the key took (A modal scene, B1 main form and its child, B2 user
+interface; with the vtable, its class when a table is given, and what it answered), the events posted, whether the exit
+event came (and after how many updates), and how many movie ticks and input mapper runs the press update had; then the
+counts of the 1 s lines (updates, UI updates, mapper runs, movie steps and ticks, "just pressed" native calls and how many
+got past its modal check). A class table (address and class name per line; made from the image's RTTI, never committed)
+is read from --vtables, the environment variable TS_VTABLES or C:\mcv\title2\tools\vtables.txt when it exists.
 """
 import argparse
 import re
@@ -83,15 +87,18 @@ def pad_lines(kind, hold=100, every=1500, settle=4, idle=150, shots=None):
 
 
 # ---- report -----------------------------------------------------------------------------------------------------------------
+import os
+
 TS = re.compile(r"\] \[t\d+\] (TS .*)$")
 STAMP = re.compile(r"^\[(\d{4}-\d\d-\d\d) (\d\d):(\d\d):(\d\d)\.(\d{3})\]")
 PRESS = re.compile(r"press_until start left_title every=(\S+)(?: hold=(\S+))?.*-> (ok after ([\d.]+) s, (\d+) presses, frame=(\d+)|err .*)")
 EDGE = re.compile(r"TS pad(\d) edge t=(\d+) update=(\d+) down=0x([0-9a-f]+) up=0x([0-9a-f]+)")
-READ = re.compile(r"TS pad(\d) script read: button (\d+) just pressed( \(held over\))? t=(\d+) update=(\d+)")
 KEY = re.compile(r"TS menu key down input=(\d+) key=(-?\d+) taken=(\d+) t=(\d+) update=(\d+)")
-SEC = re.compile(r"TS 1s t=(\d+) updates=(\d+) .*?native_calls=(\d+) true=(\d+) start_calls=(\d+) start_true=(\d+) "
-                 r"held_deliveries=(\d+) keys=(\d+) title_phase=(\w+)")
+SEC = re.compile(r"TS 1s t=(\d+) updates=(\d+) .*?ui_updates=(\d+) mapper=(\d+) movie_adv=(\d+) movie_ticks=(\d+) native_calls=(\d+) "
+                 r"native_start=(\d+) native_pass=(\d+) events=(\d+) dispatch=(\d+) title_phase=(\w+)")
 MARK = re.compile(r"dev pad: mark (\w+) at engine frame (\d+), swap (\d+)")
+UPD = re.compile(r"update[= ](\d+)")
+HEX8 = re.compile(r"\b(?:vtable|vt) ([0-9A-F]{8})")
 
 
 def secs(line):
@@ -101,14 +108,38 @@ def secs(line):
     return int(m.group(2)) * 3600 + int(m.group(3)) * 60 + int(m.group(4)) + int(m.group(5)) / 1000.0
 
 
-def report_one(folder):
+def load_vtables(path=None):
+    path = path or os.environ.get("TS_VTABLES") or r"C:\mcv\title2\tools\vtables.txt"
+    table = {}
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                table[parts[0].upper()] = parts[1].strip()
+    except OSError:
+        pass
+    return table
+
+
+def named(text, table):
+    """Adds the class name after every `vtable XXXXXXXX` or `(vt XXXXXXXX)` when the table knows it."""
+    def sub(m):
+        name = table.get(m.group(1).upper())
+        return m.group(0) + (f" <{name}>" if name else "")
+    return HEX8.sub(sub, text)
+
+
+def report_one(folder, vtables=None):
+    table = vtables if vtables is not None else load_vtables()
     log = Path(folder) / "game.log"
     text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
     lines = text.splitlines()
     out = [f"=== {Path(folder).name}"]
     press = None
     marks = {}
-    edges, reads, keys, sec = [], [], [], []
+    edges, sec = [], []
+    ts_lines = []  # (number of the last Start edge, or -1; the TS text)
+    last_start = -1
     for line in lines:
         m = PRESS.search(line)
         if m:
@@ -122,45 +153,56 @@ def report_one(folder):
         t = m.group(1)
         m = EDGE.match(t)
         if m:
-            edges.append((int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4), 16), int(m.group(5), 16)))
-            continue
-        m = READ.match(t)
-        if m:
-            reads.append((int(m.group(1)), int(m.group(2)), bool(m.group(3)), int(m.group(4)), int(m.group(5))))
-            continue
-        m = KEY.match(t)
-        if m:
-            keys.append(tuple(int(m.group(i)) for i in (1, 2, 3, 4, 5)))
+            e = (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4), 16), int(m.group(5), 16))
+            edges.append(e)
+            if e[0] == 0 and e[3] & 0x800:
+                last_start += 1
             continue
         m = SEC.match(t)
         if m:
-            sec.append(tuple(int(m.group(i)) for i in range(1, 9)) + (m.group(9),))
+            sec.append(tuple(int(m.group(i)) for i in range(1, 12)) + (m.group(12),))
+            continue
+        ts_lines.append((last_start, t))
     out.append(f"press_until: {press[0] if press else 'no result line (the pad did not get that far)'}")
     out.append("marks: " + ", ".join(f"{k}@frame {v[1]}" for k, v in marks.items()))
     start_edges = [e for e in edges if e[0] == 0 and e[3] & 0x800]
-    start_reads = [r for r in reads if r[0] == 0 and r[1] == 11]
-    key_start = [k for k in keys if k[0] == 7]
-    out.append(f"Start edges {len(start_edges)}; script reads of Start (true) {len(start_reads)} "
-               f"(held over {sum(1 for r in start_reads if r[2])}); menu key downs for Start {len(key_start)} "
-               f"(taken by the scene stack {sum(1 for k in key_start if k[2])})")
-    seen = 0
-    first_t = start_edges[0][1] if start_edges else 0
-    for i, (pad, t, upd, down, up) in enumerate(start_edges, 1):
-        r = [x for x in start_reads if x[4] >= upd and x[3] >= t and x[3] - t < 400_000]
-        k = [x for x in key_start if x[4] >= upd and x[3] >= t and x[3] - t < 400_000]
-        if r:
-            seen += 1
-        out.append(f"  press {i:2d}: +{(t - first_t) / 1000.0:8.1f} ms update {upd}  script read: "
-                   + (f"yes, {r[0][4] - upd} updates / {(r[0][3] - t) / 1000.0:.1f} ms later" + (" (held over)" if r[0][2] else "") if r else "NO")
-                   + "  menu key: " + (f"taken={k[0][2]}" if k else "none"))
-    if start_edges:
-        out.append(f"script saw {seen} of {len(start_edges)} Start presses ({100.0 * seen / len(start_edges):.0f} %)")
+    accepted_n = 0
+    for i, (pad, t, upd, down, up) in enumerate(start_edges):
+        mine = [x for (j, x) in ts_lines if j == i]
+        exit_line = next((x for x in mine if x.startswith("TS EVENT_START_SCREEN_EXIT")), None)
+        exit_upd = None
+        if exit_line:
+            mu = UPD.search(exit_line)
+            exit_upd = int(mu.group(1)) - upd if mu else None
+            accepted_n += 1
+        ways = [x for x in mine if x.startswith(("TS way", "TS main form", "TS child", "TS form"))]
+        events = [x for x in mine if x.startswith("TS event posted")]
+        ticks_here = sum(1 for x in mine if x.startswith("TS movie tick") and f"(update {upd})" in x)
+        mapper_here = sum(1 for x in mine if x.startswith("TS mapper update") and f"(update {upd})" in x)
+        movie = [x for x in mine if x.startswith("TS movie player")]
+        out.append(f"press {i + 1:2d}: update {upd}, +{(t - start_edges[0][1]) / 1000.0:.0f} ms: "
+                   + ("ACCEPTED (EVENT_START_SCREEN_EXIT" + (f" {exit_upd} updates later)" if exit_upd is not None else ")") if exit_line else "not accepted")
+                   + f"; movie ticks in the press update {ticks_here}, mapper runs {mapper_here}, events posted {len(events)}")
+        for x in mine:
+            if x.startswith("TS state"):
+                out.append("    " + named(x[3:], table))
+        for x in ways:
+            out.append("    " + named(x[3:], table))
+        for x in events:
+            out.append("    " + x[3:])
+        for x in movie:
+            out.append("    " + x[3:])
+    out.append(f"Start edges {len(start_edges)}; accepted {accepted_n}")
+    keys = [KEY.match(x) for (_, x) in ts_lines if x.startswith("TS menu key down")]
+    key_start = [k for k in keys if k and int(k.group(1)) == 7]
+    out.append(f"menu key downs for Start {len(key_start)} (taken by the scene stack {sum(1 for k in key_start if int(k.group(3)))})")
     if sec:
-        title = [s for s in sec if s[8] == "true"]
-        out.append(f"1 s lines: {len(sec)}; in the title phase {len(title)}; "
-                   f"updates a second at the first {sec[0][1]}, median {sorted(s[1] for s in sec)[len(sec) // 2]}; "
-                   f"script reads a second (median) {sorted(s[2] for s in sec)[len(sec) // 2]}, for Start {sorted(s[4] for s in sec)[len(sec) // 2]}")
-        end = next((i for i, s in enumerate(sec) if s[8] == "false"), None)
+        title = [s for s in sec if s[11] == "true"]
+        med = lambda i: sorted(s[i] for s in sec)[len(sec) // 2]
+        out.append(f"1 s lines: {len(sec)}; in the title phase {len(title)}; updates a second at the first {sec[0][1]}, median {med(1)}; "
+                   f"a second (median): UI updates {med(2)}, mapper runs {med(3)}, movie steps {med(4)}, movie ticks {med(5)}, "
+                   f"just-pressed native calls {med(6)} (for Start {med(7)}, past the modal check {med(8)}), events {med(9)}, key dispatches {med(10)}")
+        end = next((i for i, s in enumerate(sec) if s[11] == "false"), None)
         out.append("title phase ended at the 1 s line number " + (str(end) if end is not None else "never") + f" of {len(sec)}")
     return out
 
@@ -179,15 +221,17 @@ def main():
     r = sub.add_parser("report")
     r.add_argument("folders", nargs="+")
     r.add_argument("--out", default=None)
+    r.add_argument("--vtables", default=None)
     a = ap.parse_args()
     if a.cmd == "pad":
         lines = pad_lines(a.kind, a.hold, a.every, a.settle, a.idle, a.shots)
         Path(a.out).write_text("\n".join(lines) + "\n", encoding="ascii")
         print(f"{a.out}: {len(lines)} lines")
     else:
+        table = load_vtables(a.vtables)
         text = []
         for f in a.folders:
-            text += report_one(f) + [""]
+            text += report_one(f, table) + [""]
         s = "\n".join(text)
         if a.out:
             Path(a.out).write_text(s + "\n", encoding="utf-8")
