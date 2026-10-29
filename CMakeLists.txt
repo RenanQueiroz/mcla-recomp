@@ -23,6 +23,7 @@ set(MCLA_SOURCES
     src/button_prompts.cpp
     src/settings_menu.cpp
     src/save_wait.cpp
+    src/vehicle_telemetry.cpp
     src/sampling_profiler.cpp
     src/code_pointer_scan.cpp
 )
