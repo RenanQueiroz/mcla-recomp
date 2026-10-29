@@ -237,6 +237,7 @@ rexglue-upstream-linux-wine.patch src/core/dynlib_win.cpp GetModuleHandleExW
 rexglue-upstream-small-fixes.patch include/rex/system/xam/user_profile.h Settings are owned, and replaced, through
 rexglue-codegen-csr-lazy.patch src/codegen/config.cpp csr_mode_free_ops
 rexglue-affinity-warning-once.patch src/system/xthread.cpp affinity_warning_once
+rexglue-exit-gpu-drain.patch src/ui/rex_app.cpp exit_gpu_drain_ms
 LATER
 
 # ---------------------------------------------------------------------------

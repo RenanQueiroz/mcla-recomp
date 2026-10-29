@@ -1,0 +1,164 @@
+diff --git a/include/rex/graphics/graphics_system.h b/include/rex/graphics/graphics_system.h
+index 9277cf3..6c2d359 100644
+--- a/include/rex/graphics/graphics_system.h
++++ b/include/rex/graphics/graphics_system.h
+@@ -63,6 +63,7 @@ class GraphicsSystem : public system::IGraphicsSystem {
+                          system::KernelState* kernel_state) override;
+   bool has_presentation() const override { return presenter_ != nullptr; }
+   void Shutdown() override;
++  bool StopForProcessExit(uint32_t timeout_ms) override;
+ 
+   // May be called from any thread any number of times, even during recovery
+   // from a device loss.
+diff --git a/include/rex/system/interfaces/graphics.h b/include/rex/system/interfaces/graphics.h
+index 7e52960..e84b55e 100644
+--- a/include/rex/system/interfaces/graphics.h
++++ b/include/rex/system/interfaces/graphics.h
+@@ -105,6 +105,16 @@ class IGraphicsSystem {
+ 
+   virtual void Shutdown() = 0;
+ 
++  // For a process that ends without the graphics shutdown (ReXApp::OnClosing hard-exits): stops the
++  // command processor, which first waits for the GPU to finish what it was given and then releases
++  // the host GPU objects, for up to timeout_ms. True when it stopped in time; false when it did not
++  // (it is left to finish on its own thread and the caller ends the process anyway). The presenter
++  // and the provider stay as they are. Default: nothing to stop.
++  virtual bool StopForProcessExit(uint32_t timeout_ms) {
++    (void)timeout_ms;
++    return true;
++  }
++
+   // The size of the EDRAM the GPU emulates, in tiles: 2048 as on the console,
+   // or more where the GPU's edram_tiles setting asks for it and the host
+   // allows it. 0 until the GPU emulation has started. For titles patched to
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index e00560b..1fedb01 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -13,10 +13,13 @@
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <chrono>
++#include <condition_variable>
+ #include <cstdint>
+ #include <functional>
+ #include <memory>
+ #include <mutex>
++#include <thread>
+ #include <utility>
+ 
+ #include <rex/cvar.h>
+@@ -213,6 +216,35 @@ void GraphicsSystem::Shutdown() {
+   provider_.reset();
+ }
+ 
++bool GraphicsSystem::StopForProcessExit(uint32_t timeout_ms) {
++  if (!command_processor_ || !timeout_ms) {
++    return true;
++  }
++  // CommandProcessor::Shutdown ends the worker thread, which first waits for the GPU to finish the
++  // submitted work, joins the pipeline creation threads and the storage writer, and releases the
++  // host GPU objects. It runs on a thread of its own so that a worker stuck in the driver costs
++  // timeout_ms and not the process's exit. After it the object must not be shut down again (nothing
++  // does: the process ends next).
++  struct State {
++    std::mutex mutex;
++    std::condition_variable cv;
++    bool done = false;
++  };
++  auto state = std::make_shared<State>();
++  CommandProcessor* processor = command_processor_.get();
++  std::thread([processor, state]() {
++    processor->Shutdown();
++    {
++      std::lock_guard<std::mutex> lock(state->mutex);
++      state->done = true;
++    }
++    state->cv.notify_all();
++  }).detach();
++  std::unique_lock<std::mutex> lock(state->mutex);
++  return state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
++                            [&state]() { return state->done; });
++}
++
+ void GraphicsSystem::OnHostGpuLossFromAnyThread([[maybe_unused]] bool is_responsible) {
+   // TODO(Triang3l): Somehow gain exclusive ownership of the Provider (may be
+   // used by the command processor, the presenter, and possibly anything else,
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 1263a8e..55b44e8 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -43,14 +43,35 @@
+ #include <imgui.h>
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <filesystem>
+ #include <string_view>
+ 
++#include <rex/platform.h>
++#if REX_PLATFORM_WIN32
++// Declared here, as <windows.h> declares them, so that its macros stay out of this file.
++extern "C" {
++__declspec(dllimport) void* __stdcall GetCurrentProcess(void);
++__declspec(dllimport) int __stdcall TerminateProcess(void* process, unsigned int exit_code);
++}
++#endif
++
+ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
+                       "GPU emulation")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
++REXCVAR_DEFINE_INT32(exit_gpu_drain_ms, 0, "Core",
++                     "When the window closes, stop the GPU command processor (it waits for the "
++                     "GPU to finish what it was given and releases the host GPU objects) before "
++                     "the process ends, for up to this many milliseconds; it is then ended "
++                     "whether or not it stopped. 0: off, the process ends at once (a process "
++                     "that did not leave after 'hard-exiting process' was seen with 0)");
++
++REXCVAR_DEFINE_BOOL(exit_terminate_process, false, "Core",
++                    "Windows: end the process with TerminateProcess instead of std::_Exit when "
++                    "the window closes, so that the DLLs get no DLL_PROCESS_DETACH");
++
+ namespace rex {
+ 
+ // --- ReXApp ---
+@@ -514,12 +535,36 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
+   if (runtime_ && runtime_->kernel_state()) {
+     runtime_->kernel_state()->TerminateTitle();
+   }
++  // The host GPU threads are not guest threads, so TerminateTitle leaves them running: a hard exit
++  // then ends them wherever they are, in the middle of a driver call (a process that stayed alive
++  // after the line below, with one idle "D3D Background Thread", was seen). With
++  // exit_gpu_drain_ms the command processor is stopped first, bounded so that a stuck driver
++  // costs that time and not the exit.
++  const int32_t drain_ms = REXCVAR_GET(exit_gpu_drain_ms);
++  if (drain_ms > 0 && runtime_ && runtime_->graphics_system()) {
++    const auto start = std::chrono::steady_clock::now();
++    const bool stopped = runtime_->graphics_system()->StopForProcessExit(uint32_t(drain_ms));
++    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                        std::chrono::steady_clock::now() - start)
++                        .count();
++    if (stopped) {
++      REXLOG_INFO("Exit: the GPU command processor stopped in {} ms.", ms);
++    } else {
++      REXLOG_WARN("Exit: the GPU command processor did not stop within {} ms; ending the process.",
++                  ms);
++    }
++  }
+   // Hard-exit rather than run subsystem teardown, which can deadlock on a host
+   // lock still held by a straggler TerminateTitle left running. Flush (not
+   // ShutdownLogging, which frees loggers a straggler may still use); the OS
+   // reclaims the rest.
+   REXLOG_INFO("Title terminated; hard-exiting process.");
+   rex::FlushLogging();
++#if REX_PLATFORM_WIN32
++  if (REXCVAR_GET(exit_terminate_process)) {
++    TerminateProcess(GetCurrentProcess(), 0);
++  }
++#endif
+   std::_Exit(0);
+ }
+ 
