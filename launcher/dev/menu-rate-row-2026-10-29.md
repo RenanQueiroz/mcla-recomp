@@ -1,5 +1,7 @@
 # The pause menu's MENU UPDATES row (2026-10-29)
 
+**Superseded before v0.3.1:** the row (and HUD UPDATES) was replaced by one SMOOTH UI row (`ui-interpolation-2026-10-29.md`, round 3); `menu_rate_row.py` became `smooth_ui_row.py`. Kept as the record of what was measured for it.
+
 `mcla_ui_menu_rate` (the rate the menus, pop-ups and map panels advance at, `KNOWN-ISSUES.md`, `menu-lag-2026-10-29.md`) is also a row of the pause menu's DISPLAY page, under HUD UPDATES, with the HUD's four values: 30, 60, 120 PER SECOND and EVERY FRAME (`src/settings_menu.cpp`, `kDisplayItems`; the PS5 build has no 120, as for HUD UPDATES). It is built, saved and applied like HUD UPDATES: stepping a row writes the option at once (the movie reads it at every advance), the option is noted as changed, and the page's save writes only the options changed through the menus.
 
 ## What changed with it

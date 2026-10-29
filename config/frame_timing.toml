@@ -1,9 +1,8 @@
 # Frame timing hooks. Implemented in src/frame_timing.cpp.
 #
 # The addresses and the analysis of the engine timer (sub_821BDA90, timer
-# object at 0x827D7500) come from LARecomp's TECHNICAL_NOTES.md, sections 1-3,
-# used with its author's permission. The original 60 FPS timing pipeline there
-# is credited to BadassBaboon.
+# object at 0x827D7500) come from LARecomp's TECHNICAL_NOTES.md, sections 1-3.
+# The original 60 FPS timing pipeline there is credited to BadassBaboon.
 
 # 0x821BDA90: the engine timer's first instruction (`mftb r11`), before it reads the time.
 # Where a frame starts for the GPU vendor's latency reducer (NVIDIA Reflex, AMD Anti-Lag 2):
@@ -93,7 +92,7 @@ address = 0x823689F0
 registers = ["f0"]
 
 # --- UI (Flash) movies -------------------------------------------------------
-# From LARecomp's notes (used with its author's permission): mcUIManager::Update
+# From LARecomp's notes: mcUIManager::Update
 # (sub_821FC588) steps every enabled UI movie with the Flash player's one-frame
 # mode, which advances exactly one movie frame per call and ignores the elapsed
 # time; the flag it passes (byte_827DC1FC) is 1 in the image and never written.
@@ -107,6 +106,62 @@ name = "mcla_ui_movie_advance"
 address = 0x825EDC6C
 registers = ["r25", "r31"]
 jump_address_on_true = 0x825EDD44
+
+# --- Interpolated UI (development spike, mcla_ui_interpolate) ------------------------------
+# sub_825FB348 is the draw walk over the display tree (swfINSTANCE nodes; r3 = the node, r4 = the parent's
+# state block, whose world matrix is at +24 and world colour transform at +56): it computes the node's
+# world matrix (0x825FB38C-0x825FB454) and then its world colour transform (`bl sub_825F8B20` at
+# 0x825FB480) from the node's local ones, then draws the node or walks its children.
+# 0x825FB484: `lhz r9,170(r30)`, right after both are computed. r30 = the node, r31 = the parent's state
+# block. The hook redoes the node's world values from local values blended between the last two steps.
+[[midasm_hook]]
+name = "mcla_ui_interp_draw"
+address = 0x825FB484
+registers = ["r30", "r31"]
+
+# --- Interpolated UI, the pause menu's 3D (mcla_ui_interp_camera) ---------------------------
+# The camera and the 3D panels of the pause menu come from numbers its script sets in 30 Hz steps and the
+# game reads again in every update and drawn frame; src/frame_timing.cpp (UiSceneBlend) blends the reads.
+# sub_82722440 reads an array of three numbers from a script object (r30 = the object, r31 = where the
+# numbers go; the property's name is the pointer saved at 96(r1)); sub_822222F0 reads one number the same
+# way (name saved at 80(r1)). Both hooks sit on `li r3,1`, the success path, after the numbers are stored.
+[[midasm_hook]]
+name = "mcla_ui_scene_vec"
+address = 0x82722524
+registers = ["r1", "r30", "r31"]
+
+[[midasm_hook]]
+name = "mcla_ui_scene_float"
+address = 0x82722374
+registers = ["r1", "r30", "r31"]
+
+# sub_82724CF0 draws a movie's 3D scene (r3 = its player context): the entry, and `b 0x823d9230` at its end,
+# which every way out passes. Only reads inside them are the panels'.
+[[midasm_hook]]
+name = "mcla_ui_scene_enter"
+address = 0x82724CF0
+registers = ["r3"]
+
+[[midasm_hook]]
+name = "mcla_ui_scene_leave"
+address = 0x82724E64
+registers = ["r1"]
+
+# sub_827238B0 is the advance of the UI movies' player context (vtable 0x820CACB8, slot +4): the movie's
+# step, then `player0_cam_ctrl` (the blend between the game's view and the menu's) and, when it is not 0, the
+# camera (sub_82723570). 0x827238F8 is `lfs f0,80(r1)`, f0 = that blend (r31 = the context); the hook, placed
+# after the instruction, can replace it. 0x82723934 is `ld r31,-16(r1)`, where the function's every way out
+# passes, with r31 still the context.
+[[midasm_hook]]
+name = "mcla_ui_cam_ctrl"
+address = 0x827238F8
+after_instruction = true
+registers = ["r31", "f0"]
+
+[[midasm_hook]]
+name = "mcla_ui_cam_done"
+address = 0x82723934
+registers = ["r31"]
 
 # --- Menu key repeat ----------------------------------------------------------
 # sub_82223CD8 is the UI input object's update (once per UI manager update, called from
