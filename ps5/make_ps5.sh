@@ -4,7 +4,7 @@
 #   sudo bash ps5/make_ps5.sh --iso /path/to/your.iso [--console 192.168.1.50]
 #
 # Host: Arch Linux, as root (a fresh Arch under WSL2 on Windows is the tested
-# setup; README.md, 'PS5', walks through it). Everything is built on
+# setup; docs/building.md, 'PS5', walks through it). Everything is built on
 # your machine from your own copy of the game: nothing of the game is in this
 # repository, and what this script produces from it is yours to keep, not to
 # share.
@@ -80,7 +80,7 @@ logged() {
 }
 
 [ "$(id -u)" -eq 0 ] || fail "run as root (the driver project's build installs packages and writes under /root)"
-command -v pacman > /dev/null || fail "this script needs Arch Linux (pacman); see README.md, 'PS5'"
+command -v pacman > /dev/null || fail "this script needs Arch Linux (pacman); see docs/building.md, 'PS5'"
 
 # ---------------------------------------------------------------------------
 step "1/9 host packages"
@@ -418,7 +418,7 @@ if [ -z "$console" ]; then
 No --console given, so nothing was uploaded. To install by hand, copy
   $out            ->  /data/homebrew/$title_id   on the console
   $repo/game      ->  /data/mcla/game            on the console
-and see README.md, 'PS5'.
+and see docs/building.md, 'PS5'.
 EOF
     exit 0
 fi
@@ -474,5 +474,5 @@ cat <<EOF
 
 Done. On the console, "Midnight Club: Los Angeles" appears on the home screen
 once your homebrew mounter has picked up /data/homebrew/$title_id (see
-README.md, 'PS5').
+docs/building.md, 'PS5').
 EOF

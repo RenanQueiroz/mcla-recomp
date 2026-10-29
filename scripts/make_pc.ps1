@@ -5,7 +5,7 @@
 # Needs Git, CMake, Ninja, Python 3, Visual Studio Build Tools 2022 version
 # 17.1 or newer (C++ workload), a Windows SDK newer than 10.0.19041 and
 # Clang 20. Whatever is missing, the script offers to install
-# (winget, and Clang from the LLVM project's releases); README.md
+# (winget, and Clang from the LLVM project's releases); docs/building.md
 # lists them for doing it by hand. With -Toolchain mingw it needs no Microsoft
 # compiler: Clang, lld, libc++ and the mingw-w64 headers come in one download
 # (llvm-mingw), which needs no administrator rights.
@@ -687,7 +687,7 @@ try {
             # update). Anything else would be installed on the PC, so it is not, unasked.
             $others = @($required | Where-Object { $_ -ne "llvm-mingw" })
             if ($others) {
-                Fail "missing: $($others -join ', '). Nobody can be asked here: run .\launcher\build-game.ps1 -InstallTools in a terminal, or install them yourself (README.md, 'Windows')"
+                Fail "missing: $($others -join ', '). Nobody can be asked here: run .\launcher\build-game.ps1 -InstallTools in a terminal, or install them yourself (docs/building.md, 'Windows')"
             }
             "fetching llvm-mingw without asking (about 170 MB into tools\, checked against its pinned SHA-256; no administrator rights)"
         } elseif ($required -and -not $InstallTools) {
@@ -696,12 +696,12 @@ try {
             } else {
                 Read-Host "Install them now? Programs come from winget, Clang from the LLVM project's releases; the Build Tools are several GB and ask for administrator rights, and so do the Windows SDK and the Vulkan SDK. [y/N]"
             }
-            if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in README.md) and run this again, or run with -InstallTools" }
+            if ($answer -notmatch '^[yY]') { Fail "install them (see 'Windows' in docs/building.md) and run this again, or run with -InstallTools" }
         }
         $ids = @{ "Git" = "Git.Git"; "CMake" = "Kitware.CMake"; "Ninja" = "Ninja-build.Ninja"; "Python" = "Python.Python.3.12" }
         # winget is for what comes from winget: not for llvm-mingw (a download) or Clang.
         $fromWinget = @($missing | Where-Object { $ids.ContainsKey($_) -or $_ -eq "Visual Studio Build Tools" -or $_ -eq "Windows SDK" -or $_ -eq "Vulkan SDK" })
-        if ($fromWinget -and -not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install $($fromWinget -join ', ') by hand (README.md, 'Windows')" }
+        if ($fromWinget -and -not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "winget is not available; install $($fromWinget -join ', ') by hand (docs/building.md, 'Windows')" }
         foreach ($name in $missing) {
             if ($ids.ContainsKey($name)) {
                 "installing $name"

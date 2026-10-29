@@ -927,7 +927,7 @@ static uint32_t PhysicalCoresAvailable() {
 }
 
 // The two CPU options whose best setting depends on how many logical processors there are
-// (README.md, "Turning a change off"; launcher/dev/profiling-2026-10-26.md, "Wake on demand"
+// (docs/off-switches.md; launcher/dev/profiling-2026-10-26.md, "Wake on demand"
 // and "The timer queue and the frame-pacing thread by processor count"; A/B of 3 runs a side
 // at 16, 8, 6 and 4 logical processors, uncapped and at caps of 120, 60 and 30):
 // - 6 or more: mcla_pump_wake_on_demand. It lifts the 145 FPS the game's own Sleep holds the
@@ -1012,8 +1012,8 @@ static void ApplyCpuDefaults() {
 }
 #endif
 
-// SDK settings measured to suit this game on PC (README.md, "Turning a change
-// off"; the PS5 host sets its own). They become the options' defaults
+// SDK settings measured to suit this game on PC (docs/off-switches.md; the
+// PS5 host sets its own). They become the options' defaults
 // (rex::cvar::SetDefaultValue): used unless the command line, an environment
 // variable or mcla.toml sets them, and never saved as if the user had chosen
 // them. Most were options the Windows launcher passed. Set once the GPU

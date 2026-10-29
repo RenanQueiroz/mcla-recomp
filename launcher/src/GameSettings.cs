@@ -122,8 +122,8 @@ static class GameSettings
     // The choices are the pause menu's (src/settings_menu.cpp); 40 to 50 FPS
     // are for G-Sync/FreeSync displays, where a cap the game holds even in its
     // heaviest scenes gives constant frame times. The tips (Info) are checked
-    // against the code and the measurements in README.md, KNOWN-ISSUES.md and
-    // README.md here.
+    // against the code and the measurements in docs/settings.md, KNOWN-ISSUES.md
+    // and README.md here.
     public static readonly GameSetting Resolution = new("resolution_scale", "Resolution",
         [new("Native (720p)", 1L), new("2× (1440p)", 2L), new("3× (2160p, 4K)", 3L)], 1L)
     {
