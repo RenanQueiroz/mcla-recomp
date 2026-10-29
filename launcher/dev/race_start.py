@@ -503,6 +503,35 @@ def countdown_feed_line(s):
             f"{fed:.3f} s in all = {fed / writ if writ else 0:.2f} of the game's time (1.00 = the clock keeps the game's time; steps per update {steps / n:.2f})")
 
 
+def table_lines(folders, reference):
+    """One line a run: the number on screen at START, when GO appears, how long each number stayed, the clock feed ratio and the verdict
+    against the reference (the end of a chain's summary)."""
+    out = ["run                cap  at START   GO from   seconds a number (3,2,1)    fed/written (steps/update)   verdict"]
+    for folder in folders:
+        folder = Path(folder)
+        try:
+            s = Start(folder)
+            res = ring_summary(s)
+            on = res["onset"]
+            gaps = [on[b] - on[a] for a, b in zip(RING_SEQUENCE, RING_SEQUENCE[1:]) if a in on and b in on]
+            win = s.window_samples(s.start_us - 4e6, s.start_us) if s.start_us is not None else []
+            writ = sum(x["timer"].get("cdwrit", 0.0) for x in win[1:])
+            fed = sum(x["timer"].get("cdfed", 0.0) for x in win[1:])
+            steps = sum(x["timer"].get("cdsteps", 0.0) for x in win[1:])
+            n = sum(x["timer"].get("cdn", 0.0) for x in win[1:])
+            feed = f"{fed / writ:.2f} ({steps / n:.2f})" if writ > 0 and n > 0 else "n/a"
+            if reference and folder != Path(reference) and Path(reference).exists():
+                _lines, flags = verdict(reference, s)
+                v = "COUNTDOWN PASS" if "countdown-out-of-step" not in flags and res["pictures"] else "COUNTDOWN OUT OF STEP"
+            else:
+                v = "reference"
+            out.append(f"{s.tag:<18} {s.run.cap if s.run.cap is not None else '?':>3}  {res['at_start'] or '?':<9}  "
+                       f"{('%+.2f' % on['green']) if 'green' in on else 'never':<8}  {', '.join('%.2f' % g for g in gaps) or 'n/a':<26}  {feed:<27}  {v}")
+        except Exception as e:  # a run with no log must not stop the others
+            out.append(f"{folder.name:<18} failed: {e!r}")
+    return out
+
+
 def contact_sheet(folder, out_png, every_s=0.25, cols=5, thumb_w=320, span=(-6.0, 3.0)):
     """A sheet of the countdown pictures, about one per `every_s`, in time order from `span` seconds around START. Returns the index lines."""
     s = Start(folder)
