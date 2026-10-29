@@ -1066,7 +1066,7 @@ bool IsUiScreen(uint32_t context, char (&name)[32]) {
 }
 
 // The last time the pause menu's movie came up for an advance: the movie is advanced every update while the
-// pause menu is up and not at all in free roam or a race (measured in the menu-lag run of 2026-10-29: 3 s of
+// pause menu is up and not at all in free roam or a race (measured in the menu-lag run of 2026-10-29: 2.6 s of
 // free roam, no advance of any screen; then PAUSEMOVIE every 33 ms from the Start press on).
 std::atomic<uint64_t> g_pause_movie_us{0};
 

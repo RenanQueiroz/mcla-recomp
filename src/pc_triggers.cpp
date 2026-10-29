@@ -97,6 +97,8 @@ constexpr int kMinIntervalMs = 40;   // between two sends to one trigger (SDL's 
 constexpr int kTickMs = 20;
 constexpr int kScanMs = 1000;
 constexpr int kNitroHoldMs = 200;    // the nitro timer moves once per HUD update while it burns
+constexpr int kFrozenMs = 200;       // a moving car's velocity unchanged for this long: the physics are paused (upstream counts
+                                     // 20 HUD updates, which at a few hundred FPS is a few ms between two physics steps)
 constexpr int kPedalStaleMs = 250;
 constexpr int kGears = 8;
 constexpr uint16_t kSonyVendor = 0x054C;
@@ -407,7 +409,9 @@ class PcTriggers {
       answer = std::string("false: ") + (error && *error ? error : "no error text");
       return false;
     }
-    answer = "true";
+    char bits[24];
+    std::snprintf(bits, sizeof bits, "true (enable 0x%02x)", report.enable_bits1);
+    answer = bits;
     return true;
   }
 
@@ -510,7 +514,12 @@ class PcTriggers {
     const bool hud_alive = seen_hud_ && now - last_hud_change_ <= std::chrono::milliseconds(kNoHudMs);
     const bool front = !REXCVAR_GET(mcla_trigger_release_unfocused) || WindowInFront();
     const bool pause_menu = MclaPauseMenuUp();
-    const bool frozen = MclaVehiclePaused();
+    if (!MclaVehiclePaused()) {
+      frozen_since_ = {};
+    } else if (frozen_since_ == Clock::time_point{}) {
+      frozen_since_ = now;
+    }
+    const bool frozen = frozen_since_ != Clock::time_point{} && now - frozen_since_ >= std::chrono::milliseconds(kFrozenMs);
     if (!front) {
       state = "window not in front";
     } else if (!hud_alive) {
@@ -638,7 +647,8 @@ class PcTriggers {
         if (engaged) {
           REXLOG_INFO("pc triggers: state: driving ({:.1f} m/s, gear {})", status_speed_, status_gear_);
         } else {
-          REXLOG_INFO("pc triggers: state: slack, {}", state);
+          REXLOG_INFO("pc triggers: state: slack, {} (HUD updates seen: {})", state,
+                      g_mcla_vehicle.hud_updates.load(std::memory_order_relaxed));
         }
       }
     }
@@ -689,6 +699,7 @@ class PcTriggers {
   float last_nitro_time_ = 0.0f;
   Clock::time_point nitro_until_ = {};
   bool r2_limiter_ = false;
+  Clock::time_point frozen_since_ = {};
   float status_speed_ = 0.0f;
   int status_gear_ = 0;
   bool status_nitro_ = false;
