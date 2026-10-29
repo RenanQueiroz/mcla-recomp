@@ -46,6 +46,7 @@ set(MCLA_SOURCES
     src/warp_fix.cpp
     src/button_prompts.cpp
     src/settings_menu.cpp
+    src/pad_probe.cpp
     src/save_wait.cpp
     src/display_gamma.cpp
     src/render_markers.cpp

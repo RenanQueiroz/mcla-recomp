@@ -103,6 +103,9 @@ int32_t MclaHalfDisplayCap(float refresh_hz) {
   return int32_t(std::floor(double(refresh_hz) * 0.97 / 2.0));
 }
 
+// src/pad_probe.cpp: the title screen's frame-rate cap (mcla_title_fps), applied to the player's cap.
+int32_t MclaTitleFpsCap(int32_t cap);
+
 namespace {
 
 // The engine timer object lives at a fixed guest address (sub_821BDA90).
@@ -210,7 +213,7 @@ int32_t EffectiveFps() {
   const uint64_t last = checked_us.load(std::memory_order_relaxed);
   if (last == 0 || now - last >= 250'000) {
     checked_us.store(now, std::memory_order_relaxed);
-    const int32_t value = CapFromSettings();
+    const int32_t value = MclaTitleFpsCap(CapFromSettings());
     if (cap.exchange(value, std::memory_order_relaxed) != value) {
       REXLOG_INFO("frame timing: the frame-rate cap is now {} FPS{}", value,
                   value == 0 ? " (uncapped)" : "");
