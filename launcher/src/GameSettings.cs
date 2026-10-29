@@ -288,17 +288,20 @@ static class GameSettings
              + "troubleshooting. With FSR or anti-aliasing off the scene is drawn in one go anyway, so it "
              + "makes no difference.",
     };
-    // 60 a second by default since 2026-10-16 (the user's choice after
-    // playing at 30 and 60; src/frame_timing.cpp).
-    public static readonly GameSetting HudRate = new("mcla_ui_hud_rate", "HUD updates",
-        [new("30 per second (as on the console)", 30L), new("60 per second", 60L),
-         new("120 per second", 120L), new("Every frame", 0L)], 60L)
+    // The menus, pop-ups, map panels and the HUD step 30 times a second, as on the console, and each
+    // frame is drawn between the last two steps (src/frame_timing.cpp). It replaced the HUD updates
+    // setting (mcla_ui_hud_rate, 60 by default), which still applies while this is off.
+    public static readonly GameSetting SmoothUi = new("mcla_ui_interpolate", "Smooth UI",
+        [new("On (default)", true), new("Off (steps, as before)", false)], true)
     {
-        Info = "How many times a second the speedometer and the song title move. 60 (the default) gives smooth "
-             + "needles; 30 is the console's pace, with the needles in steps and the song title scrolling at "
-             + "its original speed. At 60 and 120 the title scrolls two and four times as fast. Every frame "
-             + "follows the frame rate: the smoothest needles, with the title scrolling faster still at high "
-             + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
+        Info = "Makes the menus, pop-ups, map panels and the HUD (the speedometer needle, the song title) move "
+             + "smoothly at high frame rates. They still step 30 times a second, as on the console, so nothing "
+             + "runs faster; each frame is drawn between the last two steps. The price: the picture is one step "
+             + "behind the game, up to 33 ms. What the game swaps or cuts (a new icon, text) still appears at "
+             + "once. Nothing is blended below 50 FPS. The song title scrolls at the console's speed, half of "
+             + "what the old HUD updates 60 did. Off steps the HUD 60 times a second and the menus 30, with no "
+             + "blending (they are mcla_ui_hud_rate and mcla_ui_menu_rate in mcla.toml). Changes during play in "
+             + "the pause menu (DISPLAY).",
     };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
         [new("Automatic (default)", "any"),
@@ -496,7 +499,7 @@ static class GameSettings
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0, string? recommendedApi = null) =>
         [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
-         Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
+         Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, SmoothUi, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Language, Intro, Prompts];
@@ -1000,6 +1003,8 @@ static class SettingsMigration
     static readonly object?[] OldAntiAliasing = [null, "msaa", "off"];
     static readonly object?[] OldGraphicsApi = [null, "d3d12", "vulkan"];
     static readonly object?[] OldHudRate = [30L, 60L, 120L, 0L];
+    // The old launcher's HUD updates drop-down passed mcla_ui_hud_rate (still the game's option while Smooth UI is off).
+    const string HudRateKey = "mcla_ui_hud_rate";
 
     static bool HasOldChoices(LauncherSettings s) =>
         s.Display is not null || s.Resolution is not null || s.Fps is not null || s.Intro is not null ||
@@ -1011,20 +1016,20 @@ static class SettingsMigration
     {
         var values = new Dictionary<string, object>(StringComparer.Ordinal);
         if (!HasOldChoices(s)) return values;
-        void Add(GameSetting setting, object?[] old, int index)
+        void Add(string key, object?[] old, int index)
         {
-            if (index >= 0 && index < old.Length && old[index] is { } value) values[setting.Key] = value;
+            if (index >= 0 && index < old.Length && old[index] is { } value) values[key] = value;
         }
-        Add(GameSettings.Display, OldDisplay, s.Display ?? 0);
-        Add(GameSettings.Resolution, OldResolution, s.Resolution ?? 0);
-        Add(GameSettings.FrameRate, (s.FpsList ?? 0) >= 1 ? OldFps : OldFpsList0, s.Fps ?? 0);
+        Add(GameSettings.Display.Key, OldDisplay, s.Display ?? 0);
+        Add(GameSettings.Resolution.Key, OldResolution, s.Resolution ?? 0);
+        Add(GameSettings.FrameRate.Key, (s.FpsList ?? 0) >= 1 ? OldFps : OldFpsList0, s.Fps ?? 0);
         // Every frame rate came with --vsync=false.
         if (values.ContainsKey(GameSettings.FrameRate.Key)) values["vsync"] = false;
-        Add(GameSettings.Intro, OldIntro, s.Intro ?? 0);
-        Add(GameSettings.Prompts, OldPrompts, s.Prompts ?? 0);
-        Add(GameSettings.AntiAliasing, OldAntiAliasing, s.AntiAliasing ?? 0);
-        Add(GameSettings.GraphicsApi, OldGraphicsApi, s.GraphicsApi ?? 0);
-        Add(GameSettings.HudRate, OldHudRate, s.HudRate ?? 0);
+        Add(GameSettings.Intro.Key, OldIntro, s.Intro ?? 0);
+        Add(GameSettings.Prompts.Key, OldPrompts, s.Prompts ?? 0);
+        Add(GameSettings.AntiAliasing.Key, OldAntiAliasing, s.AntiAliasing ?? 0);
+        Add(GameSettings.GraphicsApi.Key, OldGraphicsApi, s.GraphicsApi ?? 0);
+        Add(HudRateKey, OldHudRate, s.HudRate ?? 0);
         return values;
     }
 

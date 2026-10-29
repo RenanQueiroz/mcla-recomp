@@ -953,30 +953,32 @@ void mcla_bike_gyro_vel_smoothing(PPCRegister& f0) {
 // HUD code creates itself, so it is not among the UI manager's screens. The
 // game sets the gauges' values every update and the movies' own scripts draw
 // them as they advance, in the same step that scrolls the song ticker: the
-// needles move as often as the ticker steps. So the HUD has a rate of its own:
-// 60 a second by default (smoother needles, the ticker twice its original
-// speed; the user's choice after playing at 30 and 60, 2026-10-16); 30 as on
-// the console (the ticker at its original speed, the needles in 30 Hz steps);
-// 120 (the ticker 4 times as fast); or 0 for every frame, as without this
-// pacing.
+// needles move as often as the ticker steps. So the HUD has a rate of its own,
+// which counts while mcla_ui_interpolate (below) is off: 60 a second by default
+// (smoother needles, the ticker twice its original speed; the user's choice
+// after playing at 30 and 60, 2026-10-16); 30 as on the console (the ticker at
+// its original speed, the needles in 30 Hz steps); 120 (the ticker 4 times as
+// fast); or 0 for every frame, as without this pacing. With the interpolation
+// on (the default since v0.3.1) the HUD steps 30 times a second like every
+// other movie and the picture between the steps is blended.
 REXCVAR_DEFINE_BOOL(mcla_ui_timing_fix, true, "MCLA",
                     "Advance the UI's menus, pop-ups and map screens 30 times a second, as on the "
                     "console, instead of once per rendered frame");
 REXCVAR_DEFINE_INT32(mcla_ui_hud_rate, 60, "MCLA",
-                     "How many times a second the in-game HUD advances (gauges, song ticker, "
-                     "LOADING badge): 60 (the default) or 120 for smoother needles with a faster "
-                     "ticker, 30 as on the console, 0 for every frame")
+                     "While mcla_ui_interpolate is off: how many times a second the in-game HUD "
+                     "advances (gauges, song ticker, LOADING badge): 60 (the default) or 120 for "
+                     "smoother needles with a faster ticker, 30 as on the console, 0 for every frame")
     .range(0, 240);
 
-// The menus' rate, like the HUD's. 30 is what the console ran them at and what the menus'
-// animations were made for. A higher rate makes the highlight, the page changes and the pop-ups
-// arrive sooner, and every animation of the UI screens runs that many times as fast (60: twice,
-// 120: four times, 0: every frame, as without mcla_ui_timing_fix).
+// The menus' rate, like the HUD's, while mcla_ui_interpolate is off. 30 is what the console ran
+// them at and what the menus' animations were made for. A higher rate makes the highlight, the
+// page changes and the pop-ups arrive sooner, and every animation of the UI screens runs that
+// many times as fast (60: twice, 120: four times, 0: every frame, as without mcla_ui_timing_fix).
 REXCVAR_DEFINE_INT32(mcla_ui_menu_rate, 30, "MCLA",
-                     "How many times a second the menus, the pause menu, pop-ups and map panels (the "
-                     "UI manager's screens, not the HUD) advance: 30 (the default, as on the console), "
-                     "60 or 120 for snappier menus with animations that run 2 or 4 times as fast, 0 for "
-                     "every frame")
+                     "While mcla_ui_interpolate is off: how many times a second the menus, the pause "
+                     "menu, pop-ups and map panels (the UI manager's screens, not the HUD) advance: 30 "
+                     "(the default, as on the console), 60 or 120 for snappier menus with animations that "
+                     "run 2 or 4 times as fast, 0 for every frame")
     .range(0, 240);
 
 // A menu key event (a press, or a repeat of a held direction) is answered on the update it is
@@ -998,8 +1000,9 @@ REXCVAR_DEFINE_BOOL(mcla_ui_advance_log, false, "MCLA",
                     "Development: log every advance of a UI screen (its name, the time, and whether a "
                     "key event caused it), for measuring how soon the menus answer a press");
 
-// Interpolated UI (development spike, launcher/dev/ui-interpolation-2026-10-29.md). The movies still
-// step at their own rate (30 a second for the screens, mcla_ui_hud_rate for the HUD); on every drawn
+// Interpolated UI (launcher/dev/ui-interpolation-2026-10-29.md; on by default since v0.3.1, the
+// pause menu's DISPLAY > SMOOTH UI). Every movie steps 30 times a second, the console's rate (the
+// two rate options above count only while this is off); on every drawn
 // frame each display-list element is drawn between what it looked like one step ago and what it looks
 // like now, by the fraction of the step period that has passed since the step: its local matrix
 // (position, scale, rotation) and its colour transform (alpha, tint). An element that appears,
@@ -1007,10 +1010,11 @@ REXCVAR_DEFINE_BOOL(mcla_ui_advance_log, false, "MCLA",
 // mcla_ui_interp_snap_px or flipped. The picture is one step behind the game's state, which is the
 // price of the smoothness (up to 33 ms at 30 steps a second, less with mcla_ui_interp_window_pct). It
 // does nothing while the frame time is longer than 0.6 of a step (30 FPS and below for the screens).
-REXCVAR_DEFINE_BOOL(mcla_ui_interpolate, false, "MCLA",
-                    "Development spike: draw the UI's Flash movies interpolated between their last two "
-                    "steps, so that they move smoothly at any frame rate without running faster "
-                    "(needs mcla_ui_timing_fix); off by default, untested");
+REXCVAR_DEFINE_BOOL(mcla_ui_interpolate, true, "MCLA",
+                    "Draw the UI's Flash movies (menus, pop-ups, map panels and the HUD) interpolated "
+                    "between their last two steps, so that they move smoothly at any frame rate without "
+                    "running faster; every movie steps 30 times a second then, and mcla_ui_menu_rate and "
+                    "mcla_ui_hud_rate are not read (needs mcla_ui_timing_fix)");
 REXCVAR_DEFINE_INT32(mcla_ui_interp_window_pct, 100, "MCLA",
                      "With mcla_ui_interpolate: the share of a step period over which an element "
                      "glides to its new place: 100 (the whole period, smoothest, up to one step of "
@@ -1035,7 +1039,7 @@ REXCVAR_DEFINE_BOOL(mcla_ui_interp_stats, false, "MCLA",
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
 // count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
-// context). From LARecomp's notes, used with its author's permission.
+// context). From LARecomp's notes.
 constexpr uint32_t kUiManagerPtr = 0x8286D804;
 
 // Steps a second of every UI movie with mcla_ui_interpolate on (all the SWF files seen declare 30 frames a second).

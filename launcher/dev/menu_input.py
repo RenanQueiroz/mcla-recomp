@@ -1,6 +1,6 @@
 """Menu input check: how many steps one press makes (fork-only development tool).
 
-  menu_input.py pad <out.pad> --set res1|res3|fg|merged|lag   write the dev pad script of one run
+  menu_input.py pad <out.pad> --set res1|res3|fg|merged|shipped|lag   write the dev pad script of one run
   menu_input.py report <run folder>... [--out FILE]    read the runs' game.log and say what each press did
   menu_input.py lagreport <run folder>... [--out FILE] how soon the menu's movie advanced after each key event
                                                        (the run of --set lag; needs --mcla_ui_advance_log=true)
@@ -111,6 +111,10 @@ def pad_lines(run_set):
         # the defaults at the caps that matter most, then the control (about 7 minutes in all)
         cells = [(120, "S"), (0, "S"), (120, "O")]
         fg = 0
+    elif run_set == "shipped":
+        # the same without the control (about 5 minutes): the build as it ships, nothing set but the frame cap
+        cells = [(120, "S"), (0, "S")]
+        fg = 0
     elif run_set == "lag":
         cells = LAG_CELLS
         fg = 0
@@ -139,7 +143,7 @@ def pad_lines(run_set):
 
         add(f"# --- cell {n}: cap {cap}, timing fix {timing}, repeat fix {repeat}, frame generation {fg}")
         if variant == "S":
-            add("get mcla_ui_timing_fix mcla_ui_repeat_fix")
+            add("get mcla_ui_timing_fix mcla_ui_repeat_fix mcla_ui_interpolate")
         else:
             add(f"set mcla_ui_timing_fix {'true' if timing else 'false'}")
             add(f"set mcla_ui_repeat_fix {'true' if repeat else 'false'}")
@@ -219,16 +223,15 @@ def pad_lines(run_set):
         add("wait_until ui_count < 19 15s")
         add("wait 1200ms")
         if not lag and variant in "ABS":
-            # DISPLAY is the fifth button of the Settings list (the pause list comes back on PERFORMANCE);
-            # it has 16 rows (15 before MENU UPDATES, 2026-10-29) and PEAK BRIGHTNESS is row 11 (it was 10)
+            # DISPLAY is the fifth button of the Settings list (the pause list comes back on PERFORMANCE)
             add("set hdr_peak_nits 0")
             add("press_until up ui_select == 4 every=600ms hold=40ms timeout=30s")
             add("wait 400ms")
             add("press a 40ms")
-            add("wait_until ui_count == 16 20s")
+            add("wait_until ui_count == 15 20s")
             add("wait 1000ms")
             add("log MI page DISPLAY")
-            goto(11)
+            goto(10)
             add("uisel")
             at_cap()
             add("log MI test T5 key=right n=4 expect=4")
@@ -246,7 +249,7 @@ def pad_lines(run_set):
             at_nav()
             reset(0)
             add("press b 40ms")
-            add("wait_until ui_count != 16 15s")
+            add("wait_until ui_count != 15 15s")
             add("wait 1200ms")
         add("log MI end cell")
     if fg:
@@ -641,7 +644,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("pad")
     a.add_argument("out")
-    a.add_argument("--set", default="res1", choices=["res1", "res3", "fg", "merged", "lag"])
+    a.add_argument("--set", default="res1", choices=["res1", "res3", "fg", "merged", "shipped", "lag"])
     b = sub.add_parser("report")
     b.add_argument("runs", nargs="+")
     b.add_argument("--out")

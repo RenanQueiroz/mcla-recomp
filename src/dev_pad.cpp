@@ -1583,7 +1583,7 @@ void WatchFrame(uint64_t frame) {
 
 // The UI manager's movies by name (atMap name -> movie**: buckets at +60,
 // count in the high half of +64; node: +0 name, +8 movie**, +12 next). From
-// LARecomp's notes, used with its author's permission (as in frame_timing.cpp).
+// LARecomp's notes (as in frame_timing.cpp).
 constexpr uint32_t kUiManagerPtr = 0x8286D804;
 
 std::vector<std::string> UiScreens() {

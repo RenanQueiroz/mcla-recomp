@@ -1,6 +1,6 @@
 r"""Check of the interpolated UI (mcla_ui_interpolate, development spike; fork-only development tool).
 
-  ui_interp.py pad <trace|cost|big> <out.pad> --shots <folder>   write the dev pad script of one run
+  ui_interp.py pad <trace|cost|big|dur> <out.pad> --shots <folder>   write the dev pad script of one run
   ui_interp.py report <out dir> [--shots <folder>] [--out FILE] [--plot FILE]
                                                                read the runs under <out dir> and say what the option did
                                                                (<out dir>\trace, \cost, \big: a run folder each, as devrun.py makes them;
@@ -13,6 +13,7 @@ The runs (devrun.py, a scratch save, D3D12) go to the title screen and the city,
   cost   (1x, logs off, --mcla_ui_interp_stats) the HUD and the pause menu, the option off, on, off, on, at cap 120 and
          uncapped: the hook's time, the process's CPU per frame and the frame times
   big    (3x resolution) bursts, then the same cost cells
+  dur    (1x, per-frame log on) only the pause menu's closing and opening, timed from the press (round 3, see _duration_cells)
 The game logs, for every drawn frame and every display-list element that glides (its shown position differs from the
 step's), `ui interp: <screen> inst=.. ser=<step> t=<ms> alpha=.. live=(x,y) shown=(x,y) world=(x,y) lm=.. sm=.. cx=..
 applied=0|1`: with the option off `shown` is what would have been drawn and `world` what is (the step's value). The game
@@ -153,17 +154,37 @@ def _taps(add, shots, cap, variant, full, scale, with_rest=True):
     add("log UI end")
 
 
-def _open_close(add, cap, variant, k):
-    _setopt(add, variant, cap)
-    _reset(add)
-    add(f"log UI cell=close variant={variant} cap={cap} id={k}")
-    add("press start 100ms")
-    add("wait 3000ms")
-    add("log UI end")
-    add(f"log UI cell=open variant={variant} cap={cap} id={k}")
-    add("press start 100ms")
-    add("wait 3000ms")
-    add("log UI end")
+def _duration_cells(add, caps=(120, 60), reps=2):
+    """The pause menu closing and opening again (Start), timed from the press, the option off, on, off, on at each cap.
+    Round 2 timed the travel of nodes that move 150 px or more and found none (the menu's own opening is not a slide: after the
+    first time its nodes hardly move, the changes are scale and colour), so nothing was timed. Now, per cell:
+      close  the steps before the press are the menu at rest (the baseline); the steps after it are counted until the movie
+             stops being stepped (the menu is gone) and until the last step that is above the baseline;
+      open   from the press until the list takes a `down` (ready for input: the same measure as the menu-lag check, every 34 ms,
+             so a 34 ms resolution) and until the last step above the menu's own rest level (the last 20 steps of the cell).
+    Above the baseline: more nodes moved or more colour transforms changed than at rest, a node moved 0.5 px or more (the ring that
+    turns at rest moves 0.1 px), or a node is new, another character, or snapped."""
+    k = 0
+    for cap in caps:
+        for variant in OFF_ON * reps:
+            _setopt(add, variant, cap)
+            add("wait 800ms 96f")
+            add("press_until up ui_select == 0 every=400ms hold=40ms timeout=15s")
+            add("wait 400ms")
+            add(f"log UI cell=close variant={variant} cap={cap} id={k}")
+            add("wait 1000ms")
+            add("log UI phase=press")
+            add("press start 100ms")
+            add("wait 2500ms")
+            add("log UI end")
+            add(f"log UI cell=open variant={variant} cap={cap} id={k}")
+            add("log UI phase=press")
+            add("press start 100ms")
+            add("press_until down ui_select == 1 every=34ms hold=30ms timeout=10s")
+            add("log UI phase=ready")
+            add("wait 1800ms")
+            add("log UI end")
+            k += 1
 
 
 def _cost_cells(add, scene, caps, seconds):
@@ -190,10 +211,7 @@ def pad_lines(kind, shots):
         add("get mcla_ui_interpolate mcla_ui_interp_snap_px mcla_ui_menu_rate mcla_ui_hud_rate mcla_ui_advance_on_input")
         _hud_cells(add, shots)
         _open_pause(add)
-        for k, variant in enumerate(OFF_ON * 2):
-            _open_close(add, 120, variant, k)
-        for k, variant in enumerate(OFF_ON):
-            _open_close(add, 60, variant, 4 + k)
+        _duration_cells(add)
         for variant in OFF_ON:
             _taps(add, shots, 120, variant, True, 1.0)
         for variant in OFF_ON:
@@ -212,6 +230,11 @@ def pad_lines(kind, shots):
         add("screens")
         add(f"shot {shots}/probe.png 0.5")
         add("log UI end")
+    elif kind == "dur":
+        _boot(add)
+        add("get mcla_ui_interpolate mcla_ui_menu_rate mcla_ui_hud_rate mcla_ui_advance_on_input")
+        _open_pause(add)
+        _duration_cells(add)
     elif kind == "cost":
         _boot(add)
         add("set mcla_ui_interp_stats true")
@@ -332,11 +355,13 @@ def parse(text):
                 kv = _kv(words)
                 cur = {"kind": kv.get("cell"), "variant": kv.get("variant"), "cap": int(kv.get("cap", 0)), "id": kv.get("id"),
                        "scene": kv.get("scene"), "mark": kv.get("mark"), "t0": wall, "t1": wall, "phases": {}, "adv": [],
-                       "taps": [], "census": [], "events": [], "cost": [], "bursts": []}
+                       "taps": [], "census": [], "events": [], "cost": [], "bursts": [], "phase_walls": {}}
                 cells.append(cur)
                 phase = "all"
             elif words.startswith("phase="):
                 phase = words.split("=", 1)[1]
+                if cur is not None:
+                    cur["phase_walls"][phase] = wall
             elif words.startswith("tap "):
                 if cur is not None:
                     cur["taps"].append(words)
@@ -467,32 +492,92 @@ def top_movers(cell, n=3, screens=None):
     return out[:n]
 
 
-def anim_duration(cell, screens=None, min_travel=150.0):
-    """Per node that travels far in this cell: the time its drawn position takes from 10% to 90% of the way (ms); -> (median, nodes) or None."""
-    screens = screens if screens is not None else screens_of(cell)
-    by = node_steps(rows_of(cell), screens)
-    durs = []
-    for (screen, inst), steps in by.items():
-        rs = sorted((r for rr in steps.values() for r in rr), key=lambda r: r.t)
-        if len(rs) < 4:
-            continue
-        w0, wl = rs[0].world, rs[-1].live
-        total = ((wl[0] - w0[0]) ** 2 + (wl[1] - w0[1]) ** 2) ** 0.5
-        if total < min_travel:
-            continue
-        t_start = next((r.t for r in rs if ((r.world[0] - w0[0]) ** 2 + (r.world[1] - w0[1]) ** 2) ** 0.5 >= 0.1 * total), None)
-        t_end = next((r.t for r in rs if ((r.world[0] - wl[0]) ** 2 + (r.world[1] - wl[1]) ** 2) ** 0.5 <= 0.1 * total), None)
-        if t_start is not None and t_end is not None and t_end > t_start:
-            durs.append(t_end - t_start)
-    return (median(durs), len(durs)) if durs else None
+STEP_MS = 1000.0 / 30  # a step of every movie (the SWF files' own rate)
 
 
-def step_duration(cell, screen="PAUSEMOVIE", min_move=2.0):
-    """The wall time from the first to the last step of the screen that moved something by min_move px or more (ms), and how many steps."""
-    cs = [c for c in cell["census"] if c["screen"] == screen and c["max_move"] >= min_move]
-    if len(cs) < 2:
+def transition(cell, screen="PAUSEMOVIE"):
+    """One `close` or `open` cell of _duration_cells -> a dict with the times in ms from the press, or None without steps.
+    n_steps: steps of the movie after the press; stop_ms: the last of them (the menu is gone: a close ends there);
+    ready_ms: the press until the list took a `down` (open); end_ms and active: the last step above the menu's rest level,
+    and how many there were (None: the movie did not move more than at rest); tail_ms: how long the nodes that moved in that
+    step were drawn between two values (rows of the log: with the option off this is only what would have been drawn)."""
+    cs = [c for c in cell["census"] if c["screen"] == screen]
+    walls = cell.get("phase_walls", {})
+    t_press = walls.get("press", cell["t0"])
+    post = [c for c in cs if c["wall"] >= t_press]
+    if not post:
         return None
-    return (cs[-1]["wall"] - cs[0]["wall"]) * 1000.0, len(cs)
+    base = [c for c in cs if c["wall"] < t_press] if cell["kind"] == "close" else post[-20:]
+    base_moved = max([c["moved"] for c in base] or [0])
+    base_cx = max([c["cx"] for c in base] or [0])
+    act = [c for c in post if c["moved"] > base_moved or c["cx"] > base_cx or c["max_move"] >= 0.5
+           or c["fresh"] or c["swapped"] or c["snapped"]]
+    ms = lambda w: (w - t_press) * 1000.0  # noqa: E731
+    out = {"id": cell["id"], "n_steps": len(post), "first_ms": ms(post[0]["wall"]), "stop_ms": ms(post[-1]["wall"]),
+           "ready_ms": ms(walls["ready"]) if "ready" in walls else None, "active": len(act),
+           "end_ms": ms(act[-1]["wall"]) if act else None, "base_moved": base_moved, "base_cx": base_cx, "tail_ms": None}
+    if act:
+        rows = [r for r in rows_of(cell) if r.screen == screen and r.ser == act[-1]["ser"]]
+        if len(rows) >= 2:
+            out["tail_ms"] = max(r.t for r in rows) - min(r.t for r in rows)
+    return out
+
+
+def duration_verdicts(cells, lines, verdict):
+    """The pause menu's closing and opening, the option off against on, at each cap (cells of _duration_cells)."""
+    def med(items, key):
+        vals = [t[key] for t in items if t.get(key) is not None]
+        return median(vals) if vals else None
+
+    def f(x):
+        return "-" if x is None else f"{x:.0f}"
+
+    for what in ("close", "open"):
+        for cap in (120, 60):
+            res = {}
+            for v in OFF_ON:
+                cs = [c for c in cells if c["kind"] == what and c["cap"] == cap and c["variant"] == v]
+                res[v] = [t for t in (transition(c) for c in cs) if t]
+            tag = f"{what} cap {cap}"
+            for v in OFF_ON:
+                for t in res[v]:
+                    lines.append(f"   {tag} {v:3s} id {t['id']}: {t['n_steps']} steps after the press, first step {f(t['first_ms'])} ms, "
+                                 f"last step {f(t['stop_ms'])} ms"
+                                 + (f", ready for input {f(t['ready_ms'])} ms" if what == "open" else "")
+                                 + f"; steps above the rest level (moved > {t['base_moved']}, colour > {t['base_cx']}, 0.5 px, new): "
+                                   f"{t['active']}, the last at {f(t['end_ms'])} ms; glide after it {f(t['tail_ms'])} ms")
+            if not res["off"] or not res["on"]:
+                verdict.append(f"CHECK duration {tag}: cells missing (off {len(res['off'])}, on {len(res['on'])})")
+                continue
+            frame = 1000.0 / cap
+            # the movie's own sequence: it stops (close) or the list takes a press (open) after the same number of steps and time
+            if what == "close":
+                key, what_ms, tol = "stop_ms", "last step of the movie", STEP_MS + frame
+            else:
+                key, what_ms, tol = "ready_ms", "ready for input (34 ms resolution)", STEP_MS + 34.0
+            m_off, m_on = med(res["off"], key), med(res["on"], key)
+            n_off, n_on = med(res["off"], "n_steps"), med(res["on"], "n_steps")
+            if m_off is None or m_on is None:
+                verdict.append(f"CHECK duration {tag}: no {what_ms} in the cells (off {m_off}, on {m_on})")
+            else:
+                ok = abs(m_on - m_off) <= tol and abs(n_on - n_off) <= 1.01
+                verdict.append(f"{'PASS' if ok else 'FAIL'} duration {tag}: {what_ms} {m_off:.0f} ms with the option off, {m_on:.0f} ms on "
+                               f"(median of {len(res['off'])} and {len(res['on'])} cells; {n_off:.0f} and {n_on:.0f} steps; "
+                               f"equal within one step and a frame, {tol:.0f} ms: {'yes' if ok else 'NO'})")
+            e_off, e_on = med(res["off"], "end_ms"), med(res["on"], "end_ms")
+            tails = [t["tail_ms"] for t in res["on"] if t.get("tail_ms") is not None]
+            if e_off is None or e_on is None:
+                verdict.append(f"CHECK duration {tag} (last node move): no step above the menu's rest level in "
+                               f"{sum(1 for t in res['off'] if t['end_ms'] is None)} of {len(res['off'])} cells with the option off and "
+                               f"{sum(1 for t in res['on'] if t['end_ms'] is None)} of {len(res['on'])} with it on: the movie does not move more "
+                               f"than at rest (its steps above are the check)")
+            else:
+                tail = (f"; with the option on the last moved nodes were drawn between two values for {median(tails):.0f} ms more"
+                        if tails else "")
+                ok = abs(e_on - e_off) <= STEP_MS + frame
+                verdict.append(f"{'PASS' if ok else 'FAIL'} duration {tag} (last node move): the last step above the rest level at "
+                               f"{e_off:.0f} ms (option off) and {e_on:.0f} ms (on), equal within {STEP_MS + frame:.0f} ms: "
+                               f"{'yes' if ok else 'NO'}{tail}")
 
 
 def census_line(cell, screen):
@@ -863,23 +948,7 @@ def report_trace(cells, shots, lines, verdict):
         applied = sum(r.applied for r in rows)
         ok = (applied > 0) if want else (applied == 0)
         verdict.append(f"{'PASS' if ok else 'FAIL'} cap {cap}: {applied} of {len(rows)} gliding draws applied (expected {'some' if want else 'none'})")
-    for what in ("open", "close"):
-        res = {}
-        for v in OFF_ON:
-            cs = [c for c in cells if c["kind"] == what and c["variant"] == v and c["cap"] == 120]
-            drawn = [anim_duration(c) for c in cs]
-            steps = [step_duration(c) for c in cs]
-            res[v] = ([d[0] for d in drawn if d], [s[0] for s in steps if s], [s[1] for s in steps if s], [d[1] for d in drawn if d])
-        if res["off"][0] and res["on"][0]:
-            d_off, d_on = median(res["off"][0]), median(res["on"][0])
-            s_off, s_on = median(res["off"][1]), median(res["on"][1])
-            ok = abs(d_on - d_off) <= 40 and abs(s_on - s_off) <= 40
-            lines.append(f"{what}: 10%-90% of the travel of {median(res['off'][3]):.0f} nodes: {d_off:.0f} ms off, {d_on:.0f} ms on; "
-                         f"first to last moving step {s_off:.0f} ms off, {s_on:.0f} ms on ({median(res['off'][2]):.0f} and {median(res['on'][2]):.0f} steps)")
-            verdict.append(f"{'PASS' if ok else 'CHECK'} duration {what}: the animation takes {d_off:.0f} ms (drawn, option off) and {d_on:.0f} ms (option on); "
-                           f"by steps {s_off:.0f} and {s_on:.0f} ms (equal within one 33 ms step: {'yes' if ok else 'NO'})")
-        else:
-            verdict.append(f"CHECK duration {what}: no node that travels far in both variants (off {len(res['off'][0])} cells, on {len(res['on'][0])})")
+    duration_verdicts(cells, lines, verdict)
     ev = events_summary(cells)
     lines.append("")
     lines.append("=== events: nodes that changed character (swap) or snapped, per cell kind")
@@ -914,7 +983,7 @@ def report(folder, out=None, shots=None, plot_path=None, echo=True):
     """<folder>: a folder with the runs trace\\, cost\\, big\\ (or, as round 1 left it, game.log itself: one run)."""
     folder = Path(folder)
     lines, verdict = [f"ui_interp report of {folder}"], []
-    runs = [(t, folder / t) for t in ("trace", "cost", "big") if (folder / t / "game.log").exists()]
+    runs = [(t, folder / t) for t in ("trace", "cost", "big", "dur") if (folder / t / "game.log").exists()]
     if not runs and (folder / "game.log").exists():
         runs = [("trace", folder)]
     done = {}
@@ -950,6 +1019,10 @@ def report(folder, out=None, shots=None, plot_path=None, echo=True):
             if ser:
                 plot(ser, plot_path, "world position")
                 lines.append(f"plot: {plot_path}")
+    if "dur" in done:
+        lines.append("")
+        lines.append("=== the pause menu's closing and opening, timed from the press (run dur)")
+        duration_verdicts(done["dur"][0], lines, verdict)
     for tag in ("cost", "big"):
         if tag in done:
             cells, marks, path = done[tag]
@@ -978,7 +1051,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pad")
-    p.add_argument("kind", choices=["trace", "cost", "big"])
+    p.add_argument("kind", choices=["trace", "cost", "big", "dur"])
     p.add_argument("out")
     p.add_argument("--shots", default="{SHOT}")
     r = sub.add_parser("report")
