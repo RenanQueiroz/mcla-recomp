@@ -217,6 +217,9 @@ def report_one(folder, vtables=None):
             out.append("    " + x[3:])
         for x in movie:
             out.append("    " + x[3:])
+        queries = [y for y in mine if y.startswith("TS action 7")]
+        if queries:
+            out.append(f"    the UI action Start (7) was asked 'is it down' {len(queries)} times in the window")
         if natives:
             out.append("    script natives called in the window (first 200 calls; function, count): " + ", ".join(f"{NATIVE_NAMES.get(fn, fn)} x{n}" for fn, n in natives))
     out.append(f"Start edges {len(start_edges)}; accepted {accepted_n}")

@@ -161,3 +161,9 @@ address = 0x822C7FFC
 name = "mcla_tsp_script_native"
 address = 0x82555CC4
 registers = ["r11"]
+
+# sub_8221D660: "is UI action n down" (r3 = n, Start = 7), from the UI input object's records.
+[[midasm_hook]]
+name = "mcla_tsp_action_down"
+address = 0x8221D660
+registers = ["r3"]

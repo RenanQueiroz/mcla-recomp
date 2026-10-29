@@ -153,7 +153,8 @@ bool Window() {
 
 // Counts of what ran, per second.
 std::atomic<uint64_t> g_ui_updates{0}, g_mapper_calls{0}, g_movie_adv{0}, g_movie_ticks{0},
-    g_native_entry{0}, g_native_start{0}, g_native_pass{0}, g_events{0}, g_dispatch{0};
+    g_native_entry{0}, g_native_start{0}, g_native_pass{0}, g_events{0}, g_dispatch{0},
+    g_action_queries{0};
 
 // Only the game's thread (the one that runs the updates) touches these.
 std::array<uint64_t, kPadCount> g_updates{};
@@ -220,12 +221,13 @@ void MaybeReport(uint64_t now) {
   REXLOG_INFO(
       "TS 1s t={} updates={} (pad0 total {}) ui_updates={} mapper={} movie_adv={} movie_ticks={} "
       "native_calls={} native_start={} native_pass={} events={} dispatch={} title_phase={} (game "
-      "state {}, city pending {}) modal scenes {} child form vtable {:08X} script natives: {}",
+      "state {}, city pending {}) modal scenes {} child form vtable {:08X} action_queries {} script natives: {}",
       now, g_updates[0] - g_report_updates, g_updates[0], g_ui_updates.exchange(0),
       g_mapper_calls.exchange(0), g_movie_adv.exchange(0), g_movie_ticks.exchange(0),
       g_native_entry.exchange(0), g_native_start.exchange(0), g_native_pass.exchange(0),
       g_events.exchange(0), g_dispatch.exchange(0), InTitlePhase(), ReadGuestU32(kGameState),
-      ReadGuestU32(kCityPending), ModalCount(), ChildFormVtable(), TopNatives());
+      ReadGuestU32(kCityPending), ModalCount(), ChildFormVtable(), g_action_queries.exchange(0),
+      TopNatives());
   g_report_updates = g_updates[0];
 }
 
@@ -531,6 +533,20 @@ void mcla_tsp_script_native(PPCRegister& r11) {
   CountNative(r11.u32);
   if (Window() && g_native_window_logged.fetch_add(1, std::memory_order_relaxed) < 200) {
     REXLOG_INFO("TS native {:08X} (update {})", r11.u32, g_update.load(std::memory_order_relaxed));
+  }
+}
+
+// 0x8221D660: "is UI action n down" (sub_8221D660, r3 = n; the UI input object's records, Start =
+// 7). Called by the spectator's event listener at least; the trace shows whether anything asks
+// during the title.
+void mcla_tsp_action_down(PPCRegister& r3) {
+  if (!Probe()) {
+    return;
+  }
+  g_action_queries.fetch_add(1, std::memory_order_relaxed);
+  if (r3.u32 == 7 && Window()) {
+    REXLOG_INFO("TS action 7 (Start) queried (update {}) t={}",
+                g_update.load(std::memory_order_relaxed), NowUs());
   }
 }
 
