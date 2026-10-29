@@ -260,6 +260,8 @@ def pad_lines(run_set):
         for k, variant in enumerate(LAG_OPEN):
             add(f"set mcla_ui_advance_on_input {'true' if LAG_VARIANTS[variant][0] else 'false'}")
             add(f"set mcla_ui_menu_rate {LAG_VARIANTS[variant][1]}")
+            add("press_until up ui_select == 0 every=400ms hold=40ms timeout=15s")
+            add("wait 400ms")
             add("press start 100ms")
             add("wait 3000ms")
             add(f"log MI open id={k} variant={variant}")
@@ -267,8 +269,6 @@ def pad_lines(run_set):
             add("press_until down ui_select == 1 every=50ms hold=30ms timeout=10s")
             add(f"log MI openend id={k}")
             add("wait 1500ms")
-            add("press_until up ui_select == 0 every=400ms hold=40ms timeout=10s")
-            add("wait 600ms")
     add("mark end")
     return out
 
