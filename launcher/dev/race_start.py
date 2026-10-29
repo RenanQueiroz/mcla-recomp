@@ -28,6 +28,7 @@ What is measured, all on the steady clock (microseconds, `us=`):
 """
 
 import argparse
+import colorsys
 import re
 import statistics
 import struct
@@ -46,6 +47,14 @@ RATE_TOL = 0.15      # steps per game second below the reference's by more than 
 MOVE_M = 0.5         # metres from where the car stood for it to have started
 WINDOW_BEFORE_S = 12.0
 WINDOW_AFTER_S = 5.0
+# The countdown ring (3 red, 2 orange, 1 yellow, GO green) in the middle of the frame: centre and radius in a 384 x 216 picture (the size the pad's
+# pictures have at every resolution scale), the hue bands of the colours, and how many ring pixels a picture needs to count as showing a number.
+RING_CENTER = (190, 85)
+RING_R_IN, RING_R_OUT = 6, 21
+RING_SEQUENCE = ("red", "orange", "yellow", "green")
+RING_NUMBER = {"red": "3", "orange": "2", "yellow": "1", "green": "GO"}
+RING_MIN_PIXELS = 60      # a picture shows the ring when this many pixels of the colour are in the annulus
+GO_TOLERANCE_S = 0.25     # PASS: GO appears within this many seconds of START (the console's reference: GO at START, to within one picture)
 
 
 def f(x, digits=2):
@@ -234,6 +243,13 @@ def report_one(folder):
         out.append(f"pictures: {len(times)}, from {times[0][1]:+.2f} s to {times[-1][1]:+.2f} s from START; the gaps between them: median "
                    f"{statistics.median(b[1] - a[1] for a, b in zip(times, times[1:])) * 1000:.0f} ms" if len(times) > 1 else "pictures: 1")
         out.append("  pictures in order: " + " ".join(f"{k}:{t:+.2f}" for k, t in times[:: max(1, len(times) // 24)]))
+        out += ring_lines(s)
+    feed = countdown_feed_line(s)
+    if feed:
+        out.append(feed)
+    glide = glide_line(s)
+    if glide:
+        out.append(glide)
     return out
 
 
@@ -282,6 +298,16 @@ def verdict(ref, run):
                 line += "  SLOWER than the reference per game second"
                 flags.append(f"slower:{name}")
         lines.append(line)
+    ra_ring, rb_ring = ring_summary(a), ring_summary(b)
+    if ra_ring["pictures"] and rb_ring["pictures"]:
+        go_a, go_b = ra_ring["onset"].get("green"), rb_ring["onset"].get("green")
+        lines.append(f"  countdown ring: number on screen at START {rb_ring['at_start'] or 'unknown'} (reference {ra_ring['at_start'] or 'unknown'}); GO appears at "
+                     f"{f(go_b, 2) if go_b is not None else 'never'} s from START (reference {f(go_a, 2) if go_a is not None else 'never'})")
+        if go_b is None or abs(go_b) > GO_TOLERANCE_S or (ra_ring["at_start"] and rb_ring["at_start"] != ra_ring["at_start"]):
+            flags.append("countdown-out-of-step")
+            lines.append(f"  COUNTDOWN OUT OF STEP: GO is not at START (within {GO_TOLERANCE_S:.2f} s) or the number at START differs from the reference's")
+        else:
+            lines.append("  COUNTDOWN PASS: the ring shows GO at START as in the reference")
     lines.append(f"  verdict: {'; '.join(flags) if flags else 'the countdown keeps up (nothing later or slower than the reference)'}")
     return lines, flags
 
@@ -349,6 +375,132 @@ def write_png(path, w, h, rows):
 
     png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
     Path(path).write_bytes(png)
+
+
+def ring_colours(path):
+    """Counts of ring-coloured pixels (red, orange, yellow, green) in the annulus of the countdown ring of one picture."""
+    w, h, rows = read_png(path)
+    sx, sy = w / 384.0, h / 216.0
+    cx, cy = RING_CENTER
+    counts = dict.fromkeys(RING_SEQUENCE, 0)
+    for y in range(max(0, int((cy - RING_R_OUT - 1) * sy)), min(h, int((cy + RING_R_OUT + 1) * sy))):
+        row = rows[y]
+        dy = (y - cy * sy) / sy
+        if dy < -3:  # the smoke above the ring is orange too
+            continue
+        for x in range(max(0, int((cx - RING_R_OUT - 1) * sx)), min(w, int((cx + RING_R_OUT + 1) * sx))):
+            dx = (x - cx * sx) / sx
+            r2 = dx * dx + dy * dy
+            if r2 > RING_R_OUT * RING_R_OUT or r2 < RING_R_IN * RING_R_IN:
+                continue
+            hue, sat, val = colorsys.rgb_to_hsv(row[x * 3] / 255, row[x * 3 + 1] / 255, row[x * 3 + 2] / 255)
+            hue *= 360
+            if sat < 0.55 or val < 0.28:
+                continue
+            if hue < 14 or hue > 340:
+                counts["red"] += 1
+            elif hue < 38:
+                counts["orange"] += 1
+            elif hue < 75:
+                counts["yellow"] += 1
+            elif 90 < hue < 160:
+                counts["green"] += 1
+    return counts
+
+
+def ring_series(s):
+    """[(k, seconds from START, colour or None, counts)] for the countdown pictures of a Start, in time order."""
+    out = []
+    if s.start_us is None:
+        return out
+    for k, us, *_ in sorted(s.pictures, key=lambda p: p[1]):
+        path = s.folder / "shots" / f"cd-{k}.png"
+        if not path.exists():
+            continue
+        counts = ring_colours(path)
+        colour = max(counts, key=counts.get)
+        out.append((k, (us - s.start_us) / 1e6, colour if counts[colour] >= 20 else None, counts))
+    return out
+
+
+def ring_summary(s):
+    """What the pictures say about the countdown: {'onset': {colour: seconds from START of its first picture}, 'last': {...},
+    'at_start': the label of the picture nearest START (a number, GO, or 'none'), 'at_start_s': its time, 'pictures': n}. The numbers are taken
+    in order from the first strong red (smoke, lights and the HUD's other elements are orange or yellow too before the countdown starts)."""
+    series = ring_series(s)
+    res = {"onset": {}, "last": {}, "at_start": None, "at_start_s": None, "pictures": len(series)}
+    if not series:
+        return res
+    for _k, rel, colour, counts in series:
+        if colour and counts[colour] >= RING_MIN_PIXELS:
+            want = RING_SEQUENCE[len(res["onset"])] if len(res["onset"]) < len(RING_SEQUENCE) else None
+            if colour in res["onset"]:
+                res["last"][colour] = rel
+            elif colour == want and (colour == "red" or rel - res["last"].get(RING_SEQUENCE[len(res["onset"]) - 1], rel) < 3.0):
+                res["onset"][colour] = rel
+                res["last"][colour] = rel
+    # The number at START: GO if a picture within one picture gap (125 ms) of START shows it, else what the nearest picture shows.
+    near = min(series, key=lambda p: abs(p[1]))
+    if abs(near[1]) <= 0.2:
+        go = [p for p in series if abs(p[1]) <= 0.125 and p[2] == "green" and p[3]["green"] >= 20]
+        pic = go[0] if go else near
+        res["at_start"] = RING_NUMBER.get(pic[2], "none") if pic[2] and pic[3][pic[2]] >= 20 else "none"
+        res["at_start_s"] = pic[1]
+    return res
+
+
+def ring_lines(s):
+    """The report lines for the countdown ring of a run."""
+    res = ring_summary(s)
+    if not res["pictures"]:
+        return ["countdown ring: no pictures"]
+    on = res["onset"]
+    parts = [f"{RING_NUMBER[c]} from {on[c]:+.2f} s" for c in RING_SEQUENCE if c in on]
+    lines = ["countdown ring (the colour of the ring in the pictures: red 3, orange 2, yellow 1, green GO; times from START): "
+             + (", ".join(parts) if parts else "no number found")]
+    if len(on) >= 2:
+        gaps = [on[b] - on[a] for a, b in zip(RING_SEQUENCE, RING_SEQUENCE[1:]) if a in on and b in on]
+        lines.append("  seconds each number stayed (3 to 2, 2 to 1, 1 to GO): " + ", ".join(f"{g:.2f}" for g in gaps) + "  (1.0 on the console)")
+    lines.append(f"  NUMBER ON SCREEN AT START: {res['at_start'] or 'unknown'}" + (f" (picture at {res['at_start_s']:+.2f} s)" if res["at_start_s"] is not None else ""))
+    return lines
+
+
+GLIDE = re.compile(r"ui interp cost: option=(\w+) calls=(\d+) total_us=[\d.]+ per_call_ns=[\d.]+ worst_us=[\d.]+ gliding=(\d+) applied=(\d+)")
+
+
+def glide_line(s):
+    """Smooth UI's own check (the `ui interp cost` lines of --mcla_ui_interp_stats, once a second): the draws of elements that had a glide to show,
+    and how many of them the hook applied, over the whole run."""
+    calls = gliding = applied = lines = 0
+    option = None
+    for line in s.run.text:
+        m = GLIDE.search(line)
+        if m:
+            option = m.group(1)
+            calls += int(m.group(2))
+            gliding += int(m.group(3))
+            applied += int(m.group(4))
+            lines += 1
+    if not lines:
+        return None
+    return (f"Smooth UI check (mcla_ui_interp_stats, {lines} lines, option {option}): {calls} hook calls, {gliding} draws with a glide to show, "
+            f"{applied} applied" + (f" = {100.0 * applied / gliding:.1f}%" if gliding else ""))
+
+
+def countdown_feed_line(s):
+    """The HUD movie's countdown clock feed (cdn, cdwrit, cdsteps, cdfed of the pace lines) over the 4 s before START: what the game wrote
+    (its update times summed), what the movie's steps read summed, and their ratio (1.0: the clock keeps the game's time)."""
+    if s.start_us is None:
+        return None
+    win = s.window_samples(s.start_us - 4e6, s.start_us)
+    writ = sum(x["timer"].get("cdwrit", 0.0) for x in win[1:])
+    fed = sum(x["timer"].get("cdfed", 0.0) for x in win[1:])
+    steps = sum(x["timer"].get("cdsteps", 0.0) for x in win[1:])
+    n = sum(x["timer"].get("cdn", 0.0) for x in win[1:])
+    if not win or n <= 0:
+        return "countdown clock feed: no cdn= in the pace lines (the exe has no mcla_ui_countdown_fix, or the HUD's update never ran)"
+    return (f"countdown clock feed over the 4 s before START: the game wrote {n:.0f} times (sum {writ:.3f} s), the HUD movie's {steps:.0f} steps read "
+            f"{fed:.3f} s in all = {fed / writ if writ else 0:.2f} of the game's time (1.00 = the clock keeps the game's time; steps per update {steps / n:.2f})")
 
 
 def contact_sheet(folder, out_png, every_s=0.25, cols=5, thumb_w=320, span=(-6.0, 3.0)):

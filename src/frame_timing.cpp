@@ -1073,6 +1073,19 @@ REXCVAR_DEFINE_INT32(mcla_ui_pace_log_ms, 1000, "MCLA",
                      "(1000; 50 to 100 for the race start, which the dev pad sets with `set`)")
     .range(20, 10000);
 
+// The race-start countdown (the ring in the middle of the screen: 3, 2, 1, GO) is timed by the HUD movie's own script, not by
+// the game's clock. Every update the HUD sets the ActionScript variable `countdownUpdate` of the HUD gauge movie (hud/hud.swf,
+// logged as HUDGAUGE) to that update's elapsed time (sub_82212298, 0x822124E0), and the script adds the variable to its
+// countdown clock on every movie STEP. On the console (30 updates, 30 steps a second) each step added 1/30 s; with the movie
+// paced below the update rate a step saw only the last update's value, so the clock ran at steps/updates of the game's speed:
+// every number lasted 2 s with the HUD at 60 steps a second at a 120 FPS cap and 4 s with Smooth UI's 30 (measured,
+// launcher/dev/race-countdown-2026-10-29.md). The fix gives each step the time of all the updates since the movie's last step.
+REXCVAR_DEFINE_BOOL(mcla_ui_countdown_fix, true, "MCLA",
+                    "Keep the race-start countdown (3, 2, 1, GO) in time with the race at any frame rate: the HUD "
+                    "movie's countdown clock gets the game time of all the updates since its last step, not of the "
+                    "last update only (without it the countdown runs at the movie's steps per update, 1/4 speed "
+                    "with Smooth UI at a 120 FPS cap). Needs mcla_ui_timing_fix to have any effect");
+
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
 // count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
@@ -1296,6 +1309,55 @@ void WriteGuestFloat(uint32_t address, float value) {
   p[3] = uint8_t(bits);
 }
 
+// --- mcla_ui_countdown_fix: the HUD gauge movie's `countdownUpdate` variable ---
+// What the game wrote since the movie appeared (`total`) and the part of it a movie step has taken (`consumed`), in seconds.
+// The write hook gives the variable total - consumed (the time since the last step); the step hook takes it.
+struct HudDtFeed {
+  std::mutex mutex;
+  uint32_t context = 0;   // the HUD gauge movie's swfCONTEXT, as the write hook saw it
+  double total = 0.0;
+  double consumed = 0.0;
+  double fed = 0.0;       // the value the variable holds now (what the next step of the movie reads)
+  uint32_t since_step = 0;  // writes since a step of this movie was last seen
+  // The pace log's window (mcla_ui_pace_log): writes, the game's own values summed, steps, the values the steps read summed.
+  uint32_t writes = 0;
+  double written_sum = 0.0;
+  uint32_t steps = 0;
+  double fed_sum = 0.0;
+};
+HudDtFeed g_hud_dt;
+std::atomic<uint32_t> g_hud_dt_context{0};  // g_hud_dt.context, readable without the lock (every movie's advance asks)
+// The write hook feeds only a movie that is being stepped: with no step seen for this many writes (a HUD that is hidden, or a
+// context that is not the one the advance sees) it leaves the game's value alone rather than feed a clock nobody reads.
+constexpr uint32_t kHudDtLiveWrites = 100;
+
+// A call to advance `context` was let through (the movie steps): the HUD gauge movie takes the time it was given.
+void HudDtNoteStep(uint32_t context) {
+  if (context != g_hud_dt_context.load(std::memory_order_relaxed)) {
+    return;
+  }
+  std::lock_guard lock(g_hud_dt.mutex);
+  if (context != g_hud_dt.context) {
+    return;
+  }
+  g_hud_dt.since_step = 0;
+  g_hud_dt.consumed = g_hud_dt.total;
+  g_hud_dt.steps++;
+  g_hud_dt.fed_sum += g_hud_dt.fed;
+}
+
+struct HudDtWindow {
+  uint32_t writes, steps;
+  double written_sum, fed_sum;
+};
+HudDtWindow HudDtTakeWindow() {
+  std::lock_guard lock(g_hud_dt.mutex);
+  const HudDtWindow w{g_hud_dt.writes, g_hud_dt.steps, g_hud_dt.written_sum, g_hud_dt.fed_sum};
+  g_hud_dt.writes = g_hud_dt.steps = 0;
+  g_hud_dt.written_sum = g_hud_dt.fed_sum = 0.0;
+  return w;
+}
+
 // --- mcla_ui_pace_log: what the engine asks of the UI movies, and what the timer's clocks do ---
 struct UiPaceCount {
   uint32_t context = 0;
@@ -1372,13 +1434,15 @@ void UiPaceLogTick() {
     c.calls = c.steps = c.dt_calls = 0;
   }
   const double span_ms = double(now - g_pace_window_us) / 1000.0;
+  const HudDtWindow cd = HudDtTakeWindow();
   REXLOG_INFO(
       "ui pace: span_ms={:.1f} updates={} movies(name:ctx:swf_fps:calls/steps/dtcalls){} | timer dt={:.5f} rate={:.2f} "
-      "mode_t={:.3f} total_t={:.3f} total2_t={:.3f} step={:.5f} scale={:.3f} frames={} state={} us={}",
+      "mode_t={:.3f} total_t={:.3f} total2_t={:.3f} step={:.5f} scale={:.3f} frames={} state={} us={} cdn={} cdwrit={:.4f} "
+      "cdsteps={} cdfed={:.4f}",
       span_ms, g_pace_updates, movies.empty() ? " none" : movies, ReadGuestFloat(kGuestTimer + 8),
       ReadGuestFloat(kGuestTimer + 12), ReadGuestFloat(kGuestTimer + 16), ReadGuestFloat(kGuestTimer + 20),
       ReadGuestFloat(kGuestTimer + 24), ReadGuestFloat(kGuestTimer + 32), ReadGuestFloat(kGuestTimer + 84),
-      ReadGuestU32(kGuestTimer + 44), ReadGuestU32(0x8288D000), now);
+      ReadGuestU32(kGuestTimer + 44), ReadGuestU32(0x8288D000), now, cd.writes, cd.written_sum, cd.steps, cd.fed_sum);
   g_pace_window_us = now;
   g_pace_updates = 0;
 }
@@ -1399,7 +1463,46 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31, PPCRegister& f30,
   if (REXCVAR_GET(mcla_ui_pace_log)) {
     CountUiAdvance(r31.u32, one_frame, hold ? 0 : frames);
   }
+  if (!hold) {
+    HudDtNoteStep(r31.u32);  // mcla_ui_countdown_fix: the HUD gauge movie takes the time it was given
+  }
   return hold;
+}
+
+// The hook (config/frame_timing.toml) at 0x822124DC in sub_82212298, the HUD's update: r3 is the HUD gauge movie's
+// swfCONTEXT and f1 the value of its `countdownUpdate` variable, the update's elapsed time (the call that sets the
+// variable follows, sub_825EE188). The variable is read once per movie step, so it gets the time since the last step.
+void mcla_ui_countdown_dt(PPCRegister& r3, PPCRegister& f1) {
+  if (OriginalTiming()) {
+    return;
+  }
+  const double value = f1.f64;
+  if (!(value >= 0.0 && value < 1.0)) {
+    return;  // not a time: leave it to the game
+  }
+  const bool fix = REXCVAR_GET(mcla_ui_countdown_fix);
+  std::lock_guard lock(g_hud_dt.mutex);
+  if (g_hud_dt.context != r3.u32) {
+    REXLOG_INFO("ui countdown: the HUD movie is now ctx={:08X} (was {:08X}), first countdownUpdate {:.5f}", r3.u32,
+                g_hud_dt.context, value);
+    g_hud_dt.context = r3.u32;
+    g_hud_dt_context.store(r3.u32, std::memory_order_relaxed);
+    g_hud_dt.total = g_hud_dt.consumed = 0.0;
+    g_hud_dt.since_step = 0;
+  }
+  g_hud_dt.total += value;
+  g_hud_dt.since_step++;
+  double fed = value;
+  if (fix && g_hud_dt.since_step <= kHudDtLiveWrites) {
+    // The time since the last step: at least this update's own value and at most what one engine frame may advance (a
+    // movie that is not stepped at all, a HUD that is hidden, must not give its first step minutes at once).
+    fed = std::max(value, std::min(g_hud_dt.total - g_hud_dt.consumed, std::max(value, kMaxFrameSeconds)));
+    fed = double(float(fed));
+    f1.f64 = fed;
+  }
+  g_hud_dt.fed = fed;
+  g_hud_dt.writes++;
+  g_hud_dt.written_sum += value;
 }
 
 // The movie has a rule in mcla_ui_movie_rates: its own schedule, in the wall clock or the game's, that steps as many
