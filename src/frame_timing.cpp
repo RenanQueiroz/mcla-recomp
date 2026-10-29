@@ -13,6 +13,7 @@
 #include "generated/default/mcla_init.h"
 
 #include "mcla_app.h"
+#include "pc_triggers.h"
 
 #include <algorithm>
 #include <array>
@@ -764,6 +765,9 @@ void mcla_frame_delta(PPCRegister& r8) {
   MclaTickButtonPrompts();
   MclaTickPerfOptions();
   MclaTickSettingsMenu();
+#if !REX_PLATFORM_PS5
+  MclaPcTriggersFrame();  // the DualSense's adaptive triggers (src/pc_triggers.cpp)
+#endif
   MclaDevPadFrame(r8.u64);
   if (OriginalTiming()) {
     return;
@@ -1061,11 +1065,24 @@ bool IsUiScreen(uint32_t context, char (&name)[32]) {
   return UiScreenName(context, name) && std::strcmp(name, "HUDMAPMOVIE") != 0;
 }
 
+// The last time the pause menu's movie came up for an advance: the movie is advanced every update while the
+// pause menu is up and not at all in free roam or a race (measured in the menu-lag run of 2026-10-29: 3 s of
+// free roam, no advance of any screen; then PAUSEMOVIE every 33 ms from the Start press on).
+std::atomic<uint64_t> g_pause_movie_us{0};
+
 void NoteUiKeyEvent(uint64_t now_us) {
   g_ui_input_us.store(now_us, std::memory_order_relaxed);
   g_ui_input_seq.fetch_add(1, std::memory_order_release);
 }
 }  // namespace
+
+// For the DualSense triggers' release (src/pc_triggers.cpp): the pause menu is up while its movie keeps coming
+// up for an advance (every 33 ms at the default menu rate), even with the car standing still. Needs
+// mcla_ui_timing_fix (this hook returns before the note when it is off).
+bool MclaPauseMenuUp() {
+  const uint64_t last = g_pause_movie_us.load(std::memory_order_relaxed);
+  return last != 0 && NowMicros() - last < 250'000;
+}
 
 bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
@@ -1080,6 +1097,7 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
     uint32_t input_seq;   // the last key event this movie has looked at
     bool screen;
     char name[32];
+    bool pause;  // the pause menu's movie (PAUSEMOVIE)
   };
   static std::mutex mutex;
   static std::array<Schedule, 32> schedules{};
@@ -1101,6 +1119,10 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   if (now - schedule->checked_us > 1'000'000) {
     schedule->checked_us = now;
     schedule->screen = IsUiScreen(context, schedule->name);
+    schedule->pause = schedule->screen && std::strcmp(schedule->name, "PAUSEMOVIE") == 0;
+  }
+  if (schedule->pause) {
+    g_pause_movie_us.store(now, std::memory_order_relaxed);
   }
   const bool log_adv = schedule->screen && REXCVAR_GET(mcla_ui_advance_log);
   uint64_t period_us;
