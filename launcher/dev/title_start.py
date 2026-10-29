@@ -10,8 +10,9 @@ Pad kinds (all end with `quit`):
   press    wait for the engine (frames 20), settle S seconds, then press_until start left_title every=<every> hold=<hold>
   single   as press, but ONE press, then 20 s of nothing (shots at 0, 6, 12 and 20 s), then press_until: is a single
            press enough when the game then loads, or is it ignored?
-  idle     sit at the title for <idle> seconds (shots every 30 s: the attract video starts about 120 s after launch),
-           then press_until start left_title every=<every> hold=<hold>
+  idle     sit at the title for <idle> seconds after engine frame 20 (shots every 30 s, then four more in the last
+           part: the attract video starts about 120 s after launch), then 16 Start presses (every <every> ms) with a
+           shot 700 ms after each: does the first press stop the video, and which press leaves the title?
 
 `left_title` is NOT the press: the dev pad reads bit 0 of a function-local static's guard (0x82836A28) that the city's
 lighting set-up sets the first time it runs, which can be some seconds after a press that was accepted. The report
@@ -58,14 +59,24 @@ def pad_lines(kind, hold=100, every=1500, settle=4, idle=150, shots=None):
         out += [f"press_until start left_title every=2s hold={hold}ms timeout=60s", "mark city"]
         out += PEEKS + ["wait 1s", "quit"]
     elif kind == "idle":
-        chunks = max(1, int(idle // 30))
-        for i in range(chunks):
-            out += ["wait 30s"]
-            shot(f"idle{(i + 1) * 30:03d}", 0.15)
+        # Sit at the title for <idle> seconds after engine frame 20 (the attract video starts about 120 s after launch),
+        # shots on the way, then 16 Start presses (every <every> ms, <hold> ms) with a shot after each: a Start press
+        # while the video plays stops it (or not), the next one leaves the title; the shots show which.
+        left = float(idle)
+        while left > 45:
+            out.append("wait 30s")
+            shot(f"idle_{int(idle - left + 30):03d}", 0.15)
+            left -= 30
+        quarter = max(1.0, left / 4.0)
+        for i in range(4):
+            out.append(f"wait {quarter:.1f}s")
+            shot(f"idle_end{i + 1}", 0.15)
         out += ["mark idle_end"] + PEEKS
-        out += [f"press_until start left_title every={every}ms hold={hold}ms timeout=120s", "mark city"]
-        shot("city", 0.15)
-        out += PEEKS + ["wait 1s", "quit"]
+        for i in range(16):
+            out += [f"press start {hold}ms", "wait 700ms"]
+            shot(f"press{i + 1:02d}", 0.15)
+            out.append(f"wait {max(100, every - 700 - hold)}ms")
+        out += ["mark presses_end"] + PEEKS + ["wait 1s", "quit"]
     else:
         raise SystemExit(f"unknown pad kind {kind!r}")
     return out
