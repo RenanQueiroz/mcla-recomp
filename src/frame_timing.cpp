@@ -309,19 +309,21 @@ bool MclaGraphicsIsVulkan();
 // and about 15 ms at 30 (cpu3 and handoff analyses). On Vulkan the same wait is a semaphore
 // (vkLatencySleepNV) and costs no CPU, so this is for Direct3D 12 only.
 //
-// With mcla_reflex_sleep_assist the update thread first waits on a high-resolution waitable
-// timer until the margin (1.5 ms by default) before the moment the driver's wait would end, and
-// then calls the driver as before, which spins only the last stretch.
+// With mcla_reflex_sleep_assist (on by default since v0.3.0) the update thread first waits on a
+// high-resolution waitable timer until the margin before the moment the driver's wait would end,
+// and then calls the driver as before, which spins only the last stretch.
 //
 // The margin. mcla_reflex_sleep_margin_us is a fixed part (1000 to 8000 us, default 1500).
-// mcla_reflex_sleep_margin_pct (default 0: off) adds a share of the cap's frame interval. The
-// margin is the larger of the two, or their sum with mcla_reflex_sleep_margin_sum (1000 us plus
-// 17 percent is the rule of DXVK's latency sleep, which sleeps and then spins its last 4 timer
-// granularities plus a sixth of the wait: about 3.8 ms at 60 FPS and 6.6 ms at 30). The first
-// measurement (fixed 1.5 ms) cut the process's CPU at the caps by 19 to 44 percent and paced a
-// little less evenly; what a larger margin gives back in pacing, and costs in CPU, is what the
-// sweep of launcher/dev/reflex-sleep-assist-margin-2026-10-28.md measures. The check below
-// widens whatever margin the settings give.
+// mcla_reflex_sleep_margin_pct (default 20 since v0.3.0) adds a share of the cap's frame
+// interval. The margin is the larger of the two (the default: 3.3 ms at 60 FPS, 6.7 ms at 30,
+// 1.7 ms at 120), or their sum with mcla_reflex_sleep_margin_sum (1000 us plus 17 percent is the
+// rule of DXVK's latency sleep, which sleeps and then spins its last 4 timer granularities plus a
+// sixth of the wait: about 3.8 ms at 60 FPS and 6.6 ms at 30). The first measurement (fixed
+// 1.5 ms, without the frame-cap timer) cut the process's CPU at the caps by 19 to 44 percent and
+// paced a little less evenly. The sweep of launcher/dev/reflex-assist-margin-2026-10-28.md (on
+// top of the frame-cap timer) found 20 percent within the noise of the assist's absence for the
+// pacing at 4 and 16 logical processors and caps of 60 and 30, at the same CPU saving (26 to 51
+// percent less per swap). The check below widens whatever margin the settings give.
 //
 // The deadline. The documentation says only that the minimum frame interval (NV_SET_SLEEP_MODE_
 // PARAMS::minimumIntervalUs, set by the low latency code to 1,000,000 / the cap) is enforced
@@ -359,12 +361,13 @@ bool MclaGraphicsIsVulkan();
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
-REXCVAR_DEFINE_BOOL(mcla_reflex_sleep_assist, false, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_reflex_sleep_assist, true, "MCLA",
                     "With NVIDIA Reflex holding the frame-rate cap on Direct3D 12 (Windows): the "
-                    "update thread waits on a high-resolution timer until mcla_reflex_sleep_margin_us "
-                    "before the moment the driver's wait would end, so the driver's busy wait "
-                    "covers only the last stretch (6.4 to 6.9 ms of CPU a frame at a cap of 60 FPS "
-                    "otherwise). Timing only. Off is the driver's own wait");
+                    "update thread waits on a high-resolution timer until the margin (the larger of "
+                    "mcla_reflex_sleep_margin_us and mcla_reflex_sleep_margin_pct percent of the "
+                    "cap's frame interval) before the moment the driver's wait would end, so the "
+                    "driver's busy wait covers only the last stretch (6.4 to 6.9 ms of CPU a frame "
+                    "at a cap of 60 FPS otherwise). Timing only. false is the driver's own wait");
 REXCVAR_DEFINE_INT32(mcla_reflex_sleep_margin_us, 1500, "MCLA",
                      "With mcla_reflex_sleep_assist: microseconds before the driver's expected "
                      "deadline at which the timer wait ends and the driver takes over. It covers "
@@ -373,9 +376,10 @@ REXCVAR_DEFINE_INT32(mcla_reflex_sleep_margin_us, 1500, "MCLA",
                      "the timer comes back at once. With mcla_reflex_sleep_margin_pct above 0 it "
                      "is the fixed part of the margin")
     .range(1000, 8000);
-REXCVAR_DEFINE_DOUBLE(mcla_reflex_sleep_margin_pct, 0.0, "MCLA",
+REXCVAR_DEFINE_DOUBLE(mcla_reflex_sleep_margin_pct, 20.0, "MCLA",
                       "With mcla_reflex_sleep_assist: the share, in percent, of the cap's frame "
-                      "interval that is left to the driver's own wait. 0 is off (only "
+                      "interval that is left to the driver's own wait (20: 6.7 ms at a cap of 30 FPS, "
+                      "3.3 ms at 60). 0 is off (only "
                       "mcla_reflex_sleep_margin_us). The margin is the larger of this share and "
                       "mcla_reflex_sleep_margin_us, or their sum with mcla_reflex_sleep_margin_sum. "
                       "A larger margin takes less CPU off the driver's wait")

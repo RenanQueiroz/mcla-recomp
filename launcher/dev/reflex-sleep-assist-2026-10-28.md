@@ -1,8 +1,8 @@
 # The Reflex sleep assist (2026-10-28)
 
-Branch `cpu/reflex-sleep-assist`. Options `mcla_reflex_sleep_assist` (off by default) and `mcla_reflex_sleep_margin_us` (1500); the proportional margin is in
+Branch `cpu/reflex-sleep-assist`. Options `mcla_reflex_sleep_assist` (**on by default since v0.3.0**; it was off on the branch) and `mcla_reflex_sleep_margin_us` (1500); the proportional margin (default 20%) and the sweep that chose it are in
 `launcher/dev/reflex-assist-margin-2026-10-28.md`.
-**Status: measured once (the chain below ran on 2026-10-28; see "Results").** The numbers in the "Why" section come from earlier profiles of the shipped game
+**Status: measured twice (the chain below ran on 2026-10-28 with a fixed margin of 1.5 ms and without the frame-cap timer; see "Results"; the second measurement is in the margin note).** Its pacing result (a little less even) is the history that led to the margin sweep. The numbers in the "Why" section come from earlier profiles of the shipped game
 (1 kHz sampling, not controlled A/B runs).
 
 ## Why
