@@ -1,8 +1,9 @@
 # The Reflex sleep assist (2026-10-28)
 
-Branch `cpu/reflex-sleep-assist`. Options `mcla_reflex_sleep_assist` (off by default) and `mcla_reflex_sleep_margin_us` (1500).
-**Status: written and compiled by CI; not run in the game, nothing below is measured.** Every number in the "Why" section comes
-from earlier profiles of the shipped game (1 kHz sampling, not controlled A/B runs).
+Branch `cpu/reflex-sleep-assist`. Options `mcla_reflex_sleep_assist` (off by default) and `mcla_reflex_sleep_margin_us` (1500); the proportional margin is in
+`launcher/dev/reflex-assist-margin-2026-10-28.md`.
+**Status: measured once (the chain below ran on 2026-10-28; see "Results").** The numbers in the "Why" section come from earlier profiles of the shipped game
+(1 kHz sampling, not controlled A/B runs).
 
 ## Why
 
@@ -94,4 +95,21 @@ design.
 
 ## Results
 
-Not run yet. This section is to be filled from the chain's report.
+The chain ran once (2026-10-28; RTX 5080, Direct3D 12, native resolution, HDR off, the city, 3 runs per cell, 4 and 16 logical processors; the report is not in the repository). The driver's own report of "input sample to present end" has a negative baseline when the driver holds the cap (-8.5 ms at 60 FPS, -25 ms at 30 for `off`), so it is not a usable latency measure and the verdicts that used it (a FAIL for the assist at every cap) are not valid; PresentMon's start-to-screen latency is the measure.
+
+| | 4 logical, 60 FPS | 4 logical, 30 FPS | 16 logical, 60 FPS | 16 logical, 30 FPS |
+|---|---|---|---|---|
+| process CPU per swap, off to assist (ms) | 20.5 to 15.2 (-26%) | 30.5 to 17.0 (-44%) | 36.3 to 29.5 (-19%) | 63.2 to 46.8 (-26%) |
+| Main thread CPU per swap (ms) | 8.6 to 3.2 | 17.3 to 3.4 | 8.6 to 3.0 | 17.0 to 3.1 |
+| swap interval sigma (ms) | 0.228 to 0.294 | 0.271 to 0.391 | 0.179 to 0.195 | 0.208 to 0.257 |
+| display frames more than 1 ms off the period (%) | 3.3 to 4.6 | 0.7 to 2.0 | 4.8 to 8.0 | 1.1 to 4.6 |
+| PresentMon display sigma (ms) | 0.380 to 0.425 | 0.348 to 0.490 | 0.461 to 0.533 | 0.429 to 0.508 |
+| start-to-screen latency, median (ms) | 10.78 to 10.84 | 10.87 to 11.02 | 10.51 to 10.53 | 10.67 to 10.77 |
+| start-to-screen latency, 99th percentile (ms) | 12.23 to 12.44 | 12.30 to 12.48 | 11.97 to 12.12 | 11.67 to 12.11 |
+| swap interval 99th percentile (ms) | 17.28 to 17.33 | 34.00 to 34.10 | 17.21 to 17.21 | 33.80 to 34.02 |
+| the driver's wait after the timer (ms) | 1.22 | 1.22 | 1.24 | 1.23 |
+
+- The assist ran as modelled: the driver's return against the model was +0 us on average, 0 of 5,409 timer waits were too tight, 3 wake-ups were over 1 ms late (4 logical), and the margin never widened.
+- Uncapped, the assist is not engaged (the log says "no frame-rate cap"). At 4 logical processors the swap interval's sigma was 1.16 ms (off) and 2.47 ms (assist). One run explains it: run `a0xF-assist-r1` has one swap interval of 176.7 ms (frame 439 of 1,128 in the segment); without it the run's sigma is 1.14 ms, and the other two assisted runs had 1.07 and 1.16 ms against 1.14 to 1.17 for `off`. No other swap interval over 50 ms occurred in the 51 segments of the chain. The cause of that one frame was not found (nothing in the log around it); the margin sweep repeats the uncapped comparison with more runs.
+- `low_latency_limiter=fork` took 16 to 47% off the CPU per swap at the caps, but the start-to-screen latency was 7.2 to 23.7 ms longer and the display pacing worse (display frames more than 1 ms off the period +2 to +28 points).
+- Not measured: the cause of the slightly less even pacing, the exactness of the game's timing (the recipe is a `--mcla_fixed_dt` comparison of `off` against the assist), AMD, Vulkan, Linux, the PS5 build.

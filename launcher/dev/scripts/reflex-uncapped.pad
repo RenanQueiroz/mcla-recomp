@@ -1,0 +1,19 @@
+# The 4-logical uncapped block of the margin sweep (dev note launcher/dev/reflex-assist-margin-2026-10-28.md): standing at the spawn point, uncapped, the
+# assist as the command line sets it (off, or --mcla_reflex_sleep_assist=true), to see whether it changes the swap interval's sigma (the first measurement
+# had one 177 ms swap in one assisted run). Run it with real-time steps and --mcla_fps=0. Marks: title, map_zoom, free_roam, settle0, uncapped_a, uncapped_b, end.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+get ll_status mcla_reflex_sleep_assist mcla_reflex_sleep_margin_us mcla_reflex_sleep_margin_pct mcla_reflex_sleep_margin_sum mcla_timer_hr_at_cap low_latency_limiter low_latency mcla_fps
+mark settle0
+wait 2s
+mark uncapped_a
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+mark uncapped_b
+mark end

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -308,8 +309,18 @@ bool MclaGraphicsIsVulkan();
 // (vkLatencySleepNV) and costs no CPU, so this is for Direct3D 12 only.
 //
 // With mcla_reflex_sleep_assist the update thread first waits on a high-resolution waitable
-// timer until the margin (mcla_reflex_sleep_margin_us, 1.5 ms) before the moment the driver's
-// wait would end, and then calls the driver as before, which spins only the last stretch.
+// timer until the margin (1.5 ms by default) before the moment the driver's wait would end, and
+// then calls the driver as before, which spins only the last stretch.
+//
+// The margin. mcla_reflex_sleep_margin_us is a fixed part (1000 to 8000 us, default 1500).
+// mcla_reflex_sleep_margin_pct (default 0: off) adds a share of the cap's frame interval. The
+// margin is the larger of the two, or their sum with mcla_reflex_sleep_margin_sum (1000 us plus
+// 17 percent is the rule of DXVK's latency sleep, which sleeps and then spins its last 4 timer
+// granularities plus a sixth of the wait: about 3.8 ms at 60 FPS and 6.6 ms at 30). The first
+// measurement (fixed 1.5 ms) cut the process's CPU at the caps by 19 to 44 percent and paced a
+// little less evenly; what a larger margin gives back in pacing, and costs in CPU, is what the
+// sweep of launcher/dev/reflex-sleep-assist-margin-2026-10-28.md measures. The check below
+// widens whatever margin the settings give.
 //
 // The deadline. The documentation says only that the minimum frame interval (NV_SET_SLEEP_MODE_
 // PARAMS::minimumIntervalUs, set by the low latency code to 1,000,000 / the cap) is enforced
@@ -358,8 +369,20 @@ REXCVAR_DEFINE_INT32(mcla_reflex_sleep_margin_us, 1500, "MCLA",
                      "deadline at which the timer wait ends and the driver takes over. It covers "
                      "the timer's lateness (0.3 ms on average) and how far the driver's own "
                      "deadline is from the model; widened by itself when the driver's wait after "
-                     "the timer comes back at once")
+                     "the timer comes back at once. With mcla_reflex_sleep_margin_pct above 0 it "
+                     "is the fixed part of the margin")
     .range(1000, 8000);
+REXCVAR_DEFINE_DOUBLE(mcla_reflex_sleep_margin_pct, 0.0, "MCLA",
+                      "With mcla_reflex_sleep_assist: the share, in percent, of the cap's frame "
+                      "interval that is left to the driver's own wait. 0 is off (only "
+                      "mcla_reflex_sleep_margin_us). The margin is the larger of this share and "
+                      "mcla_reflex_sleep_margin_us, or their sum with mcla_reflex_sleep_margin_sum. "
+                      "A larger margin takes less CPU off the driver's wait")
+    .range(0.0, 80.0);
+REXCVAR_DEFINE_BOOL(mcla_reflex_sleep_margin_sum, false, "MCLA",
+                    "With mcla_reflex_sleep_margin_pct above 0: the margin is "
+                    "mcla_reflex_sleep_margin_us plus the share instead of the larger of the two "
+                    "(1000 and 17 is DXVK's rule: about 3.8 ms at 60 FPS, 6.6 ms at 30)");
 
 #ifdef _WIN32
 namespace {
@@ -392,15 +415,16 @@ class ReflexSleepAssist {
       return;
     }
     const uint64_t period = 1'000'000ull / uint64_t(fps);
-    const uint64_t margin = Margin();
+    const uint64_t margin = Margin(period);
     if (!engaged_) {
       engaged_ = true;
       stats_ = Stats();
       stats_since_us_ = now;
       REXLOG_INFO(
           "Reflex sleep assist: on at {} FPS (Direct3D 12): a timer wait until {} us before the "
-          "driver's deadline (the previous start plus {} us), then NVIDIA Reflex's own wait",
-          fps, margin, period);
+          "driver's deadline (the previous start plus {} us; margin rule: {}), then NVIDIA "
+          "Reflex's own wait",
+          fps, margin, period, MarginRule(period));
     }
     const uint64_t deadline = prev_return_us_ + period;
     if (deadline <= now + margin + kMinWaitUs) {
@@ -507,9 +531,34 @@ class ReflexSleepAssist {
     return n;
   }
 
-  uint64_t Margin() const {
-    const int64_t base = std::clamp<int64_t>(REXCVAR_GET(mcla_reflex_sleep_margin_us), 1000, 8000);
-    return uint64_t(base + extra_us_);
+  // The margin the settings give for a frame interval of period_us, before the check's widening:
+  // the fixed part, the share of the interval, and the larger of the two or their sum. The cvars
+  // are read every pass, so a change takes effect at once.
+  static uint64_t FixedMargin() {
+    return uint64_t(std::clamp<int64_t>(REXCVAR_GET(mcla_reflex_sleep_margin_us), 1000, 8000));
+  }
+  static double SharePercent() {
+    return std::clamp<double>(REXCVAR_GET(mcla_reflex_sleep_margin_pct), 0.0, 80.0);
+  }
+  static uint64_t BaseMargin(uint64_t period_us) {
+    const uint64_t fixed = FixedMargin();
+    const uint64_t share = uint64_t(double(period_us) * SharePercent() / 100.0 + 0.5);
+    return REXCVAR_GET(mcla_reflex_sleep_margin_sum) ? fixed + share : std::max(fixed, share);
+  }
+  uint64_t Margin(uint64_t period_us) const { return BaseMargin(period_us) + uint64_t(extra_us_); }
+
+  // The rule in words, for the log.
+  static std::string MarginRule(uint64_t period_us) {
+    char buf[160];
+    if (SharePercent() <= 0.0) {
+      std::snprintf(buf, sizeof(buf), "%llu us fixed", (unsigned long long)FixedMargin());
+    } else {
+      std::snprintf(buf, sizeof(buf),
+                    REXCVAR_GET(mcla_reflex_sleep_margin_sum) ? "%llu us plus %.1f%% of %llu us"
+                                                              : "the larger of %llu us and %.1f%% of %llu us",
+                    (unsigned long long)FixedMargin(), SharePercent(), (unsigned long long)period_us);
+    }
+    return buf;
   }
 
   void Reset() {
@@ -537,12 +586,12 @@ class ReflexSleepAssist {
     if (fps <= 0) {
       return "no frame-rate cap: the driver's own pacing has no known deadline";
     }
-    const int64_t base = std::clamp<int64_t>(REXCVAR_GET(mcla_reflex_sleep_margin_us), 1000, 8000);
     const uint64_t period = 1'000'000ull / uint64_t(fps);
-    if (period < uint64_t(base) + 3000) {
+    const uint64_t base = BaseMargin(period);
+    if (period < base + 3000) {
       return "the cap's interval is too short for the margin";
     }
-    if (period < uint64_t(base + extra_us_) + 3000) {
+    if (period < base + uint64_t(extra_us_) + 3000) {
       // The margin widened so far that nothing is left to wait: start again from the base.
       holdoff_until_us_ = now + kHoldOffUs;
       extra_us_ = 0;
@@ -614,6 +663,7 @@ class ReflexSleepAssist {
     }
     const Stats& s = stats_;
     if (s.assisted) {
+      const uint64_t period = 1'000'000ull / uint64_t(std::max<int32_t>(fps, 1));
       REXLOG_INFO(
           "Reflex sleep assist: {} timer waits and {} frames with nothing to wait for in {:.1f} s at "
           "{} FPS: timer wait {:.0f} us on average, the driver's wait after it {:.0f} us, its "
@@ -623,7 +673,7 @@ class ReflexSleepAssist {
           s.assisted, s.idle, double(now - stats_since_us_) / 1e6, fps,
           double(s.timer_wait_us) / double(s.assisted), double(s.driver_wait_us) / double(s.assisted),
           double(s.model_error_sum) / double(s.assisted), s.model_error_min, s.model_error_max,
-          Margin(), extra_us_, s.tight, s.late, s.timer_errors);
+          Margin(period), extra_us_, s.tight, s.late, s.timer_errors);
     }
     stats_ = Stats();
     stats_since_us_ = now;
