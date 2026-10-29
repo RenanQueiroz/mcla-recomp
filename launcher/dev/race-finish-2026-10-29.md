@@ -17,6 +17,7 @@ Their commit does not name the movie that is slow, and gives no numbers. We have
 - The UI manager advances its movies in the Flash player's one-frame mode (`sub_825EDC08` with its flag set): one movie frame per call, whatever time has passed. Our hook holds a call back when the movie is not due. In the other mode (the flag clear) the movie advances by the elapsed time, and the hook leaves it alone.
 - The engine timer gives the game the real elapsed time at any frame rate (a frame is clamped at 0.125 s), so the game's clock runs at wall speed. Paced movies step 30 times a second of wall time. On the console both were 30 updates a second. So by the code a movie that the game waits for takes as long as on the console, and the pacing cannot make it slower, unless something in the finish sequence runs at another rate than 30 steps a second on the console (see the table below), or the sequence is not made of movies the UI manager steps (a scripted camera, a video, a movie the game creates itself, as the HUD's gauge movie).
 - The engine timer has a fixed-step field (`[timer + 32]`, loaded as the step of the original timing; believed to be 1/30 s on the console, not read live yet). If the finish scenes set another one (1/60 s), the movies there were made for another rate and 30 would be too slow for them. The log below shows it.
+- The game's script natives include slow-motion features of its own: `PerspectiveForm_SetSlowMotion`, `AudioManager_SetActiveSlowMotionForm`, `CineScript_SetFixedFrameTime` (names from the table of the 1,252 natives; what they do was not read, and it is not known whether the finish uses one). If it does, the engine timer's time scale (`scale` in the log) drops there on the console as well, and that slow motion is the game's, not the pacing's.
 
 ## What was added
 
@@ -47,8 +48,8 @@ Each run takes about 6 minutes (boot 1.5, race 3.5, finish 1.2), so the hold fit
 
 `C:\mcv\racefinish\out\rf-summary.txt`: one report per run and the comparisons with `c30`. Redo it without the game: `python -I launcher\dev\race_finish.py report <run folder>` and `compare <c30 folder> <run folders>`.
 
-- Per movie that first appears in the finish: how long it is on screen. Same length as in `c30` (within 15% or 1 s) means the same speed. **SLOWER** is a movie that stays more than 15% and 1 s longer than in `c30`.
-- The timer's clock per wall second after the route's end (1.0 = the game runs at wall speed). **SLOWER CLOCK** is under 85% of the reference's: then the slow motion is the engine's (a time scale, or the 0.125 s clamp on a slow frame), not the movies'.
+- The finish is every stretch in which a movie is on screen that begins more than 100 s after the race starts (a movie that goes and comes back counts each time, and the k-th stretch of a name is matched with the k-th of the same name in the other run); its start is the first such stretch. For each: how long it is on screen. Same length as in `c30` (within 15% or 1 s) means the same speed. **SLOWER** is a stretch more than 15% and 1 s longer than in `c30` (or still on screen at the end of a run when `c30` had it gone).
+- The timer's clock per wall second after the finish's start (1.0 = the game runs at wall speed). **SLOWER CLOCK** is under 85% of the reference's: then the slow motion is the engine's (a time scale, or the 0.125 s clamp on a slow frame), not the movies'.
 - `step-not-30`: the engine timer's own step in the finish is not 1/30 s.
 
 What each result means:

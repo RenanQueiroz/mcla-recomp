@@ -1,9 +1,8 @@
 # Frame timing hooks. Implemented in src/frame_timing.cpp.
 #
 # The addresses and the analysis of the engine timer (sub_821BDA90, timer
-# object at 0x827D7500) come from LARecomp's TECHNICAL_NOTES.md, sections 1-3,
-# used with its author's permission. The original 60 FPS timing pipeline there
-# is credited to BadassBaboon.
+# object at 0x827D7500) come from LARecomp's TECHNICAL_NOTES.md, sections 1-3.
+# The original 60 FPS timing pipeline there is credited to BadassBaboon.
 
 # 0x821BDA90: the engine timer's first instruction (`mftb r11`), before it reads the time.
 # Where a frame starts for the GPU vendor's latency reducer (NVIDIA Reflex, AMD Anti-Lag 2):
@@ -93,7 +92,7 @@ address = 0x823689F0
 registers = ["f0"]
 
 # --- UI (Flash) movies -------------------------------------------------------
-# From LARecomp's notes (used with its author's permission): mcUIManager::Update
+# From LARecomp's notes: mcUIManager::Update
 # (sub_821FC588) steps every enabled UI movie with the Flash player's one-frame
 # mode, which advances exactly one movie frame per call and ignores the elapsed
 # time; the flag it passes (byte_827DC1FC) is 1 in the image and never written.
