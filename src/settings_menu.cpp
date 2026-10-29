@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -48,6 +49,20 @@ REXCVAR_DEFINE_BOOL(mcla_motion_blur, true, "MCLA", "Motion blur");
 REXCVAR_DEFINE_BOOL(mcla_depth_of_field, true, "MCLA", "Depth of field blur");
 REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
                     "Add the settings submenus to the pause menu");
+REXCVAR_DEFINE_INT32(mcla_menu_text_level, 1, "MCLA",
+                     "The wording of the labels and values on the pause menu's settings pages: 0 the "
+                     "full wording (a page with long texts is wider than the menu's picture holds), 1 "
+                     "shortened to fit, 2 shortest")
+    .range(0, 2);
+REXCVAR_DEFINE_INT32(mcla_menu_width_cap, 940, "MCLA",
+                     "Development: the pause menu's width (the movie's own units) above which a "
+                     "settings page goes to a shorter wording (0 never)")
+    .range(0, 4000);
+REXCVAR_DEFINE_BOOL(mcla_menu_legend, true, "MCLA",
+                    "Development: a settings page with restart-only rows says what (R) means under its "
+                    "title (the shorter wording's mark; off: only to see the page without the line)");
+REXCVAR_DEFINE_BOOL(mcla_menu_log_layout, false, "MCLA",
+                    "Development: log the pause menu's width and height while a settings page is open");
 
 // Set by a host that keeps the settings file somewhere other than next to
 // the executable (PS5).
@@ -86,6 +101,7 @@ constexpr uint32_t kFindMovieFn = 0x821F9FB8;
 constexpr uint32_t kSetFlashIntFn = 0x825EE0E0;
 constexpr uint32_t kGetFlashObjFn = 0x825ED480;
 constexpr uint32_t kSetFlashStrFn = 0x827227B8;
+constexpr uint32_t kGetFlashIntFn = 0x82722398;  // (object, name, int*): the member's value; 0 if it has none
 constexpr uint32_t kTabStripRenderFn = 0x82630E40;  // (strip): its tabs, then the selected one
 constexpr uint32_t kWidgetMovieContextSlot = 468;   // vtable offset: the widget's movie context
 
@@ -99,6 +115,7 @@ constexpr uint32_t kStr_PAUSEMOVIE = 0x8201D028;
 constexpr uint32_t kStr_menu = 0x82030A34;
 constexpr uint32_t kStr_tabs_count = 0x8208D4DC;
 constexpr uint32_t kStr_name = 0x8200CC24;
+constexpr uint32_t kStr_description = 0x8208D498;  // the line under the menu's title
 
 // Row object layout.
 constexpr uint32_t kRowObjectSize = 240;
@@ -635,11 +652,160 @@ bool IsFrameGenerationItem(const ItemDef& item) {
   return item.kind == ItemKind::kStringChoice && !std::strcmp(item.option, "frame_generation");
 }
 
+// --- The wording ---------------------------------------------------------------
+//
+// The pause movie sizes a list to its widest label plus its widest value, over every row
+// of it (the rows below the ones in view too: its MeasureCols), and the picture it draws
+// the menu into is only so wide. A page of long texts made the menu wider than that, and
+// what lay beyond it was cut off, at a straight edge: the right end of the hint row (the
+// button prompts sit against the menu's right edge), the list's scroll bar and the ends of
+// the longest values, while the frame around the menu went on to its full width. The
+// pages' own wording (a restart-only row's "(NEXT START)", "ENVIRONMENT MAP UPDATES",
+// "VULKAN (RECOMMENDED)") took the menu to about 1.2 times what the picture holds.
+// mcla_menu_text_level 1, the default, shortens those texts; 2 does it further, and 0 is
+// the full wording. A page still wider than mcla_menu_width_cap (the movie's own number,
+// read back from it: WatchLayout) goes to 2 by itself.
+
+// How far down a page's texts go: the setting, or what a page too wide has made of it.
+std::atomic<int> g_auto_text_level{0};
+
+int TextLevel() {
+  return std::max(int(REXCVAR_GET(mcla_menu_text_level)), g_auto_text_level.load(std::memory_order_relaxed));
+}
+
+// The widths of the movie's font's capitals (its glyph table), in the font's own pixels.
+// A text is about 1.7 to 2 menu units to one of them: only for comparing texts, and for the
+// log's estimate of a page's width.
+int GlyphWidth(char c) {
+  switch (c) {
+    case ' ': case '-':
+      return 8;
+    case 'I': case '1': case '.': case ',':
+      return 6;
+    case '(': case ')':
+      return 7;
+    case '*':
+      return 10;
+    case 'J':
+      return 11;
+    case 'C': case 'L': case '7': case '/':
+      return 12;
+    case 'E': case 'F': case 'K': case 'P': case 'S': case 'T': case 'U': case 'X': case 'Z':
+    case '0': case '2': case '3': case '6': case '9': case '+':
+      return 13;
+    case 'O': case 'V': case 'Y':
+      return 15;
+    case 'A': case 'Q':
+      return 16;
+    case 'M':
+      return 17;
+    case 'W':
+      return 18;
+    case '%':
+      return 19;
+    default:  // B D G H N R 4 5 8, and what the table does not have
+      return 14;
+  }
+}
+
+int TextWidthPx(std::string_view text) {
+  int width = 0;
+  for (const char c : text) {
+    width += GlyphWidth(c);
+  }
+  return width;
+}
+
+void ReplaceAll(std::string& text, std::string_view from, std::string_view to) {
+  for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) {
+    text.replace(at, from.size(), to);
+  }
+}
+
+// A label in the wording of a level (RowLabel adds what comes after it).
+std::string ShortLabel(const std::string& label, int level) {
+  if (level <= 0) {
+    return label;
+  }
+  struct Rename {
+    const char* full;
+    const char* level1;  // null: as it is
+    const char* level2;
+  };
+  static constexpr Rename kRenames[] = {
+      {"ENVIRONMENT MAP UPDATES", "ENV MAP UPDATES", "ENV MAP"},
+      {"TRAFFIC DETAIL DISTANCE", "TRAFFIC DETAIL DIST.", "TRAFFIC DETAIL"},
+      {"CITY DETAIL DISTANCE", nullptr, "CITY DETAIL"},
+      {"FRAME GENERATION", nullptr, "FRAME GEN"},
+      {"SINGLE TILE RENDERING", nullptr, "SINGLE TILE"},
+      {"ANISOTROPIC FILTERING", nullptr, "ANISOTROPIC"},
+      {"FAR SHADOW UPDATES", nullptr, "FAR SHADOWS"},
+      {"REFLECTION UPDATES", nullptr, "REFLECTIONS"},
+      {"SIMPLE CAR SHADOWS", nullptr, "CAR SHADOWS"},
+      {"HIDE MOUSE POINTER", nullptr, "HIDE POINTER"},
+  };
+  for (const Rename& rename : kRenames) {
+    if (label == rename.full) {
+      const char* short_label = level >= 2 ? rename.level2 : rename.level1;
+      return short_label ? short_label : label;
+    }
+  }
+  return label;
+}
+
+// A value's text in the wording of a level. Characters stay within what a value may use
+// (the note above the display texts).
+std::string ShortValue(std::string text, int level) {
+  if (level <= 0) {
+    return text;
+  }
+  ReplaceAll(text, " (NEXT START)", " (R)");
+  ReplaceAll(text, "(RECOMMENDED)", "(REC.)");
+  ReplaceAll(text, "HALF DISPLAY ", "HALF RATE ");
+  ReplaceAll(text, "FSR 3.1 NATIVE AA", "FSR NATIVE AA");
+  ReplaceAll(text, "ULTRA Q. ", "ULTRA ");
+  ReplaceAll(text, "QUALITY ", "QUAL. ");
+  ReplaceAll(text, "BALANCED ", "BAL. ");
+  ReplaceAll(text, "PERFORM. ", "PERF. ");
+  if (text.rfind("EVERY ", 0) == 0 && text.size() >= 14 && text.compare(text.size() - 7, 7, " FRAMES") == 0) {
+    text = "1 IN " + text.substr(6, text.size() - 13) + " FRAMES";  // EVERY 8 FRAMES
+  }
+  if (level >= 2) {
+    ReplaceAll(text, "HALF RATE ", "HALF ");
+    ReplaceAll(text, " PER SECOND", " PER SEC");
+    ReplaceAll(text, "ON (FRAME GEN)", "ON (LOCKED)");
+    ReplaceAll(text, "FSR NATIVE AA", "FSR NATIVE");
+    if (text.rfind("FSR ", 0) == 0 && text.size() > 6 && text.back() == 'P') {
+      // The size the scene is drawn at: "FSR ULTRA 1080P" is "FSR ULTRA".
+      size_t start = text.size() - 1;
+      while (start > 0 && std::isdigit(static_cast<unsigned char>(text[start - 1]))) {
+        --start;
+      }
+      if (start > 0 && start < text.size() - 1 && text[start - 1] == ' ') {
+        text.erase(start - 1);
+      }
+    }
+  }
+  // "OFF (" and the reason it can't be anything else, from the SDK: as long as it needs.
+  const int soft_cap = level >= 2 ? 150 : 185;
+  if (TextWidthPx(text) > soft_cap && text.rfind("OFF (", 0) == 0) {
+    text = "UNAVAILABLE";  // the reason is in the log
+  }
+  const int hard_cap = level >= 2 ? 160 : 200;
+  while (text.size() > 4 && TextWidthPx(text) > hard_cap) {
+    text.pop_back();
+  }
+  while (!text.empty() && text.back() == ' ') {
+    text.pop_back();
+  }
+  return text;
+}
+
 // What the rows show depends on this: it changing makes the menu bring them in line.
 std::string MenuStateKey() {
   const auto status = rex::ui::Presenter::GetFrameGenerationStatus();
   const auto low_latency = rex::ui::LowLatency::GetStatus();
-  return std::to_string(int(CurrentFpsMode())) + "|" +
+  return std::to_string(TextLevel()) + "|" + std::to_string(int(CurrentFpsMode())) + "|" +
          std::to_string(int(rex::ui::Presenter::GetDisplayRefreshHz())) + "|" +
          OptionGet("frame_generation") + "|" + std::to_string(int(status.state)) + "|" +
          status.why + "|" + std::to_string(int(low_latency.state)) + "|" + low_latency.name + "|" +
@@ -766,6 +932,7 @@ bool RestartOnly(const char* option) {
 // says "(UNAVAILABLE)" where the GPU emulates the console's EDRAM, too small
 // for it (src/render_perf.cpp), and doesn't change then (ItemChangeable).
 std::string RowLabel(const ItemDef& item) {
+  const int level = TextLevel();
   std::string label = item.label;
   if (IsLowLatencyItem(item)) {
     // The vendor's feature by its name (plain text): NVIDIA REFLEX, AMD ANTI LAG 2.
@@ -774,11 +941,12 @@ std::string RowLabel(const ItemDef& item) {
       label = status.name;
     }
   }
+  label = ShortLabel(label, level);
   if (RestartOnly(item.option)) {
-    label += " (NEXT START)";
+    label += level >= 1 ? " (R)" : " (NEXT START)";  // the page says what (R) is (PageLegend)
   }
   if (std::strcmp(item.option, "mcla_single_tile") == 0 && !MclaSingleTileAvailable()) {
-    label += " (UNAVAILABLE)";
+    label = level >= 1 ? "SINGLE TILE (N.A.)" : label + " (UNAVAILABLE)";
   }
 #if !REX_PLATFORM_PS5
   // HDR while the display says it isn't in HDR mode (read when DISPLAY opens,
@@ -786,7 +954,7 @@ std::string RowLabel(const ItemDef& item) {
   if (std::strcmp(item.option, "hdr") == 0) {
     const rex::ui::Presenter::HdrDisplayInfo display = rex::ui::Presenter::GetLastHdrDisplayInfo();
     if (display.known && !display.hdr_enabled) {
-      label += " (NOT AVAILABLE)";
+      label += level >= 2 ? " (N.A.)" : level >= 1 ? " (UNAVAILABLE)" : " (NOT AVAILABLE)";
     }
   }
 #endif
@@ -928,7 +1096,7 @@ double RangeStepLimited(const ItemDef& item, double value, int direction) {
   return next;
 }
 
-std::string ItemValueLabel(const ItemDef& item, int index) {
+std::string ItemValueLabelFull(const ItemDef& item, int index) {
   switch (item.kind) {
     case ItemKind::kToggle:
       return index ? "ON" : "OFF";
@@ -1003,6 +1171,11 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
       break;
   }
   return "";
+}
+
+// The text a row shows for its value, in the wording of the page's level.
+std::string ItemValueLabel(const ItemDef& item, int index) {
+  return ShortValue(ItemValueLabelFull(item, index), TextLevel());
 }
 
 int ItemCurrentIndex(const ItemDef& item) {
@@ -1158,6 +1331,7 @@ struct MenuRows {
   int last_index[kMaxRows] = {};
   std::string label[kMaxRows];       // the text its label has now
   std::string state_key;              // MenuStateKey when the rows were last brought in line
+  int text_level = 0;                 // TextLevel() the labels are in
   // kNumberRange: left or right held (Hold).
   int held_direction[kMaxRows] = {};
   uint64_t held_since_ms[kMaxRows] = {};
@@ -1312,6 +1486,7 @@ bool BuildRows(int menu) {
   rows.count = def.item_count;
   rows.array = array;
   rows.state_key = MenuStateKey();
+  rows.text_level = TextLevel();
   REXLOG_INFO("settings menu: '{}' built with {} rows", def.label, rows.count);
   return true;
 }
@@ -1337,9 +1512,12 @@ void InstallRows(int menu, uint32_t list) {
 void UpdateRowLabels(int menu) {
   MenuRows& rows = g_rows[menu];
   const MenuDef& def = kMenus[menu];
+  const int level = TextLevel();
+  const bool level_changed = rows.text_level != level;
+  rows.text_level = level;
   for (int i = 0; i < rows.count; ++i) {
     const ItemDef& item = Resolve(def.items[i]);
-    if (!LabelChanges(item)) {
+    if (!level_changed && !LabelChanges(item)) {
       continue;
     }
     std::string label = RowLabel(item);
@@ -1490,6 +1668,164 @@ uint32_t PauseMovieContext() {
   return movie ? Read32(movie + 56) : 0;
 }
 
+// The movie's "menu" object (title, description, width, height, rows).
+uint32_t PauseMenuObject() {
+  const uint32_t context = PauseMovieContext();
+  return context ? CallGuest(kGetFlashObjFn, context, HashString("menu"), kStr_menu) : 0;
+}
+
+// A guest copy of a text, made once.
+uint32_t GuestText(const std::string& text) {
+  static std::map<std::string, uint32_t> texts;
+  auto found = texts.find(text);
+  if (found == texts.end()) {
+    found = texts.emplace(text, AllocGuestString(text.c_str())).first;
+  }
+  return found->second;
+}
+
+// A number the movie keeps in an object (menu.width, menu.height): false if it has none by
+// that name or the movie isn't there.
+bool ReadMovieInt(uint32_t object, const char* name, int32_t& value) {
+  static uint32_t out = 0;
+  if (!out) {
+    out = CallGuest(kGuestMallocFn, 16u);
+  }
+  const uint32_t name_text = object ? GuestText(name) : 0;
+  if (!object || !out || !name_text) {
+    return false;
+  }
+  Write32(out, 0);
+  if ((CallGuest(kGetFlashIntFn, object, name_text, out) & 0xFF) == 0) {
+    return false;
+  }
+  value = int32_t(Read32(out));
+  return true;
+}
+
+// The line under the menu's title. The movie gives it room of its own (the list starts
+// below it) and draws it on the pause screen wherever it isn't empty.
+void SetMenuDescription(const char* text) {
+  const uint32_t object = PauseMenuObject();
+  const uint32_t guest_text = GuestText(text);
+  if (object && guest_text) {
+    CallGuest(kSetFlashStrFn, object, kStr_description, guest_text);
+  }
+}
+
+// What a page says under its title when its rows carry marks (RowLabel's "(R)"): none at
+// the full wording, which spells the restart out in the rows.
+constexpr const char* kRestartLegend = "(R) NEXT START";
+
+const char* PageLegend(int menu) {
+  if (TextLevel() < 1 || !REXCVAR_GET(mcla_menu_legend)) {
+    return "";
+  }
+  for (int i = 0; i < kMenus[menu].item_count; ++i) {
+    if (RestartOnly(kMenus[menu].items[i].option)) {
+      return kRestartLegend;
+    }
+  }
+  return "";
+}
+
+// The widest label and the widest value a page can show (any of the values a row steps
+// through), what the movie sizes the menu to, and about what that comes to in its units
+// (the glyph widths times 1.9, and 175 for the room round the two columns: from the
+// movie's script, the factor fitted to screenshots).
+void LogPageText(int menu) {
+  const MenuDef& def = kMenus[menu];
+  int label_px = 0, value_px = 0;
+  std::string widest_label, widest_value;
+  for (int i = 0; i < def.item_count; ++i) {
+    const ItemDef& item = Resolve(def.items[i]);
+    const std::string label = RowLabel(item);
+    if (TextWidthPx(label) > label_px) {
+      label_px = TextWidthPx(label);
+      widest_label = label;
+    }
+    if (item.kind == ItemKind::kToggle) {
+      continue;
+    }
+    std::vector<std::string> values;
+    if (item.kind == ItemKind::kNumberRange) {
+      for (const double v : {0.0, item.range_min, item.range_max, RangeValue(item)}) {
+        values.push_back(RangeText(item, v));
+      }
+    } else {
+      for (int v = 0; v < ItemValueCount(item); ++v) {
+        values.push_back(ItemValueLabel(item, v));
+      }
+    }
+    for (const std::string& value : values) {
+      if (TextWidthPx(value) > value_px) {
+        value_px = TextWidthPx(value);
+        widest_value = value;
+      }
+    }
+  }
+  REXLOG_INFO(
+      "settings menu: '{}' texts at level {}: widest label '{}' ({} px), widest value '{}' ({} px), "
+      "about {} wide",
+      def.label, TextLevel(), widest_label, label_px, widest_value, value_px,
+      int(175 + 1.9 * (label_px + value_px)));
+}
+
+// While a page is open: the menu's width and height as the movie has them, logged when
+// they settle (mcla_menu_log_layout), and a page that settles wider than
+// mcla_menu_width_cap goes to the next shorter wording (its texts are brought in line by
+// PollRows, which sees the level in MenuStateKey). Read every 100 ms.
+struct LayoutWatch {
+  uint64_t next_ms = 0;
+  uint64_t settled_since_ms = 0;
+  int32_t width = -1;
+  int32_t logged_width = -1;
+  void Reset() { *this = LayoutWatch{}; }
+};
+LayoutWatch g_layout_watch;
+
+void WatchLayout(int menu) {
+  const uint64_t now = NowMs();
+  if (now < g_layout_watch.next_ms) {
+    return;
+  }
+  g_layout_watch.next_ms = now + 100;
+  const bool log = REXCVAR_GET(mcla_menu_log_layout);
+  const int32_t cap = REXCVAR_GET(mcla_menu_width_cap);
+  if (!log && cap <= 0) {
+    return;
+  }
+  const uint32_t object = PauseMenuObject();
+  int32_t width = 0, height = 0, count = 0, list_max = 0;
+  if (!ReadMovieInt(object, "width", width) || width < 100 || width > 4000) {
+    return;
+  }
+  ReadMovieInt(object, "height", height);
+  ReadMovieInt(object, "count", count);
+  ReadMovieInt(object, "List_max", list_max);
+  if (width != g_layout_watch.width) {
+    g_layout_watch.width = width;
+    g_layout_watch.settled_since_ms = now;
+    return;
+  }
+  if (now - g_layout_watch.settled_since_ms < 500) {
+    return;
+  }
+  if (log && width != g_layout_watch.logged_width) {
+    g_layout_watch.logged_width = width;
+    REXLOG_INFO("settings menu: '{}' layout: menu.width {} height {} count {} List_max {} (texts at level {})",
+                kMenus[menu].label, width, height, count, list_max, TextLevel());
+  }
+  // Level 0 is the old wording, whatever the width: it stays (the switch for seeing the page as it was).
+  if (cap > 0 && width > cap && REXCVAR_GET(mcla_menu_text_level) >= 1 && TextLevel() < 2) {
+    const int level = TextLevel() + 1;
+    g_auto_text_level.store(level, std::memory_order_relaxed);
+    g_layout_watch.Reset();
+    REXLOG_INFO("settings menu: '{}' is {} wide (over {}): the texts go to level {}", kMenus[menu].label,
+                width, cap, level);
+  }
+}
+
 void RefreshPauseList() {
   uint32_t list = g_pause_list.load(std::memory_order_relaxed);
   if (!list) {
@@ -1527,6 +1863,9 @@ void ShowSubmenu() {
   uint32_t menu_object = CallGuest(kGetFlashObjFn, context, HashString("menu"), kStr_menu);
   if (menu_object && title) {
     CallGuest(kSetFlashStrFn, menu_object, kStr_name, title);
+  }
+  if (TextLevel() >= 1) {
+    SetMenuDescription(PageLegend(menu));
   }
 }
 
@@ -1931,6 +2270,10 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     MenuStackPush(submenu);
     ShowSubmenu();
     REXLOG_INFO("settings menu: opened '{}'", kMenus[menu].label);
+    g_layout_watch.Reset();
+    if (REXCVAR_GET(mcla_menu_log_layout)) {
+      LogPageText(menu);
+    }
     r3.u64 = 1;
     return true;
   }
@@ -1950,6 +2293,10 @@ bool mcla_menu_cancel(PPCRegister& r31) {
   if (uint32_t strip = g_pause_tab_strip.exchange(0, std::memory_order_relaxed)) {
     CallGuest(kTabStripRenderFn, strip);
   }
+  if (TextLevel() >= 1) {
+    SetMenuDescription("");  // the Settings tab has none
+  }
+  g_layout_watch.Reset();
   SaveSettingsIfChanged();
   REXLOG_INFO("settings menu: closed");
   return true;
@@ -1981,6 +2328,7 @@ bool mcla_menu_list_populate(PPCRegister& r3) {
   if (menu >= 0 && list == g_pause_list.load(std::memory_order_relaxed)) {
     PollRows(menu);
     InstallRows(menu, list);
+    WatchLayout(menu);
   }
   return false;
 }
