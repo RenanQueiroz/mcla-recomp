@@ -66,7 +66,8 @@ REXCVAR_DEFINE_BOOL(mcla_small_cpu_defaults, true, "MCLA",
                     "for a ring slot on a timer) and mcla_pump_wake_on_demand (the frame-pacing thread woken when the "
                     "main thread waits for it), next to the timer queue's high-resolution wait it turns on there "
                     "anyway. A value you set for any of them wins. Off leaves only the high-resolution wait on "
-                    "there (v0.2.x). Nothing changes with 6 or more logical processors "
+                    "there (v0.2.x). Not applied to 4 logical processors that are 4 cores without SMT (the "
+                    "CPU: line in the log says so). Nothing changes with 6 or more logical processors "
                     "(launcher/dev/small-cpu-2026-10-28.md). Takes effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
@@ -864,6 +865,58 @@ static uint32_t LogicalProcessorsAvailable() {
   return count;
 }
 
+// How many physical cores those logical processors belong to: the cores of the machine that have
+// at least one logical processor in the process's affinity mask (all cores of every group when the
+// mask is the whole group, as LogicalProcessorsAvailable counts). So a job object that limits the
+// process to logical processors 0 to 3 of a CPU with SMT is 2 cores, and to 0, 2, 4 and 6 is 4
+// cores, which is how the same limit looks on a real CPU with that many cores. 0 if it cannot be
+// told (the call failed, or the process is in more than one processor group but has a mask).
+static uint32_t PhysicalCoresAvailable() {
+  DWORD length = 0;
+  GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
+  if (length == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    return 0;
+  }
+  std::vector<uint8_t> buffer(length);
+  if (!GetLogicalProcessorInformationEx(
+          RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()),
+          &length)) {
+    return 0;
+  }
+  DWORD_PTR process = 0;
+  DWORD_PTR system = 0;
+  const bool whole = !GetProcessAffinityMask(GetCurrentProcess(), &process, &system) || process == 0 ||
+                     process == system;
+  USHORT group = 0;
+  if (!whole) {
+    USHORT groups[2] = {};
+    USHORT group_count = 2;
+    if (!GetProcessGroupAffinity(GetCurrentProcess(), &group_count, groups) || group_count != 1) {
+      return 0;
+    }
+    group = groups[0];
+  }
+  uint32_t cores = 0;
+  for (DWORD offset = 0; offset + sizeof(DWORD) * 2 <= length;) {
+    const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+    if (info->Size == 0) {
+      break;
+    }
+    offset += info->Size;
+    if (info->Relationship != RelationProcessorCore) {
+      continue;
+    }
+    for (WORD i = 0; i < info->Processor.GroupCount; ++i) {
+      const GROUP_AFFINITY& core = info->Processor.GroupMask[i];
+      if (whole || (core.Group == group && (core.Mask & process) != 0)) {
+        ++cores;
+        break;
+      }
+    }
+  }
+  return cores;
+}
+
 // The two CPU options whose best setting depends on how many logical processors there are
 // (README.md, "Turning a change off"; launcher/dev/profiling-2026-10-26.md, "Wake on demand"
 // and "The timer queue and the frame-pacing thread by processor count"; A/B of 3 runs a side
@@ -885,7 +938,11 @@ static uint32_t LogicalProcessorsAvailable() {
 // mcla_pump_wake_on_demand and mcla_poll_wait: at 4 logical processors the update thread loses 47% of
 // the frame to the pump's 7 ms Sleep, and the main thread's ring wait spins a core. Measured at 4
 // logical (2 cores with SMT) and 5 logical (5 cores) processors: uncapped frame -31 to -40%, caps
-// unchanged (launcher/dev/small-cpu-2026-10-28.md; at 4 cores without SMT 3 of 5 runs, see there).
+// unchanged (launcher/dev/small-cpu-2026-10-28.md). Not applied to 4 logical processors on 4 cores
+// (no SMT): there 3 of 5 runs gained 40%, but one of them had a tail of long frames (p99 21.7 and
+// 29.5 ms) with 77 late audio wake-ups and 2 of 5 had a short audio dropout; the cause is not
+// known, so that CPU keeps the v0.2.x rule (only the high-resolution wait). If the number of cores
+// cannot be told at 4 logical processors, the same applies.
 static void ApplyCpuDefaults() {
   constexpr uint32_t kWakeOnDemandFrom = 6;
   const uint32_t logical = LogicalProcessorsAvailable();
@@ -894,7 +951,11 @@ static void ApplyCpuDefaults() {
     return;
   }
   const bool many = logical >= kWakeOnDemandFrom;
-  const bool small_extra = !many && REXCVAR_GET(mcla_small_cpu_defaults);
+  const uint32_t cores = many ? 0 : PhysicalCoresAvailable();
+  const bool four_cores_no_smt = !many && logical == 4 && cores == 4;
+  const bool four_cores_unknown = !many && logical == 4 && cores == 0;
+  const bool small_switch = !many && REXCVAR_GET(mcla_small_cpu_defaults);
+  const bool small_extra = small_switch && !four_cores_no_smt && !four_cores_unknown;
   struct Option {
     const char* name;
     const char* label;
@@ -922,10 +983,22 @@ static void ApplyCpuDefaults() {
                         by_player ? " (set by the player)" : "");
     any_automatic = any_automatic || !by_player;
   }
-  REXLOG_INFO("CPU: {} logical processors: {}{}", logical, text,
+  // The cores are told for 5 or fewer logical processors: "on 2 cores" at 4 logical processors is
+  // 2 cores with SMT, "on 4 cores" is 4 cores without it (the one case left out).
+  std::string where;
+  if (!many) {
+    where = cores != 0 ? fmt::format(" on {} {}", cores, cores == 1 ? "core" : "cores") : ", cores unknown";
+  }
+  const char* why = "";
+  if (small_switch && four_cores_no_smt) {
+    why = "; mcla_small_cpu_defaults not applied: 4 cores without SMT";
+  } else if (small_switch && four_cores_unknown) {
+    why = "; mcla_small_cpu_defaults not applied: the number of cores could not be told";
+  }
+  REXLOG_INFO("CPU: {} logical processors{}: {}{}", logical, where, text,
               any_automatic ? (many ? " (automatic; 6 or more)"
                                     : small_extra ? " (automatic; 5 or fewer, with mcla_small_cpu_defaults)"
-                                                  : " (automatic; 5 or fewer)")
+                                                  : fmt::format(" (automatic; 5 or fewer{})", why))
                             : "");
 }
 #endif
