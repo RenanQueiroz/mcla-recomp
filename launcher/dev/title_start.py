@@ -98,6 +98,9 @@ SEC = re.compile(r"TS 1s t=(\d+) updates=(\d+) .*?ui_updates=(\d+) mapper=(\d+) 
                  r"native_start=(\d+) native_pass=(\d+) events=(\d+) dispatch=(\d+) title_phase=(\w+)")
 MARK = re.compile(r"dev pad: mark (\w+) at engine frame (\d+), swap (\d+)")
 UPD = re.compile(r"update[= ](\d+)")
+# script natives known from the code (sub_82554E20 calls them; the wrapper's address)
+NATIVE_NAMES = {"822C8AB0": "IS_PAD_BUTTON_JUST_PRESSED", "822CC808": "MoviePlayer_StopMovie", "822CBEF8": "MoviePlayer_StartMovie",
+                "822CCC00": "MoviePlayer_IsMoviePlaying?"}
 HEX8 = re.compile(r"\b(?:vtable|vt) ([0-9A-F]{8})")
 
 
@@ -175,11 +178,18 @@ def report_one(folder, vtables=None):
             mu = UPD.search(exit_line)
             exit_upd = int(mu.group(1)) - upd if mu else None
             accepted_n += 1
-        ways = [x for x in mine if x.startswith(("TS way", "TS main form", "TS child", "TS form"))]
+        ways = [x for x in mine if x.startswith(("TS way", "TS main form", "TS child", "TS form", "TS focus"))]
         events = [x for x in mine if x.startswith("TS event posted")]
         ticks_here = sum(1 for x in mine if x.startswith("TS movie tick") and f"(update {upd})" in x)
         mapper_here = sum(1 for x in mine if x.startswith("TS mapper update") and f"(update {upd})" in x)
         movie = [x for x in mine if x.startswith("TS movie player")]
+        natives = []
+        for x in mine:
+            if x.startswith("TS native "):
+                fn = x.split()[2]
+                if fn not in [n[0] for n in natives]:
+                    natives.append([fn, 0])
+                natives[[n[0] for n in natives].index(fn)][1] += 1
         out.append(f"press {i + 1:2d}: update {upd}, +{(t - start_edges[0][1]) / 1000.0:.0f} ms: "
                    + ("ACCEPTED (EVENT_START_SCREEN_EXIT" + (f" {exit_upd} updates later)" if exit_upd is not None else ")") if exit_line else "not accepted")
                    + f"; movie ticks in the press update {ticks_here}, mapper runs {mapper_here}, events posted {len(events)}")
@@ -192,6 +202,8 @@ def report_one(folder, vtables=None):
             out.append("    " + x[3:])
         for x in movie:
             out.append("    " + x[3:])
+        if natives:
+            out.append("    script natives called in the window (first 200 calls; function, count): " + ", ".join(f"{NATIVE_NAMES.get(fn, fn)} x{n}" for fn, n in natives))
     out.append(f"Start edges {len(start_edges)}; accepted {accepted_n}")
     keys = [KEY.match(x) for (_, x) in ts_lines if x.startswith("TS menu key down")]
     key_start = [k for k in keys if k and int(k.group(1)) == 7]

@@ -34,10 +34,15 @@
 
 #include "generated/default/mcla_init.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <string>
+#include <utility>
+
+#include <fmt/format.h>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -139,6 +144,50 @@ std::array<uint64_t, kPadCount> g_updates{};
 std::array<uint32_t, kPadCount> g_hold_bits{};
 std::array<uint64_t, kPadCount> g_hold_until_us{};
 
+// The script interpreter's native calls (sub_82554E20, the call at 0x82555CC8): how often each
+// native function was called in the last second (a small table, probed linearly), and the first
+// ones after each Start press.
+constexpr size_t kNativeSlots = 512;
+std::atomic<uint32_t> g_native_fn[kNativeSlots];
+std::atomic<uint32_t> g_native_count[kNativeSlots];
+std::atomic<uint32_t> g_native_window_logged{0};
+
+void CountNative(uint32_t fn) {
+  for (size_t i = 0, slot = (fn >> 2) % kNativeSlots; i < kNativeSlots; i++, slot = (slot + 1) % kNativeSlots) {
+    uint32_t seen = g_native_fn[slot].load(std::memory_order_relaxed);
+    if (seen == fn) {
+      g_native_count[slot].fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (seen == 0) {
+      uint32_t expected = 0;
+      if (g_native_fn[slot].compare_exchange_strong(expected, fn, std::memory_order_relaxed) || expected == fn) {
+        g_native_count[slot].fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
+  }
+}
+
+// The five most called natives of the last second as "XXXXXXXX x N", and the table cleared.
+std::string TopNatives() {
+  std::array<std::pair<uint32_t, uint32_t>, kNativeSlots> all{};
+  size_t n = 0;
+  for (size_t i = 0; i < kNativeSlots; i++) {
+    const uint32_t fn = g_native_fn[i].load(std::memory_order_relaxed);
+    if (!fn) {
+      continue;
+    }
+    all[n++] = {g_native_count[i].exchange(0, std::memory_order_relaxed), fn};
+  }
+  std::sort(all.begin(), all.begin() + n, [](auto& a, auto& b) { return a.first > b.first; });
+  std::string out;
+  for (size_t i = 0; i < n && i < 8 && all[i].first; i++) {
+    out += fmt::format("{:08X} x{} ", all[i].second, all[i].first);
+  }
+  return out.empty() ? std::string("none") : out;
+}
+
 std::atomic<uint64_t> g_next_report_us{0};
 uint64_t g_report_updates = 0;
 
@@ -155,12 +204,12 @@ void MaybeReport(uint64_t now) {
   REXLOG_INFO(
       "TS 1s t={} updates={} (pad0 total {}) ui_updates={} mapper={} movie_adv={} movie_ticks={} "
       "native_calls={} native_start={} native_pass={} events={} dispatch={} title_phase={} (game "
-      "state {}, city pending {})",
+      "state {}, city pending {}) script natives: {}",
       now, g_updates[0] - g_report_updates, g_updates[0], g_ui_updates.exchange(0),
       g_mapper_calls.exchange(0), g_movie_adv.exchange(0), g_movie_ticks.exchange(0),
       g_native_entry.exchange(0), g_native_start.exchange(0), g_native_pass.exchange(0),
       g_events.exchange(0), g_dispatch.exchange(0), InTitlePhase(), ReadGuestU32(kGameState),
-      ReadGuestU32(kCityPending));
+      ReadGuestU32(kCityPending), TopNatives());
   g_report_updates = g_updates[0];
 }
 
@@ -230,6 +279,7 @@ void mcla_pad_probe_update(PPCRegister& r31) {
     g_last_start_us.store(now, std::memory_order_relaxed);
     if (probe) {
       g_window_until_us.store(now + kWindowUs, std::memory_order_relaxed);
+      g_native_window_logged.store(0, std::memory_order_relaxed);
     }
   }
   if (probe && (pressed || released)) {
@@ -299,8 +349,8 @@ void mcla_tsp_dispatch(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
 // the function called is vtable[276].
 void mcla_tsp_dispatch_a(PPCRegister& r3, PPCRegister& r4, PPCRegister& r8) {
   if (Window()) {
-    REXLOG_INFO("TS way A: modal scene {:08X} vtable {:08X} handler {:08X} key={}", r3.u32, r8.u32,
-                ReadGuestU32(r8.u32 + 276), r4.s32);
+    REXLOG_INFO("TS way A: modal scene {:08X} vtable {:08X} handler {:08X} (vtable[32] {:08X}) key={}",
+                r3.u32, r8.u32, ReadGuestU32(r8.u32 + 276), ReadGuestU32(r8.u32 + 32), r4.s32);
   }
 }
 
@@ -329,8 +379,8 @@ void mcla_tsp_dispatch_b1_res(PPCRegister& r3) {
 // 0x82209D60: way B2, the "UserInterface" object at G1 + 40: r3 = it, r11 = its vtable.
 void mcla_tsp_dispatch_b2(PPCRegister& r3, PPCRegister& r4, PPCRegister& r11) {
   if (Window()) {
-    REXLOG_INFO("TS way B2: user interface {:08X} vtable {:08X} handler {:08X} key={}", r3.u32,
-                r11.u32, ReadGuestU32(r11.u32 + 276), r4.s32);
+    REXLOG_INFO("TS way B2: user interface {:08X} vtable {:08X} handler {:08X} (vtable[32] {:08X}) key={}",
+                r3.u32, r11.u32, ReadGuestU32(r11.u32 + 276), ReadGuestU32(r11.u32 + 32), r4.s32);
   }
 }
 
@@ -344,8 +394,8 @@ void mcla_tsp_dispatch_b2_res(PPCRegister& r3) {
 // r3 = the child, r4 = the key, r11 = its vtable; vtable[276].
 void mcla_tsp_child(PPCRegister& r3, PPCRegister& r4, PPCRegister& r11) {
   if (Window()) {
-    REXLOG_INFO("TS main form -> child {:08X} vtable {:08X} handler {:08X} key={}", r3.u32,
-                r11.u32, ReadGuestU32(r11.u32 + 276), r4.s32);
+    REXLOG_INFO("TS main form -> child {:08X} vtable {:08X} handler {:08X} (vtable[32] {:08X}) key={}",
+                r3.u32, r11.u32, ReadGuestU32(r11.u32 + 276), ReadGuestU32(r11.u32 + 32), r4.s32);
   }
 }
 
@@ -367,6 +417,24 @@ void mcla_tsp_form_key(PPCRegister& r3, PPCRegister& r4) {
 void mcla_tsp_form_key_res(PPCRegister& r3) {
   if (Window()) {
     REXLOG_INFO("TS form handler answered {}", r3.u32 & 0xFF);
+  }
+}
+
+// 0x8263B010 in sub_8263AFA8 (the key handler UI objects share: it offers the key to each active
+// child in turn, depth first, until one takes it): r31 = the child, r4 = the key, r11 = its
+// vtable; the call is vtable[32]. These lines are the focus chain down to the object that takes
+// the key.
+void mcla_tsp_focus_call(PPCRegister& r31, PPCRegister& r4, PPCRegister& r11) {
+  if (Window()) {
+    REXLOG_INFO("TS focus: child {:08X} vtable {:08X} handler {:08X} key={}", r31.u32, r11.u32,
+                ReadGuestU32(r11.u32 + 32), r4.s32);
+  }
+}
+
+// 0x8263B01C: after the child's call: r3 = its answer, r31 = the child.
+void mcla_tsp_focus_res(PPCRegister& r3, PPCRegister& r31) {
+  if (Window()) {
+    REXLOG_INFO("TS focus: child {:08X} answered {}", r31.u32, r3.u32 & 0xFF);
   }
 }
 
@@ -440,6 +508,18 @@ void mcla_tsp_movie_tick(PPCRegister& r31) {
   if (Window()) {
     REXLOG_INFO("TS movie tick {:08X} (update {})", r31.u32,
                 g_update.load(std::memory_order_relaxed));
+  }
+}
+
+// 0x82555CC4 in sub_82554E20 (the script interpreter): `mtctr r11` before the call of a native
+// function (r11 = it).
+void mcla_tsp_script_native(PPCRegister& r11) {
+  if (!Probe()) {
+    return;
+  }
+  CountNative(r11.u32);
+  if (Window() && g_native_window_logged.fetch_add(1, std::memory_order_relaxed) < 200) {
+    REXLOG_INFO("TS native {:08X} (update {})", r11.u32, g_update.load(std::memory_order_relaxed));
   }
 }
 

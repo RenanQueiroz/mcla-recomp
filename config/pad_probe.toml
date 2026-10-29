@@ -85,6 +85,19 @@ name = "mcla_tsp_form_key_res"
 address = 0x82631E78
 registers = ["r3"]
 
+# --- UI objects share sub_8263AFA8 (vtable[32]): the key goes to each active child in turn, depth
+# first, until one answers yes. 0x8263B010 is `lwz r10,32(r11)` (r31 = the child, r11 = its
+# vtable) and 0x8263B01C `clrlwi r9,r3,24` after the call (r3 = its answer).
+[[midasm_hook]]
+name = "mcla_tsp_focus_call"
+address = 0x8263B010
+registers = ["r31", "r4", "r11"]
+
+[[midasm_hook]]
+name = "mcla_tsp_focus_res"
+address = 0x8263B01C
+registers = ["r3", "r31"]
+
 # --- Events and the title's exit ---
 # 0x8268EE10: an event is posted (r3 = from, r4 = the code (Start = 55), r5 = the argument).
 [[midasm_hook]]
@@ -140,3 +153,11 @@ registers = ["r4"]
 [[midasm_hook]]
 name = "mcla_tsp_native_pass"
 address = 0x822C7FFC
+
+# --- The script interpreter: the native function about to be called (sub_82554E20, `mtctr r11` at
+# 0x82555CC4 before the `bctrl`; r11 = the function). Counted per second, and the first 200 after
+# each Start press are logged.
+[[midasm_hook]]
+name = "mcla_tsp_script_native"
+address = 0x82555CC4
+registers = ["r11"]
