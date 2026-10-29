@@ -5,9 +5,10 @@ r"""Script pad check (fork, 2026-10-29): do the game's scripts miss button press
   python -I script_pad.py report <run folder>... [--out FILE]
 
 Pad kinds (all end with `quit`; the dev pad, src/dev_pad.cpp, drives the game from the scratch save):
+  smoke  boot, the city, four presses, the pause menu once: the warm-up run (a fresh shader cache) that shows the hooks run
   city   boot, the title (press_until start left_title), the map zoom-out, free roam; then in jittered times (gaps of 1.0 to 1.4 s, so
          the press falls on every phase of the game's updates and of the script threads' rounds): `roam_buttons` N presses each of
-         a, b, x, y, lb, rb, left, right, down; `pause` Start / B five times (the pause menu); `map` d-pad up twice, four times;
+         a, b, x, y, lb, rb, left, right, down; `pause` Start / B four times (the pause menu); `map` d-pad up twice, three times;
          `back_button` Back / B; `drive` a route followed (--route) with a press of x, y, a, b, lb, rb every 1.0 to 1.4 s.
   race   boot, the city, the pause menu, Modes, Arcade, the first ordered race with the arcade defaults; `race_intro`: presses of A
          while the race loads and the intro runs; `race`: from the race's start, presses of x, y, lb, rb, a, b; `race_pause`: Start / B.
@@ -42,23 +43,23 @@ START = ["wait_until frames 20 90s", "wait 4s", "mark title", "press_until start
          "mark map_zoom", "wait_until roam 180s"]
 
 
-def city_lines(hold=70, presses=6, route=None):
+def city_lines(hold=70, presses=4, route=None):
     out = ["# Made by script_pad.py (city). Do not edit: change the generator."] + START
     out += ["mark free_roam", "wait 6s", "screens", "mark roam_buttons"]
     for i, b in enumerate(["a", "b", "x", "y", "lb", "rb", "left", "right", "down"]):
         for g in gaps(presses, seed=i + 1):
             out += [f"press {b} {hold}ms", f"wait {g}ms"]
     out += ["mark roam_buttons_end", "wait 1s", "mark pause"]
-    for g in gaps(5, 1000, 400, seed=20):
+    for g in gaps(4, 1000, 400, seed=20):
         out += ["press start 90ms", "wait 1500ms", "screens", "press b 90ms", f"wait {g}ms", "screens"]
     out += ["mark map"]
-    for g in gaps(4, 1000, 500, seed=30):
+    for g in gaps(3, 1000, 500, seed=30):
         out += ["press up 90ms", "wait 2s", "screens", "press up 90ms", f"wait {g}ms"]
     out += ["mark back_button", "press back 90ms", "wait 2s", "screens", "press b 90ms", "wait 1500ms", "screens"]
     out += ["mark drive"]
     if route:
         out += [f"follow {route}", "wait 3s"]
-    buttons = ["x", "y", "a", "b", "lb", "rb"] * 3
+    buttons = ["x", "y", "a", "b", "lb", "rb"] * 2
     for b, g in zip(buttons, gaps(len(buttons), 1000, 400, seed=40)):
         out += [f"press {b} {hold}ms", f"wait {g}ms"]
     if route:
@@ -75,7 +76,7 @@ def race_lines(hold=70):
     for g in gaps(8, 1200, 700, seed=50):
         out += [f"press a {hold}ms", f"wait {g}ms"]
     out += ["wait_until f32 0x827D7510 >= 9.3 300s", "mark race", "wait 2s", "screens"]
-    buttons = ["x", "y", "lb", "rb", "a", "b"] * 3
+    buttons = ["x", "y", "lb", "rb", "a", "b"] * 2
     for b, g in zip(buttons, gaps(len(buttons), 1000, 500, seed=60)):
         out += [f"press {b} {hold}ms", f"wait {g}ms"]
     out += ["mark race_pause"]
@@ -85,7 +86,18 @@ def race_lines(hold=70):
     return out
 
 
-def pad_lines(kind, hold=70, presses=6, route=None):
+def smoke_lines(hold=70):
+    out = ["# Made by script_pad.py (smoke). Do not edit: change the generator."] + START
+    out += ["mark free_roam", "wait 5s", "screens", "mark roam_buttons"]
+    for b, g in zip(["a", "x", "y", "rb"], gaps(4, 1000, 400, seed=3)):
+        out += [f"press {b} {hold}ms", f"wait {g}ms"]
+    out += ["mark pause", "press start 90ms", "wait 1500ms", "screens", "press b 90ms", "wait 1500ms", "screens", "mark end", "wait 1s", "quit"]
+    return out
+
+
+def pad_lines(kind, hold=70, presses=4, route=None):
+    if kind == "smoke":
+        return smoke_lines(hold)
     if kind == "city":
         return city_lines(hold, presses, route)
     if kind == "race":
@@ -107,6 +119,20 @@ SCREENS = re.compile(r"dev pad: screens -> (.*)$")
 SCRIPT_SEC = re.compile(r"TS 1s-script t=(\d+) .* latch_ms=(\d+)")
 PRESS = re.compile(r"press_until start left_title every=(\S+)(?: hold=(\S+))?.*-> (ok after ([\d.]+) s, (\d+) presses, frame=(\d+)|err .*)")
 CAP = re.compile(r"frame timing: the frame-rate cap is now (\d+) FPS")
+
+
+# The script button number is the bit number of the pad record's masks (src/pad_probe.cpp).
+BUTTON_NAMES = {2: "LB", 3: "RB", 4: "Y", 5: "B", 6: "A", 7: "X", 8: "Back", 9: "LS", 10: "RS", 11: "Start", 12: "up", 13: "right", 14: "down", 15: "left"}
+
+
+def srcname(src):
+    m = re.match(r"pad(\d)/b(\d+)$", src)
+    if m:
+        return f"{src} ({BUTTON_NAMES.get(int(m.group(2)), '?')})"
+    m = re.match(r"ctl([0-9A-F]{8})/a(\d+)$", src)
+    if m:
+        return f"{src} (action {m.group(2)}{', the high beams' if m.group(2) == '9' else ''})"
+    return src
 
 
 class Tally:
@@ -240,7 +266,7 @@ def report_one(folder):
         h, mk, upd = first_seen.get(k, ("?", "?", 0))
         name = names.get(h, "?")
         tl = by_site.get(k)
-        out.append(f"  {native} {program}[{name}] pc {pc} {src}: <= {rates.get(k, 0)}/s, first in {mk}; " + (tl.text() if tl else "never audited (no press while it polled)"))
+        out.append(f"  {native} {program}[{name}] pc {pc} {srcname(src)}: <= {rates.get(k, 0)}/s, first in {mk}; " + (tl.text() if tl else "never audited (no press while it polled)"))
     if formula:
         out.append(f"RECORD FORMULA DIFFERS from the game's answer: {formula} line(s) (UILogic_IsPressed / Player_FlashingHighbeams)")
     if last_sites:
@@ -260,7 +286,7 @@ def main():
     p.add_argument("out")
     p.add_argument("--route", default=None)
     p.add_argument("--hold", type=int, default=70)
-    p.add_argument("--presses", type=int, default=6)
+    p.add_argument("--presses", type=int, default=4)
     r = sub.add_parser("report")
     r.add_argument("folders", nargs="+")
     r.add_argument("--out", default=None)

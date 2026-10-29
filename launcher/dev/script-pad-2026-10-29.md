@@ -45,7 +45,7 @@ Assumptions not checked in the game (each one shows in the chain's log): `[0x828
 
 ## The chain (`C:\mcv\scriptpad\chain`, not in the repo)
 
-Runs of the dev pad from the scratch save, cap 120 and 60, each once with the latch off and once with `--mcla_script_pad_latch_ms=100 --mcla_script_pad_latch_scope=all`; presses at jittered times (gaps of 1.0 to 1.4 s) in: the title, free roam (a, b, x, y, lb, rb, left, right, down, six each), the pause menu (Start / B), the overhead map (d-pad up), Back, a short drive on a route with presses, and a race (the arcade's first ordered race: A while it loads and the intro runs, then the car's buttons, then the pause menu). A control run has the latch on with the scope `title`.
+Runs of the dev pad from the scratch save, cap 120 and 60, each once with the latch off and once with `--mcla_script_pad_latch_ms=100 --mcla_script_pad_latch_scope=all`; presses at jittered times (gaps of 1.0 to 1.4 s) in: the title, free roam (a, b, x, y, lb, rb, left, right, down, four each), the pause menu (Start / B), the overhead map (d-pad up), Back, a short drive on a route with presses, and a race (the arcade's first ordered race: A while it loads and the intro runs, then the car's buttons, then the pause menu). A control run has the latch on with the scope `title`.
 
 Read the `report` for: with the latch off, which call sites miss presses (MISSED) at 120 and 60 FPS, which native and which script (the "call sites" list); with it on, MISSED should be 0 for the call sites that ask at least every 100 ms, DOUBLED must be 0, and the control run should miss as the off runs do outside the title.
 
