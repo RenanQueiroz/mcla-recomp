@@ -18,6 +18,10 @@
 //     it; with wait, until one is, for up to 10 s)
 //   close (as the window's close button: unlike quit, it waits for a save)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
+//   burst <prefix> <n> [scale] [x0 y0 x1 y1] (n guest-output pictures, one per swap, as fast as
+//     the capture goes, cropped to a part of the frame (fractions) and written as <prefix>-<k>.png
+//     after the last; the swap numbers and times are logged, a capture that is slower than a frame
+//     skips frames and the numbers show it; a failed capture is logged and does not end the script)
 //     (mcla_pad_timeout_shot=<file.png>: the same picture when a wait_until or
 //     press_until times out)
 //   screen <file.png> [scale] (Windows: the game window's client area as the screen shows
@@ -886,6 +890,88 @@ bool Shot(const std::string& path, double scale, std::string& result) {
     return false;
   }
   result = std::to_string(width) + "x" + std::to_string(height);
+  return true;
+}
+
+// A burst of pictures of consecutive swaps (for seeing whether something moves a little on every frame or in
+// steps), each cropped to a part of the frame (fractions) and scaled. The pictures are held in memory and written
+// after the last one, so the files do not slow the capturing. The log line of each says which swaps the capture
+// spanned and when (the steady clock in microseconds, as the game's own log lines use it).
+bool Burst(const std::string& prefix, int count, double scale, double fx0, double fy0, double fx1, double fy1,
+           std::string& result) {
+  auto* runtime = rex::Runtime::instance();
+  auto* graphics = runtime ? runtime->graphics_system() : nullptr;
+  rex::ui::Presenter* presenter = graphics ? graphics->presenter() : nullptr;
+  if (!presenter) {
+    result = "no presenter";
+    return false;
+  }
+  scale = std::clamp(scale, 0.05, 1.0);
+  fx0 = std::clamp(fx0, 0.0, 1.0);
+  fy0 = std::clamp(fy0, 0.0, 1.0);
+  fx1 = std::clamp(fx1, fx0, 1.0);
+  fy1 = std::clamp(fy1, fy0, 1.0);
+  count = std::clamp(count, 1, 64);
+  struct Picture {
+    uint64_t swap0 = 0, swap1 = 0;
+    int64_t us = 0;
+    uint32_t width = 0, height = 0;
+    std::vector<uint8_t> rgb;
+  };
+  std::vector<Picture> pictures;
+  pictures.reserve(size_t(count));
+  uint64_t last = g_swaps.load();
+  for (int k = 0; k < count; k++) {
+    const auto start = Clock::now();
+    while (g_swaps.load() == last) {
+      if (std::chrono::duration<double, std::milli>(Clock::now() - start).count() > 1000) {
+        result = "no swap for a second, after " + std::to_string(k) + " pictures";
+        return false;
+      }
+      std::this_thread::yield();
+    }
+    Picture p;
+    p.swap0 = g_swaps.load();
+    rex::ui::RawImage image;
+    if (!presenter->CaptureGuestOutput(image) || !image.width || !image.height) {
+      result = "no guest output yet";
+      return false;
+    }
+    p.swap1 = g_swaps.load();
+    p.us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
+    last = p.swap1;
+    const uint32_t x0 = std::min<uint32_t>(image.width - 1, uint32_t(fx0 * image.width));
+    const uint32_t y0 = std::min<uint32_t>(image.height - 1, uint32_t(fy0 * image.height));
+    const uint32_t x1 = std::clamp<uint32_t>(uint32_t(std::ceil(fx1 * image.width)), x0 + 1, image.width);
+    const uint32_t y1 = std::clamp<uint32_t>(uint32_t(std::ceil(fy1 * image.height)), y0 + 1, image.height);
+    p.width = std::max<uint32_t>(1, uint32_t((x1 - x0) * scale));
+    p.height = std::max<uint32_t>(1, uint32_t((y1 - y0) * scale));
+    p.rgb.resize(size_t(p.width) * p.height * 3);
+    for (uint32_t y = 0; y < p.height; y++) {
+      const uint32_t sy = std::min(y1 - 1, y0 + uint32_t((y + 0.5) / scale));
+      for (uint32_t x = 0; x < p.width; x++) {
+        const uint32_t sx = std::min(x1 - 1, x0 + uint32_t((x + 0.5) / scale));
+        const uint8_t* src = image.data.data() + sy * image.stride + sx * 4;
+        uint8_t* dst = p.rgb.data() + (size_t(y) * p.width + x) * 3;
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+      }
+    }
+    pictures.push_back(std::move(p));
+  }
+  for (size_t k = 0; k < pictures.size(); k++) {
+    const Picture& p = pictures[k];
+    const std::string path = prefix + "-" + std::to_string(k) + ".png";
+    if (!WritePng(path, p.width, p.height, p.rgb)) {
+      result = "cannot write " + path;
+      return false;
+    }
+    REXLOG_INFO("dev pad: burst {} k={} swap={}..{} t={}.{:03} ms size={}x{}", prefix, k, p.swap0, p.swap1, p.us / 1000, p.us % 1000,
+                p.width, p.height);
+  }
+  result = std::to_string(pictures.size()) + " pictures, swaps " + std::to_string(pictures.front().swap0) + ".." +
+           std::to_string(pictures.back().swap1);
   return true;
 }
 
@@ -2050,6 +2136,25 @@ std::string Execute(const std::string& line) {
     }
     std::string result;
     return Shot(rest(1, last), scale, result) ? "ok " + result : "err " + result;
+  }
+  if (cmd == "burst") {
+    double count = 0, scale = 1.0, rect[4] = {0, 0, 1, 1};
+    if (args.size() < 3 || !ParseNumber(args[2], count) || (args.size() > 3 && !ParseNumber(args[3], scale)) ||
+        (args.size() > 4 && args.size() != 8)) {
+      return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1]";
+    }
+    for (size_t i = 0; i < 4 && args.size() == 8; i++) {
+      if (!ParseNumber(args[4 + i], rect[i])) {
+        return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1]";
+      }
+    }
+    std::string result;
+    if (Burst(args[1], int(count), scale, rect[0], rect[1], rect[2], rect[3], result)) {
+      return "ok " + result;
+    }
+    // Not an "err": a failed capture does not put the rest of the script out of step, and the cells after it still measure.
+    REXLOG_WARN("dev pad: burst {} failed: {}", args[1], result);
+    return "ok burst failed: " + result;
   }
   if (cmd == "screen") {
 #if defined(_WIN32)
