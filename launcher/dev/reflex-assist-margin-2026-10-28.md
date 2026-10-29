@@ -76,12 +76,13 @@ processors: 4 (affinity 0xF) and 16.
 - Estimated: about 36 minutes of runs (a sweep run about 225 s, an uncapped run about 77 s, each with about 10 s of display and fingerprint checks, as the first chain's runs had) plus the
   build (the first chain's took 2.7 minutes) and the checks. A run is not started if it would end after the steps' deadline, so a slow build drops the last uncapped runs first.
 - Measured per stretch: the process's and the Main thread's CPU per swap (1 Hz thread log interpolated to the marks), the frame median and 99th percentile, the swap interval's sigma (and the
-  sigma without intervals over 50 ms, the number of those, the longest interval), the share of intervals more than 1 ms off the period, PresentMon's display sigma, its share more than 1 ms
+  sigma without hitches, which are intervals over 50 ms or over 3 frame periods, whichever is longer; the number of hitches; the longest interval), the share of intervals more than 1 ms off the period, PresentMon's display sigma, its share more than 1 ms
   off and the judder (engine step against display interval), PresentMon's start-to-screen latency (median and 99th percentile), the driver's wait before the frame and the assist's own log
   lines. The driver's own "input to present" latency is reported as information only (its baseline is negative when the driver holds the cap, so it is not a measure).
 - Rules, per logical count and cap, each setting against `off` (the spread is the range of the three `off` stretches): the sigmas and the judder PASS if not above `off` by more than
   max(0.10 ms, 2 spreads), LOOK up to twice that, FAIL above; the shares more than 1 ms off the period max(0.5 points, 2 spreads); the 99th percentile max(1 ms, 2 spreads); the start-to-screen
-  latency median max(0.3 ms, 2 spreads), its 99th percentile max(1 ms, 2 spreads). A setting is "within the noise of `off`" when every pacing check and the latency checks PASS. The report names,
+  latency median max(0.3 ms, 2 spreads), its 99th percentile max(1 ms, 2 spreads). PresentMon's display sigma, share and judder leave the hitches out too. A setting with 3 or more hitches than `off` in total gets a LOOK. A setting is "within the noise of `off`" when every
+  cap, pacing, latency, engaged and model check PASSes (the CPU change is not part of it). The report names,
   for each cap and count, the smallest margin that is, and its CPU saving (percent and ms per swap, and the share of the fixed 1.5 ms setting's saving that it keeps). If none is, it says so and
   names the smallest margin with no FAIL.
 - The assist's own checks: the log shows it engaged in every stretch (timer waits in the 5-second lines at the stretch's margin), under 1% of the timer waits too tight, no "do not fit the model"
