@@ -29,8 +29,10 @@
 // at 60 FPS and above.
 //
 // mcla_title_pad_hold_ms (off by default, NOT measured as a fix yet): while the same is true,
-// a press of Start or A stays "just pressed" in the pad record for this many milliseconds, not
-// only in the update of the press, whatever the game's readers do with it.
+// a press of Start or A stays down in the pad record for this many milliseconds, also when the
+// button is let go sooner, whatever the game's readers do with it. The chance that a press was
+// accepted rose with its length in the first round's runs (300 ms always, 100 ms about a third),
+// which fits a check that looks at the button level every 250 to 300 ms.
 
 #include "generated/default/mcla_init.h"
 
@@ -58,8 +60,8 @@ REXCVAR_DEFINE_INT32(mcla_title_fps, 0, "MCLA",
     .range(0, 120);
 REXCVAR_DEFINE_INT32(mcla_title_pad_hold_ms, 0, "MCLA",
                      "On the title screen and the attract video a press of Start or A stays "
-                     "\"just pressed\" in the pad record for this many milliseconds (0 = only in "
-                     "the update of the press, as the game does)")
+                     "down in the pad record for this many milliseconds, also when the button is "
+                     "let go sooner (0 = as long as the button is held, as the game does)")
     .range(0, 500);
 
 namespace {
@@ -304,22 +306,17 @@ void mcla_pad_probe_update(PPCRegister& r31) {
     }
   }
   if (hold_ms > 0 && InTitlePhase()) {
-    // Keep a press of Start or A "just pressed" for hold_ms: down in the mask, not in the
-    // previous one. The next update's "previous" is copied from this mask, so nothing changes
-    // after the hold ends.
+    // Keep a press of Start or A down for hold_ms, also when the button is let go sooner: the bit
+    // stays set in the new mask. The "previous" mask of the next update is copied from this one,
+    // so the game sees one press (one edge) that lasts hold_ms, not a new press every update.
     if (pressed & kHoldMask) {
       g_hold_bits[pad] |= pressed & kHoldMask;
       g_hold_until_us[pad] = now + uint64_t(hold_ms) * 1000;
     }
     if (g_hold_bits[pad] && now < g_hold_until_us[pad]) {
-      const uint32_t bits = g_hold_bits[pad];
-      const uint32_t new_cur = cur | bits;
-      const uint32_t new_last = last & ~bits;
+      const uint32_t new_cur = cur | g_hold_bits[pad];
       if (new_cur != cur) {
         WriteGuestU32(r31.u32 + 8, new_cur);
-      }
-      if (new_last != last) {
-        WriteGuestU32(r31.u32 + 12, new_last);
       }
     } else {
       g_hold_bits[pad] = 0;
