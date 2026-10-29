@@ -1,5 +1,6 @@
-# The warm-up of the margin sweep (dev note launcher/dev/reflex-assist-margin-2026-10-28.md): boot to free roam, then 60 FPS with the assist on for a few seconds
-# (the chain stops if the log lacks "Reflex sleep assist: on at"), then uncapped. Marks: title, map_zoom, free_roam, settle0, warm60, end.
+# The warm-up of the margin sweep (dev note launcher/dev/reflex-assist-margin-2026-10-28.md): boot to free roam, then 60 FPS with the assist on at the DXVK-like margin
+# (1000 us + 17 %, set at run time like the sweep does) for a few seconds, then uncapped. The chain stops if the log lacks "Reflex sleep assist: on at 60 FPS" with the
+# margin rule "1000 us plus 17.0% of 16666 us". Marks: title, map_zoom, free_roam, settle0, warm60, end.
 wait 8s
 mark title
 press_until start left_title every=2s timeout=90s
@@ -9,11 +10,16 @@ mark free_roam
 wait 5s
 get ll_status mcla_reflex_sleep_assist mcla_reflex_sleep_margin_us mcla_reflex_sleep_margin_pct mcla_reflex_sleep_margin_sum mcla_timer_hr_at_cap low_latency_limiter low_latency mcla_fps
 mark settle0
+set mcla_reflex_sleep_assist false
+wait 300ms
+set mcla_reflex_sleep_margin_us 1000
+set mcla_reflex_sleep_margin_pct 17
+set mcla_reflex_sleep_margin_sum true
 set mcla_reflex_sleep_assist true
 set mcla_fps 60
 mark warm60
 wait 6s
-get ll_status mcla_fps
+get ll_status mcla_fps mcla_reflex_sleep_assist mcla_reflex_sleep_margin_us mcla_reflex_sleep_margin_pct mcla_reflex_sleep_margin_sum
 set mcla_fps 0
 wait 3s
 set mcla_reflex_sleep_assist false

@@ -70,10 +70,11 @@ processors: 4 (affinity 0xF) and 16.
   or last. Before the caps and after them there is an uncapped stretch of 8 s (assist off, then assist on with the DXVK-like margin): the control, where the assist is not engaged.
   Three runs per logical count, so 3 samples per setting, cap and count.
 - A block of ten 4-logical uncapped-only runs (`reflex-uncapped.pad`, 12 s uncapped; the assist off or `--mcla_reflex_sleep_assist=true` on the command line, order A B B A A B B A A B, so 5
-  runs a side) to see whether the swap interval's sigma differs with the assist on. A warm-up run first (`reflex-warm.pad`: 60 FPS with the assist on; the chain stops if the log lacks
-  "Reflex sleep assist: on at").
-- Estimated: about 34 minutes of runs (a sweep run is about 214 s, an uncapped run 67 s) plus the build (3 to 6 minutes) and the checks. A run is not started if it would end after the
-  steps' deadline, so a slow build drops the last uncapped runs first.
+  runs a side) to see whether the swap interval's sigma differs with the assist on. A warm-up run first (`reflex-warm.pad`: 60 FPS with the assist on at the DXVK-like margin, set at run time the way the
+  sweep sets it; the chain stops if the log lacks the "Reflex sleep assist: on at 60 FPS" line with `margin rule: 1000 us plus 17.0% of 16666 us`, which also proves that the four `set`
+  commands and the margin formula work in the built exe).
+- Estimated: about 36 minutes of runs (a sweep run about 225 s, an uncapped run about 77 s, each with about 10 s of display and fingerprint checks, as the first chain's runs had) plus the
+  build (the first chain's took 2.7 minutes) and the checks. A run is not started if it would end after the steps' deadline, so a slow build drops the last uncapped runs first.
 - Measured per stretch: the process's and the Main thread's CPU per swap (1 Hz thread log interpolated to the marks), the frame median and 99th percentile, the swap interval's sigma (and the
   sigma without intervals over 50 ms, the number of those, the longest interval), the share of intervals more than 1 ms off the period, PresentMon's display sigma, its share more than 1 ms
   off and the judder (engine step against display interval), PresentMon's start-to-screen latency (median and 99th percentile), the driver's wait before the frame and the assist's own log
