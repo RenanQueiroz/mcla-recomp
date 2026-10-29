@@ -1,6 +1,6 @@
 # Menu input: one press, several steps (2026-10-29)
 
-The user's report (3x, a 120 FPS cap, D3D12; a DualSense through SDL and an Xbox controller): in every menu, one press of down moves several rows, left or right changes nothing or several values; with `--mcla_ui_timing_fix=false` the menus are responsive but still misstep at 120 FPS sometimes; with that off and a 30 or 60 FPS cap they are fine. `KNOWN-ISSUES.md` has the summary; this is the detail. **Nothing here has been run yet**: everything under "Read in the code" comes from the recompiled game (`generated/default`, from the lifted source of an extracted `default.xex`) and from the unpacked image for data (vtables, tables), not from a run.
+The user's report (3x, a 120 FPS cap, D3D12; a DualSense through SDL and an Xbox controller): in every menu, one press of down moves several rows, left or right changes nothing or several values; with `--mcla_ui_timing_fix=false` the menus are responsive but still misstep at 120 FPS sometimes; with that off and a 30 or 60 FPS cap they are fine. `KNOWN-ISSUES.md` has the summary; this is the detail. "Read in the code" and "Not found" come from the recompiled game (`generated/default`, from the lifted source of an extracted `default.xex`) and from the unpacked image for data (vtables, tables), not from a run; "Measured" has the runs.
 
 ## Read in the code
 
@@ -29,7 +29,7 @@ A second fault, by reading. The report says presses are lost, not only doubled. 
 
 ## The change
 
-`mcla_ui_repeat_fix` (default off until measured), `mcla_ui_repeat_delay_ms` 233, `mcla_ui_repeat_interval_ms` 200, `mcla_ui_input_log` (development). Hooks `mcla_ui_key_press` (`0x822240C0`) and `mcla_ui_key_repeat` (`0x822241D0`) in `src/frame_timing.cpp`, registered in `config/frame_timing.toml`. At the press the time is recorded; at the compare, when the game's count says a repeat is due (`r8 == r10`), the repeat is allowed only after the delay (after the key down) or the interval (after the last repeat), less 8.3 ms (a quarter of a 30 Hz update); otherwise the count byte is put back by one (so the next update asks again) and `r8` is made different from the threshold (so the game does not repeat). Below 30 FPS the game's own count is the slower and decides. Wall-clock time (`steady_clock`), so a timedemo (`--mcla_fixed_dt`) is not the right way to look at it. The movies and `mcla_ui_timing_fix` are untouched.
+`mcla_ui_repeat_fix` (on by default since it was measured, below), `mcla_ui_repeat_delay_ms` 233, `mcla_ui_repeat_interval_ms` 200, `mcla_ui_input_log` (development). Hooks `mcla_ui_key_press` (`0x822240C0`) and `mcla_ui_key_repeat` (`0x822241D0`) in `src/frame_timing.cpp`, registered in `config/frame_timing.toml`. At the press the time is recorded; at the compare, when the game's count says a repeat is due (`r8 == r10`), the repeat is allowed only after the delay (after the key down) or the interval (after the last repeat), less 8.3 ms (a quarter of a 30 Hz update); otherwise the count byte is put back by one (so the next update asks again) and `r8` is made different from the threshold (so the game does not repeat). Below 30 FPS the game's own count is the slower and decides. Wall-clock time (`steady_clock`), so a timedemo (`--mcla_fixed_dt`) is not the right way to look at it. The movies and `mcla_ui_timing_fix` are untouched.
 
 ## The check
 
@@ -50,8 +50,28 @@ Variants: **A** the build as shipped (`mcla_ui_timing_fix` on, the repeat fix of
 
 The report (`menu_input.py report <run folder>`) gives, per cell, the key events of every tap, the rows moved (`uisel` before and after), the option values, the hold's event times, the update rate during the hold, and PASS or FAIL per cell. What it would show if the reading above is right: A at 120 FPS and uncapped fails (2 or 3 events for a tap, about 19 for the hold), A at 30 FPS passes, C at 60 FPS passes and at 120 FPS fails, B passes everywhere (hold 5 events). What would not fit: B failing with exactly one extra event per tap would mean the delay is too short for the hardware's frame times; a tap with no event at all would be the lost press that is not explained here, and the log of that cell then has to be read (`ui key:` lines against the `MI tap` markers, with `dev pad: press` times).
 
+## Measured (2026-10-29)
+
+Three runs of the pad on the build of `fix/menu-input` (RTX, Direct3D 12, a copy of the save, the pad's cells as above): native resolution (12 cells), 3x at a 120 cap (4 cells), native with frame generation (2 cells). Key events per tap (should be 1), and in a 1 s hold (should be 5). Variants: A as shipped, B the repeat fix on, C the timing fix off, D both.
+
+| Cell | A (shipped) | B (repeat fix) | C (timing fix off) | D |
+|---|---|---|---|---|
+| 30 FPS cap | 1 per tap, hold 5: PASS | 1, hold 5: PASS | | |
+| 60 FPS cap | 1 to 2, hold 10 (117 ms, then 100): FAIL | 1, hold 5 (233 ms, then 200): PASS | | |
+| 120 FPS cap | 1 to 3, hold 20 (58 ms, then 50): FAIL | 1, hold 5 (225 ms, then 200): PASS | 1 to 3, hold 20: FAIL | 1, hold 5: PASS |
+| uncapped (about 178/s) | 2 to 5, hold 30 (40 ms, then 35): FAIL | 1, hold 5 (225 ms, then 200): PASS | 2 to 5, hold 30: FAIL | 1, hold 5: PASS |
+| 3x, cap 120 (115/s) | 1 to 3, hold 19 (60 ms, then 52): FAIL | 1, hold 5 (232 ms, then 200): PASS | hold 19: FAIL | hold 5: PASS |
+| frame generation, cap 60 | 1 to 2, hold 10: FAIL | 1, hold 5: PASS | | |
+
+- The prediction above held: A fails above 30 FPS, C fails at 120 and uncapped as A does (the timing fix does not change the key events), B and D pass everywhere. The first repeat is 225 ms (not 233) at the caps above 60 because the change allows it 8.3 ms early.
+- No tap made no key event. The "lost" presses of the report are explained by doubled steps (two steps on a two-value row cancel). The two things listed under "Not found" were not reached by this pad (its presses are 60 ms and longer).
+- A on a checkbox made one event per press in every cell. HDR PEAK BRIGHTNESS (T5): a tap is one event with the change on, 1 to 5 before; a 3 s hold ran 450 to 4,000 and back to 300 in both.
+- The report's "rows moved +0" for the upward taps is the pad coming back to where it began.
+
+On the merged build (`integrate/menus`, both menu fixes, defaults and no flags), 120 FPS cap and uncapped, plus the repeat fix off by `set` as a control: **not measured yet**; the chain `menus` runs it (set `merged` of `menu_input.py`).
+
 ## Not done
 
 - Linux and the PS5 build: `src/frame_timing.cpp` and `config/frame_timing.toml` are shared with both; not built or run here.
 - A real controller: the dev pad's ScriptPad feeds the same pad state (`XamInputGetState`) the SDL and XInput drivers do, so the path above is the same, but a stick that wobbles around its threshold (the left-stick inputs 16 to 19 use one threshold, no hysteresis) can send press and release pairs; not looked at.
-- The default of `mcla_ui_repeat_fix` stays off until the numbers above are in.
+- A real controller by the fork's owner before a release (the pad does not show what a stick near its threshold does).

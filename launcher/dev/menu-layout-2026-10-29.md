@@ -18,9 +18,19 @@ The pause menu is a Scaleform movie (`PAUSEMOVIE`, resources/ui/pause in `xarchi
 - With `tabs_count` 0 (what the game's own sub-menus and these pages set) the title and its icon are shown instead of the tab strip, and the list starts 60 units down.
 - The movie is seen at an angle: rows and the bar rise to the right. A wider panel rises more over its width, so a label at the left of a row sits lower than its value at the right (5, 10, 15 and 17 px for the 3rd to 6th rows of DISPLAY at the screenshot's size; it grows down the page, which fits a perspective effect; not checked beyond that).
 
-## Why the numbers are loose
+## What was measured (2026-10-29)
 
-The picture's width (about 1,000 to 1,200 of the movie's units), the 1.9 units to a glyph pixel (the font's capitals are 6 to 19 pixels wide; `GlyphWidth` in `src/settings_menu.cpp` has them) and the 175 units of margins were fitted to two screenshots, which are a third-size crop of a 4K picture, and to the code; they were not measured in a running game. `--mcla_menu_log_layout=true` makes the game log the real `menu.width` of each page and the estimate from the texts; with the full wording (`--mcla_menu_text_level=0`) that is the width the movie gave the old pages.
+The first guesses (a picture about 1,000 to 1,200 units wide, 1.9 units to a glyph pixel, 175 units of margins) were fitted to two screenshots. A run of the pad at 1x, 2x and 3x with Xbox and PlayStation glyphs (RTX, Direct3D 12) replaced them with the movie's own `menu.width` (`--mcla_menu_log_layout=true`):
+
+| Page | Old wording (level 0) | Level 1, "(R)" | Level 2, "(R)" |
+|---|---|---|---|
+| PERFORMANCE (19 rows) | 795 | 635 | 594 |
+| DISPLAY (15 rows) | 751 | 598 | 555 |
+
+- In the pictures the hint row, the scroll bar and the last row were whole at level 1 on every page, at 1x, 2x and 3x, with both glyph sets (level 2 was run at 3x, whole too); at the old wording PERFORMANCE (795) was cut and DISPLAY (751) was at the edge. The picture holds about 750 to 760 units, read from where the hint row was cut (it sits against the width's right edge), so `mcla_menu_width_cap` is 750.
+- The log's estimate had been 1.9 units a glyph pixel and was off by about 60 percent; refitted to these six pages it is 245 plus 0.9 per glyph pixel (within about 20 units).
+- The legend line under the title ("(R) NEXT START") did not show in any picture. It was removed, and restart-only rows say "(RESTART)" at level 1 ("(R)" at level 2, unexplained, as the fallback). "(RESTART)" is about 80 font pixels longer than "(R)", so about 85 units: estimated 720 for PERFORMANCE and 680 for DISPLAY, **not measured yet**; the chain `menus` takes the pictures on `integrate/menus` and logs the widths, and says whether any page went to level 2 by itself.
+- Pictures and sheets of the first run: not in the repository.
 
 ## How to see it
 
