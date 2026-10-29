@@ -356,6 +356,8 @@ sealed record RepoStatus(
     public string? FetchDetail { get; init; }
     /// Installed mode: where the install would move to (a release, or main); null in a clone or when not looked at.
     public Setup.UpdateTarget? Target { get; init; }
+    /// The release (a v… tag) the checked-out commit is, shown as the version in place of the commit; null when HEAD is no release.
+    public string? ReleaseTag { get; init; }
     public bool UpdateAvailable => Incoming.Count > 0 || Target is { SwitchBack: true };
 }
 
@@ -365,6 +367,15 @@ static class Repo
 
     static Task<ProcResult> Git(params string[] args) =>
         Proc.RunAsync("git", ["-C", Paths.Repo, .. args], TimeSpan.FromSeconds(60));
+
+    /// The release tag (v…) that points at HEAD, the highest if several; null when HEAD is not a release or git can't say.
+    static async Task<string?> ReleaseTagAtHeadAsync()
+    {
+        var tags = await Git("tag", "--points-at", "HEAD", "--list", "v*", "--sort=-v:refname");
+        return tags.ExitCode == 0
+            ? tags.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault()
+            : null;
+    }
 
     static List<Commit> ParseLog(string text) =>
         text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -410,10 +421,19 @@ static class Repo
         var buildCurrent = builtCommit is null || builtCommit == head
             || (await Git("diff", "--name-only", builtCommit, head, "--", ".", ":(exclude)launcher", ":(exclude)*.md"))
                    is { ExitCode: 0, Output: var changed } && changed.Trim().Length == 0;
+        // The release this install is: the tag on HEAD (the setup clones a release tag, an update fetches it), else what the
+        // install record says it was set up or updated to, when that is this commit.
+        var releaseTag = await ReleaseTagAtHeadAsync();
+        if (releaseTag == null
+            && Setup.InstallRecord.Load(Path.Combine(Paths.InstallRoot!, Setup.InstallLayout.RecordName)) is { } record
+            && record.ReleaseTag is { Length: > 0 } recordTag && recordTag.StartsWith('v')
+            && record.ReleaseCommit is { Length: > 0 } recordCommit && head.StartsWith(recordCommit, StringComparison.OrdinalIgnoreCase))
+            releaseTag = recordTag;
         return new RepoStatus(head, recent, incoming, patchesChanged, File.Exists(Paths.GameExe), buildCurrent, 0, launcherOutdated, fetchError)
         {
             Target = target,
             FetchDetail = fetchDetail,
+            ReleaseTag = releaseTag,
         };
     }
 
@@ -484,7 +504,11 @@ static class Repo
             GameBuilt: File.Exists(Paths.GameExe),
             BuildCurrent: buildCurrent,
             upstreamAhead, launcherOutdated,
-            fetchError);
+            fetchError)
+        {
+            // A checkout at a release (git fetch brings the tags of the commits it fetches).
+            ReleaseTag = await ReleaseTagAtHeadAsync(),
+        };
     }
 }
 

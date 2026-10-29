@@ -687,10 +687,12 @@ sealed class LauncherApp : Component
         Element Header()
         {
             var head = status?.Recent.FirstOrDefault();
+            // The release (v0.3.0) when HEAD is one, else the commit (a checkout between releases, or main).
             var subtitle = head is null
                 ? "Static recompilation for PC"
-                : $"Static recompilation for PC  ·  version {head.Hash} from {head.Date}";
-            if (installed && head != null && InstallRecord.Load(Path.Combine(Paths.InstallRoot!, InstallLayout.RecordName))?.ReleaseTag is { Length: > 0 } releaseTag)
+                : $"Static recompilation for PC  ·  version {status?.ReleaseTag ?? head.Hash} from {head.Date}";
+            if (installed && head != null && status?.ReleaseTag is null
+                && InstallRecord.Load(Path.Combine(Paths.InstallRoot!, InstallLayout.RecordName))?.ReleaseTag is { Length: > 0 } releaseTag)
                 subtitle += $"  ·  {releaseTag}";
             // Routine states read as a line under the title; the bars below are
             // for things that need a decision.
@@ -798,7 +800,7 @@ sealed class LauncherApp : Component
                     : Info("Shaders weren't prepared", ShaderPrepRun.Describe(prepExit, prep.ErrorMessage)
                            + ". The game still plays, compiling shaders as it meets them.", InfoBarSeverity.Warning);
             if (buildResult == 0)
-                return Info("Build finished", $"You're on version {status.Head[..7]}.", InfoBarSeverity.Success);
+                return Info("Build finished", $"You're on version {status.ReleaseTag ?? status.Head[..7]}.", InfoBarSeverity.Success);
             // The check for updates could not reach GitHub: said in words (which stage, which host), with the details to copy.
             if (status.FetchError != null)
             {

@@ -6,7 +6,9 @@ starts `mcla.exe`. On start it fetches the fork
 ([RenanQueiroz/mcla-recomp](https://github.com/RenanQueiroz/mcla-recomp)); when
 the fork has new commits it offers **Update and rebuild**, with the commits folded
 under *What's new*. Routine states (checking, up to date, offline) are a line
-under the title. *More* links to the fork's recent changes and says how many
+under the title, after the version: the release (`v0.3.0`) when the checked-out
+commit is one (a `v*` tag on HEAD, or what the setup's install record says), else
+the commit (`a95aedb`). *More* links to the fork's recent changes and says how many
 commits upstream ([holdmysocks/mcla-recomp](https://github.com/holdmysocks/mcla-recomp))
 has that the fork has not taken yet: the fork takes them only when asked to.
 A commit that changes only the launcher or documentation doesn't ask for a game
