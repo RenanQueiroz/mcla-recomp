@@ -1,5 +1,5 @@
 # Boot -> title -> map zoom-out loading -> free roam, then close the window the way its close button does (WM_CLOSE).
-# For launcher/dev/exit_probe.py (the exit hang). Run it with --keep-open.
+# For launcher/dev/exit_probe.py (the exit hang). If the close does not happen, the script ends and the dev pad quits the game (exit_probe.py marks the run).
 wait 8s
 mark title
 press_until start left_title every=2s timeout=90s

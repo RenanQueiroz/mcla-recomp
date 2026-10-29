@@ -629,7 +629,7 @@ class LogTail:
 def game_args(run, out, exe_dir):
     ns = argparse.Namespace(
         backend=CELLS[run["cell"]]["api"], res="1", fps="120", fps_fg=None, vsync="false", fullscreen=False, intro="fast", present_log=False,
-        cache_root=None, script=str(SCRIPTS / PAD_OF[run["quit"]]), keep_open=run["quit"] != "end", pipe="", fixed_dt=0, record=None, track=False, extra=list(MODES[run["mode"]]))
+        cache_root=None, script=str(SCRIPTS / PAD_OF[run["quit"]]), keep_open=False, pipe="", fixed_dt=0, record=None, track=False, extra=list(MODES[run["mode"]]))
     return ns, devrun.game_args(ns, out)
 
 
@@ -773,8 +773,11 @@ def run_one(run):
         k32.CloseHandle(h)
         row["seconds"] = round(time.time() - t0, 1)
         try:
-            row["script_status"] = [ln.split("dev pad: script ", 1)[1].strip() for ln in (out / "game.log").read_text(encoding="utf-8", errors="replace").splitlines()
-                                    if "dev pad: script " in ln][-1:]
+            text = (out / "game.log").read_text(encoding="utf-8", errors="replace")
+            row["script_status"] = [ln.split("dev pad: script ", 1)[1].strip() for ln in text.splitlines() if "dev pad: script " in ln][-1:]
+            evidence = {"pause": "settings menu: quit requested", "close": "exit: window close", "end": "exit: end of the script"}[run["quit"]]
+            if evidence not in text and not row.get("quit_failed"):
+                row["quit_failed"] = f"the pad did not quit by {run['quit']} (no {evidence!r} in the log; script: {row['script_status']}); the dev pad's end-of-script quit ended the game"
         except (OSError, IndexError):
             pass
     except Exception as e:  # noqa: BLE001
@@ -938,7 +941,7 @@ def report(rows):
         if a:
             L("EXITHANG FREQUENCY, cell %s as shipped: %d of %d runs SLOW" % (cell, sum(1 for r in a if is_slow(r)), len(a)))
     # what a hang looked like
-    hangs = [r for r in good if r.get("diag")]
+    hangs = [r for r in rows if r.get("diag")]
     for r in hangs:
         d = r["diag"]
         s2 = d["snapshots"][-1] if d.get("snapshots") else {}
