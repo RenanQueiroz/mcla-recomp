@@ -46,12 +46,13 @@ REXCVAR_DEFINE_INT32(mcla_fps, 30, "MCLA",
                      "-1 restores the game's original fixed 30 Hz timing")
     .range(-1, 240);
 
-REXCVAR_DEFINE_BOOL(mcla_timer_hr_at_cap, false, "MCLA",
+REXCVAR_DEFINE_BOOL(mcla_timer_hr_at_cap, true, "MCLA",
                     "Windows: while a frame-rate cap is set, the timer thread waits on a high-resolution timer "
                     "(timer_queue_hr_wait) even where the game leaves that off (6 or more logical processors), "
                     "which gives back the core it keeps busy: about half of the process's CPU at a 60 FPS cap. "
                     "Without a cap the value the game started with applies. A timer_queue_hr_wait the player has "
-                    "set is never changed. Off leaves timer_queue_hr_wait alone");
+                    "set is never changed. Off leaves timer_queue_hr_wait alone (the game's automatic value by "
+                    "processor count, with or without a cap)");
 
 // The cap while frame generation is on (the SDK's frame_generation): the rendered
 // rate, so 60 shows 120. -1 is HALF DISPLAY, just under half the display's refresh
