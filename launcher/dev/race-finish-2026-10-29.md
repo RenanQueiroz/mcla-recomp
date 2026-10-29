@@ -67,6 +67,8 @@ What the log cannot show: a movie that the game does not step through the UI man
 
 ## Chain
 
+The race start chain (`race-start-2026-10-29.md`, `C:\mcv\racestart\chain\chain.ps1`) repeats these runs (c30, c120 with and without Smooth UI, c120 with the timing fix off, c60 if time is left) with the start measured as well, in the same pad; its finish reports are the same tool's. Queue one of the two chains, not both.
+
 One exclusive hold, `--max-min 35`: `C:\mcv\racefinish\chain\chain.ps1` (protected files before and after, the build of `fix/race-finish-pacing`, the runs of `rf_batch.py`). The queue command is in `C:\mcv\racefinish\NOTES.md`.
 
 ## Measured

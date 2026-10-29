@@ -6,7 +6,7 @@ second) is still on screen. This reads what race_finish.py's pad leaves in a run
   game.log   the UI pace log in 100 ms windows around the start (`ui pace: ... us=`), the cars' positions every 3 ticks
              of the mode timer (`dev pad: watch tick= frame= us= | x y z | ...`, the player first), the pictures' times
              (`dev pad: burst cd k= ... us=`), the marks
-  shots\\cd-<k>.png   a picture about every 120 ms from 3 s of the mode timer on (the whole frame, scaled)
+  shots\\cd-<k>.png   a picture about every 120 ms from 1.5 s of the mode timer on (the whole frame, scaled)
 
   race_start.py report <run folder>...            one run
   race_start.py compare <reference> <run>...      each run against the reference (cap 30, the console's rate)
@@ -76,10 +76,13 @@ class Start:
 
     # ---- the cars
     def move_times(self):
-        """For each car (the player first): the steady-clock time (us) it started moving, else None. The car has started when it is
-        MOVE_M from where it stood, the distance only grows over the next five lines, and the release is then taken from a fit of the
-        first metres (distance = a * (t - t0)^2 / 2, so sqrt(distance) is a straight line in t)."""
-        if len(self.watch) < 12:
+        """For each car (the player first): the steady-clock time (us) it started moving, else None.
+
+        The car stood somewhere (`rest`, moved to the current line when the car jumps more than 40 m: the cars are put on the
+        grid during the intro). The first line that is 0.15 m from it starts a candidate; it is a start when the distance from `rest`
+        keeps growing over the next 12 lines to at least 2 m (a bump of the suspension is not). The release time is then the fit of
+        the first metres: distance = a * (t - t0)^2 / 2 makes sqrt(distance) a straight line in t, and t0 its zero."""
+        if len(self.watch) < 16:
             return []
         count = min(len(w[3]) for w in self.watch)
 
@@ -87,38 +90,41 @@ class Start:
             return ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
         out = []
+        n_lines = len(self.watch)
         for c in range(count):
             found = None
-            for i in range(3, len(self.watch) - 6):
-                rest = self.watch[i - 3][3][c]
-                d = dist(self.watch[i][3][c], rest)
-                if d < MOVE_M or d > 40:
-                    continue
-                ds = [dist(self.watch[j][3][c], rest) for j in range(i, i + 6)]
-                if not (all(b > a - 0.05 for a, b in zip(ds, ds[1:])) and ds[-1] > ds[0] + 0.5):
-                    continue
-                # the fit, over the lines from the rest position to 8 m
-                pts = []
-                for j in range(i - 3, min(len(self.watch), i + 40)):
-                    dj = dist(self.watch[j][3][c], rest)
-                    if dj > 8.0:
+            rest = self.watch[0][3][c]
+            j = 1
+            while j < n_lines - 12:
+                pj = self.watch[j][3][c]
+                d = dist(pj, rest)
+                if d > 40:
+                    rest = pj
+                elif d >= 0.15:
+                    ds = [dist(self.watch[k][3][c], rest) for k in range(j, j + 13)]
+                    if max(ds) >= 2.0 and all(y > x - 0.05 for x, y in zip(ds, ds[1:])):
+                        pts = []
+                        for k in range(j, min(n_lines, j + 60)):
+                            dk = dist(self.watch[k][3][c], rest)
+                            if dk > 8.0:
+                                break
+                            pts.append((self.watch[k][0], dk ** 0.5))
+                        t0 = self.watch[j - 1][0]
+                        if len(pts) >= 4:
+                            m = len(pts)
+                            mx = sum(p[0] for p in pts) / m
+                            my = sum(p[1] for p in pts) / m
+                            sxx = sum((p[0] - mx) ** 2 for p in pts)
+                            slope = sum((p[0] - mx) * (p[1] - my) for p in pts) / sxx if sxx > 0 else 0.0
+                            if slope > 0:
+                                fit = mx - my / slope
+                                if self.watch[j - 1][0] - 1.5e6 < fit < self.watch[j][0]:
+                                    t0 = fit
+                        found = int(t0)
                         break
-                    if dj > 0.3:
-                        pts.append((self.watch[j][0], dj ** 0.5))
-                t0 = self.watch[i - 3][0]
-                if len(pts) >= 4:
-                    n = len(pts)
-                    mx = sum(p[0] for p in pts) / n
-                    my = sum(p[1] for p in pts) / n
-                    sxx = sum((p[0] - mx) ** 2 for p in pts)
-                    if sxx > 0:
-                        slope = sum((p[0] - mx) * (p[1] - my) for p in pts) / sxx
-                        if slope > 0:
-                            fit = mx - my / slope
-                            if self.watch[i - 3][0] - 1.0e6 < fit < self.watch[i][0]:
-                                t0 = fit
-                found = int(t0)
-                break
+                    # a bump: the car settles somewhere new
+                    rest = pj
+                j += 1
             out.append(found)
         return out
 
@@ -172,11 +178,14 @@ class Start:
         game = win[-1]["timer"].get("mode_t", 0.0) - win[0]["timer"].get("mode_t", 0.0)
         updates = sum(s["updates"] for s in body)
         movies = {}
-        for s in body:
+        for prev, s in zip(win, body):
+            game_span = s["timer"].get("mode_t", 0.0) - prev["timer"].get("mode_t", 0.0)
             for name, m in s["movies"].items():
-                d = movies.setdefault(name, dict(steps=0, calls=0, swf=m["swf"]))
+                d = movies.setdefault(name, dict(steps=0, calls=0, swf=m["swf"], wall=0.0, game=0.0))
                 d["steps"] += m["steps"]
                 d["calls"] += m["calls"]
+                d["wall"] += s["span"]
+                d["game"] += game_span if game_span > 0 else 0.0
         clocks = dict(wall=wall, game=game, updates=updates, fps=updates / wall if wall else None,
                       game_per_wall=(game / wall if wall else None), min_fps=min(s["fps"] for s in body),
                       first_mode_t=win[0]["timer"].get("mode_t"), last_mode_t=win[-1]["timer"].get("mode_t"))
@@ -206,15 +215,20 @@ def report_one(folder):
     out.append("movies near the start (times in s from START; steps a second over the 4 s before START in wall time / in the game's seconds; swf = the file's frame rate):")
     for name, d in sorted(s.movies().items(), key=lambda kv: kv[1]["first"]):
         b = movies.get(name)
-        if b and clocks and clocks["wall"] and clocks["game"]:
-            per_wall = b["steps"] / clocks["wall"]
-            per_game = b["steps"] / clocks["game"]
-            calls = f"{b['steps']}/{b['calls']} of the updates"
+        if b and b["wall"] > 0.3 and b["game"] > 0.3:
+            per_wall = b["steps"] / b["wall"]
+            per_game = b["steps"] / b["game"]
+            calls = f"{b['steps']} steps in {b['calls']} asks over {b['wall']:.1f} s"
             rate = f"steps/s {per_wall:6.1f} wall {per_game:6.1f} game, {calls}"
         else:
             rate = "not stepped in the 4 s before START"
         out.append(f"  {name:<22} first {d['first']:+7.2f}  last {d['last']:+7.2f}  steps {d['steps']:5d}  swf {d['swf']:3d}  {rate}")
     out.append("(a movie first seen at or after -12 s and last seen before +5 s comes and goes around the start: the countdown candidates)")
+    for name, d in sorted(s.movies().items(), key=lambda kv: kv[1]["first"]):
+        if d["first"] > -WINDOW_BEFORE_S + 0.3 and d["last"] < WINDOW_AFTER_S - 0.3 and d["steps"]:
+            seconds = max(0.1, d["last"] - d["first"])
+            out.append(f"COUNTDOWN CANDIDATE {name}: on screen from {d['first']:+.2f} s to {d['last']:+.2f} s around START ({seconds:.2f} s), "
+                       f"{d['steps']} steps = {d['steps'] / seconds:.1f} a second on average, swf {d['swf']} frames a second")
     if s.pictures:
         times = [(k, (us - t0) / 1e6) for k, us, *_ in s.pictures]
         out.append(f"pictures: {len(times)}, from {times[0][1]:+.2f} s to {times[-1][1]:+.2f} s from START; the gaps between them: median "
@@ -259,10 +273,11 @@ def verdict(ref, run):
         line = (f"  {name:<22} first {db['first']:+6.2f} (ref {da['first']:+6.2f})  last {db['last']:+6.2f} (ref {da['last']:+6.2f})  "
                 f"steps {db['steps']:4d} (ref {da['steps']:4d})  swf {db['swf']} (ref {da['swf']}){note}")
         ba, bb = ra.get(name), rb.get(name)
-        if ba and bb and ca and cb and ca["game"] and cb["game"]:
-            ga = ba["steps"] / ca["game"]
-            gb = bb["steps"] / cb["game"]
-            line += f"\n      steps per game second in the 4 s before START: {gb:6.1f} (ref {ga:6.1f}), per wall second {bb['steps'] / cb['wall']:6.1f} (ref {ba['steps'] / ca['wall']:6.1f})"
+        if ba and bb and ba["game"] > 0.3 and bb["game"] > 0.3:
+            ga = ba["steps"] / ba["game"]
+            gb = bb["steps"] / bb["game"]
+            line += (f"\n      steps per game second while on screen in the 4 s before START: {gb:6.1f} (ref {ga:6.1f}), "
+                     f"per wall second {bb['steps'] / bb['wall']:6.1f} (ref {ba['steps'] / ba['wall']:6.1f})")
             if ga > 3 and gb < ga * (1 - RATE_TOL):
                 line += "  SLOWER than the reference per game second"
                 flags.append(f"slower:{name}")
@@ -281,16 +296,16 @@ def candidates(ref, run):
         return out
     ra, ca = a.rates_before_start(4.0)
     rb, cb = b.rates_before_start(4.0)
-    if not (ca and cb and ca["game"] and cb["game"]):
+    if not (ca and cb):
         return out
     ma, mb = a.movies(), b.movies()
     seen = set()
     for name, bb in rb.items():
         ba = ra.get(name)
-        if not ba:
+        if not ba or ba["game"] <= 0.3 or bb["game"] <= 0.3:
             continue
-        ga = ba["steps"] / ca["game"]
-        gb = bb["steps"] / cb["game"]
+        ga = ba["steps"] / ba["game"]
+        gb = bb["steps"] / bb["game"]
         late = name in ma and name in mb and mb[name]["last"] - ma[name]["last"] > LAG_S and not (ma[name]["first"] <= -WINDOW_BEFORE_S + 0.3)
         slower = ga > 3 and gb < ga * (1 - RATE_TOL)
         if (slower or late) and name not in seen and 1 <= round(ga) <= 240 and name != "HUDGAUGE":
@@ -336,7 +351,7 @@ def write_png(path, w, h, rows):
     Path(path).write_bytes(png)
 
 
-def contact_sheet(folder, out_png, every_s=0.25, cols=6, thumb_w=240, span=(-6.0, 3.0)):
+def contact_sheet(folder, out_png, every_s=0.25, cols=5, thumb_w=320, span=(-6.0, 3.0)):
     """A sheet of the countdown pictures, about one per `every_s`, in time order from `span` seconds around START. Returns the index lines."""
     s = Start(folder)
     shots = Path(folder) / "shots"

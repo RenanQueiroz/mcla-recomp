@@ -5,8 +5,10 @@ LARecomp (https://github.com/mzzvxm/LARecomp, commit 7b9726e) reports that the 3
 (mcla_ui_timing_fix, on by default here too) makes the race finish screens, the podium and the results run in slow
 motion. This tool writes the pad that drives a race to its end and reads the log of a run:
 
-  race_finish.py pad <out.pad> --shots <dir> --route <file.route> --boot <boot-to-race.pad> [--finish-s 70]
-      the pad: boot-to-race.pad, then the follower drives sunset-and-vine.route to its end, then the car keeps
+  race_finish.py pad <out.pad> --shots <dir> --route <file.route> --boot <boot-to-race.pad> [--finish-s 70] [--no-start | --start-only] [--res N]
+      the pad: boot-to-race.pad, the race START measured (race_start.py: the UI log in 100 ms windows, every car's position
+      every 50 ms, a picture of the frame every 120 ms through the countdown; see pad_lines), then the follower drives
+      sunset-and-vine.route to its end, then the car keeps
       its throttle and the pad waits --finish-s seconds, a picture every 5 s (nothing is pressed after the route:
       what the game does by itself is what is measured)
   race_finish.py report <run folder>...
@@ -55,13 +57,13 @@ def stamp(line):
 
 
 def pad_lines(route, boot, shots, finish_s=70, every_s=5, scale=0.3, speed=1.0, start=True, finish=True, pictures=True,
-              res=1, picture_every_ms=120, picture_count=100):
+              res=1, picture_every_ms=120, picture_count=120):
     """The pad. The shots folder must exist before the run (the game does not make it).
 
     start: the race start is measured too (race_start.py): the UI pace log in 100 ms windows and the cars' positions every
     3 ticks (50 ms of the mode timer) from the intro on, the throttle held through the countdown by the follower, and, with
-    `pictures`, a picture of the whole frame about every picture_every_ms from 3 s of the mode timer (the countdown starts
-    after it; the race starts at about 9.3) for picture_count pictures. Those pictures are scaled by 0.3 / res, so a 3x run
+    `pictures`, a picture of the whole frame about every picture_every_ms from 1.5 s of the mode timer (the countdown starts
+    after it; the race starts at about 9.3) for picture_count pictures (14 s). Those pictures are scaled by 0.3 / res, so a 3x run
     makes the same size. `mark race` comes after them (at about 15 s of the mode timer; the finish reading counts from it, so it
     is a few seconds later than in a run without the start part).
     finish=False ends the script a few seconds after the start (a run for the start alone)."""
@@ -76,7 +78,7 @@ def pad_lines(route, boot, shots, finish_s=70, every_s=5, scale=0.3, speed=1.0, 
             "set mcla_ui_pace_log_ms 100",
             "watch 3",
             f"follow {route} speed={speed}",
-            "wait_until f32 0x827D7510 >= 3.0 120s",
+            "wait_until f32 0x827D7510 >= 1.5 120s",
             "mark countdown",
         ]
         if pictures:
@@ -361,6 +363,10 @@ def main():
     a.add_argument("--boot", required=True)
     a.add_argument("--finish-s", type=int, default=70)
     a.add_argument("--speed", type=float, default=1.0)
+    a.add_argument("--no-start", action="store_true", help="the finish part only (the pad of race-finish-2026-10-29.md)")
+    a.add_argument("--start-only", action="store_true", help="the start part only: the script ends 6 s after the race starts")
+    a.add_argument("--no-pictures", action="store_true", help="no picture every 120 ms through the countdown")
+    a.add_argument("--res", type=int, default=1, help="the resolution scale of the run (the countdown pictures are scaled by 0.3 / res)")
     r = sub.add_parser("report")
     r.add_argument("folders", nargs="+")
     c = sub.add_parser("compare")
@@ -368,7 +374,9 @@ def main():
     c.add_argument("folders", nargs="+")
     o = p.parse_args()
     if o.cmd == "pad":
-        Path(o.out).write_text("\n".join(pad_lines(o.route, o.boot, o.shots, o.finish_s, speed=o.speed)) + "\n", encoding="ascii")
+        lines = pad_lines(o.route, o.boot, o.shots, o.finish_s, speed=o.speed, start=not o.no_start, finish=not o.start_only,
+                          pictures=not o.no_pictures, res=o.res)
+        Path(o.out).write_text("\n".join(lines) + "\n", encoding="ascii")
         return 0
     if o.cmd == "report":
         for folder in o.folders:

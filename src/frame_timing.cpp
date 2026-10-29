@@ -1447,7 +1447,7 @@ static bool UiRuleAdvance(UiRateRule rule, uint32_t context, size_t slot, uint64
   }
   // The step belongs on its schedule when the wall clock keeps it, else now (the interpolation's time base).
   const uint64_t ideal = next - period;
-  NoteUiStep(slot, (!rule.game_clock && now - ideal <= period) ? ideal : now, uint32_t(period));
+  NoteUiStep(slot, (!rule.game_clock && ideal <= now && now - ideal <= period) ? ideal : now, uint32_t(period));
   return false;
 }
 
