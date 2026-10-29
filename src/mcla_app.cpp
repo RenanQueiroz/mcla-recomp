@@ -61,6 +61,13 @@ REXCVAR_DEFINE_BOOL(mcla_prefer_dedicated_gpu, true, "MCLA",
                     "d3d12_adapter or vulkan_device you set always wins. Takes effect at the next "
                     "start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(mcla_small_cpu_defaults, false, "MCLA",
+                    "With 5 or fewer logical processors the game also turns on mcla_poll_wait (the main thread's wait "
+                    "for a ring slot on a timer) and mcla_pump_wake_on_demand (the frame-pacing thread woken when the "
+                    "main thread waits for it), next to the timer queue's high-resolution wait it already turns on "
+                    "there. A value you set for any of them wins. Off while the measurement that decides it is "
+                    "pending (launcher/dev/small-cpu-2026-10-28.md). Takes effect at the next start")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 // Read by NVIDIA's Optimus and AMD's PowerXpress drivers when the exe loads: on a laptop with
 // switchable graphics they run the program on the dedicated GPU (src/gpu_choice.h has the
@@ -208,6 +215,8 @@ bool MclaRelaunchGame() {
 
 // Lets a career save in progress finish before the game ends.
 void MclaWaitForSaves();  // src/save_wait.cpp
+// The game's shutdown has begun: the audio silence from here on is the output stopping (src/poll_wait.cpp).
+void MclaPumpWakeShutdownBegins();
 
 namespace {
 
@@ -871,6 +880,9 @@ static uint32_t LogicalProcessorsAvailable() {
 // (SetDefaultValue then only records the default), and none is saved. Both are read where they
 // are used (the timer thread at every wait, the pump thread at every round), so the default
 // set here is in effect for the whole run. Not on Linux and the PS5, which keep both off.
+// With mcla_small_cpu_defaults (off until its measurement is in) the 5-or-fewer case also turns on
+// mcla_pump_wake_on_demand and mcla_poll_wait: at 4 logical processors the update thread loses 47% of
+// the frame to the pump's 7 ms Sleep, and the main thread's ring wait spins a core.
 static void ApplyCpuDefaults() {
   constexpr uint32_t kWakeOnDemandFrom = 6;
   const uint32_t logical = LogicalProcessorsAvailable();
@@ -879,15 +891,19 @@ static void ApplyCpuDefaults() {
     return;
   }
   const bool many = logical >= kWakeOnDemandFrom;
+  const bool small_extra = !many && REXCVAR_GET(mcla_small_cpu_defaults);
   struct Option {
     const char* name;
     const char* label;
     bool automatic_on;
   };
-  const Option options[] = {
+  std::vector<Option> options = {
       {"timer_queue_hr_wait", "timer queue high-resolution wait", !many},
-      {"mcla_pump_wake_on_demand", "pump wake on demand", many},
+      {"mcla_pump_wake_on_demand", "pump wake on demand", many || small_extra},
   };
+  if (small_extra) {
+    options.push_back({"mcla_poll_wait", "poll wait", true});
+  }
   std::string text;
   bool any_automatic = false;
   for (const Option& option : options) {
@@ -904,7 +920,10 @@ static void ApplyCpuDefaults() {
     any_automatic = any_automatic || !by_player;
   }
   REXLOG_INFO("CPU: {} logical processors: {}{}", logical, text,
-              any_automatic ? (many ? " (automatic; 6 or more)" : " (automatic; 5 or fewer)") : "");
+              any_automatic ? (many ? " (automatic; 6 or more)"
+                                    : small_extra ? " (automatic; 5 or fewer, with mcla_small_cpu_defaults)"
+                                                  : " (automatic; 5 or fewer)")
+                            : "");
 }
 #endif
 
@@ -1018,7 +1037,13 @@ void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
 bool MclaApp::OnWindowCloseRequested() {
   MclaWaitForSaves();
   MclaSaveMenuSettings();
+  MclaPumpWakeShutdownBegins();  // the window closes now: the title is terminated next
   return true;
+}
+
+void MclaApp::OnGuestThreadExit(rex::system::XThread* thread) {
+  (void)thread;
+  MclaPumpWakeShutdownBegins();
 }
 
 void MclaApp::OnPostSetup() {

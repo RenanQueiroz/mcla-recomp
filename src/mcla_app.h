@@ -35,6 +35,9 @@ class MclaApp : public rex::ReXApp {
   // Saves what was changed in the pause menu's settings, in case the window is
   // closed while one of its submenus is open (src/settings_menu.cpp).
   bool OnWindowCloseRequested() override;
+  // The game's main thread has ended (the title quit on its own, or the window's close ended it): the pump
+  // thread's audio watchdog stops counting silences (src/poll_wait.cpp).
+  void OnGuestThreadExit(rex::system::XThread* thread) override;
 
   // Achievement pop-ups, registered with the ImGui drawer only while one is
   // on screen (src/achievement_toast.h). The SDK's toast is registered for the
