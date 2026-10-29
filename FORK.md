@@ -287,6 +287,7 @@ git apply ../../patches/rexglue-render-target-trim.patch
 git apply ../../patches/rexglue-gpu-memory.patch
 git apply ../../patches/rexglue-d3d12-hoist-shared-memory-uploads.patch
 git apply ../../patches/rexglue-texture-load-direct-unscaled.patch
+git apply ../../patches/rexglue-occlusion-queries.patch
 git apply ../../patches/rexglue-upstream-storage-flush.patch
 git apply ../../patches/rexglue-upstream-host-fp-state.patch
 git apply ../../patches/rexglue-upstream-linux-wine.patch
