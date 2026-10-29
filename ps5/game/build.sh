@@ -99,6 +99,15 @@ if ! cmp -s "$work/flags.new" "$work/flags.txt" 2>/dev/null; then
 fi
 
 pch="$work/obj/mcla_pch.h.pch"
+# Does clang still accept the precompiled header? It refuses one when a header it read has another size or time ("file
+# ... has been modified since the precompiled header ... was built"), which a patched SDK or a new checkout of it does
+# to the headers outside generated/; the find below sees only the generated ones. Loading it for an
+# empty file is the same test. (The same stale header stopped updates of the PC build, fork issue #23. Not run on a
+# console: see KNOWN-ISSUES.md.)
+if [ -e "$pch" ] && ! ( cd "$runtime_build" && eval "\"$cxx\" $flags -x c++ -include-pch \"$pch\" -fsyntax-only /dev/null" ) > "$work/pch-check.log" 2>&1; then
+    echo "the precompiled header no longer loads ($(grep -m1 -i 'error' "$work/pch-check.log" | cut -c1-200 || true)); making it again"
+    rm -f "$pch"
+fi
 if [ ! -e "$pch" ] || [ -n "$(find "$work/src/generated/default" -name '*.h' -newer "$pch" -print -quit)" ]; then
     echo "precompiling mcla_pch.h"
     ( cd "$runtime_build" && eval "\"$cxx\" $flags -x c++-header -o \"$pch\" -c \"$work/src/generated/default/mcla_pch.h\"" )
