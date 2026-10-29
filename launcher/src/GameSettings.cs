@@ -254,11 +254,12 @@ static class GameSettings
         [new("Custom (every option as set)", "custom"), new("Low-end (for a weak graphics card)", "low"),
          new("Lowest (Low-end, and no shadows)", "lowest")], "custom")
     {
-        Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the far sun shadows every "
-             + "2nd frame and the environment map of the cars every 4th (the picture of the last time is kept "
-             + "in between). On an integrated Radeon that is about 12% less frame time at the game's own "
-             + "resolution (32.3 instead of 36.8 ms in free roam): 4% from the shadows, the map and the "
-             + "blur, and 7 to 8% from leaving anti-aliasing off (29% at 2x), at the price of jagged edges. It helps most on weak or "
+        Info = "Low-end turns off anti-aliasing and the full-screen blur, and draws the environment map of the "
+             + "cars every 4th frame (the picture of the last time is kept in between). On an integrated Radeon, "
+             + "at the game's own resolution, that is an estimated 10% less frame time: about 1.5 ms from the map "
+             + "and the blur, and 7 to 8% from leaving anti-aliasing off (29% at 2x), at the price of jagged edges. "
+             + "(Measured: 12%, when Low-end also drew the far shadows every 2nd frame, which flickered in motion "
+             + "and was taken out.) It helps most on weak or "
              + "integrated graphics. Lowest is Low-end with the real-time shadows off as well: about 27% less "
              + "frame time than with no preset on that Radeon (and 17% at 3x on an RTX 5080), but no sun "
              + "shadows at all, not even the one under the car. An option you set by hand (Anti-aliasing here, "

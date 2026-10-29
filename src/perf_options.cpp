@@ -105,7 +105,7 @@ REXCVAR_DEFINE_DOUBLE(mcla_parked_cars, 1.0, "MCLA", "Parked car density scale")
 // they are what a weak GPU pays most for (launcher/dev/gpu-weak-2026-10-27.md).
 REXCVAR_DEFINE_INT32(mcla_far_shadow_interval, 0, "MCLA",
                      "The two farthest sun-shadow cascades are drawn only every this many frames "
-                     "(0: every frame, as shipped)")
+                     "(0: every frame, as shipped; above 1 the far shadows flicker in motion)")
     .range(0, 8);
 REXCVAR_DEFINE_INT32(mcla_env_map_interval, 0, "MCLA",
                      "The environment map of the cars' paint and the speedometer is drawn only "
@@ -118,8 +118,8 @@ REXCVAR_DEFINE_INT32(mcla_reflection_interval, 0, "MCLA",
 REXCVAR_DEFINE_STRING(mcla_preset, "custom", "MCLA",
                       "A starting point for the detail options, for a weak GPU:\n"
                       " custom: every option as set (the default)\n"
-                      " low: no anti-aliasing and no full-screen blur, the far shadows drawn "
-                      "every 2nd frame and the environment map every 4th\n"
+                      " low: no anti-aliasing and no full-screen blur, and the environment map "
+                      "drawn every 4th frame\n"
                       " lowest: as low, and no real-time shadows\n"
                       "An option set by hand keeps its value")
     .allowed({"custom", "low", "lowest"});
@@ -563,8 +563,9 @@ uint32_t MclaRenderPhasesToSkip() {
 // that one chosen by hand (the command line, the environment, mcla.toml) still wins,
 // and none is saved as if the player had chosen it. Low is what was worth its look on the
 // integrated Radeon (launcher/dev/gpu-weak-2026-10-27.md): anti-aliasing off (6.5% of the
-// frame at native resolution, 29% at 2x), the far shadows every 2nd frame and the
-// environment map every 4th (about 1 ms each at native), the full-screen blur (0.5 ms).
+// frame at native resolution, 29% at 2x), the environment map every 4th frame (about
+// 1 ms at native), the full-screen blur (0.5 ms). The far shadows every 2nd frame (0.3 to
+// 1.1 ms) were taken out on 2026-10-28: they flicker in motion.
 // The reflection view stays every frame: every 2nd saved about 0.3 ms, too little for a
 // reflection that lags. Lowest is Low and the real-time shadows off, by far the largest
 // saving left (launcher/dev/aniso-2026-10-27.md: 16 to 17% of the frame on every GPU
@@ -575,9 +576,10 @@ void MclaApplyPreset() {
   if (preset != "low" && preset != "lowest") {
     return;
   }
+  // The far shadows every 2nd frame were in Low until 2026-10-28: in motion they flicker
+  // (seen by the fork's owner in a smoke run), for 0.3 to 1.1 ms on the Radeon.
   constexpr std::pair<const char*, const char*> kLow[] = {
       {"mcla_anti_aliasing", "off"},
-      {"mcla_far_shadow_interval", "2"},
       {"mcla_env_map_interval", "4"},
       {"mcla_fullscreen_blur", "false"},
   };
