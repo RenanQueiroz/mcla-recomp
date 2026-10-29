@@ -49,7 +49,8 @@
 //   findvec <addr> [floats] [tolerance] (where else in guest memory the same floats are)
 //
 // Conditions: left_title (Start accepted on the title screen), loading (the
-// map zoom-out), roam (the player is in the city), frames N (engine frames
+// map zoom-out), roam (the player is in the city), follow_done (the follower is
+// not driving: its route ended), frames N (engine frames
 // since start-up), u32|f32 <addr> ==|!=|<|>|<=|>= <value>. Addresses are guest
 // addresses, with [x] for "the 32-bit value at x" and +/- offsets:
 // [0x8288DCF8]+0x2A0.
@@ -1688,7 +1689,7 @@ bool Compare(double a, const std::string& op, double b, bool& ok) {
 }
 
 struct Condition {
-  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kUiList } kind = kFrames;
+  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kUiList, kFollowDone } kind = kFrames;
   bool is_float = false;
   std::string address;
   std::string op;
@@ -1703,6 +1704,13 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     c.kind = word == "left_title" ? Condition::kLeftTitle
              : word == "loading"  ? Condition::kLoading
                                   : Condition::kRoam;
+    i++;
+    return true;
+  }
+  if (word == "follow_done") {
+    // The follower is not driving (its route ended, or follow stop): for a script that waits for the
+    // end of a race route.
+    c.kind = Condition::kFollowDone;
     i++;
     return true;
   }
@@ -1747,7 +1755,7 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     i += 4;
     return true;
   }
-  error = "condition: left_title, loading, roam, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
+  error = "condition: left_title, loading, roam, follow_done, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
   return false;
 }
 
@@ -1759,6 +1767,8 @@ bool Evaluate(const Condition& c) {
       return ReadWord(kLeftTitle) == 1;
     case Condition::kLoading:
       return GameState() == 3;
+    case Condition::kFollowDone:
+      return !g_following.load(std::memory_order_relaxed);
     case Condition::kRoam: {
       float xyz[3];
       return ReadWord(kLeftTitle) == 1 && GameState() == 0 && ReadWord(kCityPending) == 0 &&
@@ -1953,7 +1963,7 @@ std::string Execute(const std::string& line) {
   if (cmd == "wait_until" || cmd == "press_until") {
     // wait_until <condition> [timeout]
     // press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
-    // Conditions: left_title, loading, roam, frames N, u32|f32 <addr> <op> <value>.
+    // Conditions: left_title, loading, roam, follow_done, frames N, u32|f32 <addr> <op> <value>.
     const size_t first = cmd == "press_until" ? 2 : 1;
     const uint16_t bit = cmd == "press_until" ? ButtonBit(arg(1)) : 0;
     if (cmd == "press_until" && !bit) {

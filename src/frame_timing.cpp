@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -109,6 +110,7 @@ namespace {
 // The engine timer object lives at a fixed guest address (sub_821BDA90).
 constexpr uint32_t kGuestFrameDelta = 0x827D7508;  // seconds, time-scaled
 constexpr uint32_t kGuestFrameRate = 0x827D750C;   // 1 / delta
+constexpr uint32_t kGuestTimer = 0x827D7500;       // the timer object's base: +16 time since the mode loaded, +20 total, +32 fixed step
 
 // Longest time one frame may advance the game clock. A streaming stall must
 // not reach physics and audio as one huge step.
@@ -128,6 +130,9 @@ bool OriginalTiming() {
 // Frame generation counts as on while the SDK's frame_generation asks for it and
 // has not said it can't run (Presenter::GetFrameGenerationStatus).
 uint64_t NowMicros();
+
+// Once per engine update (mcla_ui_pace_log; defined with the UI movie hooks below).
+void UiPaceLogTick();
 
 int32_t CapFromSettings() {
   const int32_t fps = REXCVAR_GET(mcla_fps);
@@ -766,6 +771,7 @@ void mcla_frame_delta(PPCRegister& r8) {
   MclaTickPerfOptions();
   MclaTickSettingsMenu();
   MclaDevPadFrame(r8.u64);
+  UiPaceLogTick();
   if (OriginalTiming()) {
     return;
   }
@@ -1036,6 +1042,24 @@ REXCVAR_DEFINE_BOOL(mcla_ui_interp_stats, false, "MCLA",
                     "total and worst time), for measuring its cost; cheap enough to leave on while "
                     "measuring frame times (the logging options above are not)");
 
+// Race finish check (launcher/dev/race-finish-2026-10-29.md). LARecomp (mzzvxm/LARecomp, commit 7b9726e) reports
+// that with the 30 Hz pacing of the UI movies the race finish screens, the podium and the results run in slow
+// motion, and exempts movies with HUD, RACE, POST, RESULT, PODIUM, CINE or END in their names from it. Whether
+// that happens in this build, and with which movie, is for the measurement (mcla_ui_pace_log). Until it is known
+// these two options change nothing by default.
+REXCVAR_DEFINE_STRING(mcla_ui_movie_rates, "", "MCLA",
+                      "Development: steps a second for chosen UI movies instead of the usual rule (30 with "
+                      "mcla_ui_interpolate, else mcla_ui_menu_rate and mcla_ui_hud_rate). A comma list of "
+                      "NAME=RATE: NAME is a movie's name (POPUPMOVIE; a trailing * matches a prefix, a lone "
+                      "* every movie, HUDGAUGE is the gauge movie of the HUD); RATE is a number a second "
+                      "(0: every update, as without mcla_ui_timing_fix) or 'game' (the inverse of the "
+                      "engine timer's own step, 30 on the console). Empty (the default): the usual rule for "
+                      "every movie");
+REXCVAR_DEFINE_BOOL(mcla_ui_pace_log, false, "MCLA",
+                    "Development: once a second, log how many engine updates there were, for each UI movie "
+                    "how many times the engine asked to advance it and how many of those advanced it, and the "
+                    "engine timer's clocks (for telling what runs at what speed in the race finish sequence)");
+
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
 // count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
@@ -1153,9 +1177,164 @@ void NoteUiStep(size_t slot, uint64_t step_us, uint32_t period_us) {
   s.step_us.store(step_us, std::memory_order_relaxed);
   s.serial.fetch_add(1, std::memory_order_release);
 }
+
+// --- mcla_ui_movie_rates: a rate for chosen movies ---
+constexpr int32_t kRateNone = -1;  // no entry for the movie: the usual rule
+constexpr int32_t kRateGame = -2;  // 'game': the inverse of the engine timer's own step
+
+std::string TrimmedCopy(const std::string& text) {
+  size_t begin = 0, end = text.size();
+  while (begin < end && text[begin] == ' ') {
+    begin++;
+  }
+  while (end > begin && text[end - 1] == ' ') {
+    end--;
+  }
+  return text.substr(begin, end - begin);
+}
+
+// The rate the list gives the movie called name (the first item that matches), kRateNone if it gives none.
+int32_t UiMovieRateFor(const std::string& list, const char* name) {
+  size_t pos = 0;
+  while (pos <= list.size()) {
+    size_t end = list.find(',', pos);
+    if (end == std::string::npos) {
+      end = list.size();
+    }
+    const std::string item = list.substr(pos, end - pos);
+    pos = end + 1;
+    const size_t eq = item.find('=');
+    if (eq == std::string::npos) {
+      continue;
+    }
+    const std::string pattern = TrimmedCopy(item.substr(0, eq));
+    const std::string value = TrimmedCopy(item.substr(eq + 1));
+    bool match = pattern == name;
+    if (!match && !pattern.empty() && pattern.back() == '*') {
+      match = std::strncmp(name, pattern.c_str(), pattern.size() - 1) == 0;
+    }
+    if (!match) {
+      continue;
+    }
+    if (value == "game") {
+      return kRateGame;
+    }
+    char* tail = nullptr;
+    const long rate = std::strtol(value.c_str(), &tail, 10);
+    return (tail != value.c_str() && *tail == 0 && rate >= 0 && rate <= 240) ? int32_t(rate) : kRateNone;
+  }
+  return kRateNone;
+}
+
+// What the engine timer's own step says the game runs at: [timer + 32] is its fixed step in seconds (1/30 on the
+// console), kept from before this build replaced it with the real elapsed time. Not a step (0, or something odd): fallback.
+int32_t GameStepRate(int32_t fallback) {
+  const float step = ReadGuestFloat(kGuestTimer + 32);
+  if (step > 1.0f / 240.0f && step < 1.0f / 15.0f) {
+    return int32_t(std::lround(1.0 / double(step)));
+  }
+  return fallback;
+}
+
+// --- mcla_ui_pace_log: what the engine asks of the UI movies, and what the timer's clocks do ---
+struct UiPaceCount {
+  uint32_t context = 0;
+  uint32_t calls = 0;     // asks to advance in the one-frame mode (the mode the UI manager uses)
+  uint32_t steps = 0;     // of them, those that were let through
+  uint32_t dt_calls = 0;  // asks in the elapsed-time mode (never held back by the pacing)
+};
+std::mutex g_pace_mutex;
+std::array<UiPaceCount, 48> g_pace;
+uint32_t g_pace_updates = 0;
+uint64_t g_pace_window_us = 0;
+
+void CountUiAdvance(uint32_t context, bool one_frame, bool stepped) {
+  std::lock_guard lock(g_pace_mutex);
+  UiPaceCount* slot = nullptr;
+  UiPaceCount* spare = nullptr;
+  for (UiPaceCount& c : g_pace) {
+    if (c.context == context) {
+      slot = &c;
+      break;
+    }
+    if (!c.context && !spare) {
+      spare = &c;
+    }
+  }
+  if (!slot) {
+    slot = spare ? spare : &g_pace[context % g_pace.size()];
+    *slot = {};
+    slot->context = context;
+  }
+  if (one_frame) {
+    slot->calls++;
+    slot->steps += stepped ? 1 : 0;
+  } else {
+    slot->dt_calls++;
+  }
+}
 }  // namespace
 
+namespace {
+void UiPaceLogTick() {
+  if (!REXCVAR_GET(mcla_ui_pace_log)) {
+    return;
+  }
+  const uint64_t now = NowMicros();
+  std::lock_guard lock(g_pace_mutex);
+  g_pace_updates++;
+  if (!g_pace_window_us) {
+    g_pace_window_us = now;
+    g_pace_updates = 0;
+    return;
+  }
+  if (now - g_pace_window_us < 1'000'000) {
+    return;
+  }
+  std::string movies;
+  for (UiPaceCount& c : g_pace) {
+    if (!c.context) {
+      continue;
+    }
+    if (!c.calls && !c.dt_calls) {
+      c = {};  // not asked about in this window: the movie is gone
+      continue;
+    }
+    char name[32];
+    if (!UiScreenName(c.context, name)) {
+      std::snprintf(name, sizeof name, "HUDGAUGE");
+    }
+    const uint32_t definition = ReadGuestU32(c.context + 28);
+    const uint32_t swf_fps = definition ? (ReadGuestU32(definition + 48) >> 16) : 0;
+    char entry[96];
+    std::snprintf(entry, sizeof entry, " %s:%08X:%u:%u/%u/%u", name, c.context, swf_fps, c.calls, c.steps, c.dt_calls);
+    movies += entry;
+    c.calls = c.steps = c.dt_calls = 0;
+  }
+  const double span_ms = double(now - g_pace_window_us) / 1000.0;
+  REXLOG_INFO(
+      "ui pace: span_ms={:.1f} updates={} movies(name:ctx:swf_fps:calls/steps/dtcalls){} | timer dt={:.5f} rate={:.2f} "
+      "mode_t={:.3f} total_t={:.3f} total2_t={:.3f} step={:.5f} scale={:.3f} frames={} state={}",
+      span_ms, g_pace_updates, movies.empty() ? " none" : movies, ReadGuestFloat(kGuestTimer + 8),
+      ReadGuestFloat(kGuestTimer + 12), ReadGuestFloat(kGuestTimer + 16), ReadGuestFloat(kGuestTimer + 20),
+      ReadGuestFloat(kGuestTimer + 24), ReadGuestFloat(kGuestTimer + 32), ReadGuestFloat(kGuestTimer + 84),
+      ReadGuestU32(kGuestTimer + 44), ReadGuestU32(0x8288D000));
+  g_pace_window_us = now;
+  g_pace_updates = 0;
+}
+}  // namespace
+
+static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31);
+
 bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
+  const bool hold = UiMovieAdvance(r25, r31);
+  if (REXCVAR_GET(mcla_ui_pace_log)) {
+    CountUiAdvance(r31.u32, r25.u32 != 0, !hold);
+  }
+  return hold;
+}
+
+static bool UiMovieAdvance(PPCRegister& r25, PPCRegister& r31) {
   if (OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || r25.u32 == 0 ||
       !g_engine_timer_started.load(std::memory_order_relaxed)) {
     return false;
@@ -1168,6 +1347,7 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
     uint32_t input_seq;   // the last key event this movie has looked at
     bool screen;
     char name[32];
+    int32_t rate;         // mcla_ui_movie_rates for this movie: kRateNone, kRateGame or steps a second
   };
   static std::mutex mutex;
   static std::array<Schedule, 32> schedules{};
@@ -1184,11 +1364,13 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   }
   if (!schedule) {
     schedule = &schedules[replace++ % schedules.size()];
-    *schedule = {context, 0, 0, 0, g_ui_input_seq.load(std::memory_order_acquire), false, {}};
+    *schedule = {context, 0, 0, 0, g_ui_input_seq.load(std::memory_order_acquire), false, {}, kRateNone};
   }
   if (now - schedule->checked_us > 1'000'000) {
     schedule->checked_us = now;
     schedule->screen = IsUiScreen(context, schedule->name);
+    const std::string rates = REXCVAR_GET(mcla_ui_movie_rates);
+    schedule->rate = rates.empty() ? kRateNone : UiMovieRateFor(rates, schedule->name[0] ? schedule->name : "HUDGAUGE");
   }
   const size_t slot = size_t(schedule - schedules.data());
   TouchUiStep(slot, context, now, schedule->name[0] ? schedule->name : "HUDGAUGE");
@@ -1198,8 +1380,12 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
   // With the interpolation on, every movie steps 30 times a second (the SWF files' own rate, the console's)
   // whatever the two rate options say: the glide supplies the frames in between, nothing runs faster.
   const bool smooth = REXCVAR_GET(mcla_ui_interpolate);
+  // A rate from mcla_ui_movie_rates replaces the usual one for that movie.
+  auto rate_for = [&](int32_t usual) {
+    return schedule->rate == kRateNone ? usual : schedule->rate == kRateGame ? GameStepRate(usual) : schedule->rate;
+  };
   if (schedule->screen) {
-    const int32_t menu_rate = smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_menu_rate);
+    const int32_t menu_rate = rate_for(smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_menu_rate));
     if (menu_rate <= 0) {
       if (log_adv) {
         REXLOG_INFO("ui adv: {} ctx={:08X} t={}.{:03} ms in=0", schedule->name, context, now / 1000, now % 1000);
@@ -1218,7 +1404,7 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
                  now - schedule->input_us >= kUiInputGapUs;
     }
   } else {
-    const int32_t hud_rate = smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_hud_rate);
+    const int32_t hud_rate = rate_for(smooth ? kUiInterpSteps : REXCVAR_GET(mcla_ui_hud_rate));
     if (hud_rate <= 0) {
       return false;
     }
