@@ -38,6 +38,7 @@ int scePadOpen(int user_id, int type, int index, const void* param);
 int scePadGetHandle(int user_id, int type, int index);
 int scePadReadState(int handle, void* data);
 int scePadSetVibration(int handle, const void* param);
+int scePadSetVibrationMode(int handle, int mode);
 }
 
 // Set when L3, R3 and the touchpad are all held: the host takes a sampling
@@ -66,6 +67,15 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
         static_cast<uint32_t>(user_service), static_cast<uint32_t>(pad_init),
         static_cast<uint32_t>(user_id), static_cast<uint32_t>(user_result),
         static_cast<uint32_t>(handle_));
+    if (handle_ >= 0) {
+      // A DualSense opens in advanced vibration mode, where scePadSetVibration's
+      // two motor levels move nothing. Compatible mode (2) drives the
+      // actuators from them, as on a DualShock 4.
+      constexpr int kVibrationModeCompatible = 2;
+      const int mode_result = scePadSetVibrationMode(handle_, kVibrationModeCompatible);
+      REXLOG_INFO("PS5 pad: scePadSetVibrationMode(compatible) 0x{:08X}",
+                  static_cast<uint32_t>(mode_result));
+    }
     return handle_ >= 0 ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
   }
 
