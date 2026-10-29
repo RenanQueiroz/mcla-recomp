@@ -1386,6 +1386,9 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
   }
 
   std::lock_guard lock(g_inst_mutex);
+  if (g_inst.bucket_count() < 4096) {
+    g_inst.reserve(4096);  // a menu opening adds a few hundred nodes at once: no rehash in the middle of a frame
+  }
   UiFrameTime& frame_time = g_frame_time[size_t(step - g_ui_step.data()) % g_frame_time.size()];
   const uint64_t real_now = NowMicros();
   if (frame_time.calls != calls || real_now - frame_time.now_us > 6000) {
@@ -1404,6 +1407,11 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
         REXLOG_INFO("ui interp step: {} ser={} moved={} cx={} fresh={} snapped={} gap={} max_move={:.1f}px tracked={}",
                     step->name, census->serial, census->moved, census->cx, census->fresh, census->snapped, census->gap,
                     census->max_move, tracked);
+      }
+      if (!census->serial) {
+        // First time this context is seen drawn: its file's frame rate (the u16 at [[ctx+28]+48]), for the notes.
+        REXLOG_INFO("ui interp movie: {} ctx={:08X} swf_fps={} period={} us", step->name, ctx,
+                    LoadU16(ReadGuestU32(ctx + 28) + 48), period_us);
       }
       *census = {};
       census->serial = serial;

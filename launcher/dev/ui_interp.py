@@ -134,6 +134,7 @@ RE_INTERP = re.compile(
     r"live=\(([-\d.]+),([-\d.]+)\) shown=\(([-\d.]+),([-\d.]+)\) world=\(([-\d.]+),([-\d.]+)\) applied=(\d)")
 RE_CHECK = re.compile(r"ui interp check: nodes=(\d+) matrix_off=(\d+) \(worst ([\d.]+)\) cxform_off=(\d+) gliding=(\d+) applied=(\d+)")
 RE_STEP = re.compile(r"ui interp step: (\S+) ser=(\d+) moved=(\d+) cx=(\d+) fresh=(\d+) snapped=(\d+) gap=(\d+) max_move=([\d.]+)px tracked=(\d+)")
+RE_MOVIE = re.compile(r"ui interp movie: (\S+) ctx=([0-9A-F]{8}) swf_fps=(\d+) period=(\d+) us")
 RE_ADV = re.compile(r"ui adv: (\S+) ctx=([0-9A-F]{8}) t=(\d+)\.(\d{3}) ms in=(\d)")
 
 
@@ -147,6 +148,7 @@ def parse(text):
     cur = None
     phase = "all"
     checks = []
+    movies = {}
     for line in text.splitlines():
         m = LOG_LINE.match(line)
         body = m.group(6) if m else line
@@ -175,6 +177,10 @@ def parse(text):
                    "world": (float(g[11]), float(g[12])), "applied": int(g[13])}
             cur["phases"].setdefault(phase, []).append(row)
             continue
+        mmv = RE_MOVIE.search(body)
+        if mmv:
+            movies[mmv.group(1)] = (int(mmv.group(3)), int(mmv.group(4)))
+            continue
         mst = RE_STEP.search(body)
         if mst and cur is not None:
             g = mst.groups()
@@ -188,7 +194,7 @@ def parse(text):
         mc = RE_CHECK.search(body)
         if mc:
             checks.append(tuple(int(x) if i != 2 else float(x) for i, x in enumerate(mc.groups())))
-    return cells, checks
+    return cells, checks, movies
 
 
 def movers(rows):
@@ -304,8 +310,10 @@ def report(folder, out=None, shots=None, plot_path=None, echo=True):
     folder = Path(folder)
     log = folder / "game.log"
     text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
-    cells, checks = parse(text)
+    cells, checks, movies = parse(text)
     lines = [f"ui_interp report of {folder}", f"{len(cells)} cells, {sum(len(r) for c in cells for r in c['phases'].values())} interp rows, {len(checks)} self-check lines"]
+    lines.append("movies seen drawn (the SWF's own frame rate, the pace they are stepped at): " + (", ".join(
+        f"{n} swf {fps}/s stepped every {per / 1000:.1f} ms" for n, (fps, per) in sorted(movies.items())) or "none"))
     verdict = []
     results = {}
     for cell in cells:
