@@ -2,6 +2,7 @@
 
 #include "mcla_app.h"
 #include "automatic_api.h"
+#include "pc_triggers.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -1124,12 +1125,14 @@ void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
 bool MclaApp::OnWindowCloseRequested() {
   MclaWaitForSaves();
   MclaSaveMenuSettings();
+  MclaPcTriggersShutdown();  // the DualSense's triggers back to slack: the process ends without further notice
   MclaPumpWakeShutdownBegins();  // the window closes now: the title is terminated next
   return true;
 }
 
 void MclaApp::OnGuestThreadExit(rex::system::XThread* thread) {
   (void)thread;
+  MclaPcTriggersShutdown();  // every way the title ends comes here, QUIT GAME and the dev pad's close included
   MclaPumpWakeShutdownBegins();
 }
 
@@ -1138,6 +1141,7 @@ void MclaApp::OnPostSetup() {
   FollowCursorSetting();
 
   MclaDevPadStart(window(), imgui_drawer());
+  MclaPcTriggersStart();
 
   // The game probes for loose city data on a "t:" drive that retail consoles
   // do not have. Give it a device so the probes fail with "not found" rather

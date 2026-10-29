@@ -1,0 +1,15 @@
+# The window's close button with the DualSense triggers in use (src/pc_triggers.cpp): boot to free roam, a few seconds of throttle
+# (the triggers are on), then `close` (WM_CLOSE, the path of the close button and Alt+F4: MclaApp::OnWindowCloseRequested). The log must show both
+# triggers released ("-> off ... (shutdown)") before the game's "hard-exiting". Run with the same options as pc-triggers.pad.
+include boot-to-roam.pad
+mark trig_close_drive
+trigger rt 1 50f
+trigger rt 0.6
+stick lx 1 40f
+trigger rt 1
+wait 4s 240f
+log TRIG close: WM_CLOSE with the triggers on
+mark trig_close
+close
+wait 20s
+mark trig_close_end

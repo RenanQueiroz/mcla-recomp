@@ -1,0 +1,69 @@
+# The DualSense trigger states of src/pc_triggers.cpp in one drive in free roam (development; run with
+# --mcla_adaptive_triggers=true --mcla_trigger_log=true --mcla_trigger_release_unfocused=false, and
+# --mcla_trigger_fake_device=true when no DualSense is connected). The checks read the log's "pc triggers:" lines
+# between the marks (C:\mcv\pctrig\chain\run_triggers.py). Segments:
+#   title, map_zoom, free_roam   as boot-to-roam.pad: no effect may be sent before the car is driven
+#   trig_idle       standing at the spawn point: the throttle spring on R2 and the brake resistance on L2
+#   trig_throttle1  full throttle out of the car park (as drive-spawn.pad) and straight on: gear changes, the shift speeds are learnt
+#   trig_brake      full brake to a stop
+#   trig_throttle2  full throttle again from a standstill: R2 buzzes near the top of the first gear
+#   trig_nitro      X held (the nitro): R2 buzzes while it burns
+#   trig_pause      Start with the car moving: both triggers slack; Start again: back
+#   trig_option     mcla_adaptive_triggers off and on
+#   trig_focus      the window minimised with mcla_trigger_release_unfocused on, then restored
+#   trig_end        the end of the script: the game quits (mcla_pad_exit_on_end) and releases the triggers
+include boot-to-roam.pad
+log TRIG idle: standing at the spawn point
+mark trig_idle
+wait 3s 120f
+log TRIG throttle1: full throttle out of the car park, straight on
+mark trig_throttle1
+trigger rt 1 50f
+trigger rt 0.6
+stick lx 1 40f
+trigger rt 1
+wait 12s 600f
+log TRIG brake: full brake to a stop
+mark trig_brake
+trigger rt 0
+trigger lt 1
+wait 7s 300f
+trigger lt 0
+wait 2s 60f
+log TRIG throttle2: full throttle from a standstill
+mark trig_throttle2
+trigger rt 1
+wait 5s 240f
+log TRIG nitro: X held with the throttle floored
+mark trig_nitro
+down x
+wait 4s 180f
+up x
+wait 2s 60f
+log TRIG pause: Start with the car moving
+mark trig_pause
+press start 4f
+wait 3s 150f
+log TRIG pause: Start again
+press start 4f
+wait 3s 150f
+log TRIG option: off
+mark trig_option
+set mcla_adaptive_triggers false
+wait 2s 60f
+log TRIG option: on
+set mcla_adaptive_triggers true
+wait 2s 60f
+log TRIG focus: window minimised
+mark trig_focus
+set mcla_trigger_release_unfocused true
+window minimize
+wait 3s
+log TRIG focus: window restored
+window restore
+wait 3s
+set mcla_trigger_release_unfocused false
+wait 2s
+release all
+log TRIG end
+mark trig_end

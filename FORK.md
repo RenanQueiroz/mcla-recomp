@@ -337,6 +337,8 @@ pointed at a Visual Studio with the C++ tools, the SDK build folder started agai
 Windows SDK changes (issue 21), and the PS5's QUIT GAME that lets a save finish
 (`src/save_wait.cpp`, which now also holds the dev pad's `MclaSaveInProgress`).
 
+Merge of 2026-10-29: Zaid Naeem's DualSense work for the PS5 (pull requests 29 and 30: the game's rumble in the pad's compatible mode, haptics from the game's sound and the car, adaptive triggers on R2 and L2; `ps5/game/ps5_haptics.h`, `ps5_triggers.h`), the car telemetry those read (`src/vehicle_telemetry.cpp`, `config/vehicle_telemetry.toml`, built into the PC game too, where it only records the car's state), and the telemetry hook that keeps running in the pause menu. Taken as is; the fork only merged the file lists (`CMakeLists.txt`, `mcla_manifest.toml`, `ps5/game/build.sh`) and put the README note in `docs/building.md`. None of it was built or run on a console by the fork. On the PC the same telemetry drives the DualSense's adaptive triggers (`src/pc_triggers.cpp`, through SDL3, off by default; `KNOWN-ISSUES.md`): the PS5 code's behaviour and option names, written again for SDL, with no SDK patch.
+
 ```
 git remote add upstream https://github.com/holdmysocks/mcla-recomp.git
 git fetch upstream
