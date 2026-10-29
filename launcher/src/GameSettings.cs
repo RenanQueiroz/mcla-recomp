@@ -298,7 +298,19 @@ static class GameSettings
              + "needles; 30 is the console's pace, with the needles in steps and the song title scrolling at "
              + "its original speed. At 60 and 120 the title scrolls two and four times as fast. Every frame "
              + "follows the frame rate: the smoothest needles, with the title scrolling faster still at high "
-             + "frame rates. Menus and pop-ups keep the console's pace whatever you pick.",
+             + "frame rates. Menus and pop-ups have their own setting, Menu updates.",
+    };
+    // 30 a second by default, the console's pace (src/frame_timing.cpp, mcla_ui_menu_rate); the pause
+    // menu's DISPLAY > MENU UPDATES sets the same option, so a change in either shows in the other.
+    public static readonly GameSetting MenuRate = new("mcla_ui_menu_rate", "Menu updates",
+        [new("30 per second (as on the console)", 30L), new("60 per second", 60L),
+         new("120 per second", 120L), new("Every frame", 0L)], 30L)
+    {
+        Info = "How many times a second the menus, the pause menu and pop-ups move. 30 (the default) is the "
+             + "console's pace: their animations run at their original speed, and a button press is still "
+             + "answered on the next frame. A higher rate makes every menu animation faster: 60 twice as "
+             + "fast, 120 four times as fast. Every frame follows the frame rate. Changes during play in the "
+             + "pause menu.",
     };
     public static readonly GameSetting GraphicsApi = new("mcla_gpu_backend", "Graphics API",
         [new("Automatic (default)", "any"),
@@ -496,7 +508,7 @@ static class GameSettings
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0, string? recommendedApi = null) =>
         [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
-         Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, GraphicsApiFor(recommendedApi)];
+         Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, HudRate, MenuRate, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Language, Intro, Prompts];

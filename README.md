@@ -56,7 +56,7 @@ In the launcher, and in the pause menu's Settings tab (resolution and graphics A
 | HDR | Off, **Auto**, On | Auto turns it on whenever Windows has HDR on for the display. Peak brightness, paper white and highlights are in the launcher too. |
 | NVIDIA Reflex / AMD Anti-Lag 2 | **Default**, Off, On, On + Boost | Less input lag when the GPU is the limit: on an RTX 5080 at 3x the time to the screen went from 22 to 8 ms, at a cost of 3 to 5% of the frame rate on Direct3D 12. On by default for NVIDIA, off for AMD (untested); always on with frame generation. |
 
-The launcher also has display (fullscreen or windowed), display gamma, screen scaling filter, HUD updates, intro, button prompts, language and player name. Every setting with its `mcla.toml` key: [docs/settings.md](docs/settings.md).
+The launcher also has display (fullscreen or windowed), display gamma, screen scaling filter, HUD updates, menu updates, intro, button prompts, language and player name. Every setting with its `mcla.toml` key: [docs/settings.md](docs/settings.md).
 
 ## Turning a change off
 

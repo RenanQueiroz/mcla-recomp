@@ -6,7 +6,7 @@
 
 - DISPLAY has 16 rows (15 before). Pads that count them: `menu_input.py` (`ui_count == 16`, PEAK BRIGHTNESS is row 11, was 10) and `scripts/menu-pages.pad` (the bottom of DISPLAY is 15 presses of down, was 14).
 - The page's width should not change: the longest label is GRAPHICS API (RESTART) (263 glyph pixels) and the longest value 120 PER SECOND (169), the movie sizes a list to those two; MENU UPDATES is about 160 and its values are HUD UPDATES'. Text level 2 shortens " PER SECOND" as it does for HUD UPDATES. No new short form was needed (computed, see Measured).
-- Not added to the launcher. It would take one `GameSetting` in `launcher/src/GameSettings.cs` next to `HudRate` (key `mcla_ui_menu_rate`, label "Menu updates", the same four choices, default 30), its place in `GraphicsFor`, a sentence in the Info text, and the rows in `docs/settings.md` and `launcher/README.md`; no old-settings migration (the launcher never forced this one).
+- Added to the launcher (branch `feat/launcher-menu-rate`): one `GameSetting`, `MenuRate`, in `launcher/src/GameSettings.cs` after `HudRate` (key `mcla_ui_menu_rate`, label "Menu updates", the same four choices, default 30) and in `GraphicsFor` right after it, an Info text, and the rows in `docs/settings.md` and `launcher/README.md`; no old-settings migration (the launcher never forced this one). The launcher and the pause menu share `mcla.toml`, so each shows what the other set. The launcher greys it out while the game runs, as every setting.
 
 ## The check (`menu_rate_row.py`, a chain of one build and four game runs)
 
