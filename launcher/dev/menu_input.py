@@ -219,15 +219,16 @@ def pad_lines(run_set):
         add("wait_until ui_count < 19 15s")
         add("wait 1200ms")
         if not lag and variant in "ABS":
-            # DISPLAY is the fifth button of the Settings list (the pause list comes back on PERFORMANCE)
+            # DISPLAY is the fifth button of the Settings list (the pause list comes back on PERFORMANCE);
+            # it has 16 rows (15 before MENU UPDATES, 2026-10-29) and PEAK BRIGHTNESS is row 11 (it was 10)
             add("set hdr_peak_nits 0")
             add("press_until up ui_select == 4 every=600ms hold=40ms timeout=30s")
             add("wait 400ms")
             add("press a 40ms")
-            add("wait_until ui_count == 15 20s")
+            add("wait_until ui_count == 16 20s")
             add("wait 1000ms")
             add("log MI page DISPLAY")
-            goto(10)
+            goto(11)
             add("uisel")
             at_cap()
             add("log MI test T5 key=right n=4 expect=4")
@@ -245,7 +246,7 @@ def pad_lines(run_set):
             at_nav()
             reset(0)
             add("press b 40ms")
-            add("wait_until ui_count != 15 15s")
+            add("wait_until ui_count != 16 15s")
             add("wait 1200ms")
         add("log MI end cell")
     if fg:

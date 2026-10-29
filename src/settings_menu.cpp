@@ -453,13 +453,14 @@ constexpr const char* kFrameGenerationLabels[] = {"OFF", "FSR 3.1 (UNTESTED)"};
 // locks the row (ItemChangeable).
 constexpr const char* kLowLatencyValues[] = {"off", "on", "boost"};
 constexpr const char* kLowLatencyLabels[] = {"OFF", "ON", "ON + BOOST"};
-// How often the HUD advances (src/frame_timing.cpp): 0 is every frame.
+// How often the HUD (mcla_ui_hud_rate) and the menus (mcla_ui_menu_rate) advance
+// (src/frame_timing.cpp): 0 is every frame.
 #if REX_PLATFORM_PS5
-constexpr double kHudRates[] = {30.0, 60.0, 0.0};
+constexpr double kUiRates[] = {30.0, 60.0, 0.0};
 #else
-constexpr double kHudRates[] = {30.0, 60.0, 120.0, 0.0};
+constexpr double kUiRates[] = {30.0, 60.0, 120.0, 0.0};
 #endif
-constexpr int kHudRateCount = int(sizeof(kHudRates) / sizeof(kHudRates[0]));
+constexpr int kUiRateCount = int(sizeof(kUiRates) / sizeof(kUiRates[0]));
 #if !REX_PLATFORM_PS5
 // resolution_scale (the SDK's; kRequiresRestart): the render targets, caches
 // and translated shaders are made for one scale when the GPU emulation starts.
@@ -500,7 +501,11 @@ const ItemDef kDisplayItems[] = {
     {"PM_MxLowLatency", ItemKind::kStringChoice, "low_latency", "LOW LATENCY", kLowLatencyValues,
      kLowLatencyLabels, nullptr, 3},
     {"PM_MxHudRate", ItemKind::kNumberChoice, "mcla_ui_hud_rate", "HUD UPDATES", nullptr, nullptr,
-     kHudRates, kHudRateCount, "%.0f PER SECOND", "EVERY FRAME"},
+     kUiRates, kUiRateCount, "%.0f PER SECOND", "EVERY FRAME"},
+    // The menus' own rate, this page included: a higher one makes the highlight and the page
+    // changes arrive sooner and every menu animation run that many times as fast.
+    {"PM_MxMenuRate", ItemKind::kNumberChoice, "mcla_ui_menu_rate", "MENU UPDATES", nullptr,
+     nullptr, kUiRates, kUiRateCount, "%.0f PER SECOND", "EVERY FRAME"},
 #if !REX_PLATFORM_PS5
     // Neither means anything on the console: there is one display mode, and
     // the PS5 host turns the emulated vsync off at every start.

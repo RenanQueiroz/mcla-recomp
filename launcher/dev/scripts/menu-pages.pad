@@ -1,7 +1,7 @@
 # Pictures of the pause menu's settings pages (DISPLAY, PERFORMANCE, CONTROLS) next to the game's own Settings list and its OPTIONS page,
 # once with Xbox prompts and once with PlayStation prompts (the cvar mcla_button_prompts, set live), for a run at any resolution scale.
 # {SHOT} (the folder the pictures go to) and {SCALE} (the pictures' size: 1 for 1x, 0.75 for 2x, 0.5 for 3x) are filled in by whoever starts the run.
-# Each page: its top, its middle and its bottom (the list scrolls; its last rows and its scroll bar are down there).
+# Each page: its top, its middle and its bottom (the list scrolls; its last rows and its scroll bar are down there). DISPLAY has 16 rows (7 downs for the middle, 15 for the bottom), PERFORMANCE 19 (18 for the bottom).
 # The Settings list is OPTIONS, STATISTICS, CHEAT CODES, MUSIC PLAYLISTS, DISPLAY (4 down), PERFORMANCE, CONTROLS; leaving a page puts the selection back on it.
 wait 8s
 mark title
@@ -52,6 +52,8 @@ press down 4f
 wait 300ms 18f
 wait 500ms 30f
 shot {SHOT}/xbox-10-display-mid.png {SCALE}
+press down 4f
+wait 300ms 18f
 press down 4f
 wait 300ms 18f
 press down 4f
@@ -169,6 +171,8 @@ press down 4f
 wait 300ms 18f
 wait 500ms 30f
 shot {SHOT}/ps-10-display-mid.png {SCALE}
+press down 4f
+wait 300ms 18f
 press down 4f
 wait 300ms 18f
 press down 4f
