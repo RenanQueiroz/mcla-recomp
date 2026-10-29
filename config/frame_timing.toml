@@ -108,6 +108,18 @@ address = 0x825EDC6C
 registers = ["r25", "r31"]
 jump_address_on_true = 0x825EDD44
 
+# --- Interpolated UI (development spike, mcla_ui_interpolate) ------------------------------
+# sub_825FB348 is the draw walk over the display tree (swfINSTANCE nodes; r3 = the node, r4 = the parent's
+# state block, whose world matrix is at +24 and world colour transform at +56): it computes the node's
+# world matrix (0x825FB38C-0x825FB454) and then its world colour transform (`bl sub_825F8B20` at
+# 0x825FB480) from the node's local ones, then draws the node or walks its children.
+# 0x825FB484: `lhz r9,170(r30)`, right after both are computed. r30 = the node, r31 = the parent's state
+# block. The hook redoes the node's world values from local values blended between the last two steps.
+[[midasm_hook]]
+name = "mcla_ui_interp_draw"
+address = 0x825FB484
+registers = ["r30", "r31"]
+
 # --- Menu key repeat ----------------------------------------------------------
 # sub_82223CD8 is the UI input object's update (once per UI manager update, called from
 # sub_82224920): for each of the 24 menu inputs (r31 = 0..23; r4 = its key code, -1 for none) it
