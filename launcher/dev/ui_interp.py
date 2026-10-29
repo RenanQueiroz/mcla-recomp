@@ -312,6 +312,15 @@ def parse(text):
         m = LOG_LINE.match(line)
         body = m.group(6) if m else line
         wall = int(m.group(2)) * 3600 + int(m.group(3)) * 60 + int(m.group(4)) + int(m.group(5)) / 1000.0 if m else 0.0
+        if cur is not None and "ui interp: " in body:  # the common line first (hundreds of thousands of them)
+            mi = RE_ROW.search(body)
+            if mi:
+                g = mi.groups()
+                cur["phases"].setdefault(phase, []).append(Row(
+                    g[0], g[1], int(g[2]), int(g[3]), int(g[4]) + int(g[5]) / 1000.0, float(g[6]), (float(g[7]), float(g[8])),
+                    (float(g[9]), float(g[10])), (float(g[11]), float(g[12])), _floats(g[13]), _floats(g[14]),
+                    (int(g[15]), int(g[16]), int(g[17]), int(g[18])) if g[15] is not None else None, int(g[19])))
+                continue
         pm = RE_PADMARK.search(body)
         if pm:
             marks.append((pm.group(1), int(pm.group(3)), int(pm.group(2)), wall))
@@ -345,14 +354,6 @@ def parse(text):
             movies[mmv.group(1)] = (int(mmv.group(3)), int(mmv.group(4)))
             continue
         if cur is None:
-            continue
-        mi = RE_ROW.search(body)
-        if mi:
-            g = mi.groups()
-            cur["phases"].setdefault(phase, []).append(Row(
-                g[0], g[1], int(g[2]), int(g[3]), int(g[4]) + int(g[5]) / 1000.0, float(g[6]), (float(g[7]), float(g[8])),
-                (float(g[9]), float(g[10])), (float(g[11]), float(g[12])), _floats(g[13]), _floats(g[14]),
-                (int(g[15]), int(g[16]), int(g[17]), int(g[18])) if g[15] is not None else None, int(g[19])))
             continue
         mst = RE_STEP.search(body)
         if mst:
