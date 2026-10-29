@@ -1082,7 +1082,9 @@ bool mcla_ui_movie_advance(PPCRegister& r25, PPCRegister& r31) {
 // repeat) have passed, less a quarter of a 30 Hz update; otherwise the count is put back by one so
 // that the next update asks again, and the compare is made to fail. At 30 FPS and below nothing
 // changes (the count is what is slower). The defaults are the console's: 7/30 s and 6/30 s.
-REXCVAR_DEFINE_BOOL(mcla_ui_repeat_fix, false, "MCLA",
+// On by default: measured 2026-10-29 (launcher/dev/menu-input-2026-10-29.md), every tap one
+// key event at 30, 60, 120 FPS and uncapped, at 3x and with frame generation.
+REXCVAR_DEFINE_BOOL(mcla_ui_repeat_fix, true, "MCLA",
                     "Repeat a held menu button or direction after mcla_ui_repeat_delay_ms and then "
                     "every mcla_ui_repeat_interval_ms, as at the console's 30 updates a second, not "
                     "after 7 and every 6 updates (58 and 50 ms at 120 FPS, which made a tap step a "

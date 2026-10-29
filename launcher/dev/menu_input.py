@@ -1,6 +1,6 @@
 """Menu input check: how many steps one press makes (fork-only development tool).
 
-  menu_input.py pad <out.pad> --set res1|res3|fg      write the dev pad script of one run
+  menu_input.py pad <out.pad> --set res1|res3|fg|merged   write the dev pad script of one run
   menu_input.py report <run folder>... [--out FILE]    read the runs' game.log and say what each press did
 
 The script (made by `pad`) takes the game to the pause menu's Settings tab, opens PERFORMANCE and, for
@@ -35,6 +35,10 @@ CAPS = [120, 0, 60, 30]  # the caps that matter first: a run cut short still has
 # (timing fix, repeat fix): A = as shipped in v0.3.0, B = the repeat fix, C = the timing fix off (the
 # workaround), D = both off the shipped way round (timing fix off, repeat fix on).
 VARIANTS = {"A": (1, 0), "B": (1, 1), "C": (0, 0), "D": (0, 1)}
+# S = the build's defaults: the pad changes neither option (their values are read and logged), so it is
+# what a player gets; the log line says timing 1, repeat 1, which are the defaults since the repeat fix
+# became the default. O = the repeat fix off by `set` (the control: it fails above 30 FPS).
+VARIANTS.update({"S": (1, 1), "O": (1, 0)})
 
 KEY_NAMES = {47: "dpad up", 48: "dpad down", 51: "dpad left", 52: "dpad right", 49: "stick up",
              50: "stick down", 53: "stick left", 54: "stick right", 55: "A", 56: "B"}
@@ -95,6 +99,10 @@ def pad_lines(run_set):
     elif run_set == "fg":
         cells = [(60, v) for v in "AB"]
         fg = 1
+    elif run_set == "merged":
+        # the defaults at the caps that matter most, then the control (about 7 minutes in all)
+        cells = [(120, "S"), (0, "S"), (120, "O")]
+        fg = 0
     else:
         raise SystemExit(f"unknown set {run_set}")
     if fg:
@@ -117,8 +125,11 @@ def pad_lines(run_set):
             add("wait 800ms")
 
         add(f"# --- cell {n}: cap {cap}, timing fix {timing}, repeat fix {repeat}, frame generation {fg}")
-        add(f"set mcla_ui_timing_fix {'true' if timing else 'false'}")
-        add(f"set mcla_ui_repeat_fix {'true' if repeat else 'false'}")
+        if variant == "S":
+            add("get mcla_ui_timing_fix mcla_ui_repeat_fix")
+        else:
+            add(f"set mcla_ui_timing_fix {'true' if timing else 'false'}")
+            add(f"set mcla_ui_repeat_fix {'true' if repeat else 'false'}")
         at_nav()
         add(f"log MI cell id={n} variant={variant} cap={cap} timing={timing} repeat={repeat} fg={fg}")
         reset(0)
@@ -185,7 +196,7 @@ def pad_lines(run_set):
         add("press b 40ms")
         add("wait_until ui_count < 19 15s")
         add("wait 1200ms")
-        if variant in "AB":
+        if variant in "ABS":
             # DISPLAY is the fifth button of the Settings list (the pause list comes back on PERFORMANCE)
             add("set hdr_peak_nits 0")
             add("press_until up ui_select == 4 every=600ms hold=40ms timeout=30s")
@@ -373,7 +384,9 @@ def report(paths, out, echo=True):
     text = "\n".join(lines) + "\n"
     if out:
         Path(out).write_text(text, encoding="utf-8")
-    sys.stdout.write(text)
+    if echo:
+        sys.stdout.write(text)
+    return text
 
 
 def main():
@@ -381,7 +394,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("pad")
     a.add_argument("out")
-    a.add_argument("--set", default="res1", choices=["res1", "res3", "fg"])
+    a.add_argument("--set", default="res1", choices=["res1", "res3", "fg", "merged"])
     b = sub.add_parser("report")
     b.add_argument("runs", nargs="+")
     b.add_argument("--out")

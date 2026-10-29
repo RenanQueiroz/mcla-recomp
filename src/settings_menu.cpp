@@ -54,13 +54,10 @@ REXCVAR_DEFINE_INT32(mcla_menu_text_level, 1, "MCLA",
                      "full wording (a page with long texts is wider than the menu's picture holds), 1 "
                      "shortened to fit, 2 shortest")
     .range(0, 2);
-REXCVAR_DEFINE_INT32(mcla_menu_width_cap, 940, "MCLA",
+REXCVAR_DEFINE_INT32(mcla_menu_width_cap, 750, "MCLA",
                      "Development: the pause menu's width (the movie's own units) above which a "
                      "settings page goes to a shorter wording (0 never)")
     .range(0, 4000);
-REXCVAR_DEFINE_BOOL(mcla_menu_legend, true, "MCLA",
-                    "Development: a settings page with restart-only rows says what (R) means under its "
-                    "title (the shorter wording's mark; off: only to see the page without the line)");
 REXCVAR_DEFINE_BOOL(mcla_menu_log_layout, false, "MCLA",
                     "Development: log the pause menu's width and height while a settings page is open");
 
@@ -115,7 +112,6 @@ constexpr uint32_t kStr_PAUSEMOVIE = 0x8201D028;
 constexpr uint32_t kStr_menu = 0x82030A34;
 constexpr uint32_t kStr_tabs_count = 0x8208D4DC;
 constexpr uint32_t kStr_name = 0x8200CC24;
-constexpr uint32_t kStr_description = 0x8208D498;  // the line under the menu's title
 
 // Row object layout.
 constexpr uint32_t kRowObjectSize = 240;
@@ -661,10 +657,13 @@ bool IsFrameGenerationItem(const ItemDef& item) {
 // button prompts sit against the menu's right edge), the list's scroll bar and the ends of
 // the longest values, while the frame around the menu went on to its full width. The
 // pages' own wording (a restart-only row's "(NEXT START)", "ENVIRONMENT MAP UPDATES",
-// "VULKAN (RECOMMENDED)") took the menu to about 1.2 times what the picture holds.
-// mcla_menu_text_level 1, the default, shortens those texts; 2 does it further, and 0 is
-// the full wording. A page still wider than mcla_menu_width_cap (the movie's own number,
-// read back from it: WatchLayout) goes to 2 by itself.
+// "VULKAN (RECOMMENDED)") took the menu to 795 (PERFORMANCE) and 751 (DISPLAY) of the
+// movie's units where the picture holds about 750 to 760 (measured: the hint row was cut at
+// 795, whole at 635).
+// mcla_menu_text_level 1, the default, shortens those texts (a restart-only row says
+// "(RESTART)"); 2 does it further ("(R)"), and 0 is the full wording. A page still wider than
+// mcla_menu_width_cap (the movie's own number, read back from it: WatchLayout) goes to 2 by
+// itself.
 
 // How far down a page's texts go: the setting, or what a page too wide has made of it.
 std::atomic<int> g_auto_text_level{0};
@@ -674,7 +673,7 @@ int TextLevel() {
 }
 
 // The widths of the movie's font's capitals (its glyph table), in the font's own pixels.
-// A text is about 1.7 to 2 menu units to one of them: only for comparing texts, and for the
+// A text is about 0.9 menu units to one of them: only for comparing texts, and for the
 // log's estimate of a page's width.
 int GlyphWidth(char c) {
   switch (c) {
@@ -759,7 +758,7 @@ std::string ShortValue(std::string text, int level) {
   if (level <= 0) {
     return text;
   }
-  ReplaceAll(text, " (NEXT START)", " (R)");
+  ReplaceAll(text, " (NEXT START)", level >= 2 ? " (R)" : " (RESTART)");
   ReplaceAll(text, "(RECOMMENDED)", "(REC.)");
   ReplaceAll(text, "HALF DISPLAY ", "HALF RATE ");
   ReplaceAll(text, "FSR 3.1 NATIVE AA", "FSR NATIVE AA");
@@ -925,7 +924,8 @@ bool RestartOnly(const char* option) {
   return info && info->lifecycle == rex::cvar::Lifecycle::kRequiresRestart;
 }
 
-// A restart-only row says "(NEXT START)", always: the game scales the whole menu
+// A restart-only row says "(NEXT START)" (level 0), "(RESTART)" (1) or "(R)" (2), always,
+// whatever the option's value: the game scales the whole menu
 // to its widest label (the stills of a GRAPHICS API step sequence), so a label
 // that changed its width at the first step ("(RESTART NEEDED)" was longer) made
 // the menu jump bigger and back as the row was stepped. SINGLE TILE RENDERING
@@ -943,7 +943,7 @@ std::string RowLabel(const ItemDef& item) {
   }
   label = ShortLabel(label, level);
   if (RestartOnly(item.option)) {
-    label += level >= 1 ? " (R)" : " (NEXT START)";  // the page says what (R) is (PageLegend)
+    label += level >= 2 ? " (R)" : level >= 1 ? " (RESTART)" : " (NEXT START)";
   }
   if (std::strcmp(item.option, "mcla_single_tile") == 0 && !MclaSingleTileAvailable()) {
     label = level >= 1 ? "SINGLE TILE (N.A.)" : label + " (UNAVAILABLE)";
@@ -1563,7 +1563,8 @@ void SyncRowsFromOptions(int menu) {
 // since the last event. (With mcla_ui_repeat_fix, src/frame_timing.cpp, the game's
 // repeats come 233 ms after the press and then every 200 ms at any frame rate; the
 // steps above are then 1 at the press, 0 at 233 ms, 1 at each repeat to 1.2 s, 4 from
-// there and 16 from 2.2 s. Computed from this function, not yet measured.)
+// there and 16 from 2.2 s. Computed from this function; measured at 120 FPS and uncapped:
+// a hold of 3 s ran PEAK BRIGHTNESS from 450 to 4,000 and back to 300.)
 constexpr uint64_t kHoldGapMs = 100;
 constexpr uint64_t kHoldDelayMs = 400;
 constexpr uint64_t kHoldIntervalMs = 100;
@@ -1703,36 +1704,10 @@ bool ReadMovieInt(uint32_t object, const char* name, int32_t& value) {
   return true;
 }
 
-// The line under the menu's title. The movie gives it room of its own (the list starts
-// below it) and draws it on the pause screen wherever it isn't empty.
-void SetMenuDescription(const char* text) {
-  const uint32_t object = PauseMenuObject();
-  const uint32_t guest_text = GuestText(text);
-  if (object && guest_text) {
-    CallGuest(kSetFlashStrFn, object, kStr_description, guest_text);
-  }
-}
-
-// What a page says under its title when its rows carry marks (RowLabel's "(R)"): none at
-// the full wording, which spells the restart out in the rows.
-constexpr const char* kRestartLegend = "(R) NEXT START";
-
-const char* PageLegend(int menu) {
-  if (TextLevel() < 1 || !REXCVAR_GET(mcla_menu_legend)) {
-    return "";
-  }
-  for (int i = 0; i < kMenus[menu].item_count; ++i) {
-    if (RestartOnly(kMenus[menu].items[i].option)) {
-      return kRestartLegend;
-    }
-  }
-  return "";
-}
-
 // The widest label and the widest value a page can show (any of the values a row steps
 // through), what the movie sizes the menu to, and about what that comes to in its units
-// (the glyph widths times 1.9, and 175 for the room round the two columns: from the
-// movie's script, the factor fitted to screenshots).
+// (245 plus 0.9 of the glyph widths: fitted to the movie's own width of six pages measured
+// in a run, within about 20 units).
 void LogPageText(int menu) {
   const MenuDef& def = kMenus[menu];
   int label_px = 0, value_px = 0;
@@ -1768,7 +1743,7 @@ void LogPageText(int menu) {
       "settings menu: '{}' texts at level {}: widest label '{}' ({} px), widest value '{}' ({} px), "
       "about {} wide",
       def.label, TextLevel(), widest_label, label_px, widest_value, value_px,
-      int(175 + 1.9 * (label_px + value_px)));
+      int(245 + 0.9 * (label_px + value_px)));
 }
 
 // While a page is open: the menu's width and height as the movie has them, logged when
@@ -1863,9 +1838,6 @@ void ShowSubmenu() {
   uint32_t menu_object = CallGuest(kGetFlashObjFn, context, HashString("menu"), kStr_menu);
   if (menu_object && title) {
     CallGuest(kSetFlashStrFn, menu_object, kStr_name, title);
-  }
-  if (TextLevel() >= 1) {
-    SetMenuDescription(PageLegend(menu));
   }
 }
 
@@ -2292,9 +2264,6 @@ bool mcla_menu_cancel(PPCRegister& r31) {
   RestorePauseList();
   if (uint32_t strip = g_pause_tab_strip.exchange(0, std::memory_order_relaxed)) {
     CallGuest(kTabStripRenderFn, strip);
-  }
-  if (TextLevel() >= 1) {
-    SetMenuDescription("");  // the Settings tab has none
   }
   g_layout_watch.Reset();
   SaveSettingsIfChanged();
