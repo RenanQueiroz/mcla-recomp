@@ -1,0 +1,26 @@
+# Title screen input: a probe and an option (src/pad_probe.cpp). Off unless --mcla_pad_probe=true
+# or --mcla_title_edge_hold_ms=N is given: each hook starts with one cvar read.
+
+# 0x82615048: in sub_82614D30 (the per-pad update, once per game update), where the branches that
+# set the button bits of the pad record's new mask (+8) meet. r31 = the pad record
+# (0x82905388 + 64 * pad); +12 holds the previous mask.
+[[midasm_hook]]
+name = "mcla_pad_probe_update"
+address = 0x82615048
+registers = ["r31"]
+
+# 0x822C8030: `cntlzw r11,r3` in sub_822C7FC8, a script native "was this button just pressed":
+# r3 = ((new xor previous) and new) and (1 << button), r11 = the pad record, r30 = the button
+# number. Changing r3 changes the answer.
+[[midasm_hook]]
+name = "mcla_pad_probe_native"
+address = 0x822C8030
+registers = ["r3", "r11", "r30"]
+
+# 0x822240E4: `clrlwi r11,r30,24` in sub_82223CD8 (the UI input object's update), after a menu key
+# down was sent to sub_82209C38 (both ways meet here). r30 = whether the scene stack took it,
+# r31 = the input, r4 = its key code or -1.
+[[midasm_hook]]
+name = "mcla_pad_probe_key"
+address = 0x822240E4
+registers = ["r30", "r31", "r4"]
