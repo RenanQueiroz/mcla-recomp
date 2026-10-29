@@ -1036,6 +1036,16 @@ REXCVAR_DEFINE_BOOL(mcla_ui_interp_stats, false, "MCLA",
                     "total and worst time), for measuring its cost; cheap enough to leave on while "
                     "measuring frame times (the logging options above are not)");
 
+// The pause menu is not only 2D: it moves a camera and 3D panels (below). Those are not display-list
+// elements, so the draw hook above never sees them. They come from the movie's script, which sets a few
+// numbers in 30 Hz steps; the game reads them again on every update (the camera) and every drawn frame (the
+// panels). The reads are blended here as the elements are above: one step behind, the same fraction of the
+// step.
+REXCVAR_DEFINE_BOOL(mcla_ui_interp_camera, true, "MCLA",
+                    "With mcla_ui_interpolate: also draw the pause menu's 3D between the movie's last two "
+                    "steps: the camera that swings in when the menu opens, between its pages and out "
+                    "again, and the place, size and turn of the 3D panels. Off leaves them in 30 Hz steps");
+
 namespace {
 // The UI manager and its movie map (atMap name -> movie**: buckets at +60,
 // count at +64; node: +0 name, +8 movie**, +12 next; movie: +56 player
@@ -1649,6 +1659,307 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
       c = {now, t1, 0, 0, 0, g_check_glide, g_check_applied};
     }
   }
+}
+
+// Interpolated UI, the 3D side (mcla_ui_interp_camera; launcher/dev/ui-camera-2026-10-29.md). Besides the
+// display list the pause menu moves a camera and 3D panels. Read from the recompiled game and the movie's
+// script (not run before the check chain):
+//  - The camera. The player context of every UI movie is of one class (vtable 0x820CACB8) whose advance,
+//    sub_827238B0, steps the movie and then reads the script's `player0_cam_ctrl` (the blend between the game's
+//    own view and the menu's, 0 to 1: the script moves it 3 percent of a sin/acos curve per step) and, when it is
+//    not 0, builds a view matrix (sub_82723570, at ctx+496) from the camera the script keeps in `player0_cam`
+//    (`position`, `lookat`, `fovy`, each eased toward the page's camera by 1/5 to 1/15 of the distance per
+//    step). The UI manager's update (sub_821FC588) copies matrix, blend and field of view into itself (+4336,
+//    +4200, +4404) and the game's camera (sub_8220AA68) mixes them with its own view in every update. The script's numbers change
+//    only when the movie steps, so the camera moved 30 times a second whatever the frame rate.
+//  - The panels. The page is drawn on a quad in the world: the script keeps a scene graph (`menu_group`,
+//    `screen_mesh`, ...) whose `rot`, `scale`, `trans` (the page's size follows the list's by a third per step,
+//    its place by a fifth) and `_alpha` the draw (sub_82724CF0 and what it calls) reads in every drawn frame.
+// Everything is read through two small functions: one for an array of three numbers (sub_82722440) and one for
+// a number (sub_822222F0). The hooks at the end of each blend what they read, by the same rule as the display list
+// above (the step's value is reached one step period after the step; a cut is shown at once), but only inside the
+// advance (between the hooks at 0x827238F8 and 0x82723934) and the scene draw (the hooks at the entry and at the
+// end of sub_82724CF0): a script's own call into the game's camera (sub_822082D8) and everything else keeps what
+// it read.
+namespace {
+// The swfCONTEXT whose script values this thread is reading for the camera or the panels; 0 anywhere else.
+thread_local uint32_t t_scene_ctx = 0;
+thread_local float t_scene_ctrl_live = 0.0f;  // the last blend value the script set, for the log
+
+constexpr uint32_t Fnv1a(const char* s) {
+  uint32_t h = 2166136261u;
+  while (*s) {
+    h = (h ^ uint32_t(uint8_t(*s++))) * 16777619u;
+  }
+  return h;
+}
+
+enum class SceneKind { kVec, kScalar, kCtrl };
+
+struct SceneSpec {
+  const char* name;
+  uint32_t hash;
+  SceneKind kind;
+  double snap;  // a change longer than this (distance of the numbers) is a cut, shown at once
+};
+// What is blended, by the name the game asks for. The limits are far above one eased step of the script
+// (a few tenths of a unit for the camera and the panels) and below its jumps (the 2D layout's camera is 46
+// units away from the 3D one, and its field of view 25 degrees off); the blend value jumps by 1 for a cut.
+constexpr SceneSpec kSceneSpecs[] = {
+    {"position", Fnv1a("position"), SceneKind::kVec, 25.0},
+    {"lookat", Fnv1a("lookat"), SceneKind::kVec, 25.0},
+    {"trans", Fnv1a("trans"), SceneKind::kVec, 8.0},
+    {"rot", Fnv1a("rot"), SceneKind::kVec, 1.2},
+    {"scale", Fnv1a("scale"), SceneKind::kVec, 0.6},
+    {"fovy", Fnv1a("fovy"), SceneKind::kScalar, 20.0},
+    {"_alpha", Fnv1a("_alpha"), SceneKind::kScalar, 1.0e9},
+    {"player0_cam_ctrl", Fnv1a("player0_cam_ctrl"), SceneKind::kCtrl, 0.5},
+};
+
+// The spec of the property name at a guest address (a constant string of the game), or null.
+const SceneSpec* SceneSpecFor(uint32_t name_ptr) {
+  if (name_ptr < 0x10000) {
+    return nullptr;
+  }
+  const uint8_t* p = GuestBase() + name_ptr;
+  char name[24];
+  size_t n = 0;
+  for (; n + 1 < sizeof name && p[n]; n++) {
+    name[n] = char(p[n]);
+  }
+  if (p[n]) {
+    return nullptr;  // longer than any name here
+  }
+  name[n] = 0;
+  const uint32_t hash = Fnv1a(name);
+  for (const SceneSpec& spec : kSceneSpecs) {
+    if (spec.hash == hash && std::strcmp(spec.name, name) == 0) {
+      return &spec;
+    }
+  }
+  return nullptr;
+}
+
+const SceneSpec& CtrlSpec() {
+  for (const SceneSpec& spec : kSceneSpecs) {
+    if (spec.kind == SceneKind::kCtrl) {
+      return spec;
+    }
+  }
+  return kSceneSpecs[0];
+}
+
+struct UiSeries {
+  uint32_t ctx = 0;
+  int n = 0;
+  uint32_t seen_serial = 0;  // the step serial at the last read
+  uint64_t t0_us = 0;        // when the glide in progress started (the step it was seen at)
+  uint64_t seen_us = 0;
+  float from[3]{}, to[3]{}, shown[3]{};
+};
+std::unordered_map<uint64_t, UiSeries> g_series;  // under g_inst_mutex
+uint64_t g_series_sweep_us = 0;
+
+// Blends the n numbers (1 to 3) that the script gave for one property of one object of the context ctx, between
+// its last two steps, with the rule of the display list. Returns true when v was changed to the blended value.
+bool UiSceneBlend(uint32_t ctx, uint32_t obj, const SceneSpec& spec, float* v, int n) {
+  const bool apply_opt = REXCVAR_GET(mcla_ui_interpolate) && REXCVAR_GET(mcla_ui_interp_camera);
+  const bool log = REXCVAR_GET(mcla_ui_interp_log);
+  if ((!apply_opt && !log) || OriginalTiming() || !REXCVAR_GET(mcla_ui_timing_fix) || ctx < 0x10000 || n < 1 || n > 3) {
+    return false;
+  }
+  const UiStepState* step = nullptr;
+  for (const UiStepState& s : g_ui_step) {
+    if (s.context.load(std::memory_order_acquire) == ctx) {
+      step = &s;
+      break;
+    }
+  }
+  if (!step) {
+    return false;  // not a movie the step hook paces
+  }
+  const uint32_t serial = step->serial.load(std::memory_order_acquire);
+  const uint32_t period_us = step->period_us.load(std::memory_order_relaxed);
+  const uint64_t step_us = step->step_us.load(std::memory_order_relaxed);
+  const uint32_t frame_us = step->frame_us.load(std::memory_order_relaxed);
+  if (!serial || !period_us) {
+    return false;
+  }
+  // As for the display list: nothing to gain with fewer than two frames per step.
+  const bool apply = apply_opt && frame_us && uint64_t(frame_us) * 10 <= uint64_t(period_us) * 6;
+  const uint32_t calls = step->calls.load(std::memory_order_relaxed);
+  const uint64_t window_us =
+      std::max<uint64_t>(1, uint64_t(period_us) * uint64_t(std::clamp(REXCVAR_GET(mcla_ui_interp_window_pct), 10, 100)) / 100);
+
+  std::lock_guard lock(g_inst_mutex);
+  UiFrameTime& frame_time = g_frame_time[size_t(step - g_ui_step.data()) % g_frame_time.size()];
+  const uint64_t real_now = NowMicros();
+  if (frame_time.calls != calls || real_now - frame_time.now_us > 6000) {
+    frame_time = {calls, real_now};
+  }
+  const uint64_t now = frame_time.now_us;
+  if (real_now - g_series_sweep_us > 2'000'000) {
+    g_series_sweep_us = real_now;
+    for (auto it = g_series.begin(); it != g_series.end();) {
+      it = real_now - it->second.seen_us > 5'000'000 ? g_series.erase(it) : std::next(it);
+    }
+  }
+
+  UiSeries& s = g_series[(uint64_t(obj) << 32) | spec.hash];
+  const size_t bytes = size_t(n) * sizeof(float);
+  // New, another movie's, or not read for a while (the menu was closed meanwhile): shown as it is.
+  const bool fresh = s.ctx != ctx || s.n != n || real_now - s.seen_us > 200'000 || serial - s.seen_serial > 3;
+  if (fresh) {
+    s = {};
+    s.ctx = ctx;
+    s.n = n;
+    std::memcpy(s.from, v, bytes);
+    std::memcpy(s.to, v, bytes);
+    std::memcpy(s.shown, v, bytes);
+    s.t0_us = step_us;
+  } else if (std::memcmp(v, s.to, bytes) != 0) {
+    // A step changed it: glide from what was shown to the new value, unless steps went by without a read of it
+    // or the change is a cut.
+    double move2 = 0;
+    for (int k = 0; k < n; k++) {
+      const double d = double(v[k]) - double(s.to[k]);
+      move2 += d * d;
+    }
+    const double move = std::sqrt(move2);
+    const bool gap = serial - s.seen_serial > 1;
+    const bool cut = move > spec.snap;
+    std::memcpy(s.from, (gap || cut) ? v : s.shown, bytes);
+    std::memcpy(s.to, v, bytes);
+    s.t0_us = step_us;
+    if (cut && log) {
+      REXLOG_INFO("ui interp event: {} kind=snap why=scene3d what={} obj={:08X} move={:.3f} limit={:.3f}", step->name, spec.name, obj,
+                  move, spec.snap);
+    }
+  }
+  s.seen_serial = serial;
+  s.seen_us = real_now;
+
+  double alpha = 1.0;
+  if (now < s.t0_us) {
+    alpha = 0.0;
+  } else if (now - s.t0_us < window_us) {
+    alpha = double(now - s.t0_us) / double(window_us);
+  }
+  bool diff = false;
+  for (int k = 0; k < n; k++) {
+    s.shown[k] = alpha >= 1.0 ? s.to[k] : float(double(s.from[k]) + (double(s.to[k]) - s.from[k]) * alpha);
+    diff |= s.shown[k] != v[k];
+  }
+  if (!diff) {
+    return false;
+  }
+  if (log) {
+    REXLOG_INFO("ui interp3d: {} {} ctx={:08X} obj={:08X} ser={} t={}.{:03} ms alpha={:.3f} live=({:.5f},{:.5f},{:.5f}) "
+                "shown=({:.5f},{:.5f},{:.5f}) applied={}",
+                step->name, spec.name, ctx, obj, serial, now / 1000, now % 1000, alpha, v[0], n > 1 ? v[1] : 0.0f,
+                n > 2 ? v[2] : 0.0f, s.shown[0], n > 1 ? s.shown[1] : 0.0f, n > 2 ? s.shown[2] : 0.0f, apply ? 1 : 0);
+  }
+  if (!apply) {
+    return false;
+  }
+  std::memcpy(v, s.shown, bytes);
+  return true;
+}
+}  // namespace
+
+// Entry of sub_82724CF0, the draw of a movie's 3D scene (r3 = its player context), and the instruction before its
+// last jump (every way out goes through it).
+void mcla_ui_scene_enter(PPCRegister& r3) {
+  t_scene_ctx = r3.u32;
+}
+
+void mcla_ui_scene_leave(PPCRegister&) {
+  t_scene_ctx = 0;
+}
+
+// End of sub_82722440 (an array of three numbers read from a script object: r30 = the object, r31 = where the
+// numbers went, the property's name is the pointer saved at 96(r1)), where it succeeded.
+void mcla_ui_scene_vec(PPCRegister& r1, PPCRegister& r30, PPCRegister& r31) {
+  const uint32_t ctx = t_scene_ctx;
+  const uint32_t out = r31.u32;
+  if (!ctx || out < 0x10000) {
+    return;
+  }
+  const SceneSpec* spec = SceneSpecFor(ReadGuestU32(r1.u32 + 96));
+  if (!spec || spec->kind != SceneKind::kVec) {
+    return;
+  }
+  float v[3] = {LoadF32(out), LoadF32(out + 4), LoadF32(out + 8)};
+  if (UiSceneBlend(ctx, r30.u32, *spec, v, 3)) {
+    StoreF32(out, v[0]);
+    StoreF32(out + 4, v[1]);
+    StoreF32(out + 8, v[2]);
+  }
+}
+
+// End of sub_822222F0 (one number read from a script object; the name is saved at 80(r1)), where it succeeded.
+void mcla_ui_scene_float(PPCRegister& r1, PPCRegister& r30, PPCRegister& r31) {
+  const uint32_t ctx = t_scene_ctx;
+  const uint32_t out = r31.u32;
+  if (!ctx || out < 0x10000) {
+    return;
+  }
+  const SceneSpec* spec = SceneSpecFor(ReadGuestU32(r1.u32 + 80));
+  if (!spec || spec->kind != SceneKind::kScalar) {
+    return;
+  }
+  float v = LoadF32(out);
+  if (UiSceneBlend(ctx, r30.u32, *spec, &v, 1)) {
+    StoreF32(out, v);
+  }
+}
+
+// In sub_827238B0 right after `lfs f0,80(r1)`: f0 = the script's `player0_cam_ctrl` (r31 = the context). Its blend
+// is the first thing of the camera's update; it also opens the window in which the reads above are blended. A blend
+// value of 0 ends the update's camera work, so while the last step's glide to 0 is going on f0 is the glide's value.
+void mcla_ui_cam_ctrl(PPCRegister& r31, PPCRegister& f0) {
+  const uint32_t ctx = r31.u32;
+  t_scene_ctx = ctx;
+  float v = float(f0.f64);
+  t_scene_ctrl_live = v;
+  if (UiSceneBlend(ctx, ctx, CtrlSpec(), &v, 1)) {
+    f0.f64 = double(v);
+  }
+}
+
+// In sub_827238B0 before `ld r31,-16(r1)`, where every way out goes: r31 = the context. Closes the window and,
+// with the log on, says what camera the update ended with.
+void mcla_ui_cam_done(PPCRegister& r31) {
+  t_scene_ctx = 0;
+  const float live_ctrl = t_scene_ctrl_live;
+  t_scene_ctrl_live = 0.0f;
+  if (!REXCVAR_GET(mcla_ui_interp_log)) {
+    return;
+  }
+  const uint32_t ctx = r31.u32;
+  if (ctx < 0x10000) {
+    return;
+  }
+  const float ctrl = LoadF32(ctx + 560);
+  if (ctrl == 0.0f && live_ctrl == 0.0f) {
+    return;
+  }
+  const UiStepState* step = nullptr;
+  for (const UiStepState& s : g_ui_step) {
+    if (s.context.load(std::memory_order_acquire) == ctx) {
+      step = &s;
+      break;
+    }
+  }
+  if (!step) {
+    return;
+  }
+  const uint64_t now = NowMicros();
+  REXLOG_INFO("ui interp cam: {} ctx={:08X} ser={} t={}.{:03} ms ctrl={:.5f} live_ctrl={:.5f} fov={:.4f} "
+              "m2=({:.5f},{:.5f},{:.5f}) m3=({:.5f},{:.5f},{:.5f})",
+              step->name, ctx, step->serial.load(std::memory_order_relaxed), now / 1000, now % 1000, ctrl, live_ctrl,
+              LoadF32(ctx + 568), LoadF32(ctx + 496 + 32), LoadF32(ctx + 496 + 36), LoadF32(ctx + 496 + 40), LoadF32(ctx + 496 + 48),
+              LoadF32(ctx + 496 + 52), LoadF32(ctx + 496 + 56));
 }
 
 // Held menu buttons repeat by counting updates, not time.
