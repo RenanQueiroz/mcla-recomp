@@ -560,7 +560,8 @@ def duration_verdicts(cells, lines, verdict):
             if m_off is None or m_on is None:
                 verdict.append(f"CHECK duration {tag}: no {what_ms} in the cells (off {m_off}, on {m_on})")
             else:
-                ok = abs(m_on - m_off) <= tol and abs(n_on - n_off) <= 1.01
+                # the step count is the movie's own for a close (it stops); for an open it only follows the ready time (the cell ends 1.8 s after it)
+                ok = abs(m_on - m_off) <= tol and (what == "open" or abs(n_on - n_off) <= 1.01)
                 verdict.append(f"{'PASS' if ok else 'FAIL'} duration {tag}: {what_ms} {m_off:.0f} ms with the option off, {m_on:.0f} ms on "
                                f"(median of {len(res['off'])} and {len(res['on'])} cells; {n_off:.0f} and {n_on:.0f} steps; "
                                f"equal within one step and a frame, {tol:.0f} ms: {'yes' if ok else 'NO'})")
