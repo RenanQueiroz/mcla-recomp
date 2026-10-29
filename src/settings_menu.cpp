@@ -5,8 +5,8 @@
 // option classes (checkbox and value rows), so they look and behave like the
 // rest of the menu.
 //
-// Ported from LARecomp's src/mc_engine/pause_menu.cpp with its author's
-// permission; the reverse engineering of the menu system is theirs. See
+// Ported from LARecomp's src/mc_engine/pause_menu.cpp; the reverse
+// engineering of the menu system is theirs. See
 // config/settings_menu.toml for what each hook address is. Left out: their
 // carbon-fibre, cutscene, language and native-renderer tabs.
 
@@ -71,6 +71,7 @@ bool MclaRelaunchGame();  // src/mcla_app.cpp
 #if !REX_PLATFORM_PS5
 void MclaWaitForSaves();  // src/save_wait.cpp
 void MclaPumpWakeShutdownBegins();  // src/poll_wait.cpp: the audio silence from here on is the output stopping
+void MclaPcTriggersShutdown();  // src/pc_triggers.cpp: the DualSense's triggers back to slack
 #endif
 bool MclaSingleTileAvailable();  // src/render_perf.cpp
 int32_t MclaHalfDisplayCap(float refresh_hz);  // src/frame_timing.cpp
@@ -453,13 +454,6 @@ constexpr const char* kFrameGenerationLabels[] = {"OFF", "FSR 3.1 (UNTESTED)"};
 // locks the row (ItemChangeable).
 constexpr const char* kLowLatencyValues[] = {"off", "on", "boost"};
 constexpr const char* kLowLatencyLabels[] = {"OFF", "ON", "ON + BOOST"};
-// How often the HUD advances (src/frame_timing.cpp): 0 is every frame.
-#if REX_PLATFORM_PS5
-constexpr double kHudRates[] = {30.0, 60.0, 0.0};
-#else
-constexpr double kHudRates[] = {30.0, 60.0, 120.0, 0.0};
-#endif
-constexpr int kHudRateCount = int(sizeof(kHudRates) / sizeof(kHudRates[0]));
 #if !REX_PLATFORM_PS5
 // resolution_scale (the SDK's; kRequiresRestart): the render targets, caches
 // and translated shaders are made for one scale when the GPU emulation starts.
@@ -499,8 +493,10 @@ const ItemDef kDisplayItems[] = {
      kFrameGenerationValues, kFrameGenerationLabels, nullptr, 2},
     {"PM_MxLowLatency", ItemKind::kStringChoice, "low_latency", "LOW LATENCY", kLowLatencyValues,
      kLowLatencyLabels, nullptr, 3},
-    {"PM_MxHudRate", ItemKind::kNumberChoice, "mcla_ui_hud_rate", "HUD UPDATES", nullptr, nullptr,
-     kHudRates, kHudRateCount, "%.0f PER SECOND", "EVERY FRAME"},
+    // The menus and the HUD step 30 times a second, as on the console, and every drawn frame
+    // is blended between the last two steps (src/frame_timing.cpp). OFF: no blending, and the
+    // steps run at mcla_ui_hud_rate (60) and mcla_ui_menu_rate (30), which have no row.
+    {"PM_MxSmoothUi", ItemKind::kToggle, "mcla_ui_interpolate", "SMOOTH UI"},
 #if !REX_PLATFORM_PS5
     // Neither means anything on the console: there is one display mode, and
     // the PS5 host turns the emulated vsync off at every start.
@@ -2013,6 +2009,7 @@ void CloseGame(bool restart) {
 #else
     (void)restart;
 #endif
+    MclaPcTriggersShutdown();
     MclaPumpWakeShutdownBegins();
     window->RequestClose();
   });

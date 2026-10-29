@@ -68,7 +68,7 @@ Three runs of the pad on the build of `fix/menu-input` (RTX, Direct3D 12, a copy
 - A on a checkbox made one event per press in every cell. HDR PEAK BRIGHTNESS (T5): a tap is one event with the change on, 1 to 5 before; a 3 s hold ran 450 to 4,000 and back to 300 in both.
 - The report's "rows moved +0" for the upward taps is the pad coming back to where it began.
 
-On the merged build (`integrate/menus`, both menu fixes, defaults and no flags), 120 FPS cap and uncapped, plus the repeat fix off by `set` as a control: **not measured yet**; the chain `menus` runs it (set `merged` of `menu_input.py`).
+On the merged build (`integrate/menus`, both menu fixes, defaults and no flags; chain `menus`, 2026-10-29, set `merged` of `menu_input.py`): the options read back as defaults (timing fix and repeat fix on), and at a 120 FPS cap and uncapped every tap made exactly one key event and a 1 s hold 5 (PASS). The control, the repeat fix turned off with `set` at 120 FPS, failed as it should. The chain `menulag` later ran the same tap and hold check in 8 more cells (caps of 120, uncapped and 60, with `mcla_ui_advance_on_input` off and on): all passed.
 
 ## Not done
 

@@ -56,7 +56,7 @@ In the launcher, and in the pause menu's Settings tab (resolution and graphics A
 | HDR | Off, **Auto**, On | Auto turns it on whenever Windows has HDR on for the display. Peak brightness, paper white and highlights are in the launcher too. |
 | NVIDIA Reflex / AMD Anti-Lag 2 | **Default**, Off, On, On + Boost | Less input lag when the GPU is the limit: on an RTX 5080 at 3x the time to the screen went from 22 to 8 ms, at a cost of 3 to 5% of the frame rate on Direct3D 12. On by default for NVIDIA, off for AMD (untested); always on with frame generation. |
 
-The launcher also has display (fullscreen or windowed), display gamma, screen scaling filter, HUD updates, intro, button prompts, language and player name. Every setting with its `mcla.toml` key: [docs/settings.md](docs/settings.md).
+The launcher also has display (fullscreen or windowed), display gamma, screen scaling filter, smooth UI, intro, button prompts, language and player name. Every setting with its `mcla.toml` key: [docs/settings.md](docs/settings.md).
 
 ## Turning a change off
 
@@ -69,12 +69,12 @@ The ones you are most likely to want:
 | Faster pause menu and GPS map | `--mcla_larger_tiles=false` |
 | Sun glare follows the real sun | `--occlusion_query_async=false` |
 | Less CPU while a frame-rate cap is set | `--mcla_timer_hr_at_cap=false`, `--mcla_reflex_sleep_assist=false` |
-| Faster on CPUs with 5 or fewer threads | `--mcla_small_cpu_defaults=false` |
+| Faster on CPUs with 5 or fewer threads, and audio set up for them | `--mcla_small_cpu_defaults=false` |
 | Less video memory at 2x and 3x | `--render_target_max_height=0` |
 | Rain at 2x and 3x | `--mcla_rain_unscaled_copy=false` |
 | Vinyls on the opponents' cars | `--mcla_vinyl_readback=false` |
 | Picking the faster GPU on a PC with two GPUs | `--mcla_prefer_dedicated_gpu=false` |
-| The HUD at 60 updates a second | `--mcla_ui_hud_rate=30` |
+| Smooth menus and HUD (drawn between their 30 steps a second) | `--mcla_ui_interpolate=false`, or the launcher's *Smooth UI* |
 | 16x anisotropic filtering | the launcher's *Anisotropic filtering* setting |
 
 Every switch (about 40, the graphics and timing internals too), what each does and what was measured: [docs/off-switches.md](docs/off-switches.md).
@@ -117,7 +117,6 @@ Upstream's build plays on a jailbroken PS5; the fork's patches have not been bui
 
 - The fork has not been tried on discrete AMD cards, Vega-based Ryzen graphics, Intel graphics, Linux or the PS5.
 - On a first run, in new places, or after a driver update, objects can be missing for a moment while their shaders compile. The launcher's shader preparation covers most of it.
-- CPUs with 4 cores and no Hyper-Threading don't get the small-CPU speed-up yet.
 - Fine dots may remain at the edges of palm leaves against the sky and in some soft shadows.
 
 Each change, how it was checked and what is not verified: [KNOWN-ISSUES.md](KNOWN-ISSUES.md).

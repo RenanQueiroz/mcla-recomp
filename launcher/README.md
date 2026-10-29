@@ -485,8 +485,9 @@ kept as `settings.json.unreadable` before the defaults replace it). A choice
 made in the launcher before then also ends it. It doesn't run while the game
 is running, which writes the file itself: it waits until the game has closed.
 A new install (no `settings.json`) has nothing to move. The old HUD updates
-choice (`HudUpdates`, an on/off switch) isn't carried over; the new one is a
-rate, 60 per second unless set.
+choice (`HudUpdates`, an on/off switch) isn't carried over. The HUD updates
+rate that followed it is moved to `mcla_ui_hud_rate` as before, but since v0.3.1
+that option counts only while *Smooth UI* is off (below).
 
 If `settings.json` can't be saved, the launcher says so instead of carrying on
 as if it had.
@@ -690,16 +691,17 @@ shared heaps, both are about as smooth in the map zoom-out after the title
 
 *Language* (`user_language`, the SDK's Xbox 360 language id; the game's default 1 is English) lists the five languages the game's own code has text for: English (1), French (4), German (3), Italian (6) and Spanish (5), the way the console's language setting would choose them. Any other id gives English, so an id typed into `mcla.toml` by hand (2 Japanese, 7 Korean, ...) shows as "set in mcla.toml". It is read when the game starts. There is no row for it in the pause menu. It is not a separate SDK patch: `XGetLanguage`, which the SDK answers with English whatever the setting says, is only called by one function of the game, behind an AV-pack check the SDK's `XGetAVPack` (6) always skips (`KNOWN-ISSUES.md`).
 
-*HUD updates* (`mcla_ui_hud_rate`) sets how many times a second the HUD's
-Flash movies (the gauges, the song ticker, the LOADING badge) take a step: 60
-(the default since 2026-10-16, the user's choice after playing at 30 and 60), 30
-(as on the console), 120, or every frame (0). The ticker scrolls one step at a
-time and the needles move only when it steps, so at 30 the ticker scrolls at its
-original speed and the needles move in 30 Hz steps; 60 and 120 make the needles
-smoother and the ticker two and four times as fast (at a 120 FPS cap: 59, 118,
-237 and 239 px/s at 720p for 30, 60, 120 and every frame). Menus, pop-ups and the
-GPS panels keep the console's pace whatever it is set to (`mcla_ui_timing_fix`,
-`KNOWN-ISSUES.md`).
+*Smooth UI* (`mcla_ui_interpolate`, on by default since v0.3.1; the pause menu's DISPLAY › SMOOTH UI is the same
+setting) draws the menus, pop-ups, GPS panels and the HUD (the gauges, the song ticker, the LOADING badge) between
+their steps. Every one of those Flash movies steps 30 times a second, as on the console, and each frame is drawn
+between the last two steps, so they move smoothly at 50 FPS and more without running faster. The price is one step
+(up to 33 ms) of delay, and what the game cuts or swaps (an icon that changes, text) still appears at once. It
+replaced *HUD updates* (`mcla_ui_hud_rate`) and the pause menu's MENU UPDATES: the HUD ticker now scrolls at the
+console's speed, half of what HUD updates 60 gave, and the needles still move smoothly. The pause menu's camera and
+3D panels glide too (`mcla_ui_interp_camera`, on; `dev\ui-camera-2026-10-29.md`). With Smooth UI off the HUD
+steps 60 times a second (`mcla_ui_hud_rate`, a mcla.toml option or `--mcla_ui_hud_rate=30`, 120, 0) and the menus 30
+(`mcla_ui_menu_rate`), unblended; both options are read only then (`KNOWN-ISSUES.md`,
+`dev\ui-interpolation-2026-10-29.md`). Menus and pop-ups answer a key press at once (`mcla_ui_advance_on_input`, on).
 
 *Player name* (`user_name`, a text box rather than a drop-down; the SDK's, from
 `patches\rexglue-user-name.patch`) is the name of the profile the game is signed in

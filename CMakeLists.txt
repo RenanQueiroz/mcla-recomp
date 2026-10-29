@@ -46,9 +46,13 @@ set(MCLA_SOURCES
     src/warp_fix.cpp
     src/button_prompts.cpp
     src/settings_menu.cpp
+    src/pad_probe.cpp
     src/save_wait.cpp
     src/display_gamma.cpp
     src/render_markers.cpp
+    src/vehicle_telemetry.cpp
+    # DualSense adaptive triggers through SDL (fork only; the PS5 build has ps5/game/ps5_triggers.h).
+    src/pc_triggers.cpp
     src/sampling_profiler.cpp
     src/code_pointer_scan.cpp
     # The shader pack's import and --mcla_prepare_shaders.

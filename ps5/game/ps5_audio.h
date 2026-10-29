@@ -30,6 +30,8 @@
 #include <rex/logging.h>
 #include <rex/thread.h>
 
+#include "ps5_haptics.h"
+
 extern "C" {
 int sceUserServiceInitialize(const void* params);
 int sceUserServiceGetInitialUser(int* user_id);
@@ -111,6 +113,8 @@ class Ps5AudioDriver final : public rex::audio::AudioDriver {
       if (frame.empty()) {
         std::memset(output, 0, sizeof output);
       } else {
+        // The low end of the same frame drives the DualSense actuators.
+        g_mcla_haptics.PushAudio(frame.data());
         rex::audio::conversion::sequential_6_BE_to_interleaved_2_LE(
             output, frame.data(), kChannelSamples, rex::audio::GetStereoFold(),
             rex::audio::GetOutputGain());

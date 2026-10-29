@@ -2,6 +2,7 @@
 
 #include "mcla_app.h"
 #include "automatic_api.h"
+#include "pc_triggers.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -65,10 +66,11 @@ REXCVAR_DEFINE_BOOL(mcla_small_cpu_defaults, true, "MCLA",
                     "With 5 or fewer logical processors the game also turns on mcla_poll_wait (the main thread's wait "
                     "for a ring slot on a timer) and mcla_pump_wake_on_demand (the frame-pacing thread woken when the "
                     "main thread waits for it), next to the timer queue's high-resolution wait it turns on there "
-                    "anyway. A value you set for any of them wins. Off leaves only the high-resolution wait on "
-                    "there (v0.2.x). Not applied to 4 logical processors that are 4 cores without SMT (the "
-                    "CPU: line in the log says so). Nothing changes with 6 or more logical processors "
-                    "(launcher/dev/small-cpu-2026-10-28.md). Takes effect at the next start")
+                    "anyway, and sets audio_thread_priority to 3 and audio_adaptive_queue on (the audio worker in the "
+                    "Windows multimedia scheduler; a deeper output queue after an underrun). A value you set for any "
+                    "of them wins. Off leaves only the high-resolution wait on there (v0.2.x). 4 cores without SMT "
+                    "are included since v0.3.1. Nothing changes with 6 or more logical processors "
+                    "(launcher/dev/small-cpu-2026-10-28.md, small-cpu-audio-2026-10-29.md). Takes effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 // Read by NVIDIA's Optimus and AMD's PowerXpress drivers when the exe loads: on a laptop with
@@ -947,67 +949,68 @@ static uint32_t PhysicalCoresAvailable() {
 // mcla_pump_wake_on_demand and mcla_poll_wait: at 4 logical processors the update thread loses 47% of
 // the frame to the pump's 7 ms Sleep, and the main thread's ring wait spins a core. Measured at 4
 // logical (2 cores with SMT) and 5 logical (5 cores) processors: uncapped frame -31 to -40%, caps
-// unchanged (launcher/dev/small-cpu-2026-10-28.md). Not applied to 4 logical processors on 4 cores
-// (no SMT): there 3 of 5 runs gained 40%, but one of them had a tail of long frames (p99 21.7 and
-// 29.5 ms) with 77 late audio wake-ups and 2 of 5 had a short audio dropout; the cause is not
-// known, so that CPU keeps the v0.2.x rule (only the high-resolution wait). If the number of cores
-// cannot be told at 4 logical processors, the same applies.
+// unchanged (launcher/dev/small-cpu-2026-10-28.md). v0.3.0 left out 4 logical processors on 4 cores
+// (no SMT): in the first test 3 of 5 runs gained 40%, but one of them had a tail of long frames
+// (p99 21.7 and 29.5 ms) with 77 late audio wake-ups and 2 of 5 had a short audio dropout. Since
+// v0.3.1 that CPU gets them too, and so does every CPU of 5 or fewer processors whose cores cannot
+// be told (the new tests: launcher/dev/small-cpu-audio-2026-10-29.md).
+// The same switch sets two audio options on there, audio_thread_priority = 3 (the audio worker and
+// the XMA decoder thread in the Windows multimedia scheduler) and audio_adaptive_queue (the mixer's
+// output queue grows after an underrun): with other processes taking the cores, the audio ran dry
+// while driving in 3 of 3 runs without them and in 1 of 3 with them (SDK patch
+// rexglue-xma-decoder-fixes.patch; a value the player sets for either wins, as for the rest).
 static void ApplyCpuDefaults() {
   constexpr uint32_t kWakeOnDemandFrom = 6;
   const uint32_t logical = LogicalProcessorsAvailable();
   if (logical == 0) {
-    REXLOG_WARN("CPU: could not count the logical processors; both options keep their defaults (off)");
+    REXLOG_WARN("CPU: could not count the logical processors; all these options keep their defaults");
     return;
   }
   const bool many = logical >= kWakeOnDemandFrom;
+  // Only for the log line ("on 2 cores" at 4 logical processors is 2 cores with SMT, "on 4 cores"
+  // is 4 cores without it): no rule depends on it.
   const uint32_t cores = many ? 0 : PhysicalCoresAvailable();
-  const bool four_cores_no_smt = !many && logical == 4 && cores == 4;
-  const bool four_cores_unknown = !many && logical == 4 && cores == 0;
-  const bool small_switch = !many && REXCVAR_GET(mcla_small_cpu_defaults);
-  const bool small_extra = small_switch && !four_cores_no_smt && !four_cores_unknown;
+  const bool small_extra = !many && REXCVAR_GET(mcla_small_cpu_defaults);
   struct Option {
     const char* name;
     const char* label;
+    const char* value;  // the default set when automatic_on
+    bool boolean;       // shown as on / off, else with its value
     bool automatic_on;
   };
   std::vector<Option> options = {
-      {"timer_queue_hr_wait", "timer queue high-resolution wait", !many},
-      {"mcla_pump_wake_on_demand", "pump wake on demand", many || small_extra},
+      {"timer_queue_hr_wait", "timer queue high-resolution wait", "true", true, !many},
+      {"mcla_pump_wake_on_demand", "pump wake on demand", "true", true, many || small_extra},
   };
   if (small_extra) {
-    options.push_back({"mcla_poll_wait", "poll wait", true});
+    options.push_back({"mcla_poll_wait", "poll wait", "true", true, true});
+    options.push_back({"audio_thread_priority", "audio thread priority", "3", false, true});
+    options.push_back({"audio_adaptive_queue", "audio adaptive queue", "true", true, true});
   }
   std::string text;
   bool any_automatic = false;
   for (const Option& option : options) {
     const bool by_player = rex::cvar::GetFlagSource(option.name) != rex::cvar::Source::kDefault;
-    if (option.automatic_on && !rex::cvar::SetDefaultValue(option.name, "true")) {
-      REXLOG_WARN("CPU: {} = true not taken", option.name);
+    if (option.automatic_on && !rex::cvar::SetDefaultValue(option.name, option.value)) {
+      REXLOG_WARN("CPU: {} = {} not taken", option.name, option.value);
     }
     if (!text.empty()) {
       text += ", ";
     }
+    const std::string now = rex::cvar::GetFlagByName(option.name);
     text += fmt::format("{} {}{}", option.label,
-                        rex::cvar::GetFlagByName(option.name) == "true" ? "on" : "off",
+                        option.boolean ? std::string(now == "true" ? "on" : "off") : now,
                         by_player ? " (set by the player)" : "");
     any_automatic = any_automatic || !by_player;
   }
-  // The cores are told for 5 or fewer logical processors: "on 2 cores" at 4 logical processors is
-  // 2 cores with SMT, "on 4 cores" is 4 cores without it (the one case left out).
   std::string where;
   if (!many) {
     where = cores != 0 ? fmt::format(" on {} {}", cores, cores == 1 ? "core" : "cores") : ", cores unknown";
   }
-  const char* why = "";
-  if (small_switch && four_cores_no_smt) {
-    why = "; mcla_small_cpu_defaults not applied: 4 cores without SMT";
-  } else if (small_switch && four_cores_unknown) {
-    why = "; mcla_small_cpu_defaults not applied: the number of cores could not be told";
-  }
   REXLOG_INFO("CPU: {} logical processors{}: {}{}", logical, where, text,
               any_automatic ? (many ? " (automatic; 6 or more)"
                                     : small_extra ? " (automatic; 5 or fewer, with mcla_small_cpu_defaults)"
-                                                  : fmt::format(" (automatic; 5 or fewer{})", why))
+                                                  : " (automatic; 5 or fewer)")
                             : "");
 }
 #endif
@@ -1122,12 +1125,14 @@ void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
 bool MclaApp::OnWindowCloseRequested() {
   MclaWaitForSaves();
   MclaSaveMenuSettings();
+  MclaPcTriggersShutdown();  // the DualSense's triggers back to slack: the process ends without further notice
   MclaPumpWakeShutdownBegins();  // the window closes now: the title is terminated next
   return true;
 }
 
 void MclaApp::OnGuestThreadExit(rex::system::XThread* thread) {
   (void)thread;
+  MclaPcTriggersShutdown();  // every way the title ends comes here, QUIT GAME and the dev pad's close included
   MclaPumpWakeShutdownBegins();
 }
 
@@ -1136,6 +1141,7 @@ void MclaApp::OnPostSetup() {
   FollowCursorSetting();
 
   MclaDevPadStart(window(), imgui_drawer());
+  MclaPcTriggersStart();
 
   // The game probes for loose city data on a "t:" drive that retail consoles
   // do not have. Give it a device so the probes fail with "not found" rather

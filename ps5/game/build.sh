@@ -60,6 +60,8 @@ cmp -s "$work/src/ps5/main_ps5.cpp.new" "$work/src/ps5/main_ps5.cpp" 2>/dev/null
     || mv "$work/src/ps5/main_ps5.cpp.new" "$work/src/ps5/main_ps5.cpp"
 tr -d '\r' < "$here/ps5_pad_input.h" > "$work/src/ps5/ps5_pad_input.h"
 tr -d '\r' < "$here/ps5_audio.h" > "$work/src/ps5/ps5_audio.h"
+tr -d '\r' < "$here/ps5_haptics.h" > "$work/src/ps5/ps5_haptics.h"
+tr -d '\r' < "$here/ps5_triggers.h" > "$work/src/ps5/ps5_triggers.h"
 for header in title_log.h log_fd_sink.h; do
     tr -d '\r' < "$here/../$header" > "$work/src/ps5/$header"
 done
@@ -112,7 +114,7 @@ done
 # The desktop-only sources are left out: mcla_app.cpp and main.cpp are the
 # windowed host, and the code-pointer scan, crash trace and sampling profiler
 # are development tools tied to it.
-for name in audio_fallback frame_timing render_perf perf_options warp_fix button_prompts settings_menu save_wait display_gamma render_markers shader_prepare shader_storage_files; do
+for name in audio_fallback frame_timing render_perf perf_options warp_fix button_prompts settings_menu save_wait display_gamma render_markers shader_prepare shader_storage_files vehicle_telemetry; do
     source="$work/src/src/$name.cpp"
     object="$work/obj/host_$name.o"
     [ "$object" -nt "$source" ] && [ "$object" -nt "$work/src/src/mcla_app.h" ] && [ "$object" -nt "$pch" ] || printf '%s\t%s\t%s\n' "$source" "$object" "" >> "$work/todo.txt"

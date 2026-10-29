@@ -26,6 +26,9 @@
 #include <rex/input/input_driver.h>
 #include <rex/logging.h>
 
+#include "ps5_haptics.h"
+#include "ps5_triggers.h"
+
 // The status macros cast to these names unqualified.
 using rex::X_RESULT;
 using rex::X_STATUS;
@@ -66,6 +69,12 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
         static_cast<uint32_t>(user_service), static_cast<uint32_t>(pad_init),
         static_cast<uint32_t>(user_id), static_cast<uint32_t>(user_result),
         static_cast<uint32_t>(handle_));
+    if (handle_ >= 0) {
+      // A DualSense opens in advanced vibration mode, where the two motor
+      // levels below move nothing: haptics or compatible mode (ps5_haptics.h).
+      g_mcla_haptics.Start(handle_, user_id);
+      g_mcla_triggers.Start(handle_);
+    }
     return handle_ >= 0 ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
   }
 
@@ -122,6 +131,7 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
     std::memcpy(&pad_buttons, data, sizeof pad_buttons);
     const uint8_t left_x = data[4], left_y = data[5], right_x = data[6], right_y = data[7];
     const uint8_t l2 = data[8], r2 = data[9];
+    g_mcla_triggers.Update(l2, r2);
 
     if ((pad_buttons & 0x00100006) == 0x00100006) {
       g_mcla_profile_request.store(true, std::memory_order_relaxed);
@@ -190,11 +200,10 @@ class Ps5PadInputDriver final : public rex::input::InputDriver {
                               rex::input::X_INPUT_VIBRATION* vibration) override {
     if (id != kDevice || handle_ < 0) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (vibration) {
-      // { large motor, small motor }, 0..255 each.
-      const uint8_t param[2] = {
+      // Large motor, small motor, 0..255 each.
+      g_mcla_haptics.SetRumble(
           static_cast<uint8_t>(static_cast<uint16_t>(vibration->left_motor_speed) >> 8),
-          static_cast<uint8_t>(static_cast<uint16_t>(vibration->right_motor_speed) >> 8)};
-      scePadSetVibration(handle_, param);
+          static_cast<uint8_t>(static_cast<uint16_t>(vibration->right_motor_speed) >> 8));
     }
     return X_ERROR_SUCCESS;
   }
