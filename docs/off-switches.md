@@ -42,6 +42,7 @@ Every change with a setting can be turned off without rebuilding: type the optio
 | Frame pacing at the swap | `--mcla_pace_at_swap=false` | |
 | Motorcycle lean | `--mcla_bike_gyro_fix=false` | |
 | Menus at the console's pace | `--mcla_ui_timing_fix=false` | |
+| Held menu buttons repeat by time (issue seen 2026-10-29) | `--mcla_ui_repeat_fix=true` turns it on | **Off by default until it has been measured** (the check is `launcher/dev/menu_input.py`; nothing has been run yet). The game repeats a held menu button after 7 updates and then every 6, which is 233 and 200 ms at the console's 30 a second but 58 and 50 ms at 120 FPS: one tap of 60 to 150 ms stepped a menu two or three times. With it on, the repeat waits for 233 ms and then 200 ms (`--mcla_ui_repeat_delay_ms`, `--mcla_ui_repeat_interval_ms`); at 30 FPS and below nothing changes. Takes effect at once. `--mcla_ui_input_log=true` (development) logs every menu key down and repeat. |
 | Alpha to mask tolerance | `--alpha_to_mask_tolerance=0` | The SDK's exact comparison of alpha with the thresholds; the default is 0.00195, half a step of 8-bit alpha. Takes effect at the next start. |
 | HUD at a rate of its own | `--mcla_ui_hud_rate=0` advances it with every frame | Default 60 a second; also 30 (the console's pace) or 120. The launcher's *HUD updates*, and DISPLAY › HUD UPDATES in the pause menu. |
 | Mouse pointer hidden during play | `--mcla_hide_cursor=false` | Or CONTROLS › HIDE MOUSE POINTER in the pause menu, which takes effect at once. |

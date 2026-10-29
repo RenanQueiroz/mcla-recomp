@@ -40,6 +40,9 @@ KEY_NAMES = {47: "dpad up", 48: "dpad down", 51: "dpad left", 52: "dpad right", 
              50: "stick down", 53: "stick left", 54: "stick right", 55: "A", 56: "B"}
 
 
+NAV_CAP = 60  # the cap while the pad moves about: a 40 ms press stays under the game's 7 updates (117 ms) at it
+
+
 def pad_lines(run_set):
     out = []
     add = out.append
@@ -54,6 +57,7 @@ def pad_lines(run_set):
                 add("wait 150ms")
             else:
                 add("wait 450ms")
+            add("log MI tapend")
 
     def reset(to=0):
         add(f"press_until up ui_select == {to} every=500ms hold=50ms timeout=40s")
@@ -99,17 +103,27 @@ def pad_lines(run_set):
 
     for n, (cap, variant) in enumerate(cells):
         timing, repeat = VARIANTS[variant]
+
+        def at_cap():
+            add(f"set mcla_fps {cap}")
+            if fg:
+                add(f"set mcla_fps_frame_generation {cap}")
+            add("wait 800ms")
+
+        def at_nav():
+            add(f"set mcla_fps {NAV_CAP}")
+            if fg:
+                add(f"set mcla_fps_frame_generation {NAV_CAP}")
+            add("wait 800ms")
+
         add(f"# --- cell {n}: cap {cap}, timing fix {timing}, repeat fix {repeat}, frame generation {fg}")
-        add(f"set mcla_fps {cap}")
-        if fg:
-            add(f"set mcla_fps_frame_generation {cap}")
         add(f"set mcla_ui_timing_fix {'true' if timing else 'false'}")
         add(f"set mcla_ui_repeat_fix {'true' if repeat else 'false'}")
-        add("wait 1500ms")
+        at_nav()
         add(f"log MI cell id={n} variant={variant} cap={cap} timing={timing} repeat={repeat} fg={fg}")
-        add("state")
         reset(0)
         # T0: the pause menu's own list
+        at_cap()
         add("log MI test T0 key=down n=4 expect=4")
         add("uisel")
         tap("T0", "down", TAP_LENS[:4])
@@ -119,6 +133,7 @@ def pad_lines(run_set):
         tap("T0b", "up", TAP_LENS[4:])
         add("wait 300ms")
         add("uisel")
+        at_nav()
         reset(0)
         # into PERFORMANCE (the sixth button of the Settings list)
         goto(5)
@@ -127,6 +142,7 @@ def pad_lines(run_set):
         add("wait 1000ms")
         add("log MI page PERFORMANCE")
         add("uisel")
+        at_cap()
         add("log MI test T1 key=down n=8 expect=8")
         tap("T1", "down", TAP_LENS)
         add("wait 300ms")
@@ -135,33 +151,43 @@ def pad_lines(run_set):
         tap("T1b", "up", TAP_LENS[::-1])
         add("wait 300ms")
         add("uisel")
+        at_nav()
         reset(0)
+        at_cap()
         add("log MI test T2 key=down hold=1000 expect=5")
         add("uisel")
+        add("state")
         add("press down 1000ms")
         add("wait 700ms")
+        add("state")
         add("uisel")
         add("log MI end T2")
+        at_nav()
         reset(0)
         goto(4)
         add("uisel")
+        at_cap()
         add("log MI test T3 key=right n=6 expect=6")
         add("get mcla_city_lod")
         tap("T3", "right", TAP_LENS[:6], "get mcla_city_lod")
         add("log MI test T3b key=left n=3 expect=3")
         tap("T3b", "left", TAP_LENS[:3], "get mcla_city_lod")
+        at_nav()
         add("press_until up ui_select == 1 every=500ms hold=50ms timeout=20s")
         add("wait 400ms")
         add("uisel")
+        at_cap()
         add("log MI test T4 key=a n=4 expect=4")
         add("get mcla_fence_yield")
         tap("T4", "a", TAP_LENS[:4], "get mcla_fence_yield")
+        at_nav()
         reset(0)
         add("press b 40ms")
         add("wait_until ui_count < 19 15s")
         add("wait 1200ms")
         if variant in "AB":
             # DISPLAY is the fifth button of the Settings list (the pause list comes back on PERFORMANCE)
+            add("set hdr_peak_nits 0")
             add("press_until up ui_select == 4 every=600ms hold=40ms timeout=30s")
             add("wait 400ms")
             add("press a 40ms")
@@ -170,6 +196,7 @@ def pad_lines(run_set):
             add("log MI page DISPLAY")
             goto(10)
             add("uisel")
+            at_cap()
             add("log MI test T5 key=right n=4 expect=4")
             add("get hdr_peak_nits")
             tap("T5", "right", TAP_LENS[:4], "get hdr_peak_nits")
@@ -182,11 +209,11 @@ def pad_lines(run_set):
             add("press left 3000ms")
             add("wait 700ms")
             add("get hdr_peak_nits")
+            at_nav()
             reset(0)
             add("press b 40ms")
             add("wait_until ui_count != 15 15s")
             add("wait 1200ms")
-        add("state")
         add("log MI end cell")
     if fg:
         add("set frame_generation off")
@@ -238,10 +265,12 @@ def parse_run(path):
                 elif kind == "tap" and test is not None:
                     tap = {"i": int(kv["i"]), "len": int(kv["len"]), "events": [], "t": t, "value": None}
                     test["taps"].append(tap)
-                elif kind in ("end", "page", "setup"):
-                    if kind == "end" and words[1:2] == ["cell"] and cell is not None:
+                elif kind == "tapend":
+                    tap = None
+                elif kind == "end":
+                    if words[1:2] == ["cell"] and cell is not None:
                         cell["t1"] = t
-                    tap = None if kind == "end" else tap
+                    test = tap = None
             elif body.startswith("uisel ") and test is not None:
                 mm = re.search(r"select=(-?\d+) scroll=(-?\d+) count=(-?\d+) rowval=(-?\d+)", body)
                 if mm:
@@ -255,10 +284,10 @@ def parse_run(path):
                 mm = re.match(r"get (\S+)=(\S+)", body)
                 if mm:
                     test["values"].append((t, mm.group(1), mm.group(2)))
-            elif body.startswith("state") and cell is not None:
+            elif body.startswith("state") and test is not None:
                 mm = re.search(r"frame=(\d+) swaps=(\d+) ms=(\d+)", body)
                 if mm:
-                    cell["states"].append((int(mm.group(1)), int(mm.group(2)), int(mm.group(3))))
+                    test.setdefault("states", []).append((int(mm.group(1)), int(mm.group(2)), int(mm.group(3))))
         elif text.startswith("ui key:") and test is not None:
             mm = re.match(r"ui key: (\w+) input=(\d+) key=(-?\d+) t=(\d+)\.(\d+) ms", text)
             if mm:
@@ -271,8 +300,9 @@ def parse_run(path):
 
 
 def cell_fps(cell):
-    if len(cell["states"]) >= 2:
-        (f0, s0, m0), (f1, s1, m1) = cell["states"][0], cell["states"][-1]
+    states = cell["tests"].get("T2", {}).get("states", [])
+    if len(states) >= 2:
+        (f0, s0, m0), (f1, s1, m1) = states[0], states[-1]
         if m1 > m0:
             return 1000.0 * (f1 - f0) / (m1 - m0), 1000.0 * (s1 - s0) / (m1 - m0)
     return None, None
@@ -284,10 +314,10 @@ def describe_cell(cell, lines, verdicts):
             f"{'on' if cell['timing'] else 'off'}, repeat fix {'on' if cell['repeat'] else 'off'}"
             f"{', frame generation' if cell['fg'] else ''}")
     if fps:
-        head += f"  (game {fps:.0f} updates/s, {swaps:.0f} swaps/s over the cell)"
+        head += f"  (game {fps:.0f} updates/s, {swaps:.0f} swaps/s during the hold)"
     lines.append(head)
     ok_all = True
-    for name in ("T0", "T0b", "T1", "T1b", "T3", "T3b", "T4"):
+    for name in ("T0", "T0b", "T1", "T1b", "T3", "T3b", "T4", "T5"):
         test = cell["tests"].get(name)
         if not test:
             continue
@@ -298,12 +328,20 @@ def describe_cell(cell, lines, verdicts):
         if len(sel) >= 2 and name in ("T0", "T0b", "T1", "T1b"):
             moved = f"  rows moved {sel[-1][1] - sel[0][1]:+d}"
         values = ""
-        if name in ("T3", "T3b", "T4"):
+        if name in ("T3", "T3b", "T4", "T5"):
             values = "  values " + " ".join(v for _, _, v in test["values"][-len(counts) - 1:])
         lines.append(f"  {name:3s} {test['key']:5s} taps {len(counts)}: key events per tap {counts}  "
                      f"exactly one: {exact}/{len(counts)}{moved}{values}")
         if exact != len(counts):
             ok_all = False
+    for name in ("T5h", "T5l"):
+        hold = cell["tests"].get(name)
+        if hold:
+            times = [e["ms"] - hold["events"][0]["ms"] for e in hold["events"]] if hold["events"] else []
+            gaps = [round(b - a) for a, b in zip(times, times[1:])]
+            values = " ".join(v for _, _, v in hold["values"])
+            lines.append(f"  {name:3s} held 3 s: {len(times)} key events, first repeat after "
+                         f"{gaps[0] if gaps else '-'} ms, then {gaps[1:4]}  hdr_peak_nits {values}")
     t2 = cell["tests"].get("T2")
     if t2:
         times = [e["ms"] - t2["events"][0]["ms"] for e in t2["events"]] if t2["events"] else []
@@ -317,7 +355,7 @@ def describe_cell(cell, lines, verdicts):
     verdicts.append((cell, ok_all))
 
 
-def report(paths, out):
+def report(paths, out, echo=True):
     lines = []
     verdicts = []
     for path in paths:

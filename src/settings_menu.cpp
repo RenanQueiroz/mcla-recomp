@@ -1382,7 +1382,10 @@ void SyncRowsFromOptions(int menu) {
 // 4,000 nits in under three seconds at 150 FPS and at 30. Whether an event
 // repeats a held direction comes from the pad (MclaTickSettingsMenu), or,
 // where the pad doesn't show the direction (another input), from the time
-// since the last event.
+// since the last event. (With mcla_ui_repeat_fix, src/frame_timing.cpp, the game's
+// repeats come 233 ms after the press and then every 200 ms at any frame rate; the
+// steps above are then 1 at the press, 0 at 233 ms, 1 at each repeat to 1.2 s, 4 from
+// there and 16 from 2.2 s. Computed from this function, not yet measured.)
 constexpr uint64_t kHoldGapMs = 100;
 constexpr uint64_t kHoldDelayMs = 400;
 constexpr uint64_t kHoldIntervalMs = 100;
