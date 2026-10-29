@@ -2,7 +2,7 @@
 
 Owner's report (Xbox Series controller and DualSense, both through SDL): "I have to press Start multiple times till it's finally detected." The attract video that plays after a while of idling also took many presses to stop, and it happens after the game has run for a while.
 
-**Status: cause found (read in the second round's logs, no new run needed); fix written, off by default, not measured yet (`mcla_script_pad_latch_ms`, `src/pad_probe.cpp`).** The third round's chain (`C:\mcv\title3\chain`, not in the repo) measures it; the numbers go into the "Measured" section below when it has run.
+**Status: cause found (read in the second round's logs); fix (`mcla_script_pad_latch_ms`, `src/pad_probe.cpp`) measured in the third round and on by default (100 ms; 0 turns it off).** The third round's chain (`C:\mcv\title3\chain`, not in the repo) ran on 2026-10-29; the numbers are under "Measured (third round)".
 
 ## The cause
 
@@ -32,7 +32,7 @@ The attract video (`idle120-p`, `idle120-t`, shots in `C:\mcv\title2\out\shots`)
 
 Why the thread runs only every 2nd to 4th update is **not known**. `sub_82553C10` is `scrThread::Update` (adds 16 ms, `1/60 s` as an integer, to the thread's two clocks per call and calls `scrThread::Run`, `sub_82554E20`); the wait natives (`sub_82553DD0`, `sub_82553D30`) add 16.67 ms per poll to the thread's wait clock. The thread's loop probably waits a couple of those polls. The chain's trace (`TS thread run` and `TS thread update` lines for the threads that poll the pad) shows how often `Update` and `Run` are called per game update; `o-a` and `o-b` (original timing, `--mcla_fps=-1`, the game's fixed 30 Hz step, vsync on) say whether the cadence follows the step (every update in the console's mode, as at a 30 FPS cap) or the clock. It does not matter for the fix.
 
-## The fix (`mcla_script_pad_latch_ms`, default 0 = off; docs/off-switches.md)
+## The fix (`mcla_script_pad_latch_ms`, default 100, 0 = off; docs/off-switches.md)
 
 Hook `mcla_script_pad_read` at `0x822C8B34` (the `cntlzw r6,r8` in `IS_PAD_BUTTON_DOWN`: r8 = the press, r6 = pad, r5 = button) and the pad update hook (`0x82615048`, counts each press: a sequence number and the time per pad and button). A script **call site** that is not given the real press is told about it **once**, at its next poll, when (a) it polled this button within 200 ms before the press (it is a poller; a call site that starts asking after the press is not told, so one press does not also answer the next screen), (b) it has not been told about this press, (c) the press is at most `mcla_script_pad_latch_ms` old (100 ms is what the chain tests: two to four polls of the title thread) and (d) the title phase is on (the guard at `0x82836A28`, bit 0, is 0). A call site that read the real edge is marked as told; later reads of the same update answer the same. A call site is the running thread's program (`[thread + 8]`) and program counter (`[thread + 16]`), the thread being the guest word at `0x828DA3BC`, which `scrThread::Run` sets: it does not matter whether the script keeps one thread or starts a new one for each pass of its loop (not known). No pad hold, no change to the UI path. The result is what the console does at 30 FPS: every script that polls a button sees each press once.
 
@@ -51,10 +51,19 @@ Risks: it applies only while the title phase lasts (the readers after it, the fr
 
 ## Measured (third round)
 
-Not run yet when this was written. The chain (`C:\mcv\title3\chain\ts_batch.py`) runs: `b120-a`, `b120-b`, `b60-a`, `b0-a` (no fix, the trace of the script side: loop run in the press update or not, SAW / MISSED per press), `o-a`, `o-b` (original timing), `f120-a..e`, `f60-a/b`, `f0-a..c`, `f120-h50` (the latch, first press accepted?), `lim-f120` (4 logical processors), `idle-f` (16 presses 1.5 s apart in the attract video), `attract-f` (presses 400 ms apart from 0.5 s after the video starts). To turn the latch on by default: the first press SAW in every `f*` run at 60, 120 and uncapped (also the 50 ms press), the video stopped by the first press in `idle-f` and no second step on the screen after the title.
+Scripted runs of the dev pad (`C:\mcv\title3\out\ts-summary.txt`; Ryzen 7 9800X3D, RTX 5080, D3D12, 1x, fast intro, one Start press of 100 ms after the settle time given in the run's name, repeated every 1.5 s until the title is left):
+
+| Run | Latch | First press |
+|---|---|---|
+| `b120-a`, `b60-a` | off | missed (the script read the pad 288 and 228 times in the window, never a true answer); accepted by the second press |
+| `b120-b`, `b0-a` | off | accepted (the script ran in the press's update) |
+| `f120-a`, `f120-b`, `f120-d`, `f60-a`, `f0-c`, `lim-f120` (8 logical processors, normal intro) | 100 ms | accepted, **through the latch** (at +1 or +2 updates, the press 6.8 to 31.5 ms old) |
+| `f120-c`, `f120-e`, `f60-b`, `f0-a`, `f0-b`, `f120-h50` (50 ms press) | 100 ms | accepted, the real press (the script ran in the press's update) |
+
+So 12 of 12 first presses were accepted with the latch (6 of them only because of it) against 2 of 4 without; the title exited once per accepted press (`StopMovie` 2 to 5 updates after it, once). The attract video (`idle-f`, `attract-f`): the first press stopped the video through the latch (`StopMovie` 41 updates later, the fade); a press during the fade back to the title was missed (the title does not take one yet), the next one left the title. Original timing (`o-a`, `o-b`: `--mcla_fps=-1`, vsync on) still needed 7 and 6 presses, so the fixed step does not make the script run in every update. Not run: Linux and the PS5 build.
 
 ## Not done / not built
 
 - Linux and the PS5 build: not built or run. `src/pad_probe.cpp` and `config/pad_probe.toml` are shared with both; the hook addresses are those of the Xbox 360 image.
-- The hooks' codegen and behaviour: nothing of the third round ran. CI compiles only the host source.
+- The hooks of the title fix were built and run in the third round. The eight hooks added for the other natives (`script-pad-2026-10-29.md`) have not run.
 - Other scripts that ask for a press the same way: four natives do (`IS_PAD_BUTTON_DOWN`, `IS_BUTTON_DOWN`, `UILogic_IsPressed`, `Player_FlashingHighbeams`); the latch was extended to all of them behind `--mcla_script_pad_latch_scope=all`, see `script-pad-2026-10-29.md` (not run in the game yet).

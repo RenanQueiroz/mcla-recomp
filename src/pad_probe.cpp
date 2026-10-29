@@ -66,11 +66,11 @@ REXCVAR_DEFINE_INT32(mcla_title_fps, 0, "MCLA",
                      "On the title screen and the attract video the frame-rate cap is this many "
                      "frames a second (0 = the player's cap), except just after a Start press")
     .range(0, 120);
-REXCVAR_DEFINE_INT32(mcla_script_pad_latch_ms, 0, "MCLA",
+REXCVAR_DEFINE_INT32(mcla_script_pad_latch_ms, 100, "MCLA",
                      "A script that polls a button and misses its press (it runs only every 2nd "
                      "to 4th update above 30 FPS) is told about the press once, at its next poll, "
-                     "up to this many milliseconds later (0 = as the game does: the press is seen "
-                     "only by a script run in the same update)")
+                     "up to this many milliseconds later (0 = off, as the game does: the press is "
+                     "seen only by a script run in the same update)")
     .range(0, 500);
 REXCVAR_DEFINE_STRING(mcla_script_pad_latch_scope, "title", "MCLA",
                       "Where mcla_script_pad_latch_ms applies: title (the title screen and the "
@@ -435,6 +435,12 @@ bool ScopeAll() {
   return scope == "all";
 }
 
+// Whether the latch has anything to do now: it is on, and the scope is every script or the title
+// phase is up. Outside that nothing is counted (the hooks cost one cvar read and a guard read).
+bool LatchWanted() {
+  return REXCVAR_GET(mcla_script_pad_latch_ms) > 0 && (ScopeAll() || InTitlePhase());
+}
+
 struct PollOut {
   bool latched = false;    // tell the script the button was pressed
   bool first = false;      // the first ask of this source by this call site
@@ -664,8 +670,8 @@ void mcla_pad_probe_update(PPCRegister& r31) {
     return;
   }
   const bool probe = Probe();
-  const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
-  if (!probe && latch_ms <= 0 && REXCVAR_GET(mcla_title_fps) <= 0) {
+  const bool latch = LatchWanted();
+  if (!probe && !latch && REXCVAR_GET(mcla_title_fps) <= 0) {
     return;
   }
   const uint64_t now = NowUs();
@@ -687,7 +693,7 @@ void mcla_pad_probe_update(PPCRegister& r31) {
       }
     }
   }
-  if (pad == 0 && (latch_ms > 0 || probe)) {
+  if (pad == 0 && (latch || probe)) {
     ScanRecordSources(now);  // the action records the scripts ask about
   }
   if (pressed & kStartBit) {
@@ -739,7 +745,7 @@ void TraceSiteNew(const char* native, const ScriptSite& s, uint64_t src) {
 bool PadNativePoll(const char* native, uint32_t pad, uint32_t button, bool real, bool log_start) {
   const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
   const bool probe = Probe();
-  if (latch_ms <= 0 && !probe) {
+  if (!probe && !LatchWanted()) {
     return false;
   }
   if (pad >= kPadCount || button >= kButtons) {
@@ -815,14 +821,14 @@ void mcla_script_button_read(PPCRegister& r3, PPCRegister& r30, PPCRegister& r11
 // 0x822C7FF4 in sub_822C7FC8 (`li r3,0`, the modal scene blocks input) and 0x822A6DD4 in sub_822A6D48
 // (Player_FlashingHighbeams answers no without asking the record): the call site is not polling now.
 void mcla_script_blocked_button() {
-  if (REXCVAR_GET(mcla_script_pad_latch_ms) <= 0 && !Probe()) {
+  if (!Probe() && !LatchWanted()) {
     return;
   }
   ScriptBlocked(CurrentScriptSite().key);
 }
 
 void mcla_script_blocked_highbeams() {
-  if (REXCVAR_GET(mcla_script_pad_latch_ms) <= 0 && !Probe()) {
+  if (!Probe() && !LatchWanted()) {
     return;
   }
   ScriptBlocked(CurrentScriptSite().key);
@@ -842,7 +848,7 @@ bool RecordNativePoll(const char* native, PPCRegister& r3) {
   t_controls = 0;
   const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
   const bool probe = Probe();
-  if ((latch_ms <= 0 && !probe) || !controls) {
+  if ((!probe && !LatchWanted()) || !controls) {
     return false;
   }
   const bool real = (r3.u32 & 0xFF) != 0;

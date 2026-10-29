@@ -2,7 +2,7 @@
 
 Question (owner): "For the button press fix, we should extend it to other areas." The title screen's Start problem (`title-start-2026-10-29.md`) comes from a game script that asks the game "was this button pressed in this update" less often than the game updates. Any script that asks the same way misses presses above 30 FPS in the same way.
 
-**Status: the natives are found in the code; the latch covers all of them (`--mcla_script_pad_latch_ms`, `--mcla_script_pad_latch_scope=all`, both off by default); none of it has run in the game yet.** The third round's chain for the title (`C:\mcv\title3`) has to show first that the latch works on the title screen. Which scripts call the natives, for what, is not known from the code (the scripts' bytecode is data and was not read); the chain's trace lists the call sites.
+**Status: the title screen is fixed and the latch is on by default for it (`--mcla_script_pad_latch_ms`, 100; measured, see `title-start-2026-10-29.md`). The natives are found in the code and the latch covers all of them behind `--mcla_script_pad_latch_scope=all` (default `title`); that scope has not run in the game yet.** Which scripts call the natives, for what, is not known from the code (the scripts' bytecode is data and was not read); the chain's trace lists the call sites.
 
 ## Script natives that ask for a press
 
@@ -45,9 +45,9 @@ Assumptions not checked in the game (each one shows in the chain's log): `[0x828
 
 ## The chain (`C:\mcv\scriptpad\chain`, not in the repo)
 
-Runs of the dev pad from the scratch save, cap 120 and 60, each once with the latch off and once with `--mcla_script_pad_latch_ms=100 --mcla_script_pad_latch_scope=all`; presses at jittered times (gaps of 1.0 to 1.4 s) in: the title, free roam (a, b, x, y, lb, rb, left, right, down, four each), the pause menu (Start / B), the overhead map (d-pad up), Back, a short drive on a route with presses, and a race (the arcade's first ordered race: A while it loads and the intro runs, then the car's buttons, then the pause menu). A control run has the latch on with the scope `title`.
+Runs of the dev pad from the scratch save, cap 120 (and 60 if time is left), each once with `--mcla_script_pad_latch_ms=0` and once with `--mcla_script_pad_latch_scope=all` (the latch's 100 ms is the default now); presses at jittered times (gaps of 1.0 to 1.4 s) in: the title, free roam (a, b, x, y, lb, rb, left, right, down, four each), the pause menu (Start / B), the overhead map (d-pad up), Back, a short drive on a route with presses, and a race (the arcade's first ordered race: A while it loads and the intro runs, then the car's buttons, then the pause menu).
 
-Read the `report` for: with the latch off, which call sites miss presses (MISSED) at 120 and 60 FPS, which native and which script (the "call sites" list); with it on, MISSED should be 0 for the call sites that ask at least every 100 ms, DOUBLED must be 0, and the control run should miss as the off runs do outside the title.
+Read the `report` for: with the latch off, which call sites miss presses (MISSED) at 120 and 60 FPS, which native and which script (the "call sites" list); with it on, MISSED should be 0 for the call sites that ask at least every 100 ms, DOUBLED must be 0, and the screens (pause menu, map, race) must open and close as in the off runs.
 
 ## Measured
 
