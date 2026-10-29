@@ -174,11 +174,11 @@ integrated GPU first is covered by a test with made-up adapters only.
 On Windows, the first time: clone this fork, put the disc image (Midnight Club:
 Los Angeles Complete Edition, USA/Europe) next to the repository folder, and run
 `launcher\build-game.ps1` (or `scripts\make_pc.ps1 -Iso <path>`; see
-README.md, "Windows", for the tools). Then `launcher\build-launcher.ps1`
+docs/building.md, "Windows", for the tools). Then `launcher\build-launcher.ps1`
 builds the launcher and puts a shortcut to it on the desktop, which updates,
 builds and plays from then on.
 
-Two toolchains build it (`-Toolchain`, README.md, "Windows"): `msvc`, the
+Two toolchains build it (`-Toolchain`, docs/building.md, "Windows"): `msvc`, the
 default, is the project's Clang 20.1.8 with Visual Studio Build Tools' headers
 and libraries (Build Tools 2022 version 17.1 or newer, and a Windows SDK newer
 than 10.0.19041, which `make_pc.ps1` installs if it is not there); `mingw` is
@@ -198,7 +198,7 @@ building one. `make_pc.ps1` keeps what it was asked for in
 builds the way the last build did (so does `make_pc.ps1`), so that an update
 (also the launcher's, an older one's too) neither falls back to msvc nor to
 building the SDK from source; an install built with msvc switches with a
-record written before its update (README.md, "Without Microsoft's compiler").
+record written before its update (docs/building.md, "Without Microsoft's compiler").
 
 **CI** (`.github/workflows/`, `scripts/ci/README.md`): every push and pull
 request checks that the pinned tools and the patch list agree, builds the SDK
@@ -222,7 +222,7 @@ themselves. To patch the SDK by hand, first apply the patches upstream's build
 applies: on Windows the ones `scripts\make_pc.ps1` applies
 (`rexglue-v0.10.0-mcla.patch`, `rexglue-minmax-blend-factor.patch`, and
 `rexglue-ffmpeg-ps5-config.patch` in `thirdparty/FFmpeg`); on Linux the
-`git apply` lines in README.md, "Linux", which include the two Linux patches.
+`git apply` lines in docs/building.md, "Linux", which include the two Linux patches.
 Then, still in `third_party/rexglue-sdk`, apply the fork's patches in this
 order, as several change neighbouring lines (the patch table in
 `scripts\make_pc.ps1` is the reference for the order):

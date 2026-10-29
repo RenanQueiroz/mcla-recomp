@@ -155,7 +155,7 @@ change `tools.json` and, for llvm-mingw and Clang, the same pins in `scripts/mak
   zips themselves are deterministic for the same inputs (sorted entries, fixed times and modes). The
   attestations, not a rebuild, tie a file to its build.
 - A bundle unpacked at `third_party\rexglue-sdk-bin\` has paths up to about 120 characters; the folder
-  limits of the README (148 characters for the clone) are for building the SDK.
+  limits in docs/troubleshooting.md (148 characters for the clone) are for building the SDK.
 - `release.yml` jobs run with the default cache mode; no job of the release uses a cache.
 
 ## Scripts
