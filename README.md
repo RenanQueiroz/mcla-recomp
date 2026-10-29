@@ -62,49 +62,22 @@ The launcher also has display (fullscreen or windowed), display gamma, screen sc
 
 Nearly every change the fork makes on by default has an off switch, so a problem can be tested without rebuilding. Type the flag under the launcher's *Advanced* › *More mcla.exe options*, or pass it to `mcla.exe`. If a problem goes away with a change off, please say which flag did it in the [fork's issues](https://github.com/RenanQueiroz/mcla-recomp/issues).
 
+The ones you are most likely to want:
+
 | Change | Off switch |
 |---|---|
-| Single-tile rendering (and the 4,096-tile EDRAM it needs) | `--mcla_single_tile=false`, `--edram_tiles=2048` |
 | Faster pause menu and GPS map | `--mcla_larger_tiles=false` |
-| Clear rectangles done as host clears | `--clear_rectangle_draws=false` |
-| Direct resolves | `--direct_host_resolve=false` |
-| Resolved textures decoded straight in | `--texture_load_direct=false`, `--texture_load_direct_unscaled=false` (native resolution only) |
-| No frame wait while new pipelines compile | `--async_pipeline_end_of_frame_wait=true` |
-| Hot pages, uploads kept valid, unclipped draws on the CPU | `--shared_memory_hot_page_faults=0`, `--clear_memory_page_state=true`, `--execute_unclipped_draw_vs_on_cpu=false` |
-| GPU register writes in bulk, request fast path, batched counters | `--gpu_regwrite_bulk=false`, `--shared_memory_request_fast_path=false`, `--gpu_batch_perf_counters=false` |
-| Guest atomics without the global lock | `--guest_atomics_lock_free=false` |
-| Direct3D 12: threaded submission | `--d3d12_threaded_submission=false` |
-| Direct3D 12: textures in shared heaps | `--d3d12_texture_heaps=false` |
-| Direct3D 12: uploads copied together | `--d3d12_hoist_shared_memory_uploads=false` |
-| Direct3D 12: compressed depth buffers on reads | `--d3d12_depth_resolve_read_state=false` |
-| Vulkan: uploads before the render pass | `--vulkan_hoist_shared_memory_uploads=false` |
-| Vulkan: threaded submission | `--vulkan_threaded_submission=false` |
-| Vulkan: texture loads by compute (NVIDIA only by default) | `--vulkan_texture_load_storage_copy=off` |
-| Vulkan: shader storage translated in parallel | `--vulkan_pipeline_storage_translation_threads=1` |
-| Vulkan: fix for the blur over a car's plate and rear lights | `--vulkan_odepth_float24_scale=false` |
-| Timer thread sleeps instead of spinning | `--timer_queue_blocking_wait=false` |
-| Timer thread's high-resolution wait (by CPU thread count) | `--timer_queue_hr_wait=false` |
-| ... while a frame-rate cap is set | `--mcla_timer_hr_at_cap=false` |
-| Less CPU in NVIDIA Reflex's frame wait (Direct3D 12) | `--mcla_reflex_sleep_assist=false` |
-| Frame-pacing thread woken on demand (by CPU thread count) | `--mcla_pump_wake_on_demand=false` |
-| Faster on CPUs with 5 or fewer threads | `--mcla_small_cpu_defaults=false` |
-| Less video memory above native resolution | `--render_target_max_height=0`, `--render_target_trim_seconds=0`, `--gpu_memory_pressure_percent=0` |
-| Frame limiter waits at the swap | `--mcla_pace_at_swap=false` |
-| Menus at the console's pace; the HUD at 60 updates a second | `--mcla_ui_timing_fix=false`; `--mcla_ui_hud_rate=30` |
-| Motorcycle lean by elapsed time | `--mcla_bike_gyro_fix=false` |
-| Camera-flight warp fix | `--mcla_warp_fix=false` |
-| Mouse pointer hidden during play | `--mcla_hide_cursor=false` |
-| No dots on lamp poles and palm trunks (alpha to mask) | `--alpha_to_mask_tolerance=0` |
 | Sun glare follows the real sun | `--occlusion_query_async=false` |
+| Less CPU while a frame-rate cap is set | `--mcla_timer_hr_at_cap=false`, `--mcla_reflex_sleep_assist=false` |
+| Faster on CPUs with 5 or fewer threads | `--mcla_small_cpu_defaults=false` |
+| Less video memory at 2x and 3x | `--render_target_max_height=0` |
 | Rain at 2x and 3x | `--mcla_rain_unscaled_copy=false` |
-| Vinyls on the arcade race opponents' cars | `--mcla_vinyl_readback=false`, `--resolve_downscale_unit_layout=false` |
-| Radio audio decoder fixes | `--xma_canary_fixes=false` |
+| Vinyls on the opponents' cars | `--mcla_vinyl_readback=false` |
 | Picking the faster GPU on a PC with two GPUs | `--mcla_prefer_dedicated_gpu=false` |
-| HDR | `--hdr=off` (parts: `--hdr_ui_layer=false`, `--mcla_hdr_scene=false`, `--mcla_render_markers=false`) |
-| Shader pack added at every start | `--mcla_shader_pack_auto=false` |
-| 16x anisotropic filtering | the launcher's *Anisotropic filtering* setting (`--anisotropic_override=3` is the old 4x) |
+| The HUD at 60 updates a second | `--mcla_ui_hud_rate=30` |
+| 16x anisotropic filtering | the launcher's *Anisotropic filtering* setting |
 
-What each does and what was measured: [docs/off-switches.md](docs/off-switches.md). A few changes have no switch (the 1 ms timer kept while the window is hidden, the achievement pop-up, loading-screen pacing).
+Every switch (about 40, the graphics and timing internals too), what each does and what was measured: [docs/off-switches.md](docs/off-switches.md).
 
 ## If something goes wrong
 
