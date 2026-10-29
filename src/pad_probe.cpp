@@ -22,7 +22,8 @@
 // milliseconds (see ScriptPoll). It covers every script native that asks "pressed in this update":
 // IS_PAD_BUTTON_DOWN and IS_BUTTON_DOWN (the pad record), UILogic_IsPressed and
 // Player_FlashingHighbeams (an action record of the player's controls, sub_822A4CE0);
-// mcla_script_pad_latch_scope says where (the title screen or every script).
+// mcla_script_pad_latch_scope says where (every script, the default, or only the title screen
+// and the attract video).
 //
 // mcla_pad_probe (development): logs, with the time and the update number of the pad, every
 // button edge of the pad records, and for 1.5 s after each Start press the decisions of that key
@@ -72,9 +73,9 @@ REXCVAR_DEFINE_INT32(mcla_script_pad_latch_ms, 100, "MCLA",
                      "up to this many milliseconds later (0 = off, as the game does: the press is "
                      "seen only by a script run in the same update)")
     .range(0, 500);
-REXCVAR_DEFINE_STRING(mcla_script_pad_latch_scope, "title", "MCLA",
-                      "Where mcla_script_pad_latch_ms applies: title (the title screen and the "
-                      "attract video) or all (every script)");
+REXCVAR_DEFINE_STRING(mcla_script_pad_latch_scope, "all", "MCLA",
+                      "Where mcla_script_pad_latch_ms applies: all (every script) or title (only "
+                      "the title screen and the attract video)");
 
 namespace {
 constexpr uint32_t kPadBase = 0x82905388;

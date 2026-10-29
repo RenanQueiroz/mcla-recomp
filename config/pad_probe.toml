@@ -1,7 +1,7 @@
-# Script pad input: the script pad latch (mcla_script_pad_latch_ms, mcla_script_pad_latch_scope) and a
-# development trace (src/pad_probe.cpp). Off unless --mcla_script_pad_latch_ms=N, --mcla_pad_probe=true
-# or --mcla_title_fps=N is given: each hook starts with one cvar read. Addresses are from the
-# recompiled code of the Xbox 360 image.
+# Script pad input: the script pad latch (mcla_script_pad_latch_ms, on by default; mcla_script_pad_latch_scope,
+# every script by default) and a development trace (src/pad_probe.cpp). The trace is off unless
+# --mcla_pad_probe=true or --mcla_title_fps=N is given; --mcla_script_pad_latch_ms=0 turns the latch off.
+# Each hook starts with a cvar read. Addresses are from the recompiled code of the Xbox 360 image.
 
 # 0x82615048: in sub_82614D30 (the per-pad update, once per game update), where the branches that
 # set the button bits of the pad record's new mask (+8) meet. r31 = the pad record
