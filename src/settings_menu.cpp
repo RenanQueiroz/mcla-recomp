@@ -58,6 +58,9 @@ REXCVAR_DEFINE_INT32(mcla_menu_width_cap, 940, "MCLA",
                      "Development: the pause menu's width (the movie's own units) above which a "
                      "settings page goes to a shorter wording (0 never)")
     .range(0, 4000);
+REXCVAR_DEFINE_BOOL(mcla_menu_legend, true, "MCLA",
+                    "Development: a settings page with restart-only rows says what (R) means under its "
+                    "title (the shorter wording's mark; off: only to see the page without the line)");
 REXCVAR_DEFINE_BOOL(mcla_menu_log_layout, false, "MCLA",
                     "Development: log the pause menu's width and height while a settings page is open");
 
@@ -1712,7 +1715,7 @@ void SetMenuDescription(const char* text) {
 constexpr const char* kRestartLegend = "(R) NEXT START";
 
 const char* PageLegend(int menu) {
-  if (TextLevel() < 1) {
+  if (TextLevel() < 1 || !REXCVAR_GET(mcla_menu_legend)) {
     return "";
   }
   for (int i = 0; i < kMenus[menu].item_count; ++i) {
