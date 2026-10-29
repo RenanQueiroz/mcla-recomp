@@ -39,8 +39,7 @@ keys.*
 *.lnk
 
 # Working notes and developer tools: kept on the maintainer's machine, not
-# published. The README is the public documentation.
-/docs/*.md
+# published. The README and docs/ are the public documentation.
 /REFLECTION_FIX.md
 /ps5/probes/
 /ps5/results/
