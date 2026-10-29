@@ -1,24 +1,25 @@
 diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
-index 2630b80..c025814 100644
+index 2630b80..505e012 100644
 --- a/src/system/xthread.cpp
 +++ b/src/system/xthread.cpp
-@@ -43,6 +43,15 @@ REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
+@@ -43,6 +43,16 @@ REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
  REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
                      "Ignores game-specified thread affinities");
  
 +REXCVAR_DEFINE_BOOL(affinity_warning_once, true, "Kernel",
-+                    "With fewer than 6 logical processors the game's thread affinities are not applied; "
-+                    "log that once per run (false: on every call, which is about 1,000 lines a second "
-+                    "in this game)");
++                    "With fewer than 6 logical processors the game's thread affinities are not "
++                    "applied; log that once per run (false: on every call, about 1,000 lines a "
++                    "second in this game)");
 +
 +REXCVAR_DEFINE_UINT32(debug_affinity_logical_processors, 0, "Kernel",
-+                      "Debug only: 0 uses the real number of logical processors; N makes the thread "
-+                      "affinity code (XThread::SetActiveCpu, nothing else) behave as if the PC had N");
++                      "Debug only: 0 uses the real number of logical processors; N makes the "
++                      "thread affinity code (XThread::SetActiveCpu, nothing else) behave as if the "
++                      "PC had N");
 +
  namespace rex::system {
  
  const uint32_t XAPC::kSize;
-@@ -894,12 +903,29 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
+@@ -894,12 +904,31 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
      pcr.prcb_data.current_cpu = cpu_index;
    }
  
@@ -33,19 +34,21 @@ index 2630b80..c025814 100644
      }
    } else {
 -    REXSYS_WARN("Too few processor cores - scheduling will be wonky");
-+    // The game calls this about 1,000 times a second (KeSetAffinityThread), and a log line is a file
-+    // write, a flush and a debugger message under the log sinks' lock, which every thread shares.
++    // The game calls this about 1,000 times a second (KeSetAffinityThread), and a log line is a
++    // file write, a flush and a debugger message under the log sinks' lock, which every thread
++    // shares.
 +    static std::atomic<bool> warned{false};
-+    const bool once = REXCVAR_GET(affinity_warning_once);
-+    if (!once || !warned.exchange(true)) {
++    if (!REXCVAR_GET(affinity_warning_once)) {
++      REXSYS_WARN("Too few processor cores - scheduling will be wonky");
++    } else if (!warned.exchange(true)) {
 +      REXSYS_WARN(
 +          "Too few processor cores ({} logical, the Xbox 360 has 6): the game's thread affinities "
-+          "are not applied{}{}",
++          "are not applied{}. Logged once per run (affinity_warning_once=false logs a line on "
++          "every call).",
 +          processors,
 +          REXCVAR_GET(ignore_thread_affinities)
 +              ? " (they are ignored on any PC while ignore_thread_affinities is on)"
-+              : "",
-+          once ? ". Logged once per run (affinity_warning_once=false logs every call)" : "");
++              : "");
 +    }
    }
  }
