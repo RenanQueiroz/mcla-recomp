@@ -1535,8 +1535,8 @@ void UiInterpDraw(PPCRegister& r30, PPCRegister& r31, bool apply_opt, bool log) 
     for (int k = 0; k < 4; k++) {
       scale_jump = std::max(scale_jump, std::fabs(double(e.to_m[k]) - double(e.from_m[k])));
     }
-    const bool far = std::fabs(double(e.to_m[4]) - e.from_m[4]) > snap || std::fabs(double(e.to_m[5]) - e.from_m[5]) > snap;
-    if (far || turned || scale_jump > 0.75) {
+    const bool jumped = std::fabs(double(e.to_m[4]) - e.from_m[4]) > snap || std::fabs(double(e.to_m[5]) - e.from_m[5]) > snap;
+    if (jumped || turned || scale_jump > 0.75) {
       std::memcpy(e.from_m, live_m, sizeof live_m);
       if (census) {
         census->snapped++;
@@ -1544,7 +1544,7 @@ void UiInterpDraw(PPCRegister& r30, PPCRegister& r31, bool apply_opt, bool log) 
       if (log) {
         REXLOG_INFO("ui interp event: {} kind=snap why={} inst={:08X} d={} char={} step_move=({:.1f},{:.1f}) previous=({:.1f},{:.1f}) "
                     "scale_jump={:.2f}",
-                    step->name, turned ? "turned" : far ? "far" : "flip", inst, depth, charid, dx, dy, prev_dx, prev_dy,
+                    step->name, turned ? "turned" : jumped ? "far" : "flip", inst, depth, charid, dx, dy, prev_dx, prev_dy,
                     scale_jump);
       }
     }
