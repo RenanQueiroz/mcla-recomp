@@ -97,6 +97,7 @@ KEY = re.compile(r"TS menu key down input=(\d+) key=(-?\d+) taken=(\d+) t=(\d+) 
 SEC = re.compile(r"TS 1s t=(\d+) updates=(\d+) .*?ui_updates=(\d+) mapper=(\d+) movie_adv=(\d+) movie_ticks=(\d+) native_calls=(\d+) "
                  r"native_start=(\d+) native_pass=(\d+) events=(\d+) dispatch=(\d+) title_phase=(\w+)")
 MARK = re.compile(r"dev pad: mark (\w+) at engine frame (\d+), swap (\d+)")
+CAP = re.compile(r"frame timing: the frame-rate cap is now (\d+) FPS")
 UPD = re.compile(r"update[= ](\d+)")
 # script natives known from the code (sub_82554E20 calls them; the wrapper's address)
 NATIVE_NAMES = {"822C8AB0": "IS_PAD_BUTTON_JUST_PRESSED", "822CC808": "MoviePlayer_StopMovie", "822CBEF8": "MoviePlayer_StartMovie",
@@ -143,7 +144,12 @@ def report_one(folder, vtables=None):
     edges, sec = [], []
     ts_lines = []  # (number of the last Start edge, or -1; the TS text)
     last_start = -1
+    caps = []  # (seconds in the log, cap)
+    first_edge_s = None
     for line in lines:
+        m = CAP.search(line)
+        if m:
+            caps.append((secs(line), int(m.group(1))))
         m = PRESS.search(line)
         if m:
             press = (m.group(3), secs(line))
@@ -160,6 +166,8 @@ def report_one(folder, vtables=None):
             edges.append(e)
             if e[0] == 0 and e[3] & 0x800:
                 last_start += 1
+                if first_edge_s is None:
+                    first_edge_s = secs(line)
             continue
         m = SEC.match(t)
         if m:
@@ -168,6 +176,9 @@ def report_one(folder, vtables=None):
         ts_lines.append((last_start, t))
     out.append(f"press_until: {press[0] if press else 'no result line (the pad did not get that far)'}")
     out.append("marks: " + ", ".join(f"{k}@frame {v[1]}" for k, v in marks.items()))
+    if caps:
+        ref = first_edge_s if first_edge_s is not None else caps[0][0]
+        out.append("frame-rate cap changes (s after the first Start press): " + ", ".join(f"{c} FPS at {t - ref:+.1f}" for t, c in caps))
     start_edges = [e for e in edges if e[0] == 0 and e[3] & 0x800]
     accepted_n = 0
     for i, (pad, t, upd, down, up) in enumerate(start_edges):
