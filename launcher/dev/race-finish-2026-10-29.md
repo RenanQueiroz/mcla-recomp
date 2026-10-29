@@ -1,6 +1,6 @@
 # Race finish: does the UI pacing slow the finish sequence? (2026-10-29)
 
-**Status: not measured yet.** This note says what was read, what was added to measure it, and how to read the result. The measurement is one chain (`C:\mcv\racefinish\chain\chain.ps1`, see the end); nothing here has run in the game.
+**Status: measured by the countdown chain's full runs, no slow motion seen** (caps of 30, 60 and 120, Smooth UI on and off; the numbers are in `race-countdown-2026-10-29.md`, "Measured"). The chain this note describes (`C:\mcv\racefinish\chain\chain.ps1`) was not run as written; this note still says what was read, what was added to measure the finish, and how to read a result. Vulkan, uncapped, a slower GPU, Linux and the PS5 build are not covered.
 
 ## The report
 

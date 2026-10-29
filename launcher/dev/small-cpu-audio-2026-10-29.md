@@ -61,7 +61,7 @@ What this says, and what it does not:
 - **The audio options do something only under starvation.** Unloaded, S had no silent frame in the drive segments (4 runs in run 2, where the car drove, and 5 in run 1, where it was
   stuck), so issue #21's stutter was **not reproduced** on the unloaded 4-core mask and the options could not be shown to remove it. Under the stress, S played 184 and 31 silent
   frames in the drive segments (3 of 3 and 2 of 3 runs), A 3 and 4 (1 of 3 in each). The adaptive queue grew only there (12 to 15 frames) and not in any unloaded run. Under the stress the frame was not slower with A (drive +0.3% and -0.2%;
-  uncapped -12.0% and -11.0%). **Not measured: the stress with C or CA**, which is the combination the new default gives; and the stress is a CPU that cannot hold 30 FPS (the busy
+  uncapped -12.0% and -11.0%). **The stress with C or CA** (the combination the new default gives) is measured below; and the stress is a CPU that cannot hold 30 FPS (the busy
   processes took the game to 0.8 to 0.9 cores, 19 to 22% of the frames slow), not a real slow CPU.
 - **Fork issue #21** (an i5 of the 3rd generation, 4 cores and 4 threads, 8 GB, RX 580, the default 30 FPS cap: audio and music stutter while the car moves) is the real-world case for
   all of this. **It was not reproduced on real old hardware**: the test PC is a fast CPU with 96 MB of L3 limited by affinity, the GPU is an RTX 5080 (the reporter's RX 580 is a
@@ -69,9 +69,28 @@ What this says, and what it does not:
 - **Latency.** The adaptive queue adds up to 86 ms (24 frames instead of 8) of output delay after the queue has run dry, and only then; with MMCSS the audio threads are scheduled ahead
   of ordinary ones. Neither was heard.
 
+## The stress with the shipped defaults (2026-10-29, chains `stressdef` and `stressdef2`)
+
+4 busy processes on the same cores (0x55), the default 30 FPS cap, the car driving (and an uncapped drive); RTX 5080, Direct3D 12. Variants: O (none of the options), S (v0.3.0 as shipped), N (the new defaults, no flags), A (the audio options only), C (the speed-ups only), P (the audio thread priority only). The reports are in the agents' scratch folders, not in the repository. In some runs the car stalled for a 2 s window of the drive (not stuck); the exit of 11 runs of `stressdef2` hung 20 s after the hard exit (their data are complete).
+
+| | Runs | Silent audio frames while the car moved (per run) | Cap-30 drive p99 (ms) | Slow frames |
+|---|---|---|---|---|
+| S, `stressdef` | 2 | 97 in 2 runs | 38.7 (37.9 to 39.5) | 9.3% |
+| N, `stressdef` | 2 | 0 | 71.2 (64.1 to 78.2) | 19.3% |
+| O, `stressdef2` | 2 | 37, 40 | 42.4 (38.7 to 46.2) | 2.0% |
+| N, `stressdef2` | 3 | 3, 1, 4 | 41.9 (37.6 to 49.5) | 1.8% |
+| A (audio options only) | 2 | 4, 558 | 68.8 (36.9 to 100.7) | 20.4% |
+| C (speed-ups only) | 3 | 21, 404, 16 | 58.5 (36.9 to 100.4) | 9.7% |
+| P (priority only) | 1 | 832 | 97.4 | 39.6% |
+
+- The new defaults removed the silent frames in 5 of 5 runs (97 and 0 in `stressdef`; 37 and 40 against 3, 1 and 4 in `stressdef2`). The late audio wake-ups of 8 ms or more fell from 53 to 14 and from 55 to 11 per 10 s.
+- The frame time at the cap is bimodal under this load: N's p99 was like the baseline's in 3 of 5 runs (`stressdef2`) and clearly worse in 2 of 5 (`stressdef`). The adaptive queue grew 16 frames (85 ms) in both `stressdef` runs and 4 frames on average (21 ms) in `stressdef2`. Uncapped, the frame median was 6.64 ms for S and 7.01 for N in `stressdef` (+5.5%) and 6.34 ms for O and 5.13 for N in `stressdef2` (-19%).
+- Each partial set (A, C, P) had at least one run with hundreds of silent frames and a p99 near 100 ms; N had none. That is why the options ship together. **Owner decision: ship both.** The sample is small (1 to 3 runs a variant): the runs overlap and most of the intervals contain 0.
+- Not heard: nobody listened to the sound. Still a simulation on a fast CPU limited by affinity.
+
 ## Not covered
 
-One machine; Direct3D 12 only (a Radeon on Vulkan is the reporter's likely case); the stress with C and CA; a real 4-core CPU without SMT (including its efficiency-core cases: a core
+One machine; Direct3D 12 only (a Radeon on Vulkan is the reporter's likely case); a real 4-core CPU without SMT (including its efficiency-core cases: a core
 with one logical processor counts as a core); the audio by ear; Linux and the PS5 (not built or run: the code is Windows only); 3 or fewer logical processors (these get the defaults
 as before, and now the audio options too, which no run covers).
 

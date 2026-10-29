@@ -1,6 +1,6 @@
 # Race countdown: the ring runs slow when the HUD movie steps less than once per update (2026-10-29)
 
-**Status:** the cause is measured (the race-start chain of `race-start-2026-10-29.md`, six runs) and read from the recompiled code. The fix (`mcla_ui_countdown_fix`, on by default) is written and compiled by CI; **it has not run in the game yet**. A chain measures it (the end of this note); until its numbers are in, every statement about what the fix does is a reading of the code.
+**Status:** the cause is measured (the race-start chain of `race-start-2026-10-29.md`, six runs) and read from the recompiled code. The fix (`mcla_ui_countdown_fix`, on by default) is measured too (chain `cdfix`, 2026-10-29, table under "Measured"): with it on "GO" was on screen at the race start in all five runs, with it off it was not. What the fix does to the clock feed is read from the logs (`cdfed / cdwrit`).
 
 ## What was reported
 
@@ -40,9 +40,9 @@ The race-start chain (RTX 5080, Direct3D 12, a scripted Arcade race, a picture o
 
 What it gives: with Smooth UI at a 120 FPS cap the variable the script reads is 1/30 s at each of its 30 steps a second, which is the console's value and rate; with the HUD at 60 steps a second it is 1/60 s; at a 30 FPS cap, or with `--mcla_ui_timing_fix=false`, every update steps the movie and the value is the game's own (nothing changes). **What it does not change:** how often any movie steps (so the song ticker and the needles keep their pacing), and the glide of Smooth UI (it is told the same steps). The countdown ring's own animation (the pulse of each number, the fade of "GO") is frame-driven and so runs at the movie's step rate as before: at 30 steps a second it is the console's speed (the `c30` pictures show it), while `c120-off` at 120 steps a second shows "GO" for one picture instead of four.
 
-Logging for the check: each `--mcla_ui_pace_log` line ends with `cdn=` (times the game wrote the variable in the window), `cdwrit=` (their sum, seconds), `cdsteps=` (steps of the movie) and `cdfed=` (the sum of what those steps read); with the fix `cdfed / cdwrit` is about 1, without it `cdsteps / cdn`. A line `ui countdown: the HUD movie is now ctx=...` says which movie the hook sees; it must be a `HUDGAUGE` context of the pace lines (the hook reads the value `r3` of `sub_82212298` and the step hook `r31` of `sub_825EDC08`; they should be the same object, the vtable of `swfCONTEXT` at 0x82085300 has the advance in slot 1; that they are equal in a running game is **not checked yet**: if they were not, no step would mark `consumed`, the liveness guard above would switch the feed off after 100 writes and the report would show `cdsteps=0`).
+Logging for the check: each `--mcla_ui_pace_log` line ends with `cdn=` (times the game wrote the variable in the window), `cdwrit=` (their sum, seconds), `cdsteps=` (steps of the movie) and `cdfed=` (the sum of what those steps read); with the fix `cdfed / cdwrit` is about 1, without it `cdsteps / cdn`. A line `ui countdown: the HUD movie is now ctx=...` says which movie the hook sees; it must be a `HUDGAUGE` context of the pace lines (the hook reads the value `r3` of `sub_82212298` and the step hook `r31` of `sub_825EDC08`; they should be the same object, the vtable of `swfCONTEXT` at 0x82085300 has the advance in slot 1; that they are the same object in the running game is shown by the runs (`cdsteps` was not 0 and `cdfed / cdwrit` was 1.00 in all five); if they were not, no step would mark `consumed`, the liveness guard above would switch the feed off after 100 writes and the report would show `cdsteps=0`).
 
-## The measurement (not run yet)
+## The measurement
 
 `C:\mcv\cdfix\chain\chain.ps1` (one exclusive hold, 40 minutes at most, about 30 expected; the queue command is in `C:\mcv\cdfix\NOTES.md`): the branch `fix/race-countdown-hud` is built from GitHub with `fast-setup.ps1`, then `rs_batch.py` runs the pad of `race_finish.py` (boot to a race, hold the throttle, a picture every 120 ms through the countdown, a fine UI pace log, `--mcla_ui_interp_stats=true`), each with the fix on: `c30` (the reference), `c120-sm` (Smooth UI, the shipping default), `c120` (`--mcla_ui_interpolate=false`) and `c60` as full runs with the finish (the route to its end, 70 s after it, a picture every 5 s), `x3` (3x, Smooth UI) as a start-only run, and the control `c120-sm-off` (Smooth UI, `--mcla_ui_countdown_fix=false`, start only). After the hold `post.py` (no game) makes the contact sheets.
 
@@ -51,10 +51,23 @@ Logging for the check: each `--mcla_ui_pace_log` line ends with `cdn=` (times th
 ## Not done, not known
 
 - The movie's script was not read (the SWF files are in the game's archive); that it adds `countdownUpdate` per step is inferred from the table.
-- The race finish: LARecomp's finish slow motion was not seen in the earlier chain (no slow UI-manager movie; the pictures of the finish every 5 s cannot show a HUD element that lasts a second). The code has no other HUD variable that carries a time, so the same fault cannot be in the gauge movie by this route; the finish reports of the chain above check it again.
+- The race finish: LARecomp's finish slow motion was not seen in the earlier chain (no slow UI-manager movie; the pictures of the finish every 5 s cannot show a HUD element that lasts a second) nor in the four full runs of this one (below). The code has no other HUD variable that carries a time, so the same fault cannot be in the gauge movie by this route.
 - Vulkan, other GPUs, frame generation, a real controller, split screen (the hook follows the first player's HUD movie only: `mcHudManager`'s movie 0).
 - Linux and the PS5 build: not built or run; `src/frame_timing.cpp` and `config/frame_timing.toml` are shared with both and the hook addresses are the game's.
 
 ## Measured
 
-Nothing from the fix yet. The table above is from the earlier chain without it.
+Chain `cdfix` (2026-10-29; RTX 5080, Direct3D 12, a scripted Arcade race, one run per row, `C:\mcv\cdfix\out\rs-table.txt`), the fix on except the control:
+
+| Run | Cap | Number on screen at START | GO first seen (s from START) | Seconds a number (3, 2, 1) | Clock feed: fed / written (steps per update) | Verdict |
+|---|---|---|---|---|---|---|
+| `c30` | 30 | GO | -0.07 | 0.96, 0.96, 0.96 | 1.00 (1.00) | reference |
+| `c120-sm` (Smooth UI) | 120 | GO | -0.11 | 0.96, 0.96, 0.96 | 1.00 (0.25) | PASS |
+| `c120` (`--mcla_ui_interpolate=false`, HUD at 60) | 120 | GO | +0.00 | 0.96, 0.96, 1.08 | 1.00 (0.50) | PASS |
+| `x3` (3x, Smooth UI) | 120 | GO | -0.07 | 0.84, 1.08, 0.96 | 1.00 (0.25) | PASS |
+| `c120-sm-off` (control: the fix off) | 120 | **3** | never | 3.60, 3.96 | 0.25 (0.25) | OUT OF STEP |
+| `c60` (Smooth UI) | 60 | GO | -0.14 | 0.96, 0.96, 0.96 | 1.00 (0.50) | PASS |
+
+- With the fix, the movie's steps read 1.00 of the game's time at every rate, and the number on screen at START is GO as at 30 FPS. The control still lags (the pad catches the bug).
+- **The race finish** (the four full runs, `c30`, `c120-sm`, `c120`, `c60`): the game's clock ran at 1.003 s per second in the race, 1.002 for 20 s after the finish and 0.952 to 0.957 from 20 to 40 s after it in all four, the 30 FPS reference included (so the game's own slow-down, not the pacing), then 1.003. The finish's movies came as in the reference (the pause movie, pop-ups and prompts stepped as often or more often, on screen 0.74 to 1.24 times as long); the 3D icon movies are never stepped and two runs ended before they left. No slow motion by these numbers.
+- **Not run:** Vulkan, frame generation, split screen, other GPUs, a real controller, Linux, the PS5.
