@@ -18,7 +18,7 @@
 //     it; with wait, until one is, for up to 10 s)
 //   close (as the window's close button: unlike quit, it waits for a save)
 //   dump <addr> <bytes> <file>   mark <name>   shot <file.png> [scale]
-//   burst <prefix> <n> [scale] [x0 y0 x1 y1] (n guest-output pictures, one per swap, as fast as
+//   burst <prefix> <n> [scale] [x0 y0 x1 y1] [every=<ms>] (n guest-output pictures, one per swap, as fast as
 //     the capture goes, cropped to a part of the frame (fractions) and written as <prefix>-<k>.png
 //     after the last; the swap numbers and times are logged, a capture that is slower than a frame
 //     skips frames and the numbers show it; a failed capture is logged and does not end the script)
@@ -49,7 +49,8 @@
 //   findvec <addr> [floats] [tolerance] (where else in guest memory the same floats are)
 //
 // Conditions: left_title (Start accepted on the title screen), loading (the
-// map zoom-out), roam (the player is in the city), frames N (engine frames
+// map zoom-out), roam (the player is in the city), follow_done (the follower is
+// not driving: its route ended), frames N (engine frames
 // since start-up), u32|f32 <addr> ==|!=|<|>|<=|>= <value>. Addresses are guest
 // addresses, with [x] for "the 32-bit value at x" and +/- offsets:
 // [0x8288DCF8]+0x2A0.
@@ -899,7 +900,7 @@ bool Shot(const std::string& path, double scale, std::string& result) {
 // after the last one, so the files do not slow the capturing. The log line of each says which swaps the capture
 // spanned and when (the steady clock in microseconds, as the game's own log lines use it).
 bool Burst(const std::string& prefix, int count, double scale, double fx0, double fy0, double fx1, double fy1,
-           std::string& result) {
+           std::string& result, double every_ms = 0) {
   auto* runtime = rex::Runtime::instance();
   auto* graphics = runtime ? runtime->graphics_system() : nullptr;
   rex::ui::Presenter* presenter = graphics ? graphics->presenter() : nullptr;
@@ -912,7 +913,7 @@ bool Burst(const std::string& prefix, int count, double scale, double fx0, doubl
   fy0 = std::clamp(fy0, 0.0, 1.0);
   fx1 = std::clamp(fx1, fx0, 1.0);
   fy1 = std::clamp(fy1, fy0, 1.0);
-  count = std::clamp(count, 1, 64);
+  count = std::clamp(count, 1, every_ms > 0 ? 200 : 64);
   struct Picture {
     uint64_t swap0 = 0, swap1 = 0;
     int64_t us = 0;
@@ -922,7 +923,16 @@ bool Burst(const std::string& prefix, int count, double scale, double fx0, doubl
   std::vector<Picture> pictures;
   pictures.reserve(size_t(count));
   uint64_t last = g_swaps.load();
+  const auto grid_start = Clock::now();
   for (int k = 0; k < count; k++) {
+    if (every_ms > 0) {
+      // Spaced pictures (every=<ms>): the k-th is due k * every_ms after the first; one that is late (the captures
+      // before it ran over) is taken at once.
+      const auto due = grid_start + std::chrono::microseconds(int64_t(double(k) * every_ms * 1000.0));
+      if (Clock::now() < due) {
+        std::this_thread::sleep_until(due);
+      }
+    }
     const auto start = Clock::now();
     while (g_swaps.load() == last) {
       if (std::chrono::duration<double, std::milli>(Clock::now() - start).count() > 1000) {
@@ -968,8 +978,8 @@ bool Burst(const std::string& prefix, int count, double scale, double fx0, doubl
       result = "cannot write " + path;
       return false;
     }
-    REXLOG_INFO("dev pad: burst {} k={} swap={}..{} t={}.{:03} ms size={}x{}", prefix, k, p.swap0, p.swap1, p.us / 1000, p.us % 1000,
-                p.width, p.height);
+    REXLOG_INFO("dev pad: burst {} k={} swap={}..{} t={}.{:03} ms us={} size={}x{}", prefix, k, p.swap0, p.swap1,
+                p.us / 1000, p.us % 1000, p.us, p.width, p.height);
   }
   result = std::to_string(pictures.size()) + " pictures, swaps " + std::to_string(pictures.front().swap0) + ".." +
            std::to_string(pictures.back().swap1);
@@ -1566,8 +1576,10 @@ void WatchFrame(uint64_t frame) {
     return;
   }
   g_watch_last = tick;
+  // us: the steady clock in microseconds, as the pictures of burst and the UI pace log (mcla_ui_pace_log) carry it.
+  const int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
   std::string line = "dev pad: watch tick=" + std::to_string(tick) +
-                     " frame=" + std::to_string(frame);
+                     " frame=" + std::to_string(frame) + " us=" + std::to_string(us);
   for (const uint32_t car : g_watch_cars) {
     float xyz[3] = {};
     for (int i = 0; i < 3; i++) {
@@ -1689,7 +1701,7 @@ bool Compare(double a, const std::string& op, double b, bool& ok) {
 }
 
 struct Condition {
-  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kUiList } kind = kFrames;
+  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kUiList, kFollowDone } kind = kFrames;
   bool is_float = false;
   std::string address;
   std::string op;
@@ -1704,6 +1716,13 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     c.kind = word == "left_title" ? Condition::kLeftTitle
              : word == "loading"  ? Condition::kLoading
                                   : Condition::kRoam;
+    i++;
+    return true;
+  }
+  if (word == "follow_done") {
+    // The follower is not driving (its route ended, or follow stop): for a script that waits for the
+    // end of a race route.
+    c.kind = Condition::kFollowDone;
     i++;
     return true;
   }
@@ -1748,7 +1767,7 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     i += 4;
     return true;
   }
-  error = "condition: left_title, loading, roam, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
+  error = "condition: left_title, loading, roam, follow_done, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
   return false;
 }
 
@@ -1760,6 +1779,8 @@ bool Evaluate(const Condition& c) {
       return ReadWord(kLeftTitle) == 1;
     case Condition::kLoading:
       return GameState() == 3;
+    case Condition::kFollowDone:
+      return !g_following.load(std::memory_order_relaxed);
     case Condition::kRoam: {
       float xyz[3];
       return ReadWord(kLeftTitle) == 1 && GameState() == 0 && ReadWord(kCityPending) == 0 &&
@@ -1955,7 +1976,7 @@ std::string Execute(const std::string& line) {
   if (cmd == "wait_until" || cmd == "press_until") {
     // wait_until <condition> [timeout]
     // press_until <button> <condition> [every=2s] [hold=300ms] [timeout=120s]
-    // Conditions: left_title, loading, roam, frames N, u32|f32 <addr> <op> <value>.
+    // Conditions: left_title, loading, roam, follow_done, frames N, u32|f32 <addr> <op> <value>.
     const size_t first = cmd == "press_until" ? 2 : 1;
     const uint16_t bit = cmd == "press_until" ? ButtonBit(arg(1)) : 0;
     if (cmd == "press_until" && !bit) {
@@ -2140,22 +2161,31 @@ std::string Execute(const std::string& line) {
     return Shot(rest(1, last), scale, result) ? "ok " + result : "err " + result;
   }
   if (cmd == "burst") {
-    double count = 0, scale = 1.0, rect[4] = {0, 0, 1, 1};
-    if (args.size() < 3 || !ParseNumber(args[2], count) || (args.size() > 3 && !ParseNumber(args[3], scale)) ||
-        (args.size() > 4 && args.size() != 8)) {
-      return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1]";
+    // burst <prefix> <n> [scale] [x0 y0 x1 y1] [every=<ms>]
+    double every_ms = 0;
+    std::vector<std::string> bargs = args;
+    if (bargs.size() > 3 && bargs.back().rfind("every=", 0) == 0) {
+      if (!ParseNumber(bargs.back().substr(6), every_ms) || every_ms < 1) {
+        return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1] [every=<ms>]";
+      }
+      bargs.pop_back();
     }
-    for (size_t i = 0; i < 4 && args.size() == 8; i++) {
-      if (!ParseNumber(args[4 + i], rect[i])) {
-        return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1]";
+    double count = 0, scale = 1.0, rect[4] = {0, 0, 1, 1};
+    if (bargs.size() < 3 || !ParseNumber(bargs[2], count) || (bargs.size() > 3 && !ParseNumber(bargs[3], scale)) ||
+        (bargs.size() > 4 && bargs.size() != 8)) {
+      return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1] [every=<ms>]";
+    }
+    for (size_t i = 0; i < 4 && bargs.size() == 8; i++) {
+      if (!ParseNumber(bargs[4 + i], rect[i])) {
+        return "err usage: burst <prefix> <n> [scale] [x0 y0 x1 y1] [every=<ms>]";
       }
     }
     std::string result;
-    if (Burst(args[1], int(count), scale, rect[0], rect[1], rect[2], rect[3], result)) {
+    if (Burst(bargs[1], int(count), scale, rect[0], rect[1], rect[2], rect[3], result, every_ms)) {
       return "ok " + result;
     }
     // Not an "err": a failed capture does not put the rest of the script out of step, and the cells after it still measure.
-    REXLOG_WARN("dev pad: burst {} failed: {}", args[1], result);
+    REXLOG_WARN("dev pad: burst {} failed: {}", bargs[1], result);
     return "ok burst failed: " + result;
   }
   if (cmd == "screen") {

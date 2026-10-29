@@ -101,11 +101,27 @@ registers = ["f0"]
 # after the length of one movie frame is computed and before the branch on the
 # one-frame flag (r25). r31 is the movie's player context. Jumping to
 # 0x825EDD44, the path taken when a movie is not yet due, holds the advance back.
+# f30 is the elapsed time the caller passed and f31 the length of one movie frame (seconds); cr6 is the
+# compare of r25 with 0 that the next instruction branches on. A movie with a rule in mcla_ui_movie_rates
+# that is behind is turned into the elapsed-time call (r25 = 0, cr6 equal, the accumulator at [movie+24]
+# set) so that it steps several frames in one update.
 [[midasm_hook]]
 name = "mcla_ui_movie_advance"
 address = 0x825EDC6C
-registers = ["r25", "r31"]
+registers = ["r25", "r31", "f30", "f31", "cr6"]
 jump_address_on_true = 0x825EDD44
+
+# 0x822124DC: `addi r4,r8,-9924` in sub_82212298 (the HUD's big update, called every update with the update's elapsed
+# time in f1 of its caller and f30 here), right after `fmr f1,f31`. r3 is the HUD gauge movie's swfCONTEXT (the HUD
+# manager's movie 0, 0x8286E6E0) and f1 the value for the ActionScript variable `countdownUpdate`, which the next
+# instructions set (`bl sub_825EE188`, name at 0x8201D93C): this update's elapsed time (0 or [timer+100] in two special
+# cases). The movie's script adds the variable to the race-start countdown's clock on every movie step, so a movie that
+# steps less often than the game updates (the pacing above) loses the time of the updates in between and the countdown
+# runs slow. The hook gives the variable the time since the movie's last step (src/frame_timing.cpp, mcla_ui_countdown_fix).
+[[midasm_hook]]
+name = "mcla_ui_countdown_dt"
+address = 0x822124DC
+registers = ["r3", "f1"]
 
 # --- Interpolated UI (development spike, mcla_ui_interpolate) ------------------------------
 # sub_825FB348 is the draw walk over the display tree (swfINSTANCE nodes; r3 = the node, r4 = the parent's
