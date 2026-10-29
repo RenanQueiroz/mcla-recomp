@@ -57,4 +57,4 @@ Not run yet when this was written. The chain (`C:\mcv\title3\chain\ts_batch.py`)
 
 - Linux and the PS5 build: not built or run. `src/pad_probe.cpp` and `config/pad_probe.toml` are shared with both; the hook addresses are those of the Xbox 360 image.
 - The hooks' codegen and behaviour: nothing of the third round ran. CI compiles only the host source.
-- The same polling may exist in the frontend's and the city's scripts (`IS_PAD_BUTTON_DOWN` has many readers in the image); not checked.
+- Other scripts that ask for a press the same way: four natives do (`IS_PAD_BUTTON_DOWN`, `IS_BUTTON_DOWN`, `UILogic_IsPressed`, `Player_FlashingHighbeams`); the latch was extended to all of them behind `--mcla_script_pad_latch_scope=all`, see `script-pad-2026-10-29.md` (not run in the game yet).

@@ -19,7 +19,10 @@
 //
 // mcla_script_pad_latch_ms: a thread that polls a button and misses its press in the update it
 // happened in is told about the press once, at its next poll, if that is within this many
-// milliseconds (see mcla_script_pad_read).
+// milliseconds (see ScriptPoll). It covers every script native that asks "pressed in this update":
+// IS_PAD_BUTTON_DOWN and IS_BUTTON_DOWN (the pad record), UILogic_IsPressed and
+// Player_FlashingHighbeams (an action record of the player's controls, sub_822A4CE0);
+// mcla_script_pad_latch_scope says where (the title screen or every script).
 //
 // mcla_pad_probe (development): logs, with the time and the update number of the pad, every
 // button edge of the pad records, and for 1.5 s after each Start press the decisions of that key
@@ -45,7 +48,9 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -62,12 +67,14 @@ REXCVAR_DEFINE_INT32(mcla_title_fps, 0, "MCLA",
                      "frames a second (0 = the player's cap), except just after a Start press")
     .range(0, 120);
 REXCVAR_DEFINE_INT32(mcla_script_pad_latch_ms, 0, "MCLA",
-                     "On the title screen and the attract video a script that polls a button "
-                     "and misses its press (it runs only every 2nd to 4th update above 30 FPS) "
-                     "is told about the press once, at its next poll, up to this many "
-                     "milliseconds later (0 = as the game does: the press is seen only by a "
-                     "script run in the same update)")
+                     "A script that polls a button and misses its press (it runs only every 2nd "
+                     "to 4th update above 30 FPS) is told about the press once, at its next poll, "
+                     "up to this many milliseconds later (0 = as the game does: the press is seen "
+                     "only by a script run in the same update)")
     .range(0, 500);
+REXCVAR_DEFINE_STRING(mcla_script_pad_latch_scope, "title", "MCLA",
+                      "Where mcla_script_pad_latch_ms applies: title (the title screen and the "
+                      "attract video) or all (every script)");
 
 namespace {
 constexpr uint32_t kPadBase = 0x82905388;
@@ -160,49 +167,92 @@ std::atomic<uint64_t> g_ui_updates{0}, g_mapper_calls{0}, g_movie_adv{0}, g_movi
 std::array<uint64_t, kPadCount> g_updates{};
 
 // ---- The latch for script threads (mcla_script_pad_latch_ms) ----
-// Per pad and button: how many presses the pad record has shown, and when the last one came.
-// Written by the pad update hook, read by the native's hook (both run on the game's thread; the
-// mutex is for any other reader).
+// A script native that asks "was this button pressed in this update" is true for ONE update, and a script
+// thread that runs only every 2nd to 4th update (above 30 FPS) asks in one update in 3 at 120 FPS and
+// misses most presses. An EDGE SOURCE is the thing such a native asks about:
+//  - a pad's button (IS_PAD_BUTTON_DOWN, IS_BUTTON_DOWN: the pad record's masks, sub_82614D30 updates
+//    them once per game update; the press is seen in the pad update hook);
+//  - an action of the player's controls (UILogic_IsPressed, Player_FlashingHighbeams: sub_822A4CE0 on the
+//    12-byte record at [controls + 12] + 12 * action). Nothing updates a press counter for these, so the
+//    pad update hook samples the records the scripts have asked about, once per game update, and a real
+//    press that a script reads first counts at once.
+// For each source the latch counts the presses (a sequence number and the time of the last one). For
+// each script CALL SITE (the running thread's program and program counter) and source it keeps the
+// press it has been told about, and when it last asked.
+//
+// Wall-clock windows: a call site is a poller when it asked within kPollerUs before the press, and a
+// missed press is told within mcla_script_pad_latch_ms after it.
+// The pad record's button bits that scripts ask about (the script button number is the bit number).
 constexpr uint32_t kButtons = 16;
-// A script thread polls a button if it read it within this long before the press.
-constexpr uint64_t kPollerUs = 200'000;
-std::mutex g_latch_mutex;
-std::array<std::array<uint32_t, kButtons>, kPadCount> g_edge_seq{};
-std::array<std::array<uint64_t, kButtons>, kPadCount> g_edge_us{};
-
-// What one script call site has done with one (pad, button). A call site is a place in a script's
-// code (the thread's program and program counter), not a thread: it is the same whichever thread
-// runs it, and still the same if the script starts a new thread for each pass of its loop.
-struct PollState {
-  uint64_t last_poll_us = 0;  // its last read of this button
-  uint32_t seen_seq = 0;      // the press it has been told about (the real edge or the latched one)
-  uint64_t seen_update = 0;   // the pad update it was told in
-  bool seen_latched = false;  // ... by the latch (later reads in that update answer the same)
-};
-struct SitePolls {
-  uint64_t site = 0;  // (program << 32 | pc) with the top bit set; 0 = the slot is free
-  uint64_t last_any_poll_us = 0;
-  std::array<std::array<PollState, kButtons>, kPadCount> state{};
-};
-constexpr size_t kSiteSlots = 128;
-std::array<SitePolls, kSiteSlots> g_sites{};
-
-// The slot of a call site (the one that polled longest ago is replaced when all are used).
-// Called with g_latch_mutex held.
-SitePolls& SiteSlot(uint64_t site) {
-  size_t oldest = 0;
-  for (size_t i = 0; i < kSiteSlots; i++) {
-    if (g_sites[i].site == site) {
-      return g_sites[i];
-    }
-    if (g_sites[i].last_any_poll_us < g_sites[oldest].last_any_poll_us) {
-      oldest = i;
-    }
-  }
-  g_sites[oldest] = SitePolls{};
-  g_sites[oldest].site = site;
-  return g_sites[oldest];
+constexpr uint64_t kSrcPad = uint64_t(1) << 56;
+constexpr uint64_t kSrcRecord = uint64_t(2) << 56;
+inline uint64_t SrcPad(uint32_t pad, uint32_t button) {
+  return kSrcPad | (uint64_t(pad) << 16) | button;
 }
+inline uint64_t SrcRecord(uint32_t controls, uint32_t action) {
+  return kSrcRecord | (uint64_t(controls) << 16) | (action & 0xFFFF);
+}
+inline bool IsRecordSrc(uint64_t src) {
+  return (src >> 56) == 2;
+}
+std::string SrcName(uint64_t src) {
+  if (IsRecordSrc(src)) {
+    return fmt::format("ctl{:08X}/a{}", uint32_t(src >> 16), uint32_t(src & 0xFFFF));
+  }
+  return fmt::format("pad{}/b{}", uint32_t((src >> 16) & 0xFF), uint32_t(src & 0xFFFF));
+}
+
+// A script thread polls a source if it asked within this long before the press.
+constexpr uint64_t kPollerUs = 200'000;
+// An audit (development) waits this long after a press for the call sites to be told.
+constexpr uint64_t kAuditUs = 600'000;
+constexpr size_t kMaxPolls = 6000;
+
+std::mutex g_latch_mutex;
+
+struct EdgeInfo {
+  uint32_t seq = 0;       // presses seen
+  uint64_t us = 0;        // when the last one was seen
+  bool flag = false;      // record sources: the record said "pressed" at the last look
+  bool scanned = false;   // record sources: in g_record_srcs
+  uint32_t controls = 0;  // record sources
+  uint32_t action = 0;
+  uint64_t last_use_us = 0;
+};
+std::unordered_map<uint64_t, EdgeInfo> g_edges;
+std::vector<uint64_t> g_record_srcs;  // the record sources to look at in each update
+
+struct PollKey {
+  uint64_t site = 0;  // (program << 32 | pc) with the top bit set
+  uint64_t src = 0;
+  bool operator==(const PollKey& o) const { return site == o.site && src == o.src; }
+};
+struct PollKeyHash {
+  size_t operator()(const PollKey& k) const {
+    return size_t((k.site * 0x9E3779B97F4A7C15ull) ^ (k.src + 0x7F4A7C15ull + (k.site >> 7)));
+  }
+};
+
+// What one script call site has done with one source.
+struct PollState {
+  uint64_t last_poll_us = 0;  // its last ask
+  uint32_t seen_seq = 0;      // the press it has been told about (the real one or the latched one)
+  uint64_t seen_update = 0;   // the game update it was told in
+  bool seen_latched = false;  // ... by the latch (later asks in that update answer the same)
+  // Trace and audit (development).
+  uint64_t total_reads = 0;
+  uint32_t reads = 0, real = 0, latched = 0;  // since the last 1 s line
+  uint32_t program = 0, pc = 0;
+  const char* native = "";
+  bool audit_pending = false;  // a press came while this call site was polling
+  uint32_t audit_seq = 0;
+  uint64_t audit_press_us = 0;
+  uint32_t told = 0;  // the game updates it was told about that press in
+  uint64_t told_update = 0;
+  uint64_t told_first_us = 0;
+  bool told_first_latched = false;
+};
+std::unordered_map<PollKey, PollState, PollKeyHash> g_polls;
 
 // The script threads that read the pad in the last second (for the trace of their runs).
 constexpr size_t kPollThreads = 32;
@@ -231,6 +281,254 @@ bool IsPadPoller(uint32_t thread, uint64_t now) {
     }
   }
   return false;
+}
+
+// The audit (needs mcla_pad_probe): for each press, the call sites that were polling the source
+// when it came, whether each was told about it (the real press or the latched one), and how many
+// times. A call site told twice would act twice.
+std::atomic<uint64_t> g_audit_eligible{0}, g_audit_saw{0}, g_audit_missed{0}, g_audit_doubled{0},
+    g_audit_gone{0};
+
+// Called with g_latch_mutex held.
+void FinalizeAuditLocked(const PollKey& key, PollState& st) {
+  if (!st.audit_pending) {
+    return;
+  }
+  st.audit_pending = false;
+  const bool polled_after = st.last_poll_us > st.audit_press_us;
+  const char* verdict = st.told >= 2 ? "DOUBLED"
+                        : st.told == 1 ? "saw"
+                        : polled_after ? "MISSED"
+                                       : "gone";
+  g_audit_eligible.fetch_add(1, std::memory_order_relaxed);
+  if (st.told >= 2) {
+    g_audit_doubled.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (st.told >= 1) {
+    g_audit_saw.fetch_add(1, std::memory_order_relaxed);
+  } else if (polled_after) {
+    g_audit_missed.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    g_audit_gone.fetch_add(1, std::memory_order_relaxed);
+  }
+  REXLOG_INFO(
+      "TS audit native={} program={:08X} pc={} src={} press_seq={} verdict={} told_updates={} "
+      "first={} delay_us={} polled_after={}",
+      st.native, st.program, st.pc, SrcName(key.src), st.audit_seq, verdict, st.told,
+      st.told ? (st.told_first_latched ? "latched" : "real") : "-",
+      st.told ? st.told_first_us - st.audit_press_us : 0, polled_after ? 1 : 0);
+}
+
+// A new press of a source (called with g_latch_mutex held).
+void RegisterEdgeLocked(uint64_t src, EdgeInfo& e, uint64_t now) {
+  e.seq++;
+  e.us = now;
+  if (!Probe()) {
+    return;
+  }
+  for (auto& kv : g_polls) {
+    if (kv.first.src != src) {
+      continue;
+    }
+    PollState& st = kv.second;
+    FinalizeAuditLocked(kv.first, st);
+    if (st.last_poll_us != 0 && now - st.last_poll_us <= kPollerUs) {
+      st.audit_pending = true;
+      st.audit_seq = e.seq;
+      st.audit_press_us = now;
+      st.told = 0;
+      st.told_update = 0;
+      st.told_first_us = 0;
+    }
+  }
+}
+
+// The audits whose time is up.
+void SweepAudits(uint64_t now) {
+  std::lock_guard<std::mutex> lock(g_latch_mutex);
+  for (auto& kv : g_polls) {
+    if (kv.second.audit_pending && now - kv.second.audit_press_us > kAuditUs) {
+      FinalizeAuditLocked(kv.first, kv.second);
+    }
+  }
+}
+
+void PruneLocked(uint64_t now) {
+  for (auto it = g_polls.begin(); it != g_polls.end();) {
+    if (!it->second.audit_pending && now - it->second.last_poll_us > 5'000'000) {
+      it = g_polls.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+// Whether the action record says "pressed in this update": sub_822A4CE0's test. A record is 12
+// bytes at [controls + 12] + 12 * action: byte 0 and byte 2 differ in bit 7 and byte 3 agrees with
+// byte 0 in bit 7.
+bool RecordPressed(uint32_t controls, uint32_t action) {
+  const uint32_t base = ReadGuestU32(controls + 12);
+  if (!base) {
+    return false;
+  }
+  const uint32_t rec = base + 12 * action;
+  const uint32_t b0 = ReadGuestU8(rec), b2 = ReadGuestU8(rec + 2), b3 = ReadGuestU8(rec + 3);
+  return ((b0 ^ b2) & 0x80) != 0 && ((b3 ^ b0) & 0x80) == 0;
+}
+
+// Once per game update (pad 0's update hook): look at the action records the scripts ask about.
+void ScanRecordSources(uint64_t now) {
+  std::lock_guard<std::mutex> lock(g_latch_mutex);
+  for (size_t i = 0; i < g_record_srcs.size();) {
+    const uint64_t src = g_record_srcs[i];
+    EdgeInfo& e = g_edges[src];
+    if (now - e.last_use_us > 10'000'000) {  // nobody asks about it any more
+      e.scanned = false;
+      g_record_srcs[i] = g_record_srcs.back();
+      g_record_srcs.pop_back();
+      continue;
+    }
+    const bool flag = RecordPressed(e.controls, e.action);
+    if (flag && !e.flag) {
+      RegisterEdgeLocked(src, e, now);
+    }
+    e.flag = flag;
+    i++;
+  }
+}
+
+// Once a second (mcla_pad_probe): the call sites that asked in the last second.
+void ReportSites(uint64_t now) {
+  struct Row {
+    uint32_t reads, real, latched, program, pc;
+    const char* native;
+    uint64_t src;
+  };
+  std::vector<Row> rows;
+  {
+    std::lock_guard<std::mutex> lock(g_latch_mutex);
+    for (auto& kv : g_polls) {
+      PollState& st = kv.second;
+      if (st.reads) {
+        rows.push_back({st.reads, st.real, st.latched, st.program, st.pc, st.native, kv.first.src});
+      }
+      st.reads = st.real = st.latched = 0;
+    }
+  }
+  if (rows.empty()) {
+    return;
+  }
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.reads > b.reads; });
+  std::string line;
+  for (size_t i = 0; i < rows.size() && i < 40; i++) {
+    const Row& r = rows[i];
+    line += fmt::format(" | {} {:08X}:{} {} r{} e{} l{}", r.native, r.program, r.pc, SrcName(r.src),
+                        r.reads, r.real, r.latched);
+  }
+  REXLOG_INFO("TS sites t={} n={} audits: eligible={} saw={} missed={} doubled={} gone={}{}", now,
+              rows.size(), g_audit_eligible.load(), g_audit_saw.load(), g_audit_missed.load(),
+              g_audit_doubled.load(), g_audit_gone.load(), line);
+}
+
+bool ScopeAll() {
+  const std::string scope = REXCVAR_GET(mcla_script_pad_latch_scope);
+  return scope == "all";
+}
+
+struct PollOut {
+  bool latched = false;    // tell the script the button was pressed
+  bool first = false;      // the first ask of this source by this call site
+  uint64_t age_us = 0;     // since the source's last press
+  uint64_t before_us = 0;  // since this call site's previous ask
+};
+
+// A script call site asks about a source; `real` is the native's own answer. Returns whether the
+// answer is to be changed to "pressed": a call site that is not given the real press is told about
+// it once, at its next poll, when
+//  - it asked this source within kPollerUs before the press (it is a poller: a call site that starts
+//    asking after the press is not told, so one press does not also answer the next screen),
+//  - it has not been told about this press (by the real answer, or earlier),
+//  - the press is at most latch_ms old,
+//  - the scope allows it (the title screen, or every script).
+// Later asks in the update it was told in answer the same, as they would for the real press.
+PollOut ScriptPoll(uint64_t site, uint64_t src, const char* native, uint32_t program, uint32_t pc,
+                   bool real, int32_t latch_ms, uint32_t controls, uint32_t action) {
+  PollOut out;
+  const uint64_t now = NowUs();
+  const uint64_t update = g_update.load(std::memory_order_relaxed);
+  const bool in_scope = latch_ms > 0 && (ScopeAll() || InTitlePhase());
+  std::lock_guard<std::mutex> lock(g_latch_mutex);
+  if (g_polls.size() > kMaxPolls) {
+    PruneLocked(now);
+  }
+  EdgeInfo& e = g_edges[src];
+  PollState& st = g_polls[PollKey{site, src}];
+  out.first = st.total_reads == 0;
+  if (IsRecordSrc(src)) {
+    e.controls = controls;
+    e.action = action;
+    e.last_use_us = now;
+    if (!e.scanned) {
+      e.scanned = true;
+      g_record_srcs.push_back(src);
+    }
+    if (real && !e.flag) {
+      // A press that the look at the start of the update has not seen (the scripts ran after the
+      // controls were updated): count it now.
+      e.flag = true;
+      RegisterEdgeLocked(src, e, now);
+    }
+  }
+  const uint32_t seq = e.seq;
+  if (real) {
+    st.seen_seq = seq;
+    st.seen_update = update;
+    st.seen_latched = false;
+  } else if (latch_ms > 0 && seq != 0) {
+    if (st.seen_seq == seq) {
+      out.latched = st.seen_latched && st.seen_update == update;
+    } else if (in_scope && st.last_poll_us != 0 && st.last_poll_us < e.us &&
+               e.us - st.last_poll_us <= kPollerUs && now - e.us <= uint64_t(latch_ms) * 1000) {
+      out.latched = true;
+      st.seen_seq = seq;
+      st.seen_update = update;
+      st.seen_latched = true;
+    }
+  }
+  if ((real || out.latched) && st.audit_pending && st.audit_seq == seq &&
+      st.told_update != update) {
+    st.told_update = update;
+    if (++st.told == 1) {
+      st.told_first_us = now;
+      st.told_first_latched = out.latched;
+    }
+  }
+  out.age_us = e.us ? now - e.us : 0;
+  out.before_us = st.last_poll_us ? now - st.last_poll_us : 0;
+  st.last_poll_us = now;
+  st.total_reads++;
+  st.reads++;
+  if (real) {
+    st.real++;
+  }
+  if (out.latched) {
+    st.latched++;
+  }
+  st.program = program;
+  st.pc = pc;
+  st.native = native;
+  return out;
+}
+
+// A script asked in a way that was refused (a modal scene blocks input, the player is not in a car):
+// the call site is not polling for now, so a press made meanwhile is not told to it later.
+void ScriptBlocked(uint64_t site) {
+  std::lock_guard<std::mutex> lock(g_latch_mutex);
+  for (auto& kv : g_polls) {
+    if (kv.first.site == site) {
+      kv.second.last_poll_us = 0;
+    }
+  }
 }
 
 std::atomic<uint64_t> g_start_reads{0}, g_start_real{0}, g_start_latched{0}, g_pad_reads{0},
@@ -307,6 +605,8 @@ void MaybeReport(uint64_t now) {
       ReadGuestU32(kCityPending), ModalCount(), ChildFormVtable(), g_action_queries.exchange(0),
       TopNatives());
   g_report_updates = g_updates[0];
+  SweepAudits(now);
+  ReportSites(now);
   REXLOG_INFO(
       "TS 1s-script t={} start_reads={} start_real={} start_latched={} pad_reads={} thread_runs={} "
       "thread_updates={} latch_ms={}",
@@ -382,10 +682,13 @@ void mcla_pad_probe_update(PPCRegister& r31) {
     std::lock_guard<std::mutex> lock(g_latch_mutex);
     for (uint32_t b = 0; b < kButtons; b++) {
       if (pressed & (1u << b)) {
-        g_edge_seq[pad][b]++;
-        g_edge_us[pad][b] = now;
+        const uint64_t src = SrcPad(pad, b);
+        RegisterEdgeLocked(src, g_edges[src], now);
       }
     }
+  }
+  if (pad == 0 && (latch_ms > 0 || probe)) {
+    ScanRecordSources(now);  // the action records the scripts ask about
   }
   if (pressed & kStartBit) {
     g_last_start_us.store(now, std::memory_order_relaxed);
@@ -407,98 +710,234 @@ void mcla_pad_probe_update(PPCRegister& r31) {
   }
 }
 
-// 0x822C8B34 in sub_822C8AF8, the script native IS_PAD_BUTTON_DOWN(pad, button), which is really
-// "this button was pressed in this update": the instruction `cntlzw r6,r8` that turns r8 (the press:
-// ((+8 xor +12) and the button's bit) and +8, nonzero = pressed) into the answer. r6 = the pad,
-// r5 = the button (its bit number).
-//
-// A script thread that runs only every 2nd to 4th update (the title's, above 30 FPS) asks in about
-// one update in 3 at 120 FPS and so misses most presses. With mcla_script_pad_latch_ms > 0 and the
-// title screen up, a call site in a script (program and program counter of the thread) that is not
-// given the real press is told about it once, at its next poll, when
-//  - it polled this button within 200 ms before the press (it is a poller: a call site that starts
-//    asking after the press is not told, so one press does not also answer the next screen),
-//  - it has not been told about this press (by the real edge, or earlier),
-//  - the press is at most mcla_script_pad_latch_ms old.
-// Later polls in the update it was told in answer the same, as they would for the real edge.
-void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
+namespace {
+// The call site of the script native being run: the running thread's program (+8) and the program
+// counter of the opcode (+16; scrThread::Run stores it before each opcode).
+struct ScriptSite {
+  uint32_t thread = 0, program = 0, pc = 0;
+  uint64_t key = 0;
+};
+
+ScriptSite CurrentScriptSite() {
+  ScriptSite s;
+  s.thread = ReadGuestU32(kCurrentThread);
+  s.program = s.thread ? ReadGuestU32(s.thread + kThreadProgram) : 0;
+  s.pc = s.thread ? ReadGuestU32(s.thread + kThreadPc) : 0;
+  s.key = (uint64_t(s.program) << 32) | s.pc | (uint64_t(1) << 63);
+  return s;
+}
+
+// The trace of a script ask (mcla_pad_probe): the first ask of each call site and source.
+void TraceSiteNew(const char* native, const ScriptSite& s, uint64_t src) {
+  REXLOG_INFO("TS site-new native={} program={:08X} (name hash {:08X}) pc={} src={} thread={:08X} t={} update={}",
+              native, s.program, s.program ? ReadGuestU32(s.program + 4) : 0, s.pc, SrcName(src),
+              s.thread, NowUs(), g_update.load(std::memory_order_relaxed));
+}
+
+// Common part of the pad-record natives (IS_PAD_BUTTON_DOWN, IS_BUTTON_DOWN): `real` is the native's
+// answer; returns whether it is to be changed to "pressed".
+bool PadNativePoll(const char* native, uint32_t pad, uint32_t button, bool real, bool log_start) {
   const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
   const bool probe = Probe();
   if (latch_ms <= 0 && !probe) {
-    return;
+    return false;
   }
-  const uint32_t pad = r6.u32;
-  const uint32_t button = r5.u32;
   if (pad >= kPadCount || button >= kButtons) {
-    return;
+    return false;
   }
-  const uint32_t thread = ReadGuestU32(kCurrentThread);
-  const uint32_t program = thread ? ReadGuestU32(thread + kThreadProgram) : 0;
-  const uint32_t pc = thread ? ReadGuestU32(thread + kThreadPc) : 0;
-  const uint64_t site = (uint64_t(program) << 32) | pc | (uint64_t(1) << 63);
-  const uint64_t now = NowUs();
-  const bool real = (r8.u32 != 0);
-  bool latched = false;
-  uint64_t age_us = 0;
-  uint64_t before_us = 0;
+  const ScriptSite s = CurrentScriptSite();
+  const uint64_t src = SrcPad(pad, button);
+  const PollOut out = ScriptPoll(s.key, src, native, s.program, s.pc, real, latch_ms, 0, 0);
   {
     std::lock_guard<std::mutex> lock(g_latch_mutex);
-    SitePolls& t = SiteSlot(site);
-    PollState& st = t.state[pad][button];
-    const uint32_t seq = g_edge_seq[pad][button];
-    const uint64_t edge_us = g_edge_us[pad][button];
-    const uint64_t update = g_updates[pad];
-    if (real) {
-      st.seen_seq = seq;
-      st.seen_update = update;
-      st.seen_latched = false;
-    } else if (latch_ms > 0 && seq != 0) {
-      if (st.seen_seq == seq) {
-        latched = st.seen_latched && st.seen_update == update;
-      } else if (InTitlePhase() && st.last_poll_us != 0 && st.last_poll_us < edge_us &&
-                 edge_us - st.last_poll_us <= kPollerUs &&
-                 now - edge_us <= uint64_t(latch_ms) * 1000) {
-        latched = true;
-        st.seen_seq = seq;
-        st.seen_update = update;
-        st.seen_latched = true;
-      }
-    }
-    age_us = edge_us ? now - edge_us : 0;
-    before_us = st.last_poll_us ? now - st.last_poll_us : 0;
-    st.last_poll_us = now;
-    t.last_any_poll_us = now;
-    NotePollThread(thread, now);
-  }
-  if (latched) {
-    r8.u64 = 1;
+    NotePollThread(s.thread, NowUs());
   }
   if (!probe) {
-    return;
+    return out.latched;
+  }
+  if (out.first) {
+    TraceSiteNew(native, s, src);
+  }
+  if (!log_start) {
+    return out.latched;
   }
   g_pad_reads.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t now = NowUs();
   if (button == kStartButton) {
     g_start_reads.fetch_add(1, std::memory_order_relaxed);
     if (real) {
       g_start_real.fetch_add(1, std::memory_order_relaxed);
     }
-    if (latched) {
+    if (out.latched) {
       g_start_latched.fetch_add(1, std::memory_order_relaxed);
     }
     if (Window()) {
       REXLOG_INFO(
           "TS padread thread={:08X} program={:08X} pc={} pad={} button={} real={} latched={} update={} "
           "t={} press_age_us={} previous_poll_us_ago={}",
-          thread, program, pc, pad, button, real ? 1 : 0, latched ? 1 : 0,
-          g_update.load(std::memory_order_relaxed), now, age_us, before_us);
+          s.thread, s.program, s.pc, pad, button, real ? 1 : 0, out.latched ? 1 : 0,
+          g_update.load(std::memory_order_relaxed), now, out.age_us, out.before_us);
     }
   } else if (Window() && g_other_reads_logged.fetch_add(1, std::memory_order_relaxed) < 48) {
     REXLOG_INFO(
         "TS padread thread={:08X} program={:08X} pc={} pad={} button={} real={} latched={} update={} "
         "t={} press_age_us={} previous_poll_us_ago={}",
-        thread, program, pc, pad, button, real ? 1 : 0, latched ? 1 : 0,
-        g_update.load(std::memory_order_relaxed), now, age_us, before_us);
+        s.thread, s.program, s.pc, pad, button, real ? 1 : 0, out.latched ? 1 : 0,
+        g_update.load(std::memory_order_relaxed), now, out.age_us, out.before_us);
   }
+  return out.latched;
+}
+}  // namespace
+
+// 0x822C8B34 in sub_822C8AF8, the script native IS_PAD_BUTTON_DOWN(pad, button), which is really
+// "this button was pressed in this update": the instruction `cntlzw r6,r8` that turns r8 (the press:
+// ((+8 xor +12) and the button's bit) and +8, nonzero = pressed) into the answer. r6 = the pad,
+// r5 = the button (its bit number). See ScriptPoll for what the latch does.
+void mcla_script_pad_read(PPCRegister& r8, PPCRegister& r6, PPCRegister& r5) {
+  if (PadNativePoll("IS_PAD_BUTTON_DOWN", r6.u32, r5.u32, r8.u32 != 0, true)) {
+    r8.u64 = 1;
+  }
+}
+
+// 0x822C8030 in sub_822C7FC8 (IS_BUTTON_DOWN(player, button) = sub_822C8AB0 -> this), the same test
+// after the "a modal scene blocks input" check: the instruction `cntlzw r11,r3`. r3 = the press, r30
+// = the button, r11 = the pad record (the player's pad).
+void mcla_script_button_read(PPCRegister& r3, PPCRegister& r30, PPCRegister& r11) {
+  if (r11.u32 < kPadBase) {
+    return;
+  }
+  if (PadNativePoll("IS_BUTTON_DOWN", (r11.u32 - kPadBase) / kPadStride, r30.u32, r3.u32 != 0,
+                    false)) {
+    r3.u64 = 1;
+  }
+}
+
+// 0x822C7FF4 in sub_822C7FC8 (`li r3,0`, the modal scene blocks input) and 0x822A6DD4 in sub_822A6D48
+// (Player_FlashingHighbeams answers no without asking the record): the call site is not polling now.
+void mcla_script_blocked_button() {
+  if (REXCVAR_GET(mcla_script_pad_latch_ms) <= 0 && !Probe()) {
+    return;
+  }
+  ScriptBlocked(CurrentScriptSite().key);
+}
+
+void mcla_script_blocked_highbeams() {
+  if (REXCVAR_GET(mcla_script_pad_latch_ms) <= 0 && !Probe()) {
+    return;
+  }
+  ScriptBlocked(CurrentScriptSite().key);
+}
+
+namespace {
+// The controls object and the action of the record test sub_822A4CE0 is about to make: the natives
+// below call it with r3 = [[player's controls + 896] + 116] and r4 = the action, and answer with its
+// result, but the object is gone from the registers when it returns.
+thread_local uint32_t t_controls = 0;
+thread_local uint32_t t_action = 0;
+std::atomic<uint64_t> g_record_formula_mismatch{0};
+
+bool RecordNativePoll(const char* native, PPCRegister& r3) {
+  const uint32_t controls = t_controls;
+  const uint32_t action = t_action;
+  t_controls = 0;
+  const int32_t latch_ms = REXCVAR_GET(mcla_script_pad_latch_ms);
+  const bool probe = Probe();
+  if ((latch_ms <= 0 && !probe) || !controls) {
+    return false;
+  }
+  const bool real = (r3.u32 & 0xFF) != 0;
+  if (probe && real != RecordPressed(controls, action) &&
+      g_record_formula_mismatch.fetch_add(1, std::memory_order_relaxed) < 20) {
+    REXLOG_INFO("TS record formula differs from the game: native={} controls={:08X} action={} game says {}",
+                native, controls, action, real ? 1 : 0);
+  }
+  const ScriptSite s = CurrentScriptSite();
+  const uint64_t src = SrcRecord(controls, action);
+  const PollOut out = ScriptPoll(s.key, src, native, s.program, s.pc, real, latch_ms, controls, action);
+  if (probe && out.first) {
+    TraceSiteNew(native, s, src);
+  }
+  return out.latched;
+}
+}  // namespace
+
+// 0x8220782C in sub_822077F0 (UILogic_IsPressed(player, action)) and 0x822A6DC8 in sub_822A6D48
+// (Player_FlashingHighbeams(player): action 9): the `bl sub_822A4CE0`; r3 = the controls object,
+// r4 = the action.
+void mcla_script_ui_pressed_pre(PPCRegister& r3, PPCRegister& r4) {
+  t_controls = r3.u32;
+  t_action = r4.u32;
+}
+
+void mcla_script_highbeams_pre(PPCRegister& r3, PPCRegister& r4) {
+  t_controls = r3.u32;
+  t_action = r4.u32;
+}
+
+// 0x82207830 and 0x822A6DCC: after the call; r3 = the answer (the hook may set it to 1).
+void mcla_script_ui_pressed_post(PPCRegister& r3) {
+  if (RecordNativePoll("UILogic_IsPressed", r3)) {
+    r3.u64 = 1;
+  }
+}
+
+void mcla_script_highbeams_post(PPCRegister& r3) {
+  if (RecordNativePoll("Player_FlashingHighbeams", r3)) {
+    r3.u64 = 1;
+  }
+}
+
+// 0x82557A68: the script loader sub_82557A68(r3 = the name to show, r4 = the script name). The
+// programs' name hash (the word at +4 of the program) is the hash of r4 (sub_82557F78).
+namespace {
+uint32_t ScriptNameHash(const std::string& name) {
+  uint32_t h = 0;
+  size_t i = 0;
+  const bool quoted = !name.empty() && name[0] == '"';
+  if (quoted) {
+    i++;
+  }
+  for (; i < name.size(); i++) {
+    int c = static_cast<signed char>(name[i]);
+    if (quoted && c == '"') {
+      break;
+    }
+    if (c >= 'A' && c <= 'Z') {
+      c += 32;
+    } else if (c == '\\') {
+      c = '/';
+    }
+    uint32_t v = uint32_t(c) + h;
+    v += v << 10;
+    h = (v >> 6) ^ v;
+  }
+  h += h << 3;
+  h ^= h >> 11;
+  h += h << 15;
+  return h < 2 ? h + 2 : h;
+}
+
+std::string GuestString(uint32_t address, size_t max = 120) {
+  std::string out;
+  if (address < 0x10000) {
+    return out;
+  }
+  const uint8_t* p = rex::Runtime::instance()->virtual_membase() + address;
+  for (size_t i = 0; i < max && p[i]; i++) {
+    out += (p[i] >= 32 && p[i] < 127) ? char(p[i]) : '?';
+  }
+  return out;
+}
+}  // namespace
+
+void mcla_script_load(PPCRegister& r3, PPCRegister& r4) {
+  if (!Probe()) {
+    return;
+  }
+  const std::string name = GuestString(r4.u32);
+  REXLOG_INFO("TS script load name=\"{}\" shown=\"{}\" hash={:08X} t={} update={}", name,
+              GuestString(r3.u32), ScriptNameHash(name), NowUs(),
+              g_update.load(std::memory_order_relaxed));
 }
 
 // 0x82554E20: scrThread::Run (sub_82554E20; r3 = the thread). 0x82553C10: scrThread::Update
