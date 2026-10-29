@@ -134,7 +134,7 @@ Each change, how it was checked and what is not verified: [KNOWN-ISSUES.md](KNOW
 
 - [mcla-recomp](https://github.com/holdmysocks/mcla-recomp) by holdmysocks, the project this fork builds on; the Linux build is by [@MoonFuji](https://github.com/MoonFuji).
 - ReXGlue SDK by Tom Clay and contributors; Xenia by Ben Vanik and contributors; XenonRecomp by hedge-dev, on which ReXGlue's analysis builds.
-- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from, with permission.
+- [LARecomp](https://github.com/mzzvxm/LARecomp) by mzzvxm and contributors, whose fixes several parts of this project are ported from.
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by mihawk-99 (GPL-3): the RADV port and toolchain the PS5 version is built on.
 - [ForzaHorizon1-ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined) and [RecompiledHaloReach](https://github.com/Dyotson/RecompiledHaloReach) by Dyotson and contributors (MIT), and [xenia-canary](https://github.com/xenia-canary/xenia-canary) and [Xenia](https://github.com/xenia-project/xenia): code and approaches the fork's changes are ported from.
 
