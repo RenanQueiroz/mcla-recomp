@@ -352,6 +352,8 @@ struct AutomaticBackend {
   const char* recommended = nullptr;  // "vulkan" or "d3d12" for the GPU, nullptr if unknown
 };
 AutomaticBackend g_automatic;
+// The API the GPU plugin was loaded with (OnPreSetup): Vulkan, else Direct3D 12.
+bool g_graphics_is_vulkan = false;
 
 // Direct3D 12's answers for an adapter (src/automatic_api.h): does the GPU share the CPU's
 // memory (an APU), and what is the smallest wave it runs (32 on RDNA, 64 on GCN)? A device
@@ -675,6 +677,12 @@ void ChooseGpu() {
 
 }  // namespace
 
+// Whether the game runs on Vulkan (src/frame_timing.cpp, the Reflex sleep assist is for
+// Direct3D 12 only). Known once OnPreSetup has loaded the GPU plugin.
+bool MclaGraphicsIsVulkan() {
+  return g_graphics_is_vulkan;
+}
+
 // Works out the rule above once: what Automatic does, which Vulkan device that is, and
 // the API to recommend for the GPU. `automatic` is whether the player left the API on
 // Automatic (only then is Vulkan's device looked for and the decision logged). The GPU is
@@ -811,6 +819,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   }
 #ifdef _WIN32
   const bool vulkan_backend = backend == "vulkan" && config.graphics;
+  g_graphics_is_vulkan = vulkan_backend;
 #endif
   if (!config.graphics) {
     config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);

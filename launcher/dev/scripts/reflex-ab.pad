@@ -1,0 +1,36 @@
+# The A/B route of the Reflex sleep assist (dev note launcher/dev/reflex-sleep-assist-2026-10-28.md): standing at the spawn point
+# in the city, uncapped, then a cap of 60 FPS and a cap of 30 set during the run. Run it with real-time steps (no --mcla_fixed_dt)
+# and --mcla_fps=0. `get` logs the settings and the latency reducer's state (ll_status) at the start of each segment.
+# Marks: title, map_zoom, free_roam, settle0, uncapped, settle1, cap60, settle2, cap30, end.
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+get ll_status mcla_reflex_sleep_assist mcla_reflex_sleep_margin_us low_latency_limiter low_latency mcla_fps
+mark settle0
+wait 2s
+mark uncapped
+include cpup-sample.pad
+wait 8s
+include cpup-sample.pad
+set mcla_fps 60
+mark settle1
+wait 3s
+get ll_status mcla_fps
+mark cap60
+include cpup-sample.pad
+wait 10s
+include cpup-sample.pad
+set mcla_fps 30
+mark settle2
+wait 3s
+get ll_status mcla_fps
+mark cap30
+include cpup-sample.pad
+wait 12s
+include cpup-sample.pad
+set mcla_fps 0
+mark end
