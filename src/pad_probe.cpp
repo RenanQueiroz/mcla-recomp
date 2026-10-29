@@ -126,6 +126,20 @@ bool Probe() {
   return REXCVAR_GET(mcla_pad_probe);
 }
 
+// The number of modal scenes the UI manager has (the ring of three at +0x40724).
+uint32_t ModalCount() {
+  const uint32_t g1 = ReadGuestU32(kUiManagerPtr);
+  const uint32_t impl = g1 ? ReadGuestU32(g1 + 52) : 0;
+  return impl ? ReadGuestU32(impl + 0x40738) : 0;
+}
+
+// The vtable of the main form's current child form ([[main form + 68] + 436]).
+uint32_t ChildFormVtable() {
+  const uint32_t g2 = ReadGuestU32(kUiLogicPtr);
+  const uint32_t array = g2 ? ReadGuestU32(g2 + 0x13F80 + 68) : 0;
+  return Vtable(array ? ReadGuestU32(array + 436) : 0);
+}
+
 std::atomic<uint64_t> g_window_until_us{0};
 std::atomic<uint64_t> g_last_start_us{0};  // the last Start press, for the title cap
 std::atomic<uint64_t> g_update{0};         // pad 0's update number
@@ -204,12 +218,12 @@ void MaybeReport(uint64_t now) {
   REXLOG_INFO(
       "TS 1s t={} updates={} (pad0 total {}) ui_updates={} mapper={} movie_adv={} movie_ticks={} "
       "native_calls={} native_start={} native_pass={} events={} dispatch={} title_phase={} (game "
-      "state {}, city pending {}) script natives: {}",
+      "state {}, city pending {}) modal scenes {} child form vtable {:08X} script natives: {}",
       now, g_updates[0] - g_report_updates, g_updates[0], g_ui_updates.exchange(0),
       g_mapper_calls.exchange(0), g_movie_adv.exchange(0), g_movie_ticks.exchange(0),
       g_native_entry.exchange(0), g_native_start.exchange(0), g_native_pass.exchange(0),
       g_events.exchange(0), g_dispatch.exchange(0), InTitlePhase(), ReadGuestU32(kGameState),
-      ReadGuestU32(kCityPending), TopNatives());
+      ReadGuestU32(kCityPending), ModalCount(), ChildFormVtable(), TopNatives());
   g_report_updates = g_updates[0];
 }
 

@@ -95,7 +95,8 @@ PRESS = re.compile(r"press_until start left_title every=(\S+)(?: hold=(\S+))?.*-
 EDGE = re.compile(r"TS pad(\d) edge t=(\d+) update=(\d+) down=0x([0-9a-f]+) up=0x([0-9a-f]+)")
 KEY = re.compile(r"TS menu key down input=(\d+) key=(-?\d+) taken=(\d+) t=(\d+) update=(\d+)")
 SEC = re.compile(r"TS 1s t=(\d+) updates=(\d+) .*?ui_updates=(\d+) mapper=(\d+) movie_adv=(\d+) movie_ticks=(\d+) native_calls=(\d+) "
-                 r"native_start=(\d+) native_pass=(\d+) events=(\d+) dispatch=(\d+) title_phase=(\w+)")
+                 r"native_start=(\d+) native_pass=(\d+) events=(\d+) dispatch=(\d+) title_phase=(\w+)"
+                 r"(?:.*?modal scenes (\d+) child form vtable ([0-9A-F]{8}))?")
 MARK = re.compile(r"dev pad: mark (\w+) at engine frame (\d+), swap (\d+)")
 CAP = re.compile(r"frame timing: the frame-rate cap is now (\d+) FPS")
 UPD = re.compile(r"update[= ](\d+)")
@@ -145,6 +146,7 @@ def report_one(folder, vtables=None):
     ts_lines = []  # (number of the last Start edge, or -1; the TS text)
     last_start = -1
     caps = []  # (seconds in the log, cap)
+    states = []  # (1 s line number, modal scenes, child form vtable)
     first_edge_s = None
     for line in lines:
         m = CAP.search(line)
@@ -172,6 +174,8 @@ def report_one(folder, vtables=None):
         m = SEC.match(t)
         if m:
             sec.append(tuple(int(m.group(i)) for i in range(1, 12)) + (m.group(12),))
+            if m.group(13) is not None:
+                states.append((len(sec) - 1, int(m.group(13)), m.group(14)))
             continue
         ts_lines.append((last_start, t))
     out.append(f"press_until: {press[0] if press else 'no result line (the pad did not get that far)'}")
@@ -227,6 +231,15 @@ def report_one(folder, vtables=None):
                    f"just-pressed native calls {med(6)} (for Start {med(7)}, past the modal check {med(8)}), events {med(9)}, key dispatches {med(10)}")
         end = next((i for i, s in enumerate(sec) if s[11] == "false"), None)
         out.append("title phase ended at the 1 s line number " + (str(end) if end is not None else "never") + f" of {len(sec)}")
+    if states:
+        runs = []
+        for n, modal, vt in states:
+            if runs and runs[-1][2] == modal and runs[-1][3] == vt:
+                runs[-1][1] = n
+            else:
+                runs.append([n, n, modal, vt])
+        out.append("modal scenes and the main form's child form over the 1 s lines: " + "; ".join(
+            f"lines {a}-{b}: {modal} modal, child {named('vt ' + vt, table)[3:]}" for a, b, modal, vt in runs[:14]))
     return out
 
 
