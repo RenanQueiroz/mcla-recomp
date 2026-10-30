@@ -165,10 +165,10 @@ index 9371784..a844129 100644
    static ExitGuard guard;
 diff --git a/src/audio/audio_lab.cpp b/src/audio/audio_lab.cpp
 new file mode 100644
-index 0000000..1a2ee03
+index 0000000..90dc46d
 --- /dev/null
 +++ b/src/audio/audio_lab.cpp
-@@ -0,0 +1,847 @@
+@@ -0,0 +1,869 @@
 +/**
 + * @file        audio/audio_lab.cpp
 + * @brief       LAB ONLY: the thread behind the audio pump's wait, and a host priority for it (issue #21)
@@ -1008,6 +1008,28 @@ index 0000000..1a2ee03
 +    }
 +    if (g_dropped.load(std::memory_order_relaxed)) {
 +      REXAPU_INFO("audio lab site table full: {} events not counted", g_dropped.load(std::memory_order_relaxed));
++    }
++  }
++  // 4. twice per run (after 20 s and after 60 s): every guest thread with its name, entry, the last priority increment the
++  //    game asked for and the host priority it has.
++  if (g_tick == 20 || g_tick == 60) {
++    rex::system::KernelState* ks = rex::system::kernel_state();
++    for (uint32_t xid = 1; ks && xid <= 400; ++xid) {
++      auto th = ks->GetThreadByID(xid);
++      if (!th || !th->thread()) {
++        continue;
++      }
++      int host_priority = -100;
++#if defined(_WIN32)
++      host_priority = GetThreadPriority(static_cast<HANDLE>(th->thread()->native_handle()));
++#endif
++      const auto* cp = th->creation_params();
++      std::snprintf(line, sizeof(line),
++                    "audio lab thread-table t=%.1fs xid=%u h=%08X tid=%u name=\"%s\" entry=%08X flags=%08X proc=%u "
++                    "asked_increment=%d host_priority=%d",
++                    t_s, xid, th->handle(), th->thread()->system_id(), th->thread()->name().c_str(), cp->start_address,
++                    cp->creation_flags, cp->creation_flags >> 24, th->priority(), host_priority);
++      REXAPU_INFO("{}", line);
 +    }
 +  }
 +  for (size_t i = 0; i < kRows; ++i) {
