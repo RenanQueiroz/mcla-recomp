@@ -66,8 +66,9 @@ REXCVAR_DEFINE_BOOL(mcla_small_cpu_defaults, true, "MCLA",
                     "With 5 or fewer logical processors the game also turns on mcla_poll_wait (the main thread's wait "
                     "for a ring slot on a timer) and mcla_pump_wake_on_demand (the frame-pacing thread woken when the "
                     "main thread waits for it), next to the timer queue's high-resolution wait it turns on there "
-                    "anyway, and sets audio_thread_priority to 3 and audio_adaptive_queue on (the audio worker in the "
-                    "Windows multimedia scheduler; a deeper output queue after an underrun). A value you set for any "
+                    "anyway, and sets audio_thread_priority and audio_mixer_priority to 3 and audio_adaptive_queue on "
+                    "(the audio worker and the game's mixer thread in the Windows multimedia scheduler; a deeper "
+                    "output queue after an underrun). A value you set for any "
                     "of them wins. Off leaves only the high-resolution wait on there (v0.2.x). 4 cores without SMT "
                     "are included since v0.3.1. Nothing changes with 6 or more logical processors "
                     "(launcher/dev/small-cpu-2026-10-28.md, small-cpu-audio-2026-10-29.md). Takes effect at the next start")
@@ -959,6 +960,9 @@ static uint32_t PhysicalCoresAvailable() {
 // output queue grows after an underrun): with other processes taking the cores, the audio ran dry
 // while driving in 3 of 3 runs without them and in 1 of 3 with them (SDK patch
 // rexglue-xma-decoder-fixes.patch; a value the player sets for either wins, as for the rest).
+// And audio_mixer_priority = 3 (src/audio_mixer.cpp): the game's own mixer thread, which the audio worker
+// waits for, gets the same treatment; the audio worker's round was 0.74 ms alone and 3.8 ms with the cores
+// taken, because that thread waited to run (launcher/dev/audio-mixer-2026-10-30.md).
 static void ApplyCpuDefaults() {
   constexpr uint32_t kWakeOnDemandFrom = 6;
   const uint32_t logical = LogicalProcessorsAvailable();
@@ -986,6 +990,8 @@ static void ApplyCpuDefaults() {
     options.push_back({"mcla_poll_wait", "poll wait", "true", true, true});
     options.push_back({"audio_thread_priority", "audio thread priority", "3", false, true});
     options.push_back({"audio_adaptive_queue", "audio adaptive queue", "true", true, true});
+    // After the others, so that the log line keeps its earlier text up to here.
+    options.push_back({"audio_mixer_priority", "audio mixer priority", "3", false, true});
   }
   std::string text;
   bool any_automatic = false;
