@@ -1,6 +1,6 @@
 # The audio pump takes 10.6 ms a round on a 3rd-generation i5 (issue #21, 2026-10-30)
 
-**State: the CPU-time stat (`cpu_avg_us`, `cpu_pct` in the `pump:` part of the `audio_stats` line) is written and compile-checked by CI. The lab counters below are on the branch `diag/audio-pump-cpu` only. Nothing was run in the game yet: every number under "Results" is "not run yet". Linux and the PS5 build were not built or run.**
+**State: the CPU-time stat (`cpu_avg_us`, `cpu_pct` in the `pump:` part of the `audio_stats` line) is written and compile-checked by CI. The lab counters below are on the branch `diag/audio-pump-cpu` only. The first lab run (2026-10-30, "Results") found that the pump's callback waits for another thread and does no floating point itself, so it said nothing about denormals: the mixer thread was not measured. The third commit (`rexglue-lab-thread-diag.patch`) finds that thread and measures it; it is compile-checked by CI and not run yet. Linux and the PS5 build were not built or run.**
 
 ## What the report shows
 
@@ -36,5 +36,15 @@ lower bound = (DE + UE stretches in the scalar mode per callback) x 150 cycles /
 One build of the branch with its own SDK (`fast-setup.ps1 -NoBundle`), then runs on that one build: scratch save and shader storage, Direct3D 12, windowed, `--mcla_fps=30 --audio_stats=true --audio_stats_interval=1 --audio_mxcsr_diag=true`, affinity mask 0x55 by a job object (4 logical processors on 4 cores). The route is audio21's `au-ab.pad` (stand, then a 24 s drive on the street that `follow` drives), the same as `affinitylog`. Group P: plain. Group S: 4 busy processes in the game's job object. The per-second lines are cut into the standing and the driving part by the pad's marks.
 
 ## Results
+
+### Run 1 (lab commit 61b5302; this PC, Ryzen 7 9800X3D limited to mask 0x55, Direct3D 12, cap 30, v0.3.2 defaults; n=2 a group)
+
+Per audio callback while driving (the pump's round on the audio worker): group P (plain) 748 us wall, 7 us CPU (0.9%), 0 MXCSR writes, 1 guest critical section taking 0 us, 1 guest wait taking 742 us (99% of the round); 11 XMA kicks a round. Group S (4 busy processes in the game's job object) 1,883 us wall, 7 us CPU (0.4%), 1 guest wait taking 1,877 us; 5.9% of the rounds over 4 ms. The CPU time did not grow with the load: all of the growth (1,136 us) is time off the CPU. (Measured; two runs a group, the third of each did not start before the hold's deadline; two attempts of S1 were dropped because the game had not left the title screen after 90 s with the busy processes running.)
+
+What that says: the callback is **not** computing. It starts a wait and sleeps in it for nearly its whole round, so what takes the time is the thread (or threads) it waits for. Raising the audio worker's host priority (`audio_thread_priority`) cannot shorten a wait for a thread that has not been raised, which fits the reporter's finding that it changed nothing (inference).
+
+**Correction.** The first version of the report said "B (denormals) CANNOT explain it". That was wrong as worded: the counters were on the callback's thread, which makes no floating-point calls (0 MXCSR writes), so they say nothing about the guest mixer. The denormal question is open until the thread that mixes is measured (`rexglue-lab-thread-diag.patch`, its `mixer` line). The Q3 arithmetic in the report was done with zero denormal stretches on that thread and is void.
+
+### Run 2
 
 Not run yet.

@@ -73,6 +73,7 @@ git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
 git apply ../../patches/rexglue-affinity-warning-once.patch
 git apply ../../patches/rexglue-lab-mxcsr-diag.patch
+git apply ../../patches/rexglue-lab-thread-diag.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -2041,7 +2042,7 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 - `src/audio/audio_system.cpp`, `audio_dump.cpp`: with `audio_stats` and `audio_mxcsr_diag` (default false) an `audio diag` line follows every interval line: per mixer callback the MXCSR writes, the stretches by mode, those with DE and UE, the share of callbacks with any, the time in each mode and in stretches with DE or UE, and the time the callback spends in guest critical sections and waits (`RtlEnterCriticalSection` and `XObject::Wait` / `WaitMultiple` on the audio worker only; a wait inside a critical section counts in both); then the three guest threads with the most MXCSR writes, per second, for scale (`ThreadState` keeps a list of live threads for this).
 - Costs: one `stmxcsr` and one `rdtsc` more on every MXCSR write of every thread; a thread-local test in the waits.
 
-**Not checked.** Built by CI only (Windows, llvm-mingw); not built on Linux or the PS5 (`ps5/make_ps5.sh` does not apply it). Results: not run yet.
+**Not checked.** Built by CI only (Windows, llvm-mingw); not built on Linux or the PS5 (`ps5/make_ps5.sh` does not apply it). Results: run 1 is in `launcher/dev/audio-pump-cpu-2026-10-30.md`. It showed that these counters sit on a thread that does not mix (the callback waits for 99% of its round and does no floating point), so they say nothing yet about denormals in the mixer; `rexglue-lab-thread-diag.patch` measures the thread that does.
 
 | Change | Files | Affects |
 |---|---|---|
@@ -2049,6 +2050,25 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | The registry of live `ThreadState`s | `include/rex/system/thread_state.h`, `src/system/thread_state.cpp` | lab |
 | The `audio diag` line, `audio_mxcsr_diag`, the TSC factor | `src/audio/audio_dump.cpp`, `include/rex/audio/audio_dump.h`, `src/audio/audio_thread.cpp`, `src/audio/audio_system.cpp` | lab |
 | Lock and wait timers (audio worker only) | `src/kernel/xboxkrnl/xboxkrnl_rtl.cpp`, `src/system/xobject.cpp` | lab |
+
+## rexglue-lab-thread-diag.patch
+
+**LAB ONLY: not for a release.** On the branch `diag/audio-pump-cpu` (third commit), after `rexglue-lab-mxcsr-diag.patch`. The first lab run (`launcher/dev/audio-pump-cpu-2026-10-30.md`, "Results") showed that the audio pump's callback does almost nothing itself: 7 us of CPU in a round of 748 us, no MXCSR write, one critical section taking no time and one guest wait taking 99% of the round. So the time is spent waiting for another thread, and the guest mixer's floating point runs there, not on the audio worker. This patch finds that thread, measures it, and lets it have the audio priority.
+
+**What it does** (all off unless a cvar asks; the hooks on the kernel's wait and signal paths then cost one relaxed load; `ps5/make_ps5.sh` does not apply it):
+- `audio_thread_diag` (with `audio_stats`): `audio lab` lines. At each guest thread's creation: its entry address, the trampoline, the context, the creation flags (the processor in the top byte) and the stack size; whenever the game asks for a new priority (`KeSetBasePriorityThread`) or affinity (`KeSetAffinityThread`) for a thread, one line per thread and value; the audio callback the game registered. A table with one row per (thread, call site, kernel object, kind of wait or signal): count, time in the wait, and the time from the object's last signal to the wake-up (the scheduling delay when the signal came while the thread waited). Every second, a `pump-wait` line for what the audio callback waits on, with the threads and call sites that signalled that object in the second. A thread that signals such an object is the "mixer thread": from then on it gets a `mixer` line a second (a round = from one signal of the pump's object to the next: wall time, time in kernel waits, busy time, CPU time by `QueryThreadCycleTime` on that thread, so busy minus CPU is the time it wanted to run and did not, or blocked on something that is not a kernel object; time in critical sections; the delay from signal to wake-up; the MXCSR counters of that thread per round, which are the valid denormal counts for the guest mixer). Every 5 seconds the rows of the audio worker, of the mixer thread(s) and of the objects they wait on, and the 25 other waits with the most time.
+- `audio_mixer_priority` (0 to 3, default 0) and `audio_mixer_entries` (default `auto`): the same host priority and MMCSS ("Pro Audio") treatment that `audio_thread_priority` gives the audio worker, for the mixer thread found as above (`auto`) and for guest threads whose entry address is listed (hex, comma separated). Applied on the thread itself.
+- Not a new option: `ignore_thread_priorities=false` makes `KeSetBasePriorityThread` set the host priority, but `XThread::SetPriority` maps the game's increment to a host priority only above +17 (above normal) or +34 (highest) and below -17 / -34, so a request in the usual range ends up normal; the creation flags' priority bits (`& 0x60`) are applied regardless of the option. What the game asks for is in the `game asks` lines.
+
+**Not checked.** Compiled by CI only (Windows, llvm-mingw); no game run yet. The counters add a `rdtsc` and a table update to every wait and signal of every thread while `audio_thread_diag` is on, so rounds are a little slower than in a release build. The mixer thread is found by who signals what the callback waits on; if that is a host thread, no mixer line appears and the site rows show it. Not built on Linux or the PS5. No row in `docs/off-switches.md` (lab only).
+
+| Change | Files | Affects |
+|---|---|---|
+| The tables, the mixer lines, the priority option, the cvars | `src/audio/audio_lab.cpp`, `include/rex/audio/audio_lab.h`, `src/audio/CMakeLists.txt` (new) | lab |
+| The reporter calls it; `Init` reads the cvars | `src/audio/audio_dump.cpp` | lab |
+| The pump flag around the callback, the registered callback | `src/audio/audio_system.cpp` | lab |
+| Hooks on the waits and signals | `src/system/xobject.cpp`, `xevent.cpp`, `xsemaphore.cpp`, `xmutant.cpp`, `src/kernel/xboxkrnl/xboxkrnl_rtl.cpp` | lab |
+| Creation, priority and affinity requests, sleeps | `src/system/xthread.cpp` | lab |
 
 ## rexglue-mingw.patch
 

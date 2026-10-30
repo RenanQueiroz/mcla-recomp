@@ -487,6 +487,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-affinity-warning-once.patch"; File = "src\system\xthread.cpp"; Adds = "affinity_warning_once" }
     # LAB ONLY (diag/audio-pump-cpu, never in a release): the MXCSR and guest-lock counters of the audio worker (issue #21).
     @{ Patch = "rexglue-lab-mxcsr-diag.patch"; File = "src\audio\audio_dump.cpp"; Adds = "audio_mxcsr_diag" }
+    # LAB ONLY (diag/audio-pump-cpu, never in a release): the guest thread behind the audio pump's wait, and a host priority for it (issue #21).
+    @{ Patch = "rexglue-lab-thread-diag.patch"; File = "src\audio\audio_lab.cpp"; Adds = "audio_mixer_priority" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

@@ -1,0 +1,1242 @@
+diff --git a/include/rex/audio/audio_lab.h b/include/rex/audio/audio_lab.h
+new file mode 100644
+index 0000000..947a67f
+--- /dev/null
++++ b/include/rex/audio/audio_lab.h
+@@ -0,0 +1,118 @@
++/**
++ * @file        audio/audio_lab.h
++ * @brief       LAB ONLY: which guest thread the audio pump waits for, what it does, and a host priority for it (issue #21)
++ *
++ * Added by the mcla-recomp fork (patches/rexglue-lab-thread-diag.patch), never released. The audio pump's
++ * round (the client callback on the "Audio Worker") is almost all waiting; these hooks find out on what, who
++ * signals it, what that thread creates, asks for and does, and let a host priority be given to it.
++ *
++ * Everything is off unless a cvar asks (audio_thread_diag with audio_stats, audio_mixer_priority,
++ * audio_mixer_entries); the hooks on the kernel's wait and signal paths then cost one relaxed load.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++namespace rex::system {
++class XObject;
++}
++
++namespace rex::audio::lab {
++
++enum class Op : uint32_t {
++  kWait = 0,           // XObject::Wait (KeWaitForSingleObject, NtWaitForSingleObjectEx, a contended critical section)
++  kWaitAny = 1,        // XObject::WaitMultiple, wait for any
++  kWaitAll = 2,        // XObject::WaitMultiple, wait for all
++  kSignalAndWait = 3,  // XObject::SignalAndWait (the wait half)
++  kDelay = 4,          // XThread::Delay (KeDelayExecutionThread, Sleep)
++  kSet = 5,            // XEvent::Set
++  kPulse = 6,          // XEvent::Pulse
++  kRelease = 7,        // XSemaphore::ReleaseSemaphore
++  kMutant = 8,         // XMutant::ReleaseMutant
++};
++
++/// True when any hook has work to do (audio_thread_diag with audio_stats, or a mixer priority option).
++extern std::atomic<bool> g_active;
++inline bool Active() {
++  return g_active.load(std::memory_order_relaxed);
++}
++
++/// True while the calling thread is inside the audio client's callback (the Audio Worker, around Execute).
++extern thread_local bool tls_in_pump;
++
++/// Reads the cvars (AudioSystem::Setup -> dump::Init). Logs one line with what is on.
++void Init();
++/// The reporter thread, once a second: the pump-wait, mixer and (every 5 s) site lines.
++void Interval();
++
++/// A wait of the calling thread: time (time-stamp counter), latency from the object's last signal, call site.
++class WaitScope {
++ public:
++  WaitScope(Op op, const rex::system::XObject* object) {
++    if (Active()) {
++      Begin(op, object);
++    }
++  }
++  ~WaitScope() {
++    if (on_) {
++      End();
++    }
++  }
++  /// Wait for several objects: marks each as a pump object if the pump waits (the one that woke the wait goes to SetObject).
++  void AddObject(const rex::system::XObject* object);
++  void SetObject(const rex::system::XObject* object) {
++    object_ = object;
++  }
++  WaitScope(const WaitScope&) = delete;
++  WaitScope& operator=(const WaitScope&) = delete;
++
++ private:
++  void Begin(Op op, const rex::system::XObject* object);
++  void End();
++  bool on_ = false;
++  Op op_ = Op::kWait;
++  const rex::system::XObject* object_ = nullptr;
++  uint64_t t0_ = 0;
++};
++
++/// A critical-section enter of the calling thread (spinning and waiting), counted for the mixer threads only.
++class CsScope {
++ public:
++  CsScope() {
++    if (Active()) {
++      Begin();
++    }
++  }
++  ~CsScope() {
++    if (t0_) {
++      End();
++    }
++  }
++  CsScope(const CsScope&) = delete;
++  CsScope& operator=(const CsScope&) = delete;
++
++ private:
++  void Begin();
++  void End();
++  uint64_t t0_ = 0;
++};
++
++/// A signal (XEvent::Set / Pulse, XSemaphore::ReleaseSemaphore, XMutant::ReleaseMutant) by the calling thread.
++void Signal(Op op, const rex::system::XObject* object);
++
++/// XThread::Create: the thread's guest creation parameters (a log line).
++void OnThreadCreated(uint32_t handle, uint32_t host_tid, uint32_t entry, uint32_t xapi_startup, uint32_t context,
++                     uint32_t creation_flags, uint32_t stack_size, bool guest);
++/// XThread::Execute, on the new thread itself: a thread whose entry is in audio_mixer_entries gets the priority.
++void OnThreadStart(uint32_t entry);
++/// KeSetBasePriorityThread / KeSetAffinityThread as the game calls them (logged when a thread asks for a new value).
++void OnPriorityRequest(uint32_t handle, int32_t increment);
++void OnAffinityRequest(uint32_t handle, uint32_t mask);
++/// AudioSystem::RegisterClient: the game's callback and argument.
++void OnClientRegistered(uint32_t callback, uint32_t argument);
++
++}  // namespace rex::audio::lab
+diff --git a/src/audio/CMakeLists.txt b/src/audio/CMakeLists.txt
+index f3a23f1..7d449b9 100644
+--- a/src/audio/CMakeLists.txt
++++ b/src/audio/CMakeLists.txt
+@@ -5,6 +5,7 @@ add_library(rexaudio OBJECT
+     
+     audio_driver.cpp
+     audio_dump.cpp
++    audio_lab.cpp
+     audio_system.cpp
+     audio_thread.cpp
+     downmix.cpp
+diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
+index 9371784..a844129 100644
+--- a/src/audio/audio_dump.cpp
++++ b/src/audio/audio_dump.cpp
+@@ -20,6 +20,7 @@
+ #include <vector>
+ 
+ #include <rex/audio/audio_dump.h>
++#include <rex/audio/audio_lab.h>
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/system/kernel_state.h>
+@@ -381,6 +382,7 @@ void ReporterMain(Reporter* self, int interval_s) {
+     if (g_lab.load(std::memory_order_relaxed)) {
+       REXAPU_INFO("{}", LabInterval(lab_state));
+     }
++    rex::audio::lab::Interval();
+     // The cumulative line too, every time: the process may leave without a chance to print the last one.
+     REXAPU_INFO("{}", TotalLine());
+     prev = now;
+@@ -580,6 +582,8 @@ void Init() {
+     g_reporter = new Reporter;
+     g_reporter->thread = std::thread(ReporterMain, g_reporter, REXCVAR_GET(audio_stats_interval));
+   }
++  // Lab build (patches/rexglue-lab-thread-diag.patch): the thread table and the mixer thread's priority option.
++  rex::audio::lab::Init();
+   // Armed here, not at load time: a function-local static is destroyed before the objects that
+   // were constructed earlier (the logging, the cvars), which the exit path still uses.
+   static ExitGuard guard;
+diff --git a/src/audio/audio_lab.cpp b/src/audio/audio_lab.cpp
+new file mode 100644
+index 0000000..1a2ee03
+--- /dev/null
++++ b/src/audio/audio_lab.cpp
+@@ -0,0 +1,847 @@
++/**
++ * @file        audio/audio_lab.cpp
++ * @brief       LAB ONLY: the thread behind the audio pump's wait, and a host priority for it (issue #21)
++ *
++ * Added by the mcla-recomp fork (patches/rexglue-lab-thread-diag.patch), never released. See audio_lab.h.
++ *
++ * What it records, with audio_thread_diag (and audio_stats):
++ *  - every guest thread's creation parameters, and the priorities and affinities the game asks for (log lines);
++ *  - a table of waits and signals: one row per (thread, call site, kernel object, kind) with the count, the time in
++ *    the wait and the time from the object's last signal to the wake-up (the scheduling delay when the signal came
++ *    while the thread waited);
++ *  - the objects the audio pump's callback waits on, and the guest thread that signals one of them: that is the
++ *    "mixer thread". Per signal of such an object it keeps a round (CPU time by QueryThreadCycleTime, wall time in
++ *    time-stamp ticks, time in kernel waits and in critical sections) and prints it once a second together with
++ *    the thread's MXCSR counters.
++ * With audio_mixer_priority > 0 that thread (and the guest threads whose entry address is in audio_mixer_entries)
++ * gets the host priority and MMCSS treatment that audio_thread_priority gives the audio worker.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++
++#if defined(_WIN32)
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++#endif
++
++#include <algorithm>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include <rex/audio/audio_dump.h>
++#include <rex/audio/audio_lab.h>
++#include <rex/cvar.h>
++#include <rex/logging.h>
++#include <rex/ppc/context.h>
++#include <rex/system/kernel_state.h>
++#include <rex/system/thread_state.h>
++#include <rex/system/xobject.h>
++#include <rex/system/xthread.h>
++#include <rex/thread.h>
++
++REXCVAR_DEFINE_BOOL(audio_thread_diag, false, "Audio",
++                    "Lab build only (patches/rexglue-lab-thread-diag.patch): with audio_stats, log which guest thread the "
++                    "audio pump's callback waits for ('audio lab' lines): the guest threads' creation parameters, the "
++                    "priorities and affinities the game asks for, a table of waits and signals, and a round of the thread "
++                    "that signals what the pump waits on. Restart")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(audio_mixer_priority, 0, "Audio",
++                     "Lab build only: host priority of the game's own audio mixer thread, as audio_thread_priority gives it "
++                     "to the audio worker: 0 = normal, 1 = above normal, 2 = highest, 3 = highest and MMCSS (\"Pro Audio\"). "
++                     "It goes to the guest thread that signals what the pump's callback waits on (audio_mixer_entries "
++                     "auto) and to guest threads whose entry address is listed. Restart")
++    .range(0, 3)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_STRING(audio_mixer_entries, "auto", "Audio",
++                      "Lab build only: which guest threads audio_mixer_priority applies to: 'auto' = the one that signals what "
++                      "the audio pump waits on, and/or guest entry addresses in hex (82123456,8212ABCD), separated by commas "
++                      "or semicolons; 'auto' may be listed with them");
++
++namespace rex::audio::lab {
++
++std::atomic<bool> g_active{false};
++thread_local bool tls_in_pump = false;
++
++namespace {
++
++using rex::audio::dump::LabTsc;
++
++constexpr size_t kRows = 4096;
++constexpr size_t kObjs = 1024;
++constexpr size_t kMixers = 8;
++constexpr size_t kPump = 16;
++constexpr size_t kEntries = 8;
++constexpr int kBuckets = 9;
++constexpr uint64_t kEdgesUs[kBuckets - 1] = {50, 100, 200, 400, 800, 1600, 3200, 6400};
++
++bool g_diag = false;
++int g_boost = 0;
++bool g_auto = true;
++uint32_t g_entries[kEntries] = {};
++size_t g_entry_count = 0;
++std::atomic<uint32_t> g_worker_tid{0};
++std::atomic<uint64_t> g_dropped{0};
++
++struct Row {
++  std::atomic<uint64_t> key{0};
++  std::atomic<uint32_t> ready{0};
++  uint32_t op = 0, tid = 0, handle = 0, lr = 0, obj_handle = 0, obj_guest = 0, obj_type = 0;
++  const void* obj = nullptr;
++  std::atomic<uint64_t> n{0}, ticks{0}, max_ticks{0}, max_all{0}, lat_n{0}, lat_ticks{0}, lat_max{0};
++};
++Row g_rows[kRows];
++
++struct ObjSlot {
++  std::atomic<const void*> ptr{nullptr};
++  std::atomic<uint64_t> last_sig{0};
++  std::atomic<uint32_t> sig_tid{0};
++};
++ObjSlot g_objs[kObjs];
++std::atomic<const void*> g_pump[kPump];
++
++struct Mixer {
++  uint32_t tid = 0, handle = 0, xid = 0, entry = 0, context = 0, flags = 0;
++  void* thread_state = nullptr;
++  // owned by the mixer thread
++  uint64_t r_tsc0 = 0, r_cpu0 = 0, r_wait = 0, r_cs = 0;
++  // read by the reporter
++  std::atomic<uint64_t> rounds{0}, cpu_ns{0}, wall{0}, wait{0}, busy{0}, cs{0}, cs_n{0}, lat_n{0}, lat_ticks{0}, lat_max{0};
++  std::atomic<uint64_t> hist_cpu[kBuckets], hist_busy[kBuckets];
++};
++Mixer g_mixers[kMixers];
++std::atomic<size_t> g_mixer_count{0};
++
++struct Tls {
++  bool init = false;
++  uint32_t tid = 0, handle = 0, xid = 0;
++  Mixer* mixer = nullptr;
++};
++thread_local Tls t_tls;
++
++Tls& T() {
++  Tls& t = t_tls;
++  if (!t.init) {
++    t.init = true;
++    t.tid = rex::thread::current_thread_system_id();
++    if (rex::system::XThread::IsInThread()) {
++      rex::system::XThread* xt = rex::system::XThread::GetCurrentThread();
++      t.handle = xt->handle();
++      t.xid = xt->thread_id();
++    }
++  }
++  return t;
++}
++
++uint32_t CurrentLr() {
++  rex::runtime::ThreadState* ts = rex::runtime::ThreadState::Get();
++  return ts ? static_cast<uint32_t>(ts->context()->lr) : 0;
++}
++
++void RaiseMax(std::atomic<uint64_t>& a, uint64_t v) {
++  uint64_t cur = a.load(std::memory_order_relaxed);
++  while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
++  }
++}
++
++uint64_t Mix(uint64_t x) {
++  x ^= x >> 33;
++  x *= 0xFF51AFD7ED558CCDull;
++  x ^= x >> 33;
++  x *= 0xC4CEB9FE1A85EC53ull;
++  x ^= x >> 33;
++  return x;
++}
++
++uint64_t RowKey(Op op, uint32_t tid, uint32_t lr, const void* obj) {
++  uint64_t h = Mix(static_cast<uint64_t>(op) + 1);
++  h = Mix(h ^ (static_cast<uint64_t>(tid) << 1));
++  h = Mix(h ^ (static_cast<uint64_t>(lr) << 7));
++  h = Mix(h ^ reinterpret_cast<uintptr_t>(obj));
++  return h | 1;
++}
++
++Row* FindRow(uint64_t key, bool& fresh) {
++  fresh = false;
++  size_t i = static_cast<size_t>(key) & (kRows - 1);
++  for (size_t probe = 0; probe < 64; ++probe, i = (i + 1) & (kRows - 1)) {
++    Row& r = g_rows[i];
++    uint64_t k = r.key.load(std::memory_order_acquire);
++    if (k == key) {
++      return &r;
++    }
++    if (k == 0) {
++      uint64_t expected = 0;
++      if (r.key.compare_exchange_strong(expected, key, std::memory_order_acq_rel)) {
++        fresh = true;
++        return &r;
++      }
++      if (expected == key) {
++        return &r;
++      }
++    }
++  }
++  return nullptr;
++}
++
++ObjSlot* FindObj(const void* p, bool create) {
++  size_t i = static_cast<size_t>(Mix(reinterpret_cast<uintptr_t>(p))) & (kObjs - 1);
++  for (size_t probe = 0; probe < 32; ++probe, i = (i + 1) & (kObjs - 1)) {
++    ObjSlot& s = g_objs[i];
++    const void* cur = s.ptr.load(std::memory_order_acquire);
++    if (cur == p) {
++      return &s;
++    }
++    if (!cur) {
++      if (!create) {
++        return nullptr;
++      }
++      const void* expected = nullptr;
++      if (s.ptr.compare_exchange_strong(expected, p, std::memory_order_acq_rel) || expected == p) {
++        return &s;
++      }
++    }
++  }
++  return nullptr;
++}
++
++void MarkPump(const void* p) {
++  for (size_t i = 0; i < kPump; ++i) {
++    const void* cur = g_pump[i].load(std::memory_order_relaxed);
++    if (cur == p) {
++      return;
++    }
++    if (!cur) {
++      const void* expected = nullptr;
++      if (g_pump[i].compare_exchange_strong(expected, p, std::memory_order_relaxed) || expected == p) {
++        return;
++      }
++    }
++  }
++}
++
++bool IsPump(const void* p) {
++  for (size_t i = 0; i < kPump; ++i) {
++    if (g_pump[i].load(std::memory_order_relaxed) == p) {
++      return true;
++    }
++  }
++  return false;
++}
++
++void AddRow(Op op, const Tls& t, uint32_t lr, const rex::system::XObject* obj, uint64_t ticks, uint64_t lat) {
++  bool fresh = false;
++  Row* r = FindRow(RowKey(op, t.tid, lr, obj), fresh);
++  if (!r) {
++    g_dropped.fetch_add(1, std::memory_order_relaxed);
++    return;
++  }
++  if (fresh) {
++    r->op = static_cast<uint32_t>(op);
++    r->tid = t.tid;
++    r->handle = t.handle;
++    r->lr = lr;
++    r->obj = obj;
++    if (obj) {
++      r->obj_handle = obj->handle();
++      r->obj_guest = obj->guest_object();
++      r->obj_type = static_cast<uint32_t>(obj->type());
++    }
++    r->ready.store(1, std::memory_order_release);
++  }
++  r->n.fetch_add(1, std::memory_order_relaxed);
++  if (ticks) {
++    r->ticks.fetch_add(ticks, std::memory_order_relaxed);
++    RaiseMax(r->max_ticks, ticks);
++    RaiseMax(r->max_all, ticks);
++  }
++  if (lat) {
++    r->lat_n.fetch_add(1, std::memory_order_relaxed);
++    r->lat_ticks.fetch_add(lat, std::memory_order_relaxed);
++    RaiseMax(r->lat_max, lat);
++  }
++}
++
++int Bucket(uint64_t us) {
++  int i = 0;
++  while (i < kBuckets - 1 && us >= kEdgesUs[i]) {
++    ++i;
++  }
++  return i;
++}
++
++// ---- host priority and MMCSS for the calling thread
++
++void BoostSelf(int level, const char* why) {
++#if defined(_WIN32)
++  if (level <= 0) {
++    return;
++  }
++  const BOOL ok = SetThreadPriority(GetCurrentThread(), level >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL);
++  const char* mmcss = "not requested";
++  if (level >= 3) {
++    using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
++    static const SetCharacteristics set_characteristics = []() -> SetCharacteristics {
++      HMODULE avrt = LoadLibraryW(L"avrt.dll");
++      return avrt ? reinterpret_cast<SetCharacteristics>(
++                        reinterpret_cast<void*>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW")))
++                  : nullptr;
++    }();
++    DWORD task_index = 0;
++    HANDLE task = set_characteristics ? set_characteristics(L"Pro Audio", &task_index) : nullptr;
++    mmcss = task ? "joined (Pro Audio)" : "FAILED";
++  }
++  REXAPU_INFO("audio lab boost: guest thread h={:08X} tid={} ({}) host priority {} at level {}, MMCSS {}",
++              T().handle, T().tid, why, ok ? "set" : "NOT set", level, mmcss);
++#else
++  (void)level;
++  (void)why;
++#endif
++}
++
++Mixer* ClaimMixer(const Tls& t) {
++  const size_t idx = g_mixer_count.fetch_add(1, std::memory_order_relaxed);
++  if (idx >= kMixers) {
++    return nullptr;
++  }
++  Mixer& m = g_mixers[idx];
++  m.tid = t.tid;
++  m.handle = t.handle;
++  m.xid = t.xid;
++  rex::system::XThread* xt = rex::system::XThread::GetCurrentThread();
++  m.entry = xt->creation_params()->start_address;
++  m.context = xt->creation_params()->start_context;
++  m.flags = xt->creation_params()->creation_flags;
++  m.thread_state = xt->thread_state();
++  REXAPU_INFO("audio lab mixer thread found: h={:08X} tid={} xid={} entry={:08X} ctx={:08X} flags={:08X} (it signals an object the audio pump waits on)",
++              m.handle, m.tid, m.xid, m.entry, m.context, m.flags);
++  return &m;
++}
++
++// One round of the mixer thread ends at each signal of a pump object by that thread.
++void MixerRound(Mixer& m, uint64_t now) {
++  const uint64_t cpu = rex::audio::dump::ThreadCpuNs();
++  if (m.r_tsc0) {
++    const uint64_t wall = now - m.r_tsc0;
++    const uint64_t cpu_d = cpu >= m.r_cpu0 ? cpu - m.r_cpu0 : 0;
++    const uint64_t busy = wall > m.r_wait ? wall - m.r_wait : 0;
++    const double tpu = rex::audio::dump::LabTscPerUs();
++    m.rounds.fetch_add(1, std::memory_order_relaxed);
++    m.cpu_ns.fetch_add(cpu_d, std::memory_order_relaxed);
++    m.wall.fetch_add(wall, std::memory_order_relaxed);
++    m.wait.fetch_add(m.r_wait, std::memory_order_relaxed);
++    m.busy.fetch_add(busy, std::memory_order_relaxed);
++    m.cs.fetch_add(m.r_cs, std::memory_order_relaxed);
++    m.hist_cpu[Bucket(cpu_d / 1000)].fetch_add(1, std::memory_order_relaxed);
++    m.hist_busy[Bucket(tpu > 0 ? static_cast<uint64_t>(static_cast<double>(busy) / tpu) : 0)].fetch_add(1, std::memory_order_relaxed);
++  }
++  m.r_tsc0 = now;
++  m.r_cpu0 = cpu;
++  m.r_wait = 0;
++  m.r_cs = 0;
++}
++
++const char* OpName(uint32_t op) {
++  switch (static_cast<Op>(op)) {
++    case Op::kWait: return "wait";
++    case Op::kWaitAny: return "wait_any";
++    case Op::kWaitAll: return "wait_all";
++    case Op::kSignalAndWait: return "signal_and_wait";
++    case Op::kDelay: return "delay";
++    case Op::kSet: return "set";
++    case Op::kPulse: return "pulse";
++    case Op::kRelease: return "release";
++    case Op::kMutant: return "release_mutant";
++  }
++  return "?";
++}
++
++bool IsWaitOp(uint32_t op) {
++  return op <= static_cast<uint32_t>(Op::kDelay);
++}
++
++}  // namespace
++
++// ---------------------------------------------------------------------------------------------------------------
++
++void Init() {
++  g_diag = REXCVAR_GET(audio_thread_diag) && rex::audio::dump::StatsEnabled();
++  g_boost = REXCVAR_GET(audio_mixer_priority);
++  g_auto = false;
++  g_entry_count = 0;
++  const std::string spec = REXCVAR_GET(audio_mixer_entries);
++  size_t pos = 0;
++  while (pos < spec.size()) {
++    size_t end = spec.find_first_of(",; ", pos);
++    if (end == std::string::npos) {
++      end = spec.size();
++    }
++    const std::string tok = spec.substr(pos, end - pos);
++    pos = end + 1;
++    if (tok.empty()) {
++      continue;
++    }
++    if (tok == "auto") {
++      g_auto = true;
++    } else if (g_entry_count < kEntries) {
++      g_entries[g_entry_count++] = static_cast<uint32_t>(std::strtoul(tok.c_str(), nullptr, 16));
++    }
++  }
++  g_active.store(g_diag || g_boost > 0, std::memory_order_relaxed);
++  if (REXCVAR_GET(audio_thread_diag) && !g_diag) {
++    REXAPU_WARN("audio_thread_diag needs audio_stats; the thread lines stay off");
++  }
++  if (g_diag || g_boost > 0) {
++    REXAPU_INFO("audio lab: thread table {}, mixer priority {} for {}{} listed entries",
++                g_diag ? "on" : "off", g_boost, g_auto ? "the thread that wakes the pump (auto) and " : "", g_entry_count);
++  }
++}
++
++void WaitScope::Begin(Op op, const rex::system::XObject* object) {
++  on_ = true;
++  op_ = op;
++  object_ = object;
++  t0_ = LabTsc();
++  if (tls_in_pump) {
++    g_worker_tid.store(T().tid, std::memory_order_relaxed);
++    if (object) {
++      MarkPump(object);
++    }
++  }
++}
++
++void WaitScope::AddObject(const rex::system::XObject* object) {
++  if (on_ && tls_in_pump && object) {
++    MarkPump(object);
++  }
++}
++
++void WaitScope::End() {
++  const uint64_t t1 = LabTsc();
++  const uint64_t dt = t1 - t0_;
++  Tls& t = T();
++  uint64_t lat = 0;
++  if (object_) {
++    ObjSlot* s = FindObj(object_, false);
++    if (s) {
++      const uint64_t sig = s->last_sig.load(std::memory_order_relaxed);
++      if (sig > t0_ && t1 >= sig) {
++        lat = t1 - sig;
++      }
++    }
++  }
++  AddRow(op_, t, CurrentLr(), object_, dt, lat);
++  if (Mixer* m = t.mixer) {
++    m->r_wait += dt;
++    if (lat) {
++      m->lat_n.fetch_add(1, std::memory_order_relaxed);
++      m->lat_ticks.fetch_add(lat, std::memory_order_relaxed);
++      RaiseMax(m->lat_max, lat);
++    }
++  }
++}
++
++void CsScope::Begin() {
++  if (T().mixer) {
++    t0_ = LabTsc();
++  }
++}
++
++void CsScope::End() {
++  Mixer* m = T().mixer;
++  if (m) {
++    const uint64_t dt = LabTsc() - t0_;
++    m->r_cs += dt;
++    m->cs_n.fetch_add(1, std::memory_order_relaxed);
++  }
++}
++
++void Signal(Op op, const rex::system::XObject* object) {
++  if (!Active() || !object) {
++    return;
++  }
++  Tls& t = T();
++  const uint64_t now = LabTsc();
++  if (ObjSlot* s = FindObj(object, true)) {
++    s->last_sig.store(now, std::memory_order_relaxed);
++    s->sig_tid.store(t.tid, std::memory_order_relaxed);
++  }
++  AddRow(op, t, CurrentLr(), object, 0, 0);
++  if (!tls_in_pump && t.handle != 0 && IsPump(object)) {
++    if (!t.mixer && g_mixer_count.load(std::memory_order_relaxed) < kMixers) {
++      t.mixer = ClaimMixer(t);
++      if (t.mixer && g_auto && g_boost > 0) {
++        BoostSelf(g_boost, "signals what the audio pump waits on");
++      }
++    }
++    if (t.mixer) {
++      MixerRound(*t.mixer, now);
++    }
++  }
++}
++
++void OnThreadCreated(uint32_t handle, uint32_t host_tid, uint32_t entry, uint32_t xapi_startup, uint32_t context,
++                     uint32_t creation_flags, uint32_t stack_size, bool guest) {
++  if (!g_diag) {
++    return;
++  }
++  REXAPU_INFO(
++      "audio lab thread created: h={:08X} tid={} guest={} entry={:08X} xapi={:08X} ctx={:08X} flags={:08X} stack={} proc={}",
++      handle, host_tid, guest ? 1 : 0, entry, xapi_startup, context, creation_flags, stack_size, creation_flags >> 24);
++}
++
++void OnThreadStart(uint32_t entry) {
++  if (g_boost <= 0 || g_entry_count == 0) {
++    return;
++  }
++  for (size_t i = 0; i < g_entry_count; ++i) {
++    if (g_entries[i] == entry) {
++      BoostSelf(g_boost, "its entry is in audio_mixer_entries");
++      return;
++    }
++  }
++}
++
++namespace {
++std::mutex g_ask_mutex;
++std::set<uint64_t> g_asked;
++}  // namespace
++
++void OnPriorityRequest(uint32_t handle, int32_t increment) {
++  if (!g_diag) {
++    return;
++  }
++  const uint64_t key = (static_cast<uint64_t>(handle) << 32) ^ static_cast<uint32_t>(increment) ^ (1ull << 62);
++  {
++    std::lock_guard<std::mutex> lock(g_ask_mutex);
++    if (!g_asked.insert(key).second) {
++      return;
++    }
++  }
++  REXAPU_INFO("audio lab game asks: thread h={:08X} KeSetBasePriorityThread increment={}", handle, increment);
++}
++
++void OnAffinityRequest(uint32_t handle, uint32_t mask) {
++  if (!g_diag) {
++    return;
++  }
++  const uint64_t key = (static_cast<uint64_t>(handle) << 32) ^ mask ^ (1ull << 61);
++  {
++    std::lock_guard<std::mutex> lock(g_ask_mutex);
++    if (!g_asked.insert(key).second) {
++      return;
++    }
++  }
++  REXAPU_INFO("audio lab game asks: thread h={:08X} KeSetAffinityThread mask={:X}", handle, mask);
++}
++
++void OnClientRegistered(uint32_t callback, uint32_t argument) {
++  if (!g_diag) {
++    return;
++  }
++  REXAPU_INFO("audio lab pump: the game registered its audio callback {:08X} with argument {:08X}", callback, argument);
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// The reporter's once-a-second lines.
++
++namespace {
++
++struct Snap {
++  uint64_t n = 0, ticks = 0, lat_n = 0, lat_ticks = 0;
++};
++Snap g_prev[kRows];
++
++struct MixPrev {
++  bool seen = false;
++  uint64_t t_us = 0, rounds = 0, cpu_ns = 0, wall = 0, wait = 0, busy = 0, cs = 0, cs_n = 0, lat_n = 0, lat_ticks = 0;
++  uint64_t hist_cpu[kBuckets] = {}, hist_busy[kBuckets] = {};
++#if defined(REX_MXCSR_DIAG_ON)
++  PPCFPSCRRegister::MxcsrDiag diag{};
++#endif
++};
++MixPrev g_mix_prev[kMixers];
++uint64_t g_tick = 0;
++
++#if defined(REX_MXCSR_DIAG_ON)
++struct DiagWant {
++  std::vector<std::pair<void*, PPCFPSCRRegister::MxcsrDiag>>* out;
++  const std::vector<void*>* want;
++};
++void CollectDiag(rex::runtime::ThreadState* ts, void* arg) {
++  auto* w = static_cast<DiagWant*>(arg);
++  for (void* p : *w->want) {
++    if (p == static_cast<void*>(ts)) {
++      w->out->emplace_back(p, ts->context()->fpscr.diag);
++    }
++  }
++}
++#endif
++
++std::string ThreadNameOf(uint32_t xid) {
++  rex::system::KernelState* ks = rex::system::kernel_state();
++  if (ks) {
++    auto thread = ks->GetThreadByID(xid);
++    if (thread && thread->thread()) {
++      return thread->thread()->name();
++    }
++  }
++  return "?";
++}
++
++const char* PercentileLabel(const uint64_t* delta, double q, char* buf, size_t cap) {
++  uint64_t total = 0;
++  for (int i = 0; i < kBuckets; ++i) {
++    total += delta[i];
++  }
++  if (!total) {
++    std::snprintf(buf, cap, "-");
++    return buf;
++  }
++  const double want = q * static_cast<double>(total);
++  uint64_t acc = 0;
++  for (int i = 0; i < kBuckets; ++i) {
++    acc += delta[i];
++    if (static_cast<double>(acc) >= want) {
++      if (i < kBuckets - 1) {
++        std::snprintf(buf, cap, "<%llu", static_cast<unsigned long long>(kEdgesUs[i]));
++      } else {
++        std::snprintf(buf, cap, ">=%llu", static_cast<unsigned long long>(kEdgesUs[kBuckets - 2]));
++      }
++      return buf;
++    }
++  }
++  std::snprintf(buf, cap, "-");
++  return buf;
++}
++
++}  // namespace
++
++void Interval() {
++  if (!g_diag) {
++    return;
++  }
++  ++g_tick;
++  const uint64_t now_us = rex::audio::dump::NowUs();
++  const double t_s = static_cast<double>(now_us) / 1e6;
++  const double tpu = rex::audio::dump::LabTscPerUs();
++  if (tpu <= 0) {
++    return;
++  }
++  // Snapshot of every row (and the interval maxima, which are reset here).
++  static std::vector<Snap> cur(kRows);
++  static std::vector<uint64_t> cur_max(kRows), cur_latmax(kRows);
++  for (size_t i = 0; i < kRows; ++i) {
++    Row& r = g_rows[i];
++    if (!r.ready.load(std::memory_order_acquire)) {
++      cur[i] = Snap{};
++      cur_max[i] = cur_latmax[i] = 0;
++      continue;
++    }
++    cur[i].n = r.n.load(std::memory_order_relaxed);
++    cur[i].ticks = r.ticks.load(std::memory_order_relaxed);
++    cur[i].lat_n = r.lat_n.load(std::memory_order_relaxed);
++    cur[i].lat_ticks = r.lat_ticks.load(std::memory_order_relaxed);
++    cur_max[i] = r.max_ticks.exchange(0, std::memory_order_relaxed);
++    cur_latmax[i] = r.lat_max.exchange(0, std::memory_order_relaxed);
++  }
++  char line[1024];
++
++  // 1. what the audio pump's callback waits on, and who signals it
++  const uint32_t wtid = g_worker_tid.load(std::memory_order_relaxed);
++  for (size_t i = 0; i < kRows && wtid; ++i) {
++    const Row& r = g_rows[i];
++    if (!r.ready.load(std::memory_order_acquire) || r.tid != wtid || !IsWaitOp(r.op)) {
++      continue;
++    }
++    const uint64_t dn = cur[i].n - g_prev[i].n;
++    if (!dn) {
++      continue;
++    }
++    const uint64_t dt = cur[i].ticks - g_prev[i].ticks;
++    const uint64_t dln = cur[i].lat_n - g_prev[i].lat_n;
++    const uint64_t dlt = cur[i].lat_ticks - g_prev[i].lat_ticks;
++    std::string sig;
++    int shown = 0;
++    for (size_t j = 0; j < kRows && shown < 3; ++j) {
++      const Row& s = g_rows[j];
++      if (!s.ready.load(std::memory_order_acquire) || IsWaitOp(s.op) || s.obj != r.obj) {
++        continue;
++      }
++      const uint64_t sn = cur[j].n - g_prev[j].n;
++      if (!sn) {
++        continue;
++      }
++      char one[160];
++      std::snprintf(one, sizeof(one), " [tid=%u h=%08X lr=%08X %s n=%llu]", s.tid, s.handle, s.lr, OpName(s.op),
++                    static_cast<unsigned long long>(sn));
++      sig += one;
++      ++shown;
++    }
++    std::snprintf(line, sizeof(line),
++                  "audio lab pump-wait t=%.1fs tid=%u %s lr=%08X obj=%08X h=%08X guest=%08X type=%u | waits n=%llu avg_us=%.0f "
++                  "max_us=%.0f | woken after a signal n=%llu avg_us=%.0f max_us=%.0f | signaled by:%s",
++                  t_s, r.tid, OpName(r.op), r.lr, static_cast<unsigned>(reinterpret_cast<uintptr_t>(r.obj)), r.obj_handle,
++                  r.obj_guest, r.obj_type, static_cast<unsigned long long>(dn), static_cast<double>(dt) / tpu / static_cast<double>(dn),
++                  static_cast<double>(cur_max[i]) / tpu, static_cast<unsigned long long>(dln),
++                  dln ? static_cast<double>(dlt) / tpu / static_cast<double>(dln) : 0.0, static_cast<double>(cur_latmax[i]) / tpu,
++                  sig.empty() ? " (none seen)" : sig.c_str());
++    REXAPU_INFO("{}", line);
++  }
++
++  // 2. the mixer threads, per round
++  const size_t mixers = std::min(g_mixer_count.load(std::memory_order_relaxed), kMixers);
++#if defined(REX_MXCSR_DIAG_ON)
++  std::vector<void*> want;
++  for (size_t k = 0; k < mixers; ++k) {
++    want.push_back(g_mixers[k].thread_state);
++  }
++  std::vector<std::pair<void*, PPCFPSCRRegister::MxcsrDiag>> diags;
++  DiagWant dw{&diags, &want};
++  rex::runtime::ThreadState::DiagForEach(&CollectDiag, &dw);
++#endif
++  for (size_t k = 0; k < mixers; ++k) {
++    Mixer& m = g_mixers[k];
++    MixPrev& p = g_mix_prev[k];
++    const uint64_t rounds = m.rounds.load(std::memory_order_relaxed);
++    const uint64_t cpu_ns = m.cpu_ns.load(std::memory_order_relaxed);
++    const uint64_t wall = m.wall.load(std::memory_order_relaxed);
++    const uint64_t wait = m.wait.load(std::memory_order_relaxed);
++    const uint64_t busy = m.busy.load(std::memory_order_relaxed);
++    const uint64_t cs = m.cs.load(std::memory_order_relaxed);
++    const uint64_t cs_n = m.cs_n.load(std::memory_order_relaxed);
++    const uint64_t lat_n = m.lat_n.load(std::memory_order_relaxed);
++    const uint64_t lat_ticks = m.lat_ticks.load(std::memory_order_relaxed);
++    const uint64_t lat_max = m.lat_max.exchange(0, std::memory_order_relaxed);
++    uint64_t hc[kBuckets], hb[kBuckets], dhc[kBuckets], dhb[kBuckets];
++    for (int b = 0; b < kBuckets; ++b) {
++      hc[b] = m.hist_cpu[b].load(std::memory_order_relaxed);
++      hb[b] = m.hist_busy[b].load(std::memory_order_relaxed);
++      dhc[b] = hc[b] - p.hist_cpu[b];
++      dhb[b] = hb[b] - p.hist_busy[b];
++    }
++    const double dr = static_cast<double>(rounds - p.rounds);
++    const double secs = static_cast<double>(now_us - p.t_us) / 1e6;
++    double sw = 0, de_s = 0, ue_s = 0, de_v = 0, ue_v = 0, flagged_us = 0, win_s = 0;
++#if defined(REX_MXCSR_DIAG_ON)
++    for (const auto& d : diags) {
++      if (d.first == m.thread_state) {
++        const auto& a = d.second;
++        const auto& b = p.diag;
++        if (dr > 0 && p.seen) {
++          sw = static_cast<double>(a.switches - b.switches) / dr;
++          win_s = static_cast<double>(a.win[0] - b.win[0]) / dr;
++          de_s = static_cast<double>(a.de[0] - b.de[0]) / dr;
++          ue_s = static_cast<double>(a.ue[0] - b.ue[0]) / dr;
++          de_v = static_cast<double>(a.de[1] - b.de[1]) / dr;
++          ue_v = static_cast<double>(a.ue[1] - b.ue[1]) / dr;
++          flagged_us = static_cast<double>(a.flagged - b.flagged) / tpu / dr;
++        }
++        p.diag = a;
++      }
++    }
++#endif
++    if (p.seen && dr > 0) {
++      char p50c[16], p99c[16], p50b[16], p99b[16];
++      std::snprintf(line, sizeof(line),
++                    "audio lab mixer t=%.1fs h=%08X tid=%u entry=%08X name=\"%s\" | rounds/s=%.1f | per round: wall_us=%.0f "
++                    "wait_us=%.0f busy_us=%.0f cpu_us=%.0f not_running_us=%.0f cs_us=%.1f cs_n=%.1f | cpu_us p50%s p99%s "
++                    "busy_us p50%s p99%s | woken after a signal n=%.2f avg_us=%.0f max_us=%.0f | MXCSR per round: writes=%.1f "
++                    "scalar stretches=%.1f DE scalar=%.2f UE scalar=%.2f DE vector=%.2f UE vector=%.2f flagged_us=%.1f",
++                    t_s, m.handle, m.tid, m.entry, ThreadNameOf(m.xid).c_str(), secs > 0 ? dr / secs : 0.0,
++                    static_cast<double>(wall - p.wall) / tpu / dr, static_cast<double>(wait - p.wait) / tpu / dr,
++                    static_cast<double>(busy - p.busy) / tpu / dr, static_cast<double>(cpu_ns - p.cpu_ns) / 1000.0 / dr,
++                    std::max(0.0, static_cast<double>(busy - p.busy) / tpu - static_cast<double>(cpu_ns - p.cpu_ns) / 1000.0) / dr,
++                    static_cast<double>(cs - p.cs) / tpu / dr, static_cast<double>(cs_n - p.cs_n) / dr,
++                    PercentileLabel(dhc, 0.5, p50c, sizeof(p50c)), PercentileLabel(dhc, 0.99, p99c, sizeof(p99c)),
++                    PercentileLabel(dhb, 0.5, p50b, sizeof(p50b)), PercentileLabel(dhb, 0.99, p99b, sizeof(p99b)),
++                    static_cast<double>(lat_n - p.lat_n) / dr,
++                    lat_n > p.lat_n ? static_cast<double>(lat_ticks - p.lat_ticks) / tpu / static_cast<double>(lat_n - p.lat_n) : 0.0,
++                    static_cast<double>(lat_max) / tpu, sw, win_s, de_s, ue_s, de_v, ue_v, flagged_us);
++      REXAPU_INFO("{}", line);
++    }
++    p.seen = true;
++    p.t_us = now_us;
++    p.rounds = rounds;
++    p.cpu_ns = cpu_ns;
++    p.wall = wall;
++    p.wait = wait;
++    p.busy = busy;
++    p.cs = cs;
++    p.cs_n = cs_n;
++    p.lat_n = lat_n;
++    p.lat_ticks = lat_ticks;
++    std::memcpy(p.hist_cpu, hc, sizeof(hc));
++    std::memcpy(p.hist_busy, hb, sizeof(hb));
++  }
++
++  // 3. every 5 s: the table (cumulative since the start): the audio worker's waits, the mixer threads' waits, the signals of
++  //    every object those wait on, and the 25 other waits with the most time.
++  if (g_tick % 5 == 0) {
++    std::set<const void*> objs;
++    std::vector<size_t> pick;
++    std::vector<std::pair<uint64_t, size_t>> others;
++    for (size_t i = 0; i < kRows; ++i) {
++      const Row& r = g_rows[i];
++      if (!r.ready.load(std::memory_order_acquire) || !IsWaitOp(r.op)) {
++        continue;
++      }
++      bool mine = wtid && r.tid == wtid;
++      for (size_t k = 0; k < mixers; ++k) {
++        mine = mine || r.tid == g_mixers[k].tid;
++      }
++      if (mine) {
++        pick.push_back(i);
++        if (r.obj) {
++          objs.insert(r.obj);
++        }
++      } else {
++        others.emplace_back(cur[i].ticks, i);
++      }
++    }
++    std::sort(others.begin(), others.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++    for (size_t i = 0; i < kRows; ++i) {
++      const Row& r = g_rows[i];
++      if (r.ready.load(std::memory_order_acquire) && !IsWaitOp(r.op) && objs.count(r.obj)) {
++        pick.push_back(i);
++      }
++    }
++    for (size_t k = 0; k < others.size() && k < 25; ++k) {
++      pick.push_back(others[k].second);
++    }
++    if (pick.size() > 120) {
++      pick.resize(120);
++    }
++    for (size_t i : pick) {
++      const Row& r = g_rows[i];
++      std::snprintf(line, sizeof(line),
++                    "audio lab site t=%.1fs tid=%u h=%08X %s lr=%08X obj=%08X oh=%08X og=%08X ot=%u | n=%llu us=%.0f max_us=%.0f "
++                    "woken n=%llu woken_us=%.0f",
++                    t_s, r.tid, r.handle, OpName(r.op), r.lr, static_cast<unsigned>(reinterpret_cast<uintptr_t>(r.obj)),
++                    r.obj_handle, r.obj_guest, r.obj_type, static_cast<unsigned long long>(cur[i].n),
++                    static_cast<double>(cur[i].ticks) / tpu, static_cast<double>(r.max_all.load(std::memory_order_relaxed)) / tpu,
++                    static_cast<unsigned long long>(cur[i].lat_n), static_cast<double>(cur[i].lat_ticks) / tpu);
++      REXAPU_INFO("{}", line);
++    }
++    if (g_dropped.load(std::memory_order_relaxed)) {
++      REXAPU_INFO("audio lab site table full: {} events not counted", g_dropped.load(std::memory_order_relaxed));
++    }
++  }
++  for (size_t i = 0; i < kRows; ++i) {
++    g_prev[i] = cur[i];
++  }
++}
++
++}  // namespace rex::audio::lab
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 2bd6cdc..4b3fb92 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <rex/assert.h>
+ #include <rex/audio/audio_driver.h>
++#include <rex/audio/audio_lab.h>
+ #include <rex/audio/audio_dump.h>
+ #include <rex/audio/audio_system.h>
+ #include <rex/audio/flags.h>
+@@ -224,8 +225,10 @@ void AudioSystem::WorkerThreadMain() {
+           dump::tls_lab_audio_worker = true;
+         }
+ #endif
++        rex::audio::lab::tls_in_pump = rex::audio::lab::Active();
+         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+                                       rex::countof(args));
++        rex::audio::lab::tls_in_pump = false;
+ #if defined(REX_MXCSR_DIAG_ON)
+         if (lab_ctx) {
+           dump::tls_lab_audio_worker = false;
+@@ -344,6 +347,7 @@ void AudioSystem::Shutdown() {
+ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, size_t* out_index) {
+   REXAPU_DEBUG("AudioSystem::RegisterClient: callback={:08X} callback_arg={:08X}", callback,
+                callback_arg);
++  rex::audio::lab::OnClientRegistered(callback, callback_arg);
+   auto global_lock = LockClients();
+ 
+   auto index = FindFreeClient();
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+index 1259c8f..cb89b6f 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+@@ -16,6 +16,7 @@
+ #include <string>
+ 
+ #include <rex/audio/audio_dump.h>
++#include <rex/audio/audio_lab.h>
+ #include <rex/chrono/chrono_steady_cast.h>
+ #include <rex/kernel/xboxkrnl/private.h>
+ #include <rex/kernel/xboxkrnl/rtl.h>
+@@ -391,6 +392,7 @@ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+   // Lab build: the time the audio worker's callback spends getting a critical section (spinning and waiting).
+   rex::audio::dump::LabLockTimer lab_timer(rex::audio::dump::C().lab_cs_calls,
+                                            rex::audio::dump::C().lab_cs_ticks);
++  rex::audio::lab::CsScope lab_cs_scope;
+ 
+   // Spin loop
+   while (spin_count--) {
+diff --git a/src/system/xevent.cpp b/src/system/xevent.cpp
+index c24fbd1..4618964 100644
+--- a/src/system/xevent.cpp
++++ b/src/system/xevent.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/audio/audio_lab.h>
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/xevent.h>
+@@ -74,11 +75,13 @@ void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
+ }
+ 
+ int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
++  rex::audio::lab::Signal(rex::audio::lab::Op::kSet, this);
+   event_->Set();
+   return 1;
+ }
+ 
+ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
++  rex::audio::lab::Signal(rex::audio::lab::Op::kPulse, this);
+   event_->Pulse();
+   return 1;
+ }
+diff --git a/src/system/xmutant.cpp b/src/system/xmutant.cpp
+index 9303962..f6bff4f 100644
+--- a/src/system/xmutant.cpp
++++ b/src/system/xmutant.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/audio/audio_lab.h>
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+@@ -45,6 +46,7 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon, bool
+ 
+   // TODO(benvanik): abandoning.
+   assert_false(abandon);
++  rex::audio::lab::Signal(rex::audio::lab::Op::kMutant, this);
+   if (mutant_->Release()) {
+     return X_STATUS_SUCCESS;
+   } else {
+diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
+index 3689df9..2a956f8 100644
+--- a/src/system/xobject.cpp
++++ b/src/system/xobject.cpp
+@@ -12,6 +12,7 @@
+ #include <vector>
+ 
+ #include <rex/audio/audio_dump.h>
++#include <rex/audio/audio_lab.h>
+ #include <rex/chrono/clock.h>
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+@@ -206,6 +207,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
+   // Lab build: the time the audio worker's callback spends in waits.
+   rex::audio::dump::LabLockTimer lab_timer(rex::audio::dump::C().lab_wait_calls,
+                                            rex::audio::dump::C().lab_wait_ticks);
++  rex::audio::lab::WaitScope lab_scope(rex::audio::lab::Op::kWait, this);
+   auto wait_handle = GetWaitHandle();
+   if (!wait_handle) {
+     // Object doesn't support waiting.
+@@ -239,6 +241,8 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
+ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, uint32_t wait_reason,
+                                 uint32_t processor_mode, uint32_t alertable,
+                                 uint64_t* opt_timeout) {
++  rex::audio::lab::Signal(rex::audio::lab::Op::kSet, signal_object);
++  rex::audio::lab::WaitScope lab_scope(rex::audio::lab::Op::kSignalAndWait, wait_object);
+   auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
+                                       TimeoutTicksToMs(*opt_timeout)))
+                                 : std::chrono::milliseconds::max();
+@@ -268,6 +272,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+                                uint64_t* opt_timeout) {
+   rex::audio::dump::LabLockTimer lab_timer(rex::audio::dump::C().lab_wait_calls,
+                                            rex::audio::dump::C().lab_wait_ticks);
++  rex::audio::lab::WaitScope lab_scope(wait_type ? rex::audio::lab::Op::kWaitAny : rex::audio::lab::Op::kWaitAll,
++                                       nullptr);
++  for (uint32_t i = 0; i < count; ++i) {
++    lab_scope.AddObject(objects[i]);
++  }
+   std::vector<rex::thread::WaitHandle*> wait_handles(count);
+   for (size_t i = 0; i < count; ++i) {
+     wait_handles[i] = objects[i]->GetWaitHandle();
+@@ -285,6 +294,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+     XThread::CheckTitleTermination();
+     switch (result.first) {
+       case rex::thread::WaitResult::kSuccess:
++        lab_scope.SetObject(objects[result.second]);
+         objects[result.second]->WaitCallback();
+ 
+         return X_STATUS(result.second);
+diff --git a/src/system/xsemaphore.cpp b/src/system/xsemaphore.cpp
+index db830e4..ebfdc0a 100644
+--- a/src/system/xsemaphore.cpp
++++ b/src/system/xsemaphore.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/audio/audio_lab.h>
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/xsemaphore.h>
+@@ -40,6 +41,7 @@ bool XSemaphore::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
+ 
+ bool XSemaphore::ReleaseSemaphore(int32_t release_count, int32_t* out_previous_count) {
+   int32_t previous_count = 0;
++  rex::audio::lab::Signal(rex::audio::lab::Op::kRelease, this);
+   bool success = semaphore_->Release(release_count, &previous_count);
+   if (out_previous_count) {
+     *out_previous_count = previous_count;
+diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
+index 505e012..85ddae6 100644
+--- a/src/system/xthread.cpp
++++ b/src/system/xthread.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/audio/audio_lab.h>
+ #include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+@@ -475,6 +476,11 @@ X_STATUS XThread::Create() {
+     return X_STATUS_NO_MEMORY;
+   }
+ 
++  // Lab build: the guest creation parameters (patches/rexglue-lab-thread-diag.patch).
++  rex::audio::lab::OnThreadCreated(handle(), thread_->system_id(), creation_params_.start_address,
++                                   creation_params_.xapi_thread_startup, creation_params_.start_context,
++                                   creation_params_.creation_flags, creation_params_.stack_size, guest_thread_);
++
+   // Set the thread name based on host ID (for easier debugging).
+   if (thread_name_.empty()) {
+     set_name(fmt::format("XThread{:04X}", thread_->system_id()));
+@@ -585,6 +591,9 @@ void XThread::Execute() {
+   // Let the kernel know we are starting.
+   kernel_state_->OnThreadExecute(this);
+ 
++  // Lab build: a host priority for the guest threads that audio_mixer_entries lists.
++  rex::audio::lab::OnThreadStart(creation_params_.start_address);
++
+   // Dispatch any APCs that were queued before the thread was created first.
+   DeliverAPCs();
+ 
+@@ -846,6 +855,7 @@ int32_t XThread::QueryPriority() {
+ 
+ void XThread::SetPriority(int32_t increment) {
+   priority_ = increment;
++  rex::audio::lab::OnPriorityRequest(handle(), increment);
+ 
+   // Write priority to guest X_KTHREAD struct.
+   auto kthread = guest_object<X_KTHREAD>();
+@@ -869,6 +879,7 @@ void XThread::SetPriority(int32_t increment) {
+ }
+ 
+ void XThread::SetAffinity(uint32_t affinity) {
++  rex::audio::lab::OnAffinityRequest(handle(), affinity);
+   SetActiveCpu(GetFakeCpuNumber(affinity));
+ }
+ 
+@@ -1027,6 +1038,7 @@ uint32_t XThread::SelfSuspend() {
+ #endif
+ 
+ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t interval) {
++  rex::audio::lab::WaitScope lab_scope(rex::audio::lab::Op::kDelay, nullptr);
+   int64_t timeout_ticks = interval;
+   uint32_t timeout_ms;
+   if (timeout_ticks > 0) {
