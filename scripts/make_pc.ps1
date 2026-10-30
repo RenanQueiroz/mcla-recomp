@@ -490,6 +490,8 @@ $laterPatches = @(
     # serves both, and switching toolchains needs no new patching.
     @{ Patch = "rexglue-mingw.patch"; File = "cmake\mingw_imp_exports.cmake"; Adds = "__imp_" }
     @{ Patch = "rexglue-ffmpeg-mingw-config.patch"; Repo = "thirdparty\FFmpeg"; File = "config.h"; Adds = "HAVE_LIBC_MSVCRT 0" }
+    # Lab only (amd28f, fork issue #28 research, branch diag/amd-list-boundary): a log of the ends of submissions and extra ends on request. Never merged.
+    @{ Patch = "rexglue-lab-d3d12-submission-log.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_debug_end_submission_at_draw" }
 )
 
 # Git refuses a repository folder whose path is over 220 characters, with

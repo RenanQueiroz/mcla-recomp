@@ -1,0 +1,792 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -232,6 +232,10 @@
+                  uint32_t frontbuffer_height) override;
+ 
+   void OnPrimaryBufferEnd() override;
++
++  // Lab only (fork issue #28 research, branch diag/amd-list-boundary): the guest's markers also go to the submission log
++  // and can end a submission (d3d12_debug_end_submission_phase_mask).
++  void OnGuestMarker(uint32_t kind, uint32_t value) override;
+ 
+   // Guest occlusion queries (CommandProcessor::ExecuteGuestOcclusionEvent).
+   bool HostOcclusionQueriesUsable() const override { return occlusion_query_resources_available_; }
+@@ -563,6 +567,21 @@
+   std::atomic<uint64_t> submission_thread_submitted_{0};
+   // Draws in the open submission (d3d12_threaded_submission_split_draws).
+   uint32_t submission_draws_ = 0;
++
++  // Lab only (fork issue #28 research, branch diag/amd-list-boundary): a log of the ends of submissions (the Direct3D 12
++  // command lists) and extra ends on request. Everything is in command_processor.cpp (struct Lab); all off by default.
++  struct Lab;
++  std::unique_ptr<Lab> lab_;
++  // Before a draw or a resolve is processed: counts it, and ends the submission here if one of the
++  // d3d12_debug_end_submission_* options asks for it.
++  void LabBeforeOp(bool is_copy);
++  void LabFrameBegin();
++  void LabFrameEnd();
++  // A submission is about to end (EndSubmission); reason is a Lab::kReason* value or 0.
++  void LabOnEndSubmission(bool is_swap, uint32_t reason);
++  void LabCountDraw();
++  void LabAfterRenderTargetUpdate();
++  void LabClearRectangleDone();
+ 
+   bool debug_markers_enabled_ = false;
+ 
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -53,6 +53,13 @@
+ 
+   void CompletedSubmissionUpdated();
+   void BeginSubmission();
++
++  // Lab only (fork issue #28 research, branch diag/amd-list-boundary), for the command processor's submission log: the keys
++  // (RenderTargetKey::key) of the host render targets of the last update, depth first, then the colour ones (0 where there is
++  // none), a name for a key, and a line describing those render targets (size, samples, the resource state the cache tracks).
++  void LabGetBoundKeys(uint32_t* keys_out) const;
++  std::string LabKeyName(uint32_t key) const;
++  std::string LabDescribeBound() const;
+ 
+   Path GetPath() const override { return path_; }
+ 
+@@ -271,6 +278,8 @@
+     const ui::d3d12::D3D12CpuDescriptorPool::Descriptor& descriptor_load_separate() const {
+       return descriptor_load_separate_;
+     }
++
++    D3D12_RESOURCE_STATES resource_state() const { return resource_state_; }
+ 
+     D3D12_RESOURCE_STATES SetResourceState(D3D12_RESOURCE_STATES new_state) {
+       D3D12_RESOURCE_STATES old_state = resource_state_;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -10,11 +10,16 @@
+  */
+ 
+ #include <algorithm>
++#include <array>
+ #include <chrono>
+ #include <cstdarg>
++#include <cstdio>
+ #include <cstring>
++#include <memory>
+ #include <sstream>
++#include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include <rex/assert.h>
+ #include <rex/chrono/clock.h>
+@@ -85,6 +90,57 @@
+ REXCVAR_DECLARE(bool, gpu_regwrite_bulk);
+ REXCVAR_DECLARE(bool, gpu_batch_perf_counters);
+ 
++// ---- Lab only (fork issue #28 research, branch diag/amd-list-boundary; never merged) -------------------------------------
++// A log of every end of a submission (one Direct3D 12 command list) and extra ends on request, to find which ends of a list
++// make the AMD "grey and black 8x8 blocks" artefact appear. Everything is off by default; with the options at their defaults
++// this code only counts draws.
++REXCVAR_DEFINE_INT32(d3d12_lab_log_on, 0, "GPU/D3D12",
++                     "Lab: 1 = write the submission log of the frames from now on (needs d3d12_lab_log)");
++
++REXCVAR_DEFINE_STRING(d3d12_lab_log, "", "GPU/D3D12",
++                      "Lab: file the submission log is written to: for every frame the ends of submissions, "
++                      "why, after how many draws, in which guest phase, with which render targets, and what "
++                      "happened just before and after");
++
++REXCVAR_DEFINE_INT32(d3d12_lab_log_context, 6, "GPU/D3D12",
++                     "Lab: how many guest events before and after each end of a submission the log lists")
++    .range(0, 64);
++
++REXCVAR_DEFINE_INT32(d3d12_debug_end_submission_at_draw, 0, "GPU/D3D12",
++                     "Lab: end the submission once in every frame, after this many draws of the frame (at the "
++                     "next draw or resolve), 0 = off; ignored while d3d12_debug_end_submission_at_phase is set. "
++                     "With the sweep, the first value of the sweep")
++    .range(0, 1000000);
++
++REXCVAR_DEFINE_UINT32(d3d12_debug_end_submission_at_phase, 0, "GPU/D3D12",
++                      "Lab: end the submission once in every frame in this guest phase (the game's render phase "
++                      "bit, for example 0x1000; needs mcla_render_markers_all_phases), after "
++                      "d3d12_debug_end_submission_phase_draw draws of the phase, 0 = off");
++
++REXCVAR_DEFINE_INT32(d3d12_debug_end_submission_phase_draw, 0, "GPU/D3D12",
++                     "Lab: with d3d12_debug_end_submission_at_phase: the draws of the phase before the end (0 = at "
++                     "the start of the phase, before its first draw or resolve). With the sweep, the first value")
++    .range(0, 1000000);
++
++REXCVAR_DEFINE_UINT32(d3d12_debug_end_submission_phase_mask, 0, "GPU/D3D12",
++                      "Lab: end the submission at the start of every guest phase whose bit is in this mask (needs "
++                      "mcla_render_markers_all_phases), 0 = off");
++
++REXCVAR_DEFINE_INT32(d3d12_debug_end_submission_sweep_step, 0, "GPU/D3D12",
++                     "Lab: above 0, the draw count of d3d12_debug_end_submission_at_draw (or the phase draw count, "
++                     "with a phase) grows by this much every d3d12_debug_end_submission_sweep_frames frames, up to "
++                     "d3d12_debug_end_submission_sweep_to, then starts again")
++    .range(0, 1000000);
++
++REXCVAR_DEFINE_INT32(d3d12_debug_end_submission_sweep_frames, 1, "GPU/D3D12",
++                     "Lab: frames per step of the sweep")
++    .range(1, 100000);
++
++REXCVAR_DEFINE_INT32(d3d12_debug_end_submission_sweep_to, 0, "GPU/D3D12",
++                     "Lab: last value of the sweep (0 = the draws of the previous frame)")
++    .range(0, 1000000);
++
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -102,12 +158,489 @@
+ #include "../shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h"
+ }  // namespace shaders
+ 
++namespace {
++
++void LabAppendf(std::string& out, const char* format, ...) {
++  char buffer[640];
++  std::va_list args;
++  va_start(args, format);
++  int length = std::vsnprintf(buffer, sizeof(buffer), format, args);
++  va_end(args);
++  if (length > 0) {
++    out.append(buffer, size_t(length) < sizeof(buffer) ? size_t(length) : sizeof(buffer) - 1);
++  }
++}
++
++}  // namespace
++
++struct D3D12CommandProcessor::Lab {
++  static constexpr uint32_t kReasonSwap = 1;
++  static constexpr uint32_t kReasonPrimaryEnd = 2;
++  static constexpr uint32_t kReasonSplit = 3;
++  static constexpr uint32_t kReasonWait = 4;
++  static constexpr uint32_t kReasonForcedDraw = 5;
++  static constexpr uint32_t kReasonForcedPhase = 6;
++  static constexpr uint32_t kReasonOther = 7;
++  static const char* ReasonName(uint32_t reason) {
++    static const char* const kNames[] = {"none", "swap", "primary_end", "split", "wait", "forced_draw", "forced_phase", "other"};
++    return reason < 8 ? kNames[reason] : "?";
++  }
++
++  static constexpr size_t kMaxEvents = 65536;
++  static constexpr uint16_t kEvDraw = 1;
++  static constexpr uint16_t kEvClear = 2;
++  static constexpr uint16_t kEvResolve = 3;
++  static constexpr uint16_t kEvMarker = 4;
++  static constexpr uint16_t kEvBoundary = 5;
++  static constexpr uint16_t kMarkerPhase = 0x100;
++
++  // A guest event of the frame: a draw (aux = id of the render target set, a = the frame's draw number, b = transfers of the
++  // update: depth << 16 | colour), a clear drawn as a rectangle, a resolve, a guest marker (aux = kind, a = value, b = the
++  // frame's draws so far), or an end of a submission (aux = reason, a = index in boundaries).
++  struct Event {
++    uint16_t type = 0;
++    uint16_t aux = 0;
++    uint32_t a = 0;
++    uint32_t b = 0;
++  };
++
++  struct Boundary {
++    uint32_t event_index = 0;
++    uint32_t reason = 0;
++    uint64_t submission = 0;
++    uint32_t submission_draws = 0;
++    uint32_t frame_draw = 0;
++    uint32_t frame_op = 0;
++    uint32_t phase = 0;
++    uint32_t phase_draw = 0;
++    int32_t set_id = -1;
++    int32_t inflight = 0;
++    int32_t backlog = 0;
++    bool query_open = false;
++    uint32_t transfers = 0;
++    uint32_t clears = 0;
++    uint32_t resolves = 0;
++    uint32_t since_transfer = UINT32_MAX;
++    uint32_t since_clear = UINT32_MAX;
++    uint32_t since_resolve = UINT32_MAX;
++    uint64_t t_ms = 0;
++    std::string rt;
++  };
++
++  static void AppendEvent(std::string& out, const Event& e) {
++    switch (e.type) {
++      case kEvDraw:
++        LabAppendf(out, " d%u(s%u,t%u+%u)", e.a, unsigned(e.aux), e.b >> 16, e.b & 0xFFFFu);
++        break;
++      case kEvClear:
++        LabAppendf(out, " CLR@%u", e.a);
++        break;
++      case kEvResolve:
++        LabAppendf(out, " RES@%u", e.a);
++        break;
++      case kEvMarker:
++        if (e.aux == kMarkerPhase) {
++          LabAppendf(out, " P0x%X@%u", e.a, e.b);
++        } else {
++          LabAppendf(out, " K%u=0x%X@%u", unsigned(e.aux), e.a, e.b);
++        }
++        break;
++      case kEvBoundary:
++        LabAppendf(out, " |END:%s|", ReasonName(e.aux));
++        break;
++      default:
++        break;
++    }
++  }
++
++  std::FILE* file = nullptr;
++  bool file_tried = false;
++  bool frame_started = false;
++  bool logging = false;
++  // Left by whoever calls EndSubmission(false), read and cleared by EndSubmission.
++  uint32_t reason = 0;
++
++  // The frame so far.
++  uint32_t frame_draws = 0;
++  uint32_t frame_ops = 0;
++  uint32_t last_frame_draws = 0;
++  uint32_t lists = 0;
++  uint32_t phase = 0;
++  uint32_t phase_draws = 0;
++  uint32_t forced_deferred = 0;
++  uint32_t forced_coincided = 0;
++  int32_t target_draw = 0;
++  uint32_t target_phase = 0;
++  int32_t target_phase_draw = 0;
++  bool draw_target_done = false;
++  bool phase_target_done = false;
++  bool phase_pending = false;
++  int32_t current_set = -1;
++  uint32_t sub_transfers = 0;
++  uint32_t sub_clears = 0;
++  uint32_t sub_resolves = 0;
++  uint32_t last_transfer_draw = UINT32_MAX;
++  uint32_t last_clear_draw = UINT32_MAX;
++  uint32_t last_resolve_draw = UINT32_MAX;
++  std::vector<Event> events;
++  std::vector<Boundary> boundaries;
++
++  // The whole run.
++  bool sweep_active = false;
++  uint32_t sweep_base_swap = 0;
++  std::vector<std::array<uint32_t, 1 + xenos::kMaxColorRenderTargets>> sets;
++  size_t sets_printed = 0;
++  uint64_t frames_written = 0;
++};
++
+ D3D12CommandProcessor::D3D12CommandProcessor(D3D12GraphicsSystem* graphics_system,
+                                              system::KernelState* kernel_state)
+     : CommandProcessor(graphics_system, kernel_state), deferred_command_list_(*this) {
+   legacy_readback_memexport_cvar_name_ = "d3d12_readback_memexport";
+-}
+-D3D12CommandProcessor::~D3D12CommandProcessor() = default;
++  lab_ = std::make_unique<Lab>();
++}
++D3D12CommandProcessor::~D3D12CommandProcessor() {
++  if (lab_ && lab_->file) {
++    std::fclose(lab_->file);
++    lab_->file = nullptr;
++  }
++}
++
++// ---- Lab only (fork issue #28 research): the submission log and the forced ends of submissions ----------------------------
++void D3D12CommandProcessor::LabFrameBegin() {
++  Lab& lab = *lab_;
++  lab.frame_started = true;
++  lab.logging = REXCVAR_GET(d3d12_lab_log_on) != 0;
++  if (lab.logging && !lab.file && !lab.file_tried) {
++    lab.file_tried = true;
++    const std::string path = REXCVAR_GET(d3d12_lab_log);
++    if (!path.empty()) {
++      lab.file = std::fopen(path.c_str(), "wb");
++      if (lab.file) {
++        std::fprintf(lab.file,
++                     "# Lab submission log (fork issue #28 research). F = a frame (swap = its swap number), SET = a set of render "
++                     "target keys, MK = the guest's markers (P = a render phase) with the frame's draws so far, B = an end of a "
++                     "submission (reason, draws in the submission and in the frame, phase, render targets, counts), then the "
++                     "events before and after it: dN(sS,tD+C) = draw N with render target set S and D+C ownership transfers, "
++                     "CLR = a clear drawn as a rectangle, RES = a resolve, |END:x| = an end of a submission.\n");
++        REXGPU_INFO("Lab: submission log opened: {}", path);
++      } else {
++        REXGPU_INFO("Lab: could not open the submission log: {}", path);
++      }
++    }
++  }
++  if (lab.logging && !lab.file) {
++    lab.logging = false;
++  }
++  lab.events.clear();
++  lab.boundaries.clear();
++  lab.frame_draws = 0;
++  lab.frame_ops = 0;
++  lab.lists = 0;
++  lab.phase = 0;
++  lab.phase_draws = 0;
++  lab.forced_deferred = 0;
++  lab.forced_coincided = 0;
++  lab.draw_target_done = false;
++  lab.phase_target_done = false;
++  lab.phase_pending = false;
++  lab.current_set = -1;
++  lab.sub_transfers = 0;
++  lab.sub_clears = 0;
++  lab.sub_resolves = 0;
++  lab.last_transfer_draw = UINT32_MAX;
++  lab.last_clear_draw = UINT32_MAX;
++  lab.last_resolve_draw = UINT32_MAX;
++  // This frame's place for the extra end; the sweep moves it from frame to frame.
++  const int32_t at_draw = REXCVAR_GET(d3d12_debug_end_submission_at_draw);
++  const int32_t phase_draw = REXCVAR_GET(d3d12_debug_end_submission_phase_draw);
++  lab.target_phase = REXCVAR_GET(d3d12_debug_end_submission_at_phase);
++  lab.target_draw = at_draw;
++  lab.target_phase_draw = phase_draw;
++  const int32_t step = REXCVAR_GET(d3d12_debug_end_submission_sweep_step);
++  if (step > 0) {
++    if (!lab.sweep_active) {
++      lab.sweep_active = true;
++      lab.sweep_base_swap = counter_;
++    }
++    const int64_t per_value = std::max<int32_t>(1, REXCVAR_GET(d3d12_debug_end_submission_sweep_frames));
++    const int64_t ordinal = int64_t(counter_) - int64_t(lab.sweep_base_swap);
++    const int64_t first = lab.target_phase ? phase_draw : at_draw;
++    int64_t value = first + int64_t(step) * (ordinal / per_value);
++    int64_t last = REXCVAR_GET(d3d12_debug_end_submission_sweep_to);
++    if (last <= 0) {
++      last = int64_t(lab.last_frame_draws);
++    }
++    if (last > first && value > last) {
++      value = first + (value - first) % (last - first + 1);
++    }
++    if (lab.target_phase) {
++      lab.target_phase_draw = int32_t(value);
++    } else {
++      lab.target_draw = int32_t(value);
++    }
++  } else {
++    lab.sweep_active = false;
++  }
++}
++
++void D3D12CommandProcessor::LabCountDraw() {
++  ++lab_->frame_draws;
++  ++lab_->phase_draws;
++}
++
++void D3D12CommandProcessor::LabClearRectangleDone() {
++  Lab& lab = *lab_;
++  ++lab.sub_clears;
++  lab.last_clear_draw = lab.frame_draws;
++  if (lab.logging && lab.events.size() < Lab::kMaxEvents) {
++    Lab::Event event;
++    event.type = Lab::kEvClear;
++    event.a = lab.frame_draws;
++    lab.events.push_back(event);
++  }
++}
++
++void D3D12CommandProcessor::LabAfterRenderTargetUpdate() {
++  Lab& lab = *lab_;
++  if (!lab.logging || !render_target_cache_) {
++    return;
++  }
++  uint32_t keys[1 + xenos::kMaxColorRenderTargets];
++  render_target_cache_->LabGetBoundKeys(keys);
++  std::array<uint32_t, 1 + xenos::kMaxColorRenderTargets> set;
++  for (size_t i = 0; i < set.size(); ++i) {
++    set[i] = keys[i];
++  }
++  int32_t id = -1;
++  for (size_t i = 0; i < lab.sets.size(); ++i) {
++    if (lab.sets[i] == set) {
++      id = int32_t(i);
++      break;
++    }
++  }
++  if (id < 0) {
++    id = int32_t(lab.sets.size());
++    lab.sets.push_back(set);
++  }
++  lab.current_set = id;
++  uint32_t depth_transfers = 0;
++  uint32_t color_transfers = 0;
++  render_target_cache_->GetLastUpdateTransferCounts(depth_transfers, color_transfers);
++  if (depth_transfers + color_transfers) {
++    lab.sub_transfers += depth_transfers + color_transfers;
++    lab.last_transfer_draw = lab.frame_draws;
++  }
++  if (lab.events.size() < Lab::kMaxEvents) {
++    Lab::Event event;
++    event.type = Lab::kEvDraw;
++    event.aux = uint16_t(id);
++    event.a = lab.frame_draws;
++    event.b = (std::min(depth_transfers, uint32_t(0xFFFF)) << 16) | std::min(color_transfers, uint32_t(0xFFFF));
++    lab.events.push_back(event);
++  }
++}
++
++void D3D12CommandProcessor::OnGuestMarker(uint32_t kind, uint32_t value) {
++  CommandProcessor::OnGuestMarker(kind, value);
++  Lab& lab = *lab_;
++  if (!lab.frame_started) {
++    LabFrameBegin();
++  }
++  if (kind == uint32_t(Lab::kMarkerPhase)) {
++    lab.phase = value;
++    lab.phase_draws = 0;
++    const uint32_t mask = REXCVAR_GET(d3d12_debug_end_submission_phase_mask);
++    if (mask && (mask & value)) {
++      lab.phase_pending = true;
++    }
++  }
++  if (lab.logging && lab.events.size() < Lab::kMaxEvents) {
++    Lab::Event event;
++    event.type = Lab::kEvMarker;
++    event.aux = uint16_t(kind);
++    event.a = value;
++    event.b = lab.frame_draws;
++    lab.events.push_back(event);
++  }
++}
++
++void D3D12CommandProcessor::LabBeforeOp(bool is_copy) {
++  Lab& lab = *lab_;
++  if (!lab.frame_started) {
++    LabFrameBegin();
++  }
++  ++lab.frame_ops;
++  if (is_copy) {
++    ++lab.sub_resolves;
++    lab.last_resolve_draw = lab.frame_draws;
++    if (lab.logging && lab.events.size() < Lab::kMaxEvents) {
++      Lab::Event event;
++      event.type = Lab::kEvResolve;
++      event.a = lab.frame_draws;
++      event.b = lab.frame_ops;
++      lab.events.push_back(event);
++    }
++  }
++  const bool want_draw = lab.target_phase == 0 && lab.target_draw > 0 && !lab.draw_target_done &&
++                         lab.frame_draws >= uint32_t(lab.target_draw);
++  const bool want_phase =
++      lab.phase_pending ||
++      (lab.target_phase != 0 && !lab.phase_target_done && lab.phase == lab.target_phase &&
++       lab.phase_draws >= uint32_t(std::max<int32_t>(0, lab.target_phase_draw)));
++  if (!want_draw && !want_phase) {
++    return;
++  }
++  if (!submission_open_) {
++    // Nothing to end: a list begins with the next op anyway.
++    if (want_draw) {
++      lab.draw_target_done = true;
++    }
++    if (want_phase) {
++      lab.phase_pending = false;
++      lab.phase_target_done = true;
++    }
++    ++lab.forced_coincided;
++    return;
++  }
++  if (active_occlusion_query_.valid || !CanEndSubmissionImmediately()) {
++    // A host query cannot span submissions, and pending pipelines would be waited for: try again at the next op.
++    ++lab.forced_deferred;
++    return;
++  }
++  if (want_draw) {
++    lab.draw_target_done = true;
++  }
++  if (want_phase) {
++    lab.phase_pending = false;
++    lab.phase_target_done = true;
++  }
++  lab.reason = want_phase ? Lab::kReasonForcedPhase : Lab::kReasonForcedDraw;
++  EndSubmission(false);
++}
++
++void D3D12CommandProcessor::LabOnEndSubmission(bool is_swap, uint32_t reason) {
++  Lab& lab = *lab_;
++  if (!lab.frame_started) {
++    LabFrameBegin();
++  }
++  if (is_swap) {
++    reason = Lab::kReasonSwap;
++  } else if (!reason) {
++    reason = Lab::kReasonOther;
++  }
++  ++lab.lists;
++  if (lab.logging) {
++    Lab::Boundary b;
++    b.event_index = uint32_t(lab.events.size());
++    b.reason = reason;
++    b.submission = submission_current_;
++    b.submission_draws = submission_draws_;
++    b.frame_draw = lab.frame_draws;
++    b.frame_op = lab.frame_ops;
++    b.phase = lab.phase;
++    b.phase_draw = lab.phase_draws;
++    b.set_id = lab.current_set;
++    b.inflight = int32_t(int64_t(submission_current_) - 1 - int64_t(submission_completed_));
++    b.backlog = int32_t(int64_t(submission_thread_queued_) -
++                        int64_t(submission_thread_submitted_.load(std::memory_order_acquire)));
++    b.query_open = active_occlusion_query_.valid;
++    b.transfers = lab.sub_transfers;
++    b.clears = lab.sub_clears;
++    b.resolves = lab.sub_resolves;
++    if (lab.last_transfer_draw != UINT32_MAX) {
++      b.since_transfer = lab.frame_draws - lab.last_transfer_draw;
++    }
++    if (lab.last_clear_draw != UINT32_MAX) {
++      b.since_clear = lab.frame_draws - lab.last_clear_draw;
++    }
++    if (lab.last_resolve_draw != UINT32_MAX) {
++      b.since_resolve = lab.frame_draws - lab.last_resolve_draw;
++    }
++    b.t_ms = rex::chrono::Clock::QueryHostUptimeMillis();
++    if (render_target_cache_) {
++      b.rt = render_target_cache_->LabDescribeBound();
++    }
++    Lab::Event event;
++    event.type = Lab::kEvBoundary;
++    event.aux = uint16_t(reason);
++    event.a = uint32_t(lab.boundaries.size());
++    lab.events.push_back(event);
++    lab.boundaries.push_back(std::move(b));
++  }
++  lab.sub_transfers = 0;
++  lab.sub_clears = 0;
++  lab.sub_resolves = 0;
++}
++
++void D3D12CommandProcessor::LabFrameEnd() {
++  Lab& lab = *lab_;
++  if (!lab.frame_started) {
++    return;
++  }
++  if (lab.logging && lab.file) {
++    std::string out;
++    out.reserve(8192);
++    const size_t context = size_t(std::max<int32_t>(0, REXCVAR_GET(d3d12_lab_log_context)));
++    LabAppendf(out,
++               "F swap=%u guest_frame=%u t_ms=%llu draws=%u ops=%u lists=%u forced_deferred=%u forced_coincided=%u "
++               "target_draw=%d target_phase=0x%X target_phase_draw=%d\n",
++               unsigned(counter_ + 1), unsigned(guest_marker_frame_),
++               static_cast<unsigned long long>(rex::chrono::Clock::QueryHostUptimeMillis()), unsigned(lab.frame_draws),
++               unsigned(lab.frame_ops), unsigned(lab.lists), unsigned(lab.forced_deferred), unsigned(lab.forced_coincided),
++               int(lab.target_draw), unsigned(lab.target_phase), int(lab.target_phase_draw));
++    for (; lab.sets_printed < lab.sets.size(); ++lab.sets_printed) {
++      LabAppendf(out, "SET %u:", unsigned(lab.sets_printed));
++      for (size_t i = 0; i < lab.sets[lab.sets_printed].size(); ++i) {
++        const uint32_t key = lab.sets[lab.sets_printed][i];
++        if (!key) {
++          continue;
++        }
++        if (i == 0) {
++          out += " ds=";
++        } else {
++          LabAppendf(out, " c%u=", unsigned(i - 1));
++        }
++        out += render_target_cache_ ? render_target_cache_->LabKeyName(key) : std::string("?");
++      }
++      out += "\n";
++    }
++    out += "MK:";
++    for (const Lab::Event& event : lab.events) {
++      if (event.type == Lab::kEvMarker) {
++        Lab::AppendEvent(out, event);
++      }
++    }
++    out += "\n";
++    for (size_t bi = 0; bi < lab.boundaries.size(); ++bi) {
++      const Lab::Boundary& b = lab.boundaries[bi];
++      LabAppendf(out,
++                 "B %u reason=%s sub=%llu sub_draws=%u frame_draw=%u op=%u phase=0x%X phase_draw=%u set=%d inflight=%d "
++                 "backlog=%d query=%d tx=%u clr=%u res=%u since_tx=%d since_clr=%d since_res=%d t_ms=%llu\n",
++                 unsigned(bi), Lab::ReasonName(b.reason), static_cast<unsigned long long>(b.submission),
++                 unsigned(b.submission_draws), unsigned(b.frame_draw), unsigned(b.frame_op), unsigned(b.phase),
++                 unsigned(b.phase_draw), int(b.set_id), int(b.inflight), int(b.backlog), b.query_open ? 1 : 0,
++                 unsigned(b.transfers), unsigned(b.clears), unsigned(b.resolves), int(b.since_transfer),
++                 int(b.since_clear), int(b.since_resolve), static_cast<unsigned long long>(b.t_ms));
++      out += "  rt: " + b.rt + "\n";
++      const size_t at = b.event_index;
++      out += "  before:";
++      for (size_t i = at > context ? at - context : 0; i < at && i < lab.events.size(); ++i) {
++        Lab::AppendEvent(out, lab.events[i]);
++      }
++      out += "\n  after:";
++      for (size_t i = at + 1; i < lab.events.size() && i <= at + context; ++i) {
++        Lab::AppendEvent(out, lab.events[i]);
++      }
++      out += "\n";
++    }
++    std::fwrite(out.data(), 1, out.size(), lab.file);
++    std::fflush(lab.file);
++    ++lab.frames_written;
++  }
++  lab.last_frame_draws = lab.frame_draws;
++  lab.frame_started = false;
++}
+ 
+ void D3D12CommandProcessor::UpdateDebugMarkersEnabled() {
+   debug_markers_enabled_ = IsGpuDebugMarkersEnabled();
+@@ -3062,6 +3595,7 @@
+   if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
+       CanEndSubmissionImmediately() &&
+       !(active_occlusion_query_.valid && REXCVAR_GET(occlusion_query_keep_submission_open))) {
++    lab_->reason = Lab::kReasonPrimaryEnd;
+     EndSubmission(false);
+   }
+ }
+@@ -3084,6 +3618,7 @@
+   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+   if (edram_mode == xenos::EdramMode::kCopy) {
+     // Special copy handling.
++    LabBeforeOp(true);
+     return IssueCopy();
+   }
+   // The copies of scaled resolves that wait (resolve_unscaled_copy_batch) go
+@@ -3142,13 +3677,17 @@
+   if (split_draws && submission_open_ && submission_draws_ >= split_draws && submission_thread_ &&
+       REXCVAR_GET(d3d12_threaded_submission) && !active_occlusion_query_.valid &&
+       CanEndSubmissionImmediately()) {
++    lab_->reason = Lab::kReasonSplit;
+     EndSubmission(false);
+   }
++  // Lab: counts the op and ends the submission here when d3d12_debug_end_submission_* asks for it.
++  LabBeforeOp(false);
+ 
+   if (!BeginSubmission(true)) {
+     return false;
+   }
+   ++submission_draws_;
++  LabCountDraw();
+   if (active_occlusion_query_.valid) {
+     ++active_occlusion_query_.draws;
+   }
+@@ -3161,6 +3700,7 @@
+           draw_util::GetNormalizedDepthControl(regs),
+           pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                        : 0)) {
++    LabClearRectangleDone();
+     return true;
+   }
+ 
+@@ -3224,6 +3764,7 @@
+   }
+   // HDR output: the UI layer may start with this draw.
+   HdrRenderTargetsReady();
++  LabAfterRenderTargetUpdate();
+ 
+   // Create the pipeline (for this, need the actually used render target formats
+   // from the render target cache), translating the shaders - doing this now to
+@@ -4339,6 +4880,7 @@
+ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+   if (await_submission >= submission_current_) {
+     if (submission_open_) {
++      lab_->reason = Lab::kReasonWait;
+       EndSubmission(false);
+     }
+     // Ending an open submission should result in queue operations done directly
+@@ -4613,6 +5155,13 @@
+ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+   const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+ 
++  // Lab: logs this end (whoever asked for it left the reason in lab_->reason).
++  const uint32_t lab_reason = lab_->reason;
++  lab_->reason = 0;
++  if (submission_open_) {
++    LabOnEndSubmission(is_swap, lab_reason);
++  }
++
+   // Copies of scaled resolves that wait (resolve_unscaled_copy_batch) belong to
+   // this submission.
+   if (submission_open_ && !pending_unscaled_copies_.empty()) {
+@@ -4734,6 +5283,7 @@
+     frame_open_ = false;
+     // Submission already closed now, so minus 1.
+     closed_frame_submissions_[(frame_current_++) % kQueueFrames] = submission_current_ - 1;
++    LabFrameEnd();
+ 
+     // gpu_memory_*: the video memory in use, and what to do about a shortage.
+     UpdateGpuMemory(rex::chrono::Clock::QueryHostUptimeMillis());
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -14,6 +14,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstdint>
++#include <cstdio>
+ #include <cstring>
+ #include <iterator>
+ #include <memory>
+@@ -1425,6 +1426,68 @@
+     edram_buffer_modification_status_ = EdramBufferModificationStatus::kUnmodified;
+     PixelShaderInterlockFullEdramBarrierPlaced();
+   }
++}
++
++// Lab only (fork issue #28 research, branch diag/amd-list-boundary): see the header.
++void D3D12RenderTargetCache::LabGetBoundKeys(uint32_t* keys_out) const {
++  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++    keys_out[i] = 0;
++  }
++  if (GetPath() != Path::kHostRenderTargets) {
++    return;
++  }
++  RenderTarget* const* render_targets = last_update_accumulated_render_targets();
++  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++    if (render_targets[i]) {
++      keys_out[i] = render_targets[i]->key().key;
++    }
++  }
++}
++
++std::string D3D12RenderTargetCache::LabKeyName(uint32_t key) const {
++  RenderTargetKey render_target_key;
++  render_target_key.key = key;
++  char head[24];
++  std::snprintf(head, sizeof(head), "%08X ", static_cast<unsigned>(key));
++  return std::string(head) + render_target_key.GetDebugName();
++}
++
++std::string D3D12RenderTargetCache::LabDescribeBound() const {
++  if (GetPath() != Path::kHostRenderTargets) {
++    return "no host render targets (the pixel shader interlock path)";
++  }
++  std::string out;
++  RenderTarget* const* render_targets = last_update_accumulated_render_targets();
++  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++    const RenderTarget* render_target = render_targets[i];
++    if (!render_target) {
++      continue;
++    }
++    const D3D12RenderTarget* d3d12_rt = static_cast<const D3D12RenderTarget*>(render_target);
++    D3D12_RESOURCE_DESC desc = d3d12_rt->resource()->GetDesc();
++    char head[16];
++    if (i == 0) {
++      std::snprintf(head, sizeof(head), "ds");
++    } else {
++      std::snprintf(head, sizeof(head), "c%u", static_cast<unsigned>(i - 1));
++    }
++    char tail[96];
++    std::snprintf(tail, sizeof(tail), " %llux%u s%u state 0x%X",
++                  static_cast<unsigned long long>(desc.Width), static_cast<unsigned>(desc.Height),
++                  static_cast<unsigned>(desc.SampleDesc.Count),
++                  static_cast<unsigned>(d3d12_rt->resource_state()));
++    if (!out.empty()) {
++      out += " | ";
++    }
++    out += head;
++    out += "=";
++    out += LabKeyName(render_target->key().key);
++    out += tail;
++  }
++  if (out.empty()) {
++    out = "nothing bound";
++  }
++  return out;
+ }
+ 
+ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,

@@ -73,6 +73,7 @@ git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
 git apply ../../patches/rexglue-affinity-warning-once.patch
 git apply ../../patches/rexglue-mingw.patch
+git apply ../../patches/rexglue-lab-d3d12-submission-log.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
 
@@ -2061,3 +2062,6 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 
 FFmpeg's Windows configuration is the Microsoft toolchain's (`--toolchain=msvc`): it asks for `crtversion.h`, which mingw-w64 with the UCRT doesn't have (151 files failed). Under `__MINGW32__`, `config.h` sets `HAVE_LIBC_MSVCRT` to 0, which also gives the C99 `printf` specifiers. Applied in the `thirdparty/FFmpeg` submodule, like `rexglue-ffmpeg-ps5-config.patch`; nothing changes for any other compiler.
 
+## rexglue-lab-d3d12-submission-log.patch
+
+Lab only (fork issue #28 research, branch `diag/amd-list-boundary`; never merged). A log of every end of a Direct3D 12 submission (why, draws in it and in the frame, guest phase, render targets and their states, the guest events around it) and options that end the submission at a chosen draw or guest phase, `d3d12_debug_end_submission_*` and `d3d12_lab_log*`. All off by default.
