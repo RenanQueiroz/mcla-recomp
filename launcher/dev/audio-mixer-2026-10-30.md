@@ -74,8 +74,19 @@ shutdown lines and the time the process outlived its last log line (at most 10 s
 ## The shipped build: the chain `mixerfix`
 
 13 runs in one exclusive hold of at most 20 minutes (D3D12, 30 FPS cap, `--audio_stats`): A = `--audio_mixer_priority=0` (v0.3.2 behaviour), B = the new default; 4 busy processes (SA, SB, n = 3
-alternating A B B A A B), 16 logical processors with the default (FB1), plain (PA, PB, n = 3). `C:\mcv\mixerfix\chain`; results in `C:\mcv\mixerfix\out\VERDICT.txt`. **Not run yet when this was
-written.**
+alternating A B B A A B), 16 logical processors with the default (FB1), plain (PA, PB, n = 3). `C:\mcv\mixerfix\chain`; results in `C:\mcv\mixerfix\out\VERDICT.txt`. Run on 2026-10-30; 9 of the 13 runs
+used: SB3's car got stuck on the route (not usable; the game exited normally), and the deadline dropped PA2, PA3 and PB3.
+
+| Driving | 4 busy processes: A (n = 3) | B (n = 2) | Plain: A (n = 1) | B (n = 2) |
+|---|---|---|---|---|
+| Silent frames in the middle of the audio, per run | 5.0 (0 to 15) | 0 | 0 | 0 |
+| Mixer wake-up after the pump's signal, mean (us) | 26.7 | 3.2 (separated) | 4.9 | 4.6 |
+| Worst wake-up (us) | 25,945 | 114 (separated) | 250 | 30 |
+| Pump round (us) | 3,684 | 1,822 | 704 | 719 |
+| Frame median / p99 (ms) | 32.9 / 130 | 31.2 / 110 | 33.3 / 34.1 | 33.3 / 34.1 |
+| Process CPU (cores) | 0.80 | 1.15 (separated) | 0.69 | 0.73 |
+
+With the lab build's runs (n = 3 a side: 12.3 silent frames a run against 0), the option on had no silent frame in 5 runs and the option off had some in 5 of 6. Under stress the process uses more CPU with it on (+44%, the main thread's share not explaining it all); frames were not slower. Cause not known. 16 logical processors with the default: the option is 0, no mixer line, the stat works, 0 silent frames. All 9 runs exited with code 0, within 0.5 s of the last log line.
 
 ## Not covered
 
