@@ -1,0 +1,687 @@
+diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
+index 89fb9e6..73a9c33 100644
+--- a/include/rex/audio/audio_dump.h
++++ b/include/rex/audio/audio_dump.h
+@@ -48,6 +48,49 @@ bool ThreadCpuAvailable();
+ /// Finds the clock and measures its factor (Init() calls it when audio_stats is on).
+ void InitThreadCpuClock();
+ 
++// ---- Lab build (patches/rexglue-lab-mxcsr-diag.patch), never released.
++
++/// audio_mxcsr_diag and audio_stats are on in a build that has the MXCSR counters.
++bool LabEnabled();
++/// Time-stamp counter, 0 where there is none.
++inline uint64_t LabTsc() {
++#if defined(__x86_64__) || defined(_M_X64)
++  return __builtin_ia32_rdtsc();
++#else
++  return 0;
++#endif
++}
++/// Time-stamp counter ticks per microsecond, measured next to the thread cycle clock (0: unknown).
++double LabTscPerUs();
++/// True on the audio worker while a mixer callback runs: the timers below count that thread only.
++inline thread_local bool tls_lab_audio_worker = false;
++/// Counts one guest lock or wait of the audio worker's callback and the ticks it took.
++class LabLockTimer {
++ public:
++  LabLockTimer(std::atomic<uint64_t>& calls, std::atomic<uint64_t>& ticks)
++      : calls_(calls), ticks_(ticks), start_(tls_lab_audio_worker ? LabTsc() : 0) {}
++  ~LabLockTimer() {
++    if (start_) {
++      calls_.fetch_add(1, std::memory_order_relaxed);
++      ticks_.fetch_add(LabTsc() - start_, std::memory_order_relaxed);
++    }
++  }
++  LabLockTimer(const LabLockTimer&) = delete;
++  LabLockTimer& operator=(const LabLockTimer&) = delete;
++
++ private:
++  std::atomic<uint64_t>& calls_;
++  std::atomic<uint64_t>& ticks_;
++  uint64_t start_;
++};
++/// What one callback did to the audio worker's MXCSR (differences of the context's counters).
++struct LabRound {
++  uint64_t switches = 0, win[2] = {}, de[2] = {}, ue[2] = {}, tsc[2] = {}, flagged = 0;
++};
++void LabAddRound(const LabRound& r);
++/// The audio worker's ThreadState (left out of the other-threads table).
++void LabSetAudioThreadState(const void* thread_state);
++
+ /// The folder of the dump files, with a trailing separator ("" when dumping is off).
+ const std::string& Dir();
+ 
+@@ -84,6 +127,12 @@ struct Counters {
+   std::atomic<uint64_t> pump_over_4ms{0};     // callbacks that took over 4 ms (the frame period is 5.33 ms)
+   std::atomic<uint64_t> pump_over_8ms{0};     // callbacks that took over 8 ms: more than a whole frame
+   std::atomic<uint64_t> pump_cpu_ns{0};       // CPU time the audio worker used in those callbacks (ThreadCpuNs; Windows)
++  // Lab build (patches/rexglue-lab-mxcsr-diag.patch, audio_mxcsr_diag): what the audio worker's callbacks did to the
++  // MXCSR, and how long they spent in guest locks and waits (time-stamp counter ticks), summed over the callbacks.
++  std::atomic<uint64_t> lab_rounds{0}, lab_rounds_de{0}, lab_rounds_ue{0}, lab_switches{0}, lab_switches_max{0};
++  std::atomic<uint64_t> lab_win_scalar{0}, lab_win_vector{0}, lab_de_scalar{0}, lab_de_vector{0};
++  std::atomic<uint64_t> lab_ue_scalar{0}, lab_ue_vector{0}, lab_tsc_scalar{0}, lab_tsc_vector{0}, lab_tsc_flagged{0};
++  std::atomic<uint64_t> lab_cs_calls{0}, lab_cs_ticks{0}, lab_wait_calls{0}, lab_wait_ticks{0};
+   // The SDL output
+   std::atomic<uint64_t> sdl_callbacks{0};
+   std::atomic<uint64_t> sdl_frames{0};        // guest frames played
+diff --git a/include/rex/ppc/context.h b/include/rex/ppc/context.h
+index a3d43bb..49e7e91 100644
+--- a/include/rex/ppc/context.h
++++ b/include/rex/ppc/context.h
+@@ -25,6 +25,18 @@
+ #include <simde/x86/sse.h>
+ #include <simde/x86/sse4.1.h>
+ 
++// LAB BUILD ONLY (patches/rexglue-lab-mxcsr-diag.patch, branch diag/audio-pump-cpu, never released): every guest
++// thread counts how often the recompiled code switches the CPU's flush mode (MXCSR), and in how many of the
++// stretches between two switches the CPU raised the denormal-operand flag (DE) or the underflow flag (UE). On
++// by default in this patch; -DREX_MXCSR_DIAG=0 turns it off (the layout of the context changes with it, so the
++// SDK and the game must agree).
++#ifndef REX_MXCSR_DIAG
++#define REX_MXCSR_DIAG 1
++#endif
++#if REX_MXCSR_DIAG && (defined(__x86_64__) || defined(_M_X64))
++#define REX_MXCSR_DIAG_ON 1
++#endif
++
+ //=============================================================================
+ // Pack/Unpack Constants (NORMPACKED32 - 2:10:10:10 format)
+ //=============================================================================
+@@ -147,6 +159,48 @@ constexpr uint32_t kRoundMask = 0x03;
+ struct FPSCRRegister {
+   uint32_t csr;
+ 
++#if defined(REX_MXCSR_DIAG_ON)
++  // Index 0: stretches in the scalar (denormals kept) mode, 1: in the vector (flush to zero) mode. A stretch is the
++  // time between two writes of the MXCSR; the flags are sticky, so the value read just before a write tells what
++  // happened in the stretch it ends.
++  struct MxcsrDiag {
++    uint64_t switches;     // writes of the MXCSR (not counting diagEnd)
++    uint64_t win[2];       // stretches, by mode
++    uint64_t de[2];        // ... that ended with DE set
++    uint64_t ue[2];        // ... that ended with UE set
++    uint64_t tsc[2];       // time-stamp counter ticks spent in them
++    uint64_t flagged;      // ticks in the stretches that ended with DE or UE set
++    uint64_t last_tsc;
++  } diag;
++
++  inline void diagStretch(uint32_t cur, bool is_switch) noexcept {
++    const uint64_t now = __builtin_ia32_rdtsc();
++    const unsigned m = (cur & uint32_t(FlushMask)) == uint32_t(FlushMask) ? 1u : 0u;
++    const bool de = (cur & 0x02u) != 0;
++    const bool ue = (cur & 0x10u) != 0;
++    diag.switches += is_switch ? 1 : 0;
++    diag.win[m] += 1;
++    diag.de[m] += de ? 1 : 0;
++    diag.ue[m] += ue ? 1 : 0;
++    if (diag.last_tsc) {
++      const uint64_t dt = now - diag.last_tsc;
++      diag.tsc[m] += dt;
++      diag.flagged += (de || ue) ? dt : 0;
++    }
++    diag.last_tsc = now;
++  }
++  // The start of a measured stretch of work (one audio callback): flags clear, the clock restarted.
++  inline void diagBegin() noexcept {
++    Platform::setcsr(Platform::getcsr() & ~0x3Fu);
++    diag.last_tsc = __builtin_ia32_rdtsc();
++  }
++  // Its end: closes the last stretch and stops the clock (the time outside it belongs to nobody).
++  inline void diagEnd() noexcept {
++    diagStretch(Platform::getcsr(), false);
++    diag.last_tsc = 0;
++  }
++#endif
++
+   static constexpr size_t HostToGuest[] = {kRoundNearest, kRoundDown, kRoundUp, kRoundTowardZero};
+ 
+   using Platform = platform::FPSCRPlatform;
+@@ -168,6 +222,9 @@ struct FPSCRRegister {
+     // per-arch polarity (x86: 1 = masked, ARM: 1 = trap enabled), so it is used
+     // here rather than open-coding a mask that is correct on only one of them.
+     Platform::InitHostExceptions(csr);
++#if defined(REX_MXCSR_DIAG_ON)
++    diagStretch(Platform::getcsr(), true);
++#endif
+     Platform::setcsr(csr);
+   }
+ 
+@@ -224,10 +281,18 @@ struct FPSCRRegister {
+   static constexpr uint32_t kMxcsrVmxNearest =
+       uint32_t(Platform::ExceptionMask) | uint32_t(FlushMask);
+ 
++  // Platform::setcsr of a constant, counted in the lab build.
++  inline void setcsrConstant(uint32_t value) noexcept {
++#if defined(REX_MXCSR_DIAG_ON)
++    diagStretch(Platform::getcsr(), true);
++#endif
++    Platform::setcsr(value);
++  }
++
+   inline void enableFlushModeFast() noexcept {
+     if ((csr & RoundMaskVal) == 0) [[likely]] {
+       csr |= FlushMask;
+-      Platform::setcsr(kMxcsrVmxNearest);
++      setcsrConstant(kMxcsrVmxNearest);
+     } else {
+       enableFlushModeUnconditional();
+     }
+@@ -236,7 +301,7 @@ struct FPSCRRegister {
+   inline void disableFlushModeFast() noexcept {
+     if ((csr & RoundMaskVal) == 0) [[likely]] {
+       csr &= ~FlushMask;
+-      Platform::setcsr(kMxcsrFpuNearest);
++      setcsrConstant(kMxcsrFpuNearest);
+     } else {
+       disableFlushModeUnconditional();
+     }
+@@ -502,7 +567,7 @@ struct alignas(0x40) PPCContext {
+   //       | cr2-cr4 (12) | fpscr (4).  Total: 1616 bytes.
+   static constexpr size_t kNonVolatileSaveSize =
+       18 * sizeof(PPCRegister) + 18 * sizeof(PPCRegister) + 18 * sizeof(PPCVRegister) +
+-      64 * sizeof(PPCVRegister) + 3 * sizeof(PPCCRRegister) + sizeof(PPCFPSCRRegister);
++      64 * sizeof(PPCVRegister) + 3 * sizeof(PPCCRRegister) + sizeof(uint32_t);  // the csr word only
+ 
+   inline void SaveNonVolatiles(uint8_t* dst) const {
+     std::memcpy(dst, &r14, 18 * sizeof(PPCRegister));
+@@ -515,7 +580,7 @@ struct alignas(0x40) PPCContext {
+     dst += 64 * sizeof(PPCVRegister);
+     std::memcpy(dst, &cr2, 3 * sizeof(PPCCRRegister));
+     dst += 3 * sizeof(PPCCRRegister);
+-    std::memcpy(dst, &fpscr, sizeof(PPCFPSCRRegister));
++    std::memcpy(dst, &fpscr.csr, sizeof(uint32_t));
+   }
+ 
+   inline void RestoreNonVolatiles(const uint8_t* src) {
+@@ -529,8 +594,8 @@ struct alignas(0x40) PPCContext {
+     src += 64 * sizeof(PPCVRegister);
+     std::memcpy(&cr2, src, 3 * sizeof(PPCCRRegister));
+     src += 3 * sizeof(PPCCRRegister);
+-    PPCFPSCRRegister saved_fpscr;
+-    std::memcpy(&saved_fpscr, src, sizeof(PPCFPSCRRegister));
+-    fpscr.restoreGuestBits(saved_fpscr.csr);
++    uint32_t saved_csr;
++    std::memcpy(&saved_csr, src, sizeof(uint32_t));
++    fpscr.restoreGuestBits(saved_csr);
+   }
+ };
+diff --git a/include/rex/system/thread_state.h b/include/rex/system/thread_state.h
+index 876e2cb..48661e4 100644
+--- a/include/rex/system/thread_state.h
++++ b/include/rex/system/thread_state.h
+@@ -33,6 +33,12 @@ class ThreadState {
+   static ThreadState* Get();
+   static uint32_t GetThreadID();
+ 
++#if defined(REX_MXCSR_DIAG_ON)
++  /// Lab build (patches/rexglue-lab-mxcsr-diag.patch): calls fn for every live ThreadState, with the registry's lock
++  /// held (so none is destroyed meanwhile; fn must not create or destroy threads).
++  static void DiagForEach(void (*fn)(ThreadState*, void*), void* arg);
++#endif
++
+  private:
+   memory::Memory* memory_;
+ 
+diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
+index fed028f..9371784 100644
+--- a/src/audio/audio_dump.cpp
++++ b/src/audio/audio_dump.cpp
+@@ -13,6 +13,7 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <filesystem>
++#include <map>
+ #include <mutex>
+ #include <string>
+ #include <thread>
+@@ -21,6 +22,9 @@
+ #include <rex/audio/audio_dump.h>
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
++#include <rex/system/kernel_state.h>
++#include <rex/system/thread_state.h>
++#include <rex/system/xthread.h>
+ 
+ REXCVAR_DEFINE_BOOL(audio_stats, false, "Audio",
+                     "Dev tool: log counters of the audio path every audio_stats_interval seconds (an "
+@@ -29,6 +33,11 @@ REXCVAR_DEFINE_BOOL(audio_stats, false, "Audio",
+                     "the SDL output's underruns)");
+ REXCVAR_DEFINE_INT32(audio_stats_interval, 10, "Audio", "Dev tool: seconds between audio_stats lines")
+     .range(1, 600);
++REXCVAR_DEFINE_BOOL(audio_mxcsr_diag, false, "Audio",
++                    "Lab build only (patches/rexglue-lab-mxcsr-diag.patch): with audio_stats, an 'audio diag' line after "
++                    "each interval line: what the audio worker's mixer callbacks do to the MXCSR (switches, stretches "
++                    "that raised the denormal-operand or underflow flag), their time in guest locks and waits, and the "
++                    "same for the busiest other guest threads");
+ REXCVAR_DEFINE_STRING(audio_dump_dir, "", "Audio",
+                       "Dev tool: write the audio path to files in this folder: what every XMA context decodes "
+                       "(xma_ctx<N>_s<M>.wav, with its input in .xma and a .json), and the final mix (mix.wav, "
+@@ -194,8 +203,159 @@ void WriteTotalFile(const std::string& line) {
+   }
+ }
+ 
++// ---- Lab build (patches/rexglue-lab-mxcsr-diag.patch): the 'audio diag' line.
++
++std::atomic<bool> g_lab{false};
++std::atomic<const void*> g_lab_audio_ts{nullptr};
++
++struct LabSnap {
++  uint64_t rounds = 0, rounds_de = 0, rounds_ue = 0, switches = 0, win_s = 0, win_v = 0, de_s = 0, de_v = 0,
++           ue_s = 0, ue_v = 0, tsc_s = 0, tsc_v = 0, flagged = 0, cs_calls = 0, cs_ticks = 0, wait_calls = 0,
++           wait_ticks = 0;
++};
++
++LabSnap LabTake() {
++  Counters& c = g_counters;
++  const auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
++  LabSnap s;
++  s.rounds = ld(c.lab_rounds);
++  s.rounds_de = ld(c.lab_rounds_de);
++  s.rounds_ue = ld(c.lab_rounds_ue);
++  s.switches = ld(c.lab_switches);
++  s.win_s = ld(c.lab_win_scalar);
++  s.win_v = ld(c.lab_win_vector);
++  s.de_s = ld(c.lab_de_scalar);
++  s.de_v = ld(c.lab_de_vector);
++  s.ue_s = ld(c.lab_ue_scalar);
++  s.ue_v = ld(c.lab_ue_vector);
++  s.tsc_s = ld(c.lab_tsc_scalar);
++  s.tsc_v = ld(c.lab_tsc_vector);
++  s.flagged = ld(c.lab_tsc_flagged);
++  s.cs_calls = ld(c.lab_cs_calls);
++  s.cs_ticks = ld(c.lab_cs_ticks);
++  s.wait_calls = ld(c.lab_wait_calls);
++  s.wait_ticks = ld(c.lab_wait_ticks);
++  return s;
++}
++
++#if defined(REX_MXCSR_DIAG_ON)
++struct LabThread {
++  uint32_t id = 0;
++  uint64_t switches = 0, de = 0, ue = 0, tsc_s = 0, tsc_v = 0, flagged = 0;
++};
++
++void LabCollect(rex::runtime::ThreadState* ts, void* arg) {
++  auto* out = static_cast<std::vector<std::pair<const void*, LabThread>>*>(arg);
++  const auto& d = ts->context()->fpscr.diag;
++  LabThread t;
++  t.id = ts->thread_id();
++  t.switches = d.switches;
++  t.de = d.de[0] + d.de[1];
++  t.ue = d.ue[0] + d.ue[1];
++  t.tsc_s = d.tsc[0];
++  t.tsc_v = d.tsc[1];
++  t.flagged = d.flagged;
++  out->emplace_back(ts, t);
++}
++
++std::string LabThreadName(uint32_t id) {
++  rex::system::KernelState* ks = rex::system::kernel_state();
++  if (ks) {
++    auto thread = ks->GetThreadByID(id);
++    if (thread) {
++      return thread->name();
++    }
++  }
++  return "?";
++}
++#endif
++
++struct LabState {
++  LabSnap prev;
++  uint64_t prev_us = 0;
++#if defined(REX_MXCSR_DIAG_ON)
++  std::map<const void*, LabThread> threads;
++#endif
++};
++
++// One 'audio diag' line: the audio worker per callback, the three busiest other guest threads per second.
++std::string LabInterval(LabState& st) {
++  const LabSnap now = LabTake();
++  const LabSnap& prev = st.prev;
++  const uint64_t now_us = NowUs();
++  const double secs = static_cast<double>(now_us - st.prev_us) / 1e6;
++  const double rounds = static_cast<double>(now.rounds - prev.rounds);
++  const double tpu = LabTscPerUs();  // ticks per microsecond
++  const auto per = [&](uint64_t a, uint64_t b) { return rounds > 0 ? static_cast<double>(a - b) / rounds : 0.0; };
++  const auto us = [&](uint64_t a, uint64_t b) {
++    return rounds > 0 && tpu > 0 ? static_cast<double>(a - b) / tpu / rounds : 0.0;
++  };
++  const auto pct = [&](uint64_t a, uint64_t b) { return rounds > 0 ? 100.0 * static_cast<double>(a - b) / rounds : 0.0; };
++  char buf[1536];
++  std::snprintf(
++      buf, sizeof(buf),
++      "audio diag t=%.1fs | audio worker per callback (n=%llu): mxcsr writes=%.1f stretches scalar=%.1f vector=%.1f | "
++      "DE stretches scalar=%.2f vector=%.2f | UE stretches scalar=%.2f vector=%.2f | callbacks with DE=%.1f%% UE=%.1f%% | "
++      "time in scalar mode=%.0fus vector mode=%.0fus stretches with DE or UE=%.1fus | guest locks: critical sections=%.1f "
++      "(%.0fus) waits=%.1f (%.0fus) | tsc_per_us=%.0f",
++      static_cast<double>(now_us) / 1e6, U(now.rounds - prev.rounds), per(now.switches, prev.switches),
++      per(now.win_s, prev.win_s), per(now.win_v, prev.win_v), per(now.de_s, prev.de_s), per(now.de_v, prev.de_v),
++      per(now.ue_s, prev.ue_s), per(now.ue_v, prev.ue_v), pct(now.rounds_de, prev.rounds_de),
++      pct(now.rounds_ue, prev.rounds_ue), us(now.tsc_s, prev.tsc_s), us(now.tsc_v, prev.tsc_v),
++      us(now.flagged, prev.flagged), per(now.cs_calls, prev.cs_calls), us(now.cs_ticks, prev.cs_ticks),
++      per(now.wait_calls, prev.wait_calls), us(now.wait_ticks, prev.wait_ticks), tpu);
++  std::string line = buf;
++#if defined(REX_MXCSR_DIAG_ON)
++  std::vector<std::pair<const void*, LabThread>> table;
++  rex::runtime::ThreadState::DiagForEach(&LabCollect, &table);
++  struct Row {
++    LabThread cur, old;
++  };
++  std::vector<Row> rows;
++  const void* audio_ts = g_lab_audio_ts.load(std::memory_order_relaxed);
++  for (const auto& e : table) {
++    if (e.first == audio_ts) {
++      continue;
++    }
++    auto it = st.threads.find(e.first);
++    Row r;
++    r.cur = e.second;
++    if (it != st.threads.end() && it->second.id == e.second.id) {
++      r.old = it->second;
++    }
++    rows.push_back(r);
++  }
++  st.threads.clear();
++  for (const auto& e : table) {
++    st.threads[e.first] = e.second;
++  }
++  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
++    return a.cur.switches - a.old.switches > b.cur.switches - b.old.switches;
++  });
++  line += " | busiest other guest threads per second:";
++  for (size_t i = 0; i < rows.size() && i < 3 && secs > 0; ++i) {
++    const Row& r = rows[i];
++    const uint64_t tsc = (r.cur.tsc_s - r.old.tsc_s) + (r.cur.tsc_v - r.old.tsc_v);
++    char t[256];
++    std::snprintf(t, sizeof(t), " [%X %s: writes=%.0f DE=%.0f UE=%.0f vector mode %.0f%% of its time]", r.cur.id,
++                  LabThreadName(r.cur.id).c_str(), static_cast<double>(r.cur.switches - r.old.switches) / secs,
++                  static_cast<double>(r.cur.de - r.old.de) / secs, static_cast<double>(r.cur.ue - r.old.ue) / secs,
++                  tsc ? 100.0 * static_cast<double>(r.cur.tsc_v - r.old.tsc_v) / static_cast<double>(tsc) : 0.0);
++    line += t;
++  }
++#else
++  (void)secs;
++  line += " | (no MXCSR counters in this build)";
++#endif
++  st.prev = now;
++  st.prev_us = now_us;
++  return line;
++}
++
+ void ReporterMain(Reporter* self, int interval_s) {
+   Snapshot prev;
++  LabState lab_state;
++  lab_state.prev_us = NowUs();
+   const auto interval = std::chrono::seconds(interval_s);
+   auto due = std::chrono::steady_clock::now() + interval;
+   while (!self->stop.load(std::memory_order_acquire)) {
+@@ -218,6 +378,9 @@ void ReporterMain(Reporter* self, int interval_s) {
+     Min(g_run_queue_min, queue_min);
+     const Snapshot now = Take();
+     REXAPU_INFO("{}", Format("interval", now, prev, work_max, pump_max, gap_max, queue_min));
++    if (g_lab.load(std::memory_order_relaxed)) {
++      REXAPU_INFO("{}", LabInterval(lab_state));
++    }
+     // The cumulative line too, every time: the process may leave without a chance to print the last one.
+     REXAPU_INFO("{}", TotalLine());
+     prev = now;
+@@ -316,6 +479,36 @@ bool DumpEnabled() {
+   return g_dump.load(std::memory_order_relaxed);
+ }
+ 
++bool LabEnabled() {
++  return g_lab.load(std::memory_order_relaxed);
++}
++
++void LabSetAudioThreadState(const void* thread_state) {
++  g_lab_audio_ts.store(thread_state, std::memory_order_relaxed);
++}
++
++void LabAddRound(const LabRound& r) {
++  Counters& c = g_counters;
++  Add(c.lab_rounds, 1);
++  Add(c.lab_switches, r.switches);
++  Max(c.lab_switches_max, r.switches);
++  Add(c.lab_win_scalar, r.win[0]);
++  Add(c.lab_win_vector, r.win[1]);
++  Add(c.lab_de_scalar, r.de[0]);
++  Add(c.lab_de_vector, r.de[1]);
++  Add(c.lab_ue_scalar, r.ue[0]);
++  Add(c.lab_ue_vector, r.ue[1]);
++  Add(c.lab_tsc_scalar, r.tsc[0]);
++  Add(c.lab_tsc_vector, r.tsc[1]);
++  Add(c.lab_tsc_flagged, r.flagged);
++  if (r.de[0] + r.de[1] > 0) {
++    Add(c.lab_rounds_de, 1);
++  }
++  if (r.ue[0] + r.ue[1] > 0) {
++    Add(c.lab_rounds_ue, 1);
++  }
++}
++
+ uint64_t NowUs() {
+   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - g_start)
+@@ -375,6 +568,10 @@ void Init() {
+   }
+   if (StatsEnabled()) {
+     InitThreadCpuClock();
++    if (REXCVAR_GET(audio_mxcsr_diag)) {
++      g_lab.store(true, std::memory_order_relaxed);
++      REXAPU_INFO("audio_mxcsr_diag: an 'audio diag' line follows every interval line");
++    }
+     g_total_written.store(false);
+     g_run_work_max.store(0);
+     g_run_pump_max.store(0);
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 4f3ba96..2bd6cdc 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -212,8 +212,37 @@ void AudioSystem::WorkerThreadMain() {
+           }
+           last_pump_us_[index] = pump_start_us;
+         }
++#if defined(REX_MXCSR_DIAG_ON)
++        // Lab build: what this callback does to the MXCSR, and its time in guest locks and waits.
++        const bool lab = stats && dump::LabEnabled();
++        PPCContext* lab_ctx = lab ? worker_thread_->thread_state()->context() : nullptr;
++        PPCFPSCRRegister::MxcsrDiag lab_before{};
++        if (lab_ctx) {
++          dump::LabSetAudioThreadState(worker_thread_->thread_state());
++          lab_ctx->fpscr.diagBegin();
++          lab_before = lab_ctx->fpscr.diag;
++          dump::tls_lab_audio_worker = true;
++        }
++#endif
+         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+                                       rex::countof(args));
++#if defined(REX_MXCSR_DIAG_ON)
++        if (lab_ctx) {
++          dump::tls_lab_audio_worker = false;
++          lab_ctx->fpscr.diagEnd();
++          const auto& after = lab_ctx->fpscr.diag;
++          dump::LabRound round;
++          round.switches = after.switches - lab_before.switches;
++          for (int m = 0; m < 2; ++m) {
++            round.win[m] = after.win[m] - lab_before.win[m];
++            round.de[m] = after.de[m] - lab_before.de[m];
++            round.ue[m] = after.ue[m] - lab_before.ue[m];
++            round.tsc[m] = after.tsc[m] - lab_before.tsc[m];
++          }
++          round.flagged = after.flagged - lab_before.flagged;
++          dump::LabAddRound(round);
++        }
++#endif
+         if (stats) {
+           // The CPU time of this round against its wall time: a round that waits (a lock, an event) or is not
+           // scheduled uses less of its wall time than one that computes. Read first, so that it lies inside the
+diff --git a/src/audio/audio_thread.cpp b/src/audio/audio_thread.cpp
+index 9f14d1c..3935a3b 100644
+--- a/src/audio/audio_thread.cpp
++++ b/src/audio/audio_thread.cpp
+@@ -63,6 +63,7 @@ namespace {
+ using QueryThreadCycleTimeFn = BOOL(WINAPI*)(HANDLE, PULONG64);
+ QueryThreadCycleTimeFn g_query_cycles = nullptr;
+ double g_cycles_per_ns = 0.0;  // 0: no clock
++double g_tsc_per_us = 0.0;     // lab build
+ }  // namespace
+ 
+ // QueryThreadCycleTime is found by name so that no import library has to be linked for it (both toolchains).
+@@ -88,13 +89,16 @@ void InitThreadCpuClock() {
+     ULONG64 c0 = 0, c1 = 0;
+     LARGE_INTEGER t0{}, t1{};
+     QueryPerformanceCounter(&t0);
++    const uint64_t k0 = LabTsc();
+     g_query_cycles(GetCurrentThread(), &c0);
+     do {
+       QueryPerformanceCounter(&t1);
+     } while ((t1.QuadPart - t0.QuadPart) * 1000 < freq.QuadPart * 8);
+     g_query_cycles(GetCurrentThread(), &c1);
++    const uint64_t k1 = LabTsc();
+     const double ns = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1e9 / static_cast<double>(freq.QuadPart);
+     best = std::max(best, static_cast<double>(c1 - c0) / ns);
++    g_tsc_per_us = std::max(g_tsc_per_us, static_cast<double>(k1 - k0) / ns * 1000.0);
+   }
+   if (best <= 0.0) {
+     REXAPU_WARN("audio stats: the thread cycle counter did not move, cpu_pct stays na");
+@@ -116,6 +120,10 @@ uint64_t ThreadCpuNs() {
+ bool ThreadCpuAvailable() {
+   return g_cycles_per_ns > 0.0;
+ }
++
++double LabTscPerUs() {
++  return g_tsc_per_us;
++}
+ #else
+ void InitThreadCpuClock() {}
+ uint64_t ThreadCpuNs() {
+@@ -124,6 +132,9 @@ uint64_t ThreadCpuNs() {
+ bool ThreadCpuAvailable() {
+   return false;
+ }
++double LabTscPerUs() {
++  return 0.0;
++}
+ #endif
+ 
+ }  // namespace rex::audio::dump
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+index 8b862fc..1259c8f 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+@@ -15,6 +15,7 @@
+ #include <algorithm>
+ #include <string>
+ 
++#include <rex/audio/audio_dump.h>
+ #include <rex/chrono/chrono_steady_cast.h>
+ #include <rex/kernel/xboxkrnl/private.h>
+ #include <rex/kernel/xboxkrnl/rtl.h>
+@@ -387,6 +388,10 @@ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+     return;
+   }
+ 
++  // Lab build: the time the audio worker's callback spends getting a critical section (spinning and waiting).
++  rex::audio::dump::LabLockTimer lab_timer(rex::audio::dump::C().lab_cs_calls,
++                                           rex::audio::dump::C().lab_cs_ticks);
++
+   // Spin loop
+   while (spin_count--) {
+     if (rex::thread::atomic_cas(-1, 0, &cs->lock_count)) {
+diff --git a/src/system/thread_state.cpp b/src/system/thread_state.cpp
+index 46ab797..0bacf46 100644
+--- a/src/system/thread_state.cpp
++++ b/src/system/thread_state.cpp
+@@ -9,7 +9,10 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cstdlib>
++#include <mutex>
++#include <vector>
+ 
+ #include <rex/assert.h>
+ #include <rex/kernel.h>
+@@ -21,6 +24,26 @@ namespace rex::runtime {
+ 
+ thread_local ThreadState* thread_state_ = nullptr;
+ 
++#if defined(REX_MXCSR_DIAG_ON)
++namespace {
++std::mutex& DiagMutex() {
++  static std::mutex* m = new std::mutex;  // never destroyed: threads end after the static destructors ran
++  return *m;
++}
++std::vector<ThreadState*>& DiagThreads() {
++  static std::vector<ThreadState*>* v = new std::vector<ThreadState*>;
++  return *v;
++}
++}  // namespace
++
++void ThreadState::DiagForEach(void (*fn)(ThreadState*, void*), void* arg) {
++  std::lock_guard<std::mutex> lock(DiagMutex());
++  for (ThreadState* ts : DiagThreads()) {
++    fn(ts, arg);
++  }
++}
++#endif
++
+ ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_address,
+                          memory::Memory* memory)
+     : memory_(memory), pcr_address_(pcr_address), thread_id_(thread_id) {
+@@ -37,9 +60,21 @@ ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_a
+ 
+   // Note(tomc): the rexglue abi passes memory base via 'base' parameter to each function call,
+   // so we don't need to store it in the context like JIT did.
++
++#if defined(REX_MXCSR_DIAG_ON)
++  std::lock_guard<std::mutex> lock(DiagMutex());
++  DiagThreads().push_back(this);
++#endif
+ }
+ 
+ ThreadState::~ThreadState() {
++#if defined(REX_MXCSR_DIAG_ON)
++  {
++    std::lock_guard<std::mutex> lock(DiagMutex());
++    auto& v = DiagThreads();
++    v.erase(std::remove(v.begin(), v.end(), this), v.end());
++  }
++#endif
+   if (thread_state_ == this) {
+     thread_state_ = nullptr;
+   }
+diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
+index d358f39..3689df9 100644
+--- a/src/system/xobject.cpp
++++ b/src/system/xobject.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <vector>
+ 
++#include <rex/audio/audio_dump.h>
+ #include <rex/chrono/clock.h>
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+@@ -202,6 +203,9 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
+ 
+ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
+                        uint64_t* opt_timeout) {
++  // Lab build: the time the audio worker's callback spends in waits.
++  rex::audio::dump::LabLockTimer lab_timer(rex::audio::dump::C().lab_wait_calls,
++                                           rex::audio::dump::C().lab_wait_ticks);
+   auto wait_handle = GetWaitHandle();
+   if (!wait_handle) {
+     // Object doesn't support waiting.
+@@ -262,6 +266,8 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
+ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_type,
+                                uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
+                                uint64_t* opt_timeout) {
++  rex::audio::dump::LabLockTimer lab_timer(rex::audio::dump::C().lab_wait_calls,
++                                           rex::audio::dump::C().lab_wait_ticks);
+   std::vector<rex::thread::WaitHandle*> wait_handles(count);
+   for (size_t i = 0; i < count; ++i) {
+     wait_handles[i] = objects[i]->GetWaitHandle();

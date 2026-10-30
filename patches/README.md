@@ -72,6 +72,7 @@ git apply ../../patches/rexglue-upstream-linux-wine.patch
 git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
 git apply ../../patches/rexglue-affinity-warning-once.patch
+git apply ../../patches/rexglue-lab-mxcsr-diag.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -2030,6 +2031,24 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | Change | Files | Affects |
 |---|---|---|
 | The warning logged once per run (`affinity_warning_once`); `debug_affinity_logical_processors` | `src/system/xthread.cpp` | all platforms with fewer than 6 logical processors (and the debug option anywhere) |
+
+## rexglue-lab-mxcsr-diag.patch
+
+**LAB ONLY: not for a release.** It lives on the branch `diag/audio-pump-cpu` (second commit) to answer fork issue #21 (see `launcher/dev/audio-pump-cpu-2026-10-30.md`): the reporter's audio worker takes 10.6 ms a round while driving, and this PC takes 0.74 ms. Two readings to tell apart: the round waits (a guest lock held by a starved thread), or it computes and a 3rd-generation Intel CPU is slow at it (denormal floats cost 150 or more cycles an operation there before Skylake and little on a Zen).
+
+**What it does.**
+- `include/rex/ppc/context.h`: every guest thread's `FPSCRRegister` counts its MXCSR writes and, for each stretch between two writes, whether the CPU had raised the denormal-operand flag (DE) or the underflow flag (UE), by mode (scalar: denormals kept; vector: flushed), with the time-stamp counter ticks spent in each mode. The flags are sticky and each write wipes them, so the value read just before a write tells what happened in the stretch it ends. A stretch with DE set in the scalar mode consumed at least one denormal (the counts are lower bounds on the denormal operations); UE in the scalar mode is a tiny inexact result. Enabled in this patch (`REX_MXCSR_DIAG` 1; `-DREX_MXCSR_DIAG=0` turns it off); x86-64 only. The context grows, so the save area of the fibers keeps its size: the save and restore copy the `csr` word, not the struct.
+- `src/audio/audio_system.cpp`, `audio_dump.cpp`: with `audio_stats` and `audio_mxcsr_diag` (default false) an `audio diag` line follows every interval line: per mixer callback the MXCSR writes, the stretches by mode, those with DE and UE, the share of callbacks with any, the time in each mode and in stretches with DE or UE, and the time the callback spends in guest critical sections and waits (`RtlEnterCriticalSection` and `XObject::Wait` / `WaitMultiple` on the audio worker only; a wait inside a critical section counts in both); then the three guest threads with the most MXCSR writes, per second, for scale (`ThreadState` keeps a list of live threads for this).
+- Costs: one `stmxcsr` and one `rdtsc` more on every MXCSR write of every thread; a thread-local test in the waits.
+
+**Not checked.** Built by CI only (Windows, llvm-mingw); not built on Linux or the PS5 (`ps5/make_ps5.sh` does not apply it). Results: not run yet.
+
+| Change | Files | Affects |
+|---|---|---|
+| The MXCSR counters; the save area keeps its layout | `include/rex/ppc/context.h` | every thread (x86-64) |
+| The registry of live `ThreadState`s | `include/rex/system/thread_state.h`, `src/system/thread_state.cpp` | lab |
+| The `audio diag` line, `audio_mxcsr_diag`, the TSC factor | `src/audio/audio_dump.cpp`, `include/rex/audio/audio_dump.h`, `src/audio/audio_thread.cpp`, `src/audio/audio_system.cpp` | lab |
+| Lock and wait timers (audio worker only) | `src/kernel/xboxkrnl/xboxkrnl_rtl.cpp`, `src/system/xobject.cpp` | lab |
 
 ## rexglue-mingw.patch
 

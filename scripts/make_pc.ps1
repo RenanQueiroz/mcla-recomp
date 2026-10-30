@@ -485,6 +485,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-codegen-csr-lazy.patch"; File = "src\codegen\config.cpp"; Adds = "csr_mode_free_ops" }
     # The "too few processor cores" warning of the thread affinity code, once per run (issue #21), and a debug option to take that path on a larger PC.
     @{ Patch = "rexglue-affinity-warning-once.patch"; File = "src\system\xthread.cpp"; Adds = "affinity_warning_once" }
+    # LAB ONLY (diag/audio-pump-cpu, never in a release): the MXCSR and guest-lock counters of the audio worker (issue #21).
+    @{ Patch = "rexglue-lab-mxcsr-diag.patch"; File = "src\audio\audio_dump.cpp"; Adds = "audio_mxcsr_diag" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.
