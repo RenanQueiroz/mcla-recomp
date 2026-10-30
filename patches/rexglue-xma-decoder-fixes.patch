@@ -1,9 +1,9 @@
 diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
 new file mode 100644
-index 0000000..f9166da
+index 0000000..89fb9e6
 --- /dev/null
 +++ b/include/rex/audio/audio_dump.h
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,203 @@
 +/**
 + * @file        audio/audio_dump.h
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -43,6 +43,17 @@ index 0000000..f9166da
 +/// Microseconds since Init() (steady clock).
 +uint64_t NowUs();
 +
++/// CPU time the calling thread has used so far, in nanoseconds, or 0 when it cannot be read (not Windows). Windows:
++/// QueryThreadCycleTime, which counts the cycles the thread ran, exactly, however short the stretch; GetThreadTimes
++/// would only move in clock ticks (15.6 ms, or 1 ms when a program raises the timer resolution, as the game does), too
++/// coarse for a 1 ms callback. The cycles are turned into time by a factor measured in Init() (one busy spell of about
++/// 24 ms on the calling thread, only with audio_stats). Take the difference of two calls.
++uint64_t ThreadCpuNs();
++/// True when ThreadCpuNs() works.
++bool ThreadCpuAvailable();
++/// Finds the clock and measures its factor (Init() calls it when audio_stats is on).
++void InitThreadCpuClock();
++
 +/// The folder of the dump files, with a trailing separator ("" when dumping is off).
 +const std::string& Dir();
 +
@@ -78,6 +89,7 @@ index 0000000..f9166da
 +  std::atomic<uint64_t> pump_late{0};         // callbacks that started over 8 ms after the previous one
 +  std::atomic<uint64_t> pump_over_4ms{0};     // callbacks that took over 4 ms (the frame period is 5.33 ms)
 +  std::atomic<uint64_t> pump_over_8ms{0};     // callbacks that took over 8 ms: more than a whole frame
++  std::atomic<uint64_t> pump_cpu_ns{0};       // CPU time the audio worker used in those callbacks (ThreadCpuNs; Windows)
 +  // The SDL output
 +  std::atomic<uint64_t> sdl_callbacks{0};
 +  std::atomic<uint64_t> sdl_frames{0};        // guest frames played
@@ -360,10 +372,10 @@ index d55f16a..f3a23f1 100644
      xma_decoder.cpp
 diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
 new file mode 100644
-index 0000000..296c021
+index 0000000..fed028f
 --- /dev/null
 +++ b/src/audio/audio_dump.cpp
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,564 @@
 +/**
 + * @file        audio/audio_dump.cpp
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -440,9 +452,9 @@ index 0000000..296c021
 +  uint64_t xma_work_inline = 0, xma_work_worker = 0, xma_work_us = 0, xma_work_slow = 0, xma_kicks = 0,
 +           xma_frames = 0, xma_decode_errors = 0, xma_recheck_abort = 0, xma_stalled_loops = 0,
 +           xma_cas_retries = 0, wrote_rd = 0, wrote_valid = 0, wrote_other = 0, pump_count = 0,
-+           pump_us = 0, pump_late = 0, pump_over_4ms = 0, pump_over_8ms = 0, sdl_callbacks = 0, sdl_frames = 0,
-+           sdl_underruns = 0, sdl_underruns_steady = 0, sdl_queue_grown = 0, wake_lt1 = 0, wake_lt2 = 0, wake_lt4 = 0,
-+           wake_lt8 = 0, wake_lt16 = 0, wake_ge16 = 0;
++           pump_us = 0, pump_cpu_ns = 0, pump_late = 0, pump_over_4ms = 0, pump_over_8ms = 0, sdl_callbacks = 0,
++           sdl_frames = 0, sdl_underruns = 0, sdl_underruns_steady = 0, sdl_queue_grown = 0, wake_lt1 = 0,
++           wake_lt2 = 0, wake_lt4 = 0, wake_lt8 = 0, wake_lt16 = 0, wake_ge16 = 0;
 +};
 +
 +Snapshot Take() {
@@ -464,6 +476,7 @@ index 0000000..296c021
 +  s.wrote_other = ld(c.xma_game_wrote_other);
 +  s.pump_count = ld(c.pump_count);
 +  s.pump_us = ld(c.pump_us);
++  s.pump_cpu_ns = ld(c.pump_cpu_ns);
 +  s.pump_late = ld(c.pump_late);
 +  s.pump_over_4ms = ld(c.pump_over_4ms);
 +  s.pump_over_8ms = ld(c.pump_over_8ms);
@@ -494,14 +507,26 @@ index 0000000..296c021
 +                   uint64_t pump_max, uint64_t gap_max, uint64_t queue_min) {
 +  const uint64_t works = (now.xma_work_inline - prev.xma_work_inline) +
 +                         (now.xma_work_worker - prev.xma_work_worker);
++  // The share of the pumps' wall time the audio worker was running on a CPU (a low value: it waited, or was not
++  // scheduled; near 100: it computed, or spun), and its CPU time per pump. "na" where the clock does not exist.
++  char cpu_avg_us[24] = "na";
++  char cpu_pct[24] = "na";
++  if (ThreadCpuAvailable()) {
++    const uint64_t pumps = now.pump_count - prev.pump_count;
++    const uint64_t cpu_ns = now.pump_cpu_ns - prev.pump_cpu_ns;
++    const uint64_t wall_us = now.pump_us - prev.pump_us;
++    std::snprintf(cpu_avg_us, sizeof(cpu_avg_us), "%llu", U(Div(cpu_ns / 1000, pumps)));
++    std::snprintf(cpu_pct, sizeof(cpu_pct), "%.1f",
++                  wall_us ? 100.0 * (static_cast<double>(cpu_ns) / 1000.0) / static_cast<double>(wall_us) : 0.0);
++  }
 +  char buf[2048];
 +  std::snprintf(
 +      buf, sizeof(buf),
 +      "audio stats %s t=%.1fs | xma: kicks=%llu work inline=%llu worker=%llu avg_us=%llu max_us=%llu "
 +      "slow(>2ms)=%llu frames=%llu errors=%llu recheck_abort=%llu stalled=%llu cas_retry=%llu | game wrote "
 +      "during a decode: read_offset=%llu valid=%llu other=%llu | pump: n=%llu avg_us=%llu max_us=%llu "
-+      "gap_max_us=%llu late(>8ms)=%llu over4ms=%llu over8ms=%llu | sdl: callbacks=%llu frames=%llu "
-+      "underruns=%llu queue_min=%llu underruns_steady=%llu silence_max=%llu queue_grown=%llu | wake: lt1ms=%llu "
++      "gap_max_us=%llu late(>8ms)=%llu over4ms=%llu over8ms=%llu cpu_avg_us=%s cpu_pct=%s | sdl: "
++      "callbacks=%llu frames=%llu underruns=%llu queue_min=%llu underruns_steady=%llu silence_max=%llu queue_grown=%llu | wake: lt1ms=%llu "
 +      "lt2ms=%llu lt4ms=%llu lt8ms=%llu lt16ms=%llu ge16ms=%llu max_us=%llu",
 +      label, static_cast<double>(NowUs()) / 1e6, U(now.xma_kicks - prev.xma_kicks),
 +      U(now.xma_work_inline - prev.xma_work_inline), U(now.xma_work_worker - prev.xma_work_worker),
@@ -513,7 +538,8 @@ index 0000000..296c021
 +      U(now.wrote_other - prev.wrote_other), U(now.pump_count - prev.pump_count),
 +      U(Div(now.pump_us - prev.pump_us, now.pump_count - prev.pump_count)), U(pump_max), U(gap_max),
 +      U(now.pump_late - prev.pump_late), U(now.pump_over_4ms - prev.pump_over_4ms),
-+      U(now.pump_over_8ms - prev.pump_over_8ms), U(now.sdl_callbacks - prev.sdl_callbacks),
++      U(now.pump_over_8ms - prev.pump_over_8ms), cpu_avg_us, cpu_pct,
++      U(now.sdl_callbacks - prev.sdl_callbacks),
 +      U(now.sdl_frames - prev.sdl_frames), U(now.sdl_underruns - prev.sdl_underruns),
 +      U(queue_min == ~0ull ? 0 : queue_min), U(now.sdl_underruns_steady - prev.sdl_underruns_steady),
 +      U(g_counters.sdl_silence_max.load(std::memory_order_relaxed)), U(now.sdl_queue_grown - prev.sdl_queue_grown),
@@ -726,6 +752,7 @@ index 0000000..296c021
 +    }
 +  }
 +  if (StatsEnabled()) {
++    InitThreadCpuClock();
 +    g_total_written.store(false);
 +    g_run_work_max.store(0);
 +    g_run_pump_max.store(0);
@@ -914,7 +941,7 @@ index 0000000..296c021
 +
 +}  // namespace rex::audio::dump
 diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
-index 7a711a8..76b2573 100644
+index 7a711a8..4f3ba96 100644
 --- a/src/audio/audio_system.cpp
 +++ b/src/audio/audio_system.cpp
 @@ -11,6 +11,7 @@
@@ -1019,12 +1046,13 @@ index 7a711a8..76b2573 100644
        uint32_t client_callback = clients_[index].callback;
        uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
        global_lock.unlock();
-@@ -146,8 +183,48 @@ void AudioSystem::WorkerThreadMain() {
+@@ -146,8 +183,54 @@ void AudioSystem::WorkerThreadMain() {
          }
          SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
          uint64_t args[] = {client_callback_arg};
 +        const bool stats = dump::StatsEnabled();
 +        const uint64_t pump_start_us = stats ? dump::NowUs() : 0;
++        const uint64_t pump_start_cpu_ns = stats ? dump::ThreadCpuNs() : 0;
 +        if (stats) {
 +          // How long the device's request waited for this callback to start (the SDL callback stamps the time it
 +          // freed a slot of the queue).
@@ -1054,9 +1082,14 @@ index 7a711a8..76b2573 100644
          function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                        rex::countof(args));
 +        if (stats) {
++          // The CPU time of this round against its wall time: a round that waits (a lock, an event) or is not
++          // scheduled uses less of its wall time than one that computes. Read first, so that it lies inside the
++          // wall time.
++          const uint64_t cpu_ns = dump::ThreadCpuNs() - pump_start_cpu_ns;
 +          const uint64_t us = dump::NowUs() - pump_start_us;
 +          dump::Add(dump::C().pump_count, 1);
 +          dump::Add(dump::C().pump_us, us);
++          dump::Add(dump::C().pump_cpu_ns, cpu_ns);
 +          dump::Max(dump::C().pump_us_max, us);
 +          if (us > 4000) {
 +            dump::Add(dump::C().pump_over_4ms, 1);
@@ -1068,7 +1101,7 @@ index 7a711a8..76b2573 100644
          if (diag_pump_count < 10) {
            REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
          }
-@@ -214,6 +291,8 @@ void AudioSystem::Shutdown() {
+@@ -214,6 +297,8 @@ void AudioSystem::Shutdown() {
      worker_thread_.reset();
    }
  
@@ -1077,7 +1110,7 @@ index 7a711a8..76b2573 100644
    // Destroy all active client drivers (closes SDL audio devices, stopping
    // callback threads) before the semaphores they reference are destroyed.
    for (size_t i = 0; i < kMaximumClientCount; i++) {
-@@ -230,7 +309,7 @@ void AudioSystem::Shutdown() {
+@@ -230,7 +315,7 @@ void AudioSystem::Shutdown() {
  X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, size_t* out_index) {
    REXAPU_DEBUG("AudioSystem::RegisterClient: callback={:08X} callback_arg={:08X}", callback,
                 callback_arg);
@@ -1086,7 +1119,7 @@ index 7a711a8..76b2573 100644
  
    auto index = FindFreeClient();
    assert_true(index >= 0);
-@@ -252,6 +331,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+@@ -252,6 +337,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
    memory::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
  
    clients_[index] = {driver, callback, callback_arg, ptr, true};
@@ -1094,7 +1127,7 @@ index 7a711a8..76b2573 100644
  
    if (out_index) {
      *out_index = index;
-@@ -270,7 +350,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+@@ -270,7 +356,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
      submit_count++;
    }
  
@@ -1103,7 +1136,7 @@ index 7a711a8..76b2573 100644
    assert_true(index < kMaximumClientCount);
    assert_true(clients_[index].driver != NULL);
    (clients_[index].driver)->SubmitFrame(samples_ptr);
-@@ -279,7 +359,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+@@ -279,7 +365,7 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
  void AudioSystem::UnregisterClient(size_t index) {
    SCOPE_profile_cpu_f("apu");
  
@@ -1114,10 +1147,10 @@ index 7a711a8..76b2573 100644
    memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
 diff --git a/src/audio/audio_thread.cpp b/src/audio/audio_thread.cpp
 new file mode 100644
-index 0000000..0657785
+index 0000000..9f14d1c
 --- /dev/null
 +++ b/src/audio/audio_thread.cpp
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,129 @@
 +/**
 + * @file        audio/audio_thread.cpp
 + * @brief       Host scheduling of the audio threads (fork addition)
@@ -1138,6 +1171,9 @@ index 0000000..0657785
 +#include <windows.h>
 +#endif
 +
++#include <algorithm>
++
++#include <rex/audio/audio_dump.h>
 +#include <rex/audio/audio_system.h>
 +#include <rex/audio/flags.h>
 +#include <rex/logging.h>
@@ -1172,6 +1208,78 @@ index 0000000..0657785
 +}
 +
 +}  // namespace rex::audio
++
++namespace rex::audio::dump {
++
++#if defined(_WIN32)
++namespace {
++using QueryThreadCycleTimeFn = BOOL(WINAPI*)(HANDLE, PULONG64);
++QueryThreadCycleTimeFn g_query_cycles = nullptr;
++double g_cycles_per_ns = 0.0;  // 0: no clock
++}  // namespace
++
++// QueryThreadCycleTime is found by name so that no import library has to be linked for it (both toolchains).
++// Its unit is the processor's time-stamp counter on current Windows (4.7 cycles per ns on a 4.7 GHz Ryzen, checked),
++// but that is not promised, so the factor is measured: the thread spins for about 8 ms against the performance
++// counter, three times, and the largest ratio is kept (a spell in which the thread was preempted only lowers it).
++void InitThreadCpuClock() {
++  if (g_cycles_per_ns > 0.0) {
++    return;
++  }
++  HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
++  g_query_cycles = kernel ? reinterpret_cast<QueryThreadCycleTimeFn>(
++                                reinterpret_cast<void*>(GetProcAddress(kernel, "QueryThreadCycleTime")))
++                          : nullptr;
++  if (!g_query_cycles) {
++    REXAPU_WARN("audio stats: QueryThreadCycleTime is not available, cpu_pct stays na");
++    return;
++  }
++  LARGE_INTEGER freq{};
++  QueryPerformanceFrequency(&freq);
++  double best = 0.0;
++  for (int i = 0; i < 3 && freq.QuadPart > 0; ++i) {
++    ULONG64 c0 = 0, c1 = 0;
++    LARGE_INTEGER t0{}, t1{};
++    QueryPerformanceCounter(&t0);
++    g_query_cycles(GetCurrentThread(), &c0);
++    do {
++      QueryPerformanceCounter(&t1);
++    } while ((t1.QuadPart - t0.QuadPart) * 1000 < freq.QuadPart * 8);
++    g_query_cycles(GetCurrentThread(), &c1);
++    const double ns = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1e9 / static_cast<double>(freq.QuadPart);
++    best = std::max(best, static_cast<double>(c1 - c0) / ns);
++  }
++  if (best <= 0.0) {
++    REXAPU_WARN("audio stats: the thread cycle counter did not move, cpu_pct stays na");
++    return;
++  }
++  g_cycles_per_ns = best;
++  REXAPU_INFO("audio stats: pump CPU time from QueryThreadCycleTime ({:.0f} cycles per microsecond, measured now)",
++              best * 1000.0);
++}
++
++uint64_t ThreadCpuNs() {
++  ULONG64 cycles = 0;
++  if (g_cycles_per_ns <= 0.0 || !g_query_cycles(GetCurrentThread(), &cycles)) {
++    return 0;
++  }
++  return static_cast<uint64_t>(static_cast<double>(cycles) / g_cycles_per_ns);
++}
++
++bool ThreadCpuAvailable() {
++  return g_cycles_per_ns > 0.0;
++}
++#else
++void InitThreadCpuClock() {}
++uint64_t ThreadCpuNs() {
++  return 0;
++}
++bool ThreadCpuAvailable() {
++  return false;
++}
++#endif
++
++}  // namespace rex::audio::dump
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
 index 20a2cd8..06cb35d 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
