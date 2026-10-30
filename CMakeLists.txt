@@ -39,6 +39,7 @@ set(MCLA_SOURCES
     src/mcla_app.cpp
     src/crash_trace.cpp
     src/audio_fallback.cpp
+    src/audio_mixer.cpp
     src/frame_timing.cpp
     src/render_perf.cpp
     src/perf_options.cpp

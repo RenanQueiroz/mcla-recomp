@@ -1,0 +1,22 @@
+# The game's audio mixer thread (src/audio_mixer.cpp): the audio statistics' mixer round, and the check that the thread
+# audio_mixer_priority raises (the override of sub_823EC8C8, its entry) has started. Each hook does nothing but a relaxed
+# load unless audio_stats is on (the check costs one counter increment a round).
+#
+# sub_823ECA40 is what the game's audio callback (sub_823F56D0) calls to hand a frame to the mixer thread: it sets the
+# event 0x828CD9AC and waits for 0x828CD99C. sub_823EC8C8 is the mixer thread: KeWaitForSingleObject(0x828CD9AC), the mixing
+# (sub_823EC160, sub_823EC248), KeSetEvent(0x828CD99C), round again.
+
+# 0x823ECA90 in sub_823ECA40: `bl KeSetEvent` on 0x828CD9AC (r3), the pump waking the mixer. Hooked before the call.
+[[midasm_hook]]
+name = "mcla_audio_pump_signal"
+address = 0x823ECA90
+
+# 0x823EC920 in sub_823EC8C8: `lwz r3,-9796(r31)`, the first instruction after the thread's KeWaitForSingleObject returned.
+[[midasm_hook]]
+name = "mcla_audio_mixer_woke"
+address = 0x823EC920
+
+# 0x823EC978 in sub_823EC8C8: `bl KeSetEvent` on 0x828CD99C (r3), the mixer telling the pump the frame is done. Hooked before the call.
+[[midasm_hook]]
+name = "mcla_audio_mixer_done"
+address = 0x823EC978

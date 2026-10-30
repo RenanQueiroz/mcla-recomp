@@ -1,9 +1,9 @@
 diff --git a/include/rex/audio/audio_dump.h b/include/rex/audio/audio_dump.h
 new file mode 100644
-index 0000000..f9166da
+index 0000000..31aad92
 --- /dev/null
 +++ b/include/rex/audio/audio_dump.h
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,209 @@
 +/**
 + * @file        audio/audio_dump.h
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -42,6 +42,24 @@ index 0000000..f9166da
 +
 +/// Microseconds since Init() (steady clock).
 +uint64_t NowUs();
++
++/// CPU time the calling thread has used so far, in nanoseconds, or 0 when it cannot be read (not Windows). Windows:
++/// QueryThreadCycleTime, which counts the cycles the thread ran, exactly, however short the stretch; GetThreadTimes
++/// would only move in clock ticks (15.6 ms, or 1 ms when a program raises the timer resolution, as the game does), too
++/// coarse for a 1 ms stretch. The cycles are turned into time by a factor measured in Init() (one busy spell of about
++/// 24 ms on the calling thread, only with audio_stats). Take the difference of two calls.
++uint64_t ThreadCpuNs();
++/// True when ThreadCpuNs() works.
++bool ThreadCpuAvailable();
++/// Finds the clock and measures its factor (Init() calls it when audio_stats is on).
++void InitThreadCpuClock();
++
++/// Host code can add text to the end of every statistics line: an interval line and the TOTAL line that follows it.
++/// `total` is false for an interval line (what happened since the last call with false, which only the reporter
++/// thread makes) and true for a TOTAL line (since the start; also made once from the process-exit guard). Called only
++/// with audio_stats; it must not block. Return "" for nothing, else text starting with " | ". Set it once, early (before Init() if possible).
++using ExtraStatsFn = std::string (*)(bool total);
++void SetExtraStats(ExtraStatsFn fn);
 +
 +/// The folder of the dump files, with a trailing separator ("" when dumping is off).
 +const std::string& Dir();
@@ -196,7 +214,7 @@ index 0000000..f9166da
 +
 +}  // namespace rex::audio::dump
 diff --git a/include/rex/audio/audio_system.h b/include/rex/audio/audio_system.h
-index 33fd32c..7a8441d 100644
+index 33fd32c..f83ee70 100644
 --- a/include/rex/audio/audio_system.h
 +++ b/include/rex/audio/audio_system.h
 @@ -12,6 +12,7 @@
@@ -207,7 +225,7 @@ index 33fd32c..7a8441d 100644
  #include <queue>
  
  #include <rex/kernel.h>
-@@ -33,6 +34,16 @@ constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
+@@ -33,6 +34,23 @@ constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
  class AudioDriver;
  class XmaDecoder;
  
@@ -221,10 +239,17 @@ index 33fd32c..7a8441d 100644
 +/// Does nothing on other platforms or when the level is lower.
 +void EnterAudioThreadMmcss(const char* thread_name);
 +
++/// The same treatment for a thread the host code names, at a level of its own (the values of audio_thread_priority:
++/// 1 above normal, 2 highest, 3 highest and MMCSS), whatever audio_thread_priority says: for a guest thread that does
++/// the game's audio mixing (the game's own code decides which, and what its option is called). Called by the thread
++/// itself; logs one line with what was done. Returns true when the host priority was set; false for level 0, on a
++/// failure, and on other platforms than Windows (nothing changes there).
++bool RaiseCallingAudioThread(int32_t level, const char* thread_name);
++
  class AudioSystem : public system::IAudioSystem {
   public:
    virtual ~AudioSystem();
-@@ -77,6 +88,12 @@ class AudioSystem : public system::IAudioSystem {
+@@ -77,6 +95,12 @@ class AudioSystem : public system::IAudioSystem {
    system::object_ref<system::XHostThread> worker_thread_;
  
    rex::thread::global_critical_region global_critical_region_;
@@ -360,10 +385,10 @@ index d55f16a..f3a23f1 100644
      xma_decoder.cpp
 diff --git a/src/audio/audio_dump.cpp b/src/audio/audio_dump.cpp
 new file mode 100644
-index 0000000..296c021
+index 0000000..353fe79
 --- /dev/null
 +++ b/src/audio/audio_dump.cpp
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,562 @@
 +/**
 + * @file        audio/audio_dump.cpp
 + * @brief       Counters and WAV dumps of the audio path (fork instrumentation)
@@ -428,6 +453,7 @@ index 0000000..296c021
 +};
 +Reporter* g_reporter = nullptr;
 +bool g_initialized = false;
++std::atomic<ExtraStatsFn> g_extra_stats{nullptr};
 +std::atomic<bool> g_total_written{false};
 +
 +// Maxima and minima over the whole run, as of the last interval (the counters' own are reset at every one).
@@ -485,6 +511,12 @@ index 0000000..296c021
 +  return b ? a / b : 0;
 +}
 +
++// What the host code adds to the end of a line (SetExtraStats).
++std::string Extra(bool total) {
++  const ExtraStatsFn fn = g_extra_stats.load(std::memory_order_acquire);
++  return fn ? fn(total) : std::string();
++}
++
 +unsigned long long U(uint64_t v) {
 +  return static_cast<unsigned long long>(v);
 +}
@@ -530,7 +562,8 @@ index 0000000..296c021
 +                std::max(g_run_work_max.load(), c.xma_work_us_max.load()),
 +                std::max(g_run_pump_max.load(), c.pump_us_max.load()),
 +                std::max(g_run_gap_max.load(), c.pump_gap_max_us.load()),
-+                std::min(g_run_queue_min.load(), c.sdl_queue_min.load()));
++                std::min(g_run_queue_min.load(), c.sdl_queue_min.load())) +
++         Extra(true);
 +}
 +
 +// Writes the final totals next to the dumps (once). The file exists even when the process left
@@ -569,7 +602,7 @@ index 0000000..296c021
 +    Max(g_run_gap_max, gap_max);
 +    Min(g_run_queue_min, queue_min);
 +    const Snapshot now = Take();
-+    REXAPU_INFO("{}", Format("interval", now, prev, work_max, pump_max, gap_max, queue_min));
++    REXAPU_INFO("{}", Format("interval", now, prev, work_max, pump_max, gap_max, queue_min) + Extra(false));
 +    // The cumulative line too, every time: the process may leave without a chance to print the last one.
 +    REXAPU_INFO("{}", TotalLine());
 +    prev = now;
@@ -668,6 +701,10 @@ index 0000000..296c021
 +  return g_dump.load(std::memory_order_relaxed);
 +}
 +
++void SetExtraStats(ExtraStatsFn fn) {
++  g_extra_stats.store(fn, std::memory_order_release);
++}
++
 +uint64_t NowUs() {
 +  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
 +                                   std::chrono::steady_clock::now() - g_start)
@@ -726,6 +763,7 @@ index 0000000..296c021
 +    }
 +  }
 +  if (StatsEnabled()) {
++    InitThreadCpuClock();
 +    g_total_written.store(false);
 +    g_run_work_max.store(0);
 +    g_run_pump_max.store(0);
@@ -1114,10 +1152,10 @@ index 7a711a8..76b2573 100644
    memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
 diff --git a/src/audio/audio_thread.cpp b/src/audio/audio_thread.cpp
 new file mode 100644
-index 0000000..0657785
+index 0000000..926e8b2
 --- /dev/null
 +++ b/src/audio/audio_thread.cpp
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,193 @@
 +/**
 + * @file        audio/audio_thread.cpp
 + * @brief       Host scheduling of the audio threads (fork addition)
@@ -1138,18 +1176,25 @@ index 0000000..0657785
 +#include <windows.h>
 +#endif
 +
++#include <algorithm>
++#include <cstdint>
++#include <string>
++
++#include <rex/audio/audio_dump.h>
 +#include <rex/audio/audio_system.h>
 +#include <rex/audio/flags.h>
 +#include <rex/logging.h>
 +
 +namespace rex::audio {
 +
-+void EnterAudioThreadMmcss([[maybe_unused]] const char* thread_name) {
 +#if defined(_WIN32)
-+  if (REXCVAR_GET(audio_thread_priority) < 3) {
-+    return;
-+  }
-+  // avrt.dll is loaded by hand so that nothing has to be linked for it.
++namespace {
++
++enum class Mmcss { kJoined, kFailed, kNoAvrt };
++
++// The calling thread joins the Windows multimedia scheduler (task "Pro Audio"). avrt.dll is loaded by hand so that
++// nothing has to be linked for it. `value` is the task index when joined, else the error.
++Mmcss JoinMmcss(uint32_t* value) {
 +  using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
 +  static const SetCharacteristics set_characteristics = []() -> SetCharacteristics {
 +    HMODULE avrt = LoadLibraryW(L"avrt.dll");
@@ -1158,20 +1203,152 @@ index 0000000..0657785
 +                : nullptr;
 +  }();
 +  if (!set_characteristics) {
-+    REXAPU_WARN("audio_thread_priority 3: avrt.dll is not available, {} stays outside MMCSS", thread_name);
-+    return;
++    *value = 0;
++    return Mmcss::kNoAvrt;
 +  }
 +  DWORD task_index = 0;
 +  HANDLE task = set_characteristics(L"Pro Audio", &task_index);
 +  if (task) {
-+    REXAPU_INFO("{} joined MMCSS (task \"Pro Audio\", index {})", thread_name, static_cast<uint32_t>(task_index));
-+  } else {
-+    REXAPU_WARN("{} could not join MMCSS (error {})", thread_name, static_cast<uint32_t>(GetLastError()));
++    *value = static_cast<uint32_t>(task_index);
++    return Mmcss::kJoined;
++  }
++  *value = static_cast<uint32_t>(GetLastError());
++  return Mmcss::kFailed;
++}
++
++}  // namespace
++#endif
++
++void EnterAudioThreadMmcss([[maybe_unused]] const char* thread_name) {
++#if defined(_WIN32)
++  if (REXCVAR_GET(audio_thread_priority) < 3) {
++    return;
++  }
++  uint32_t value = 0;
++  switch (JoinMmcss(&value)) {
++    case Mmcss::kNoAvrt:
++      REXAPU_WARN("audio_thread_priority 3: avrt.dll is not available, {} stays outside MMCSS", thread_name);
++      break;
++    case Mmcss::kJoined:
++      REXAPU_INFO("{} joined MMCSS (task \"Pro Audio\", index {})", thread_name, value);
++      break;
++    case Mmcss::kFailed:
++      REXAPU_WARN("{} could not join MMCSS (error {})", thread_name, value);
++      break;
 +  }
 +#endif
 +}
 +
++bool RaiseCallingAudioThread([[maybe_unused]] int32_t level, [[maybe_unused]] const char* thread_name) {
++#if defined(_WIN32)
++  if (level <= 0) {
++    return false;
++  }
++  const bool highest = level >= 2;
++  const bool set =
++      SetThreadPriority(GetCurrentThread(), highest ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL) != 0;
++  const uint32_t priority_error = set ? 0 : static_cast<uint32_t>(GetLastError());
++  std::string mmcss = "not asked (level below 3)";
++  if (level >= 3) {
++    uint32_t value = 0;
++    switch (JoinMmcss(&value)) {
++      case Mmcss::kJoined:
++        mmcss = "joined (task \"Pro Audio\", index " + std::to_string(value) + ")";
++        break;
++      case Mmcss::kFailed:
++        mmcss = "could not join (error " + std::to_string(value) + ")";
++        break;
++      case Mmcss::kNoAvrt:
++        mmcss = "not available (avrt.dll)";
++        break;
++    }
++  }
++  if (set) {
++    REXAPU_INFO("{}: host priority {}, MMCSS {} (level {})", thread_name, highest ? "highest" : "above normal", mmcss,
++                level);
++  } else {
++    REXAPU_WARN("{}: host priority NOT raised (error {}), MMCSS {} (level {})", thread_name, priority_error, mmcss,
++                level);
++  }
++  return set;
++#else
++  return false;
++#endif
++}
++
 +}  // namespace rex::audio
++
++namespace rex::audio::dump {
++
++#if defined(_WIN32)
++namespace {
++using QueryThreadCycleTimeFn = BOOL(WINAPI*)(HANDLE, PULONG64);
++QueryThreadCycleTimeFn g_query_cycles = nullptr;
++double g_cycles_per_ns = 0.0;  // 0: no clock
++}  // namespace
++
++// QueryThreadCycleTime is found by name so that no import library has to be linked for it (both toolchains).
++// Its unit is the processor's time-stamp counter on current Windows (4.7 cycles per ns on a 4.7 GHz Ryzen, checked),
++// but that is not promised, so the factor is measured: the thread spins for about 8 ms against the performance
++// counter, three times, and the largest ratio is kept (a spell in which the thread was preempted only lowers it).
++void InitThreadCpuClock() {
++  if (g_cycles_per_ns > 0.0) {
++    return;
++  }
++  HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
++  g_query_cycles = kernel ? reinterpret_cast<QueryThreadCycleTimeFn>(
++                                reinterpret_cast<void*>(GetProcAddress(kernel, "QueryThreadCycleTime")))
++                          : nullptr;
++  if (!g_query_cycles) {
++    REXAPU_WARN("audio stats: QueryThreadCycleTime is not available, the CPU times stay na");
++    return;
++  }
++  LARGE_INTEGER freq{};
++  QueryPerformanceFrequency(&freq);
++  double best = 0.0;
++  for (int i = 0; i < 3 && freq.QuadPart > 0; ++i) {
++    ULONG64 c0 = 0, c1 = 0;
++    LARGE_INTEGER t0{}, t1{};
++    QueryPerformanceCounter(&t0);
++    g_query_cycles(GetCurrentThread(), &c0);
++    do {
++      QueryPerformanceCounter(&t1);
++    } while ((t1.QuadPart - t0.QuadPart) * 1000 < freq.QuadPart * 8);
++    g_query_cycles(GetCurrentThread(), &c1);
++    const double ns = static_cast<double>(t1.QuadPart - t0.QuadPart) * 1e9 / static_cast<double>(freq.QuadPart);
++    best = std::max(best, static_cast<double>(c1 - c0) / ns);
++  }
++  if (best <= 0.0) {
++    REXAPU_WARN("audio stats: the thread cycle counter did not move, the CPU times stay na");
++    return;
++  }
++  g_cycles_per_ns = best;
++  REXAPU_INFO("audio stats: thread CPU times from QueryThreadCycleTime ({:.0f} cycles per microsecond, measured now)",
++              best * 1000.0);
++}
++
++uint64_t ThreadCpuNs() {
++  ULONG64 cycles = 0;
++  if (g_cycles_per_ns <= 0.0 || !g_query_cycles(GetCurrentThread(), &cycles)) {
++    return 0;
++  }
++  return static_cast<uint64_t>(static_cast<double>(cycles) / g_cycles_per_ns);
++}
++
++bool ThreadCpuAvailable() {
++  return g_cycles_per_ns > 0.0;
++}
++#else
++void InitThreadCpuClock() {}
++uint64_t ThreadCpuNs() {
++  return 0;
++}
++bool ThreadCpuAvailable() {
++  return false;
++}
++#endif
++
++}  // namespace rex::audio::dump
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
 index 20a2cd8..06cb35d 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp

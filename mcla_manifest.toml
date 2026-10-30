@@ -8,4 +8,4 @@ game_root = "game"
 [entrypoint]
 file_path = "game/default.xex"
 out_directory_path = "generated/default"
-includes = ["config/mcla.toml", "config/data_referenced.toml", "config/runtime_discovered.toml", "config/code_referenced.toml", "config/frame_timing.toml", "config/render_perf.toml", "config/perf_options.toml", "config/poll_wait.toml", "config/ui.toml", "config/settings_menu.toml", "config/pad_probe.toml", "config/codegen_options.toml", "config/vehicle_telemetry.toml"]
+includes = ["config/mcla.toml", "config/data_referenced.toml", "config/runtime_discovered.toml", "config/code_referenced.toml", "config/frame_timing.toml", "config/render_perf.toml", "config/perf_options.toml", "config/poll_wait.toml", "config/ui.toml", "config/settings_menu.toml", "config/pad_probe.toml", "config/codegen_options.toml", "config/vehicle_telemetry.toml", "config/audio_mixer.toml"]
