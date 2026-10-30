@@ -54,6 +54,13 @@ G4 SetPSO(aliased line + depth/stencil, PS with clip()); tri   s0 ( 8.1, 8.1) s1
 G5 SetPSO(aliased line + depth/stencil, cull back); tri        s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
 G6 SetPSO(POINT topology PSO); tri                             s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 G7 SetPSO(aliased line with SampleDesc 1); tri                 s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G12 SetPSO(line topology type WITH a geometry shader); tri     s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
 
 --- PSO sequences with different sample counts ---
 E1 1x tri; line; tri                                           s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
@@ -148,6 +155,13 @@ G4 SetPSO(aliased line + depth/stencil, PS with clip()); tri   s0 (12.2,12.2) s1
 G5 SetPSO(aliased line + depth/stencil, cull back); tri        s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 G6 SetPSO(POINT topology PSO); tri                             s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 G7 SetPSO(aliased line with SampleDesc 1); tri                 s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G12 SetPSO(line topology type WITH a geometry shader); tri     s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 
 --- PSO sequences with different sample counts ---
 E1 1x tri; line; tri                                           s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
@@ -242,6 +256,13 @@ G4 SetPSO(aliased line + depth/stencil, PS with clip()); tri   s0 (12.2,12.2) s1
 G5 SetPSO(aliased line + depth/stencil, cull back); tri        s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 G6 SetPSO(POINT topology PSO); tri                             s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 G7 SetPSO(aliased line with SampleDesc 1); tri                 s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G12 SetPSO(line topology type WITH a geometry shader); tri     s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
+G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern
 
 --- PSO sequences with different sample counts ---
 E1 1x tri; line; tri                                           s0 (12.2,12.2) s1 ( 4.1, 4.1) /16 px  => standard pattern

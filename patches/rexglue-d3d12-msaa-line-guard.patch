@@ -189,10 +189,10 @@ index e4361f6..96de8e1 100644
          }
        } break;
 diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
-index 8565923..f494ff6 100644
+index 8565923..a1ee77d 100644
 --- a/src/graphics/d3d12/pipeline_cache.cpp
 +++ b/src/graphics/d3d12/pipeline_cache.cpp
-@@ -2753,6 +2753,38 @@ const std::vector<uint32_t>& PipelineCache::GetGeometryShader(GeometryShaderKey
+@@ -2753,6 +2753,44 @@ const std::vector<uint32_t>& PipelineCache::GetGeometryShader(GeometryShaderKey
    return geometry_shaders_.emplace(key, std::move(shader)).first->second;
  }
  
@@ -202,9 +202,15 @@ index 8565923..f494ff6 100644
 +  if (description.host_msaa_samples == xenos::MsaaSamples::k1X) {
 +    return 0;
 +  }
++  // A pipeline with a geometry shader (the quad lists have the line topology type
++  // and are rasterized as triangles) doesn't leave the sample positions at the
++  // pixel centre on the Radeon, so it needs no guard.
++  if (description.geometry_shader != PipelineGeometryShader::kNone) {
++    return 0;
++  }
 +  // Triangles drawn as wireframe are rasterized as lines. For a vertex shader,
-+  // the topology type (the same one CreateD3D12Pipeline gives the pipeline, also
-+  // with a geometry shader) is line.
++  // the topology type (the same one CreateD3D12Pipeline gives the pipeline) is
++  // line.
 +  bool lines = description.fill_mode_wireframe != 0;
 +  if (!lines &&
 +      !Shader::IsHostVertexShaderTypeDomain(

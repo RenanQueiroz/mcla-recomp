@@ -10,9 +10,10 @@
 //   WARP except where it keeps explicit sample positions from case 18 for the later lists, so 18 runs last):
 //   1. 2x and 4x alike, the Radeon leaves all samples at the pixel centre for the triangles that follow an aliased line PSO (or a wireframe triangle PSO,
 //      W1) when that PSO is bound while the previous graphics PSO of the list has another sample count, or there is none (cases 1-4, 7, 8, 11, 12, 16, 17,
-//      19-23, 26, E1-E3, E6, E8, F0-F2, F5-F9, F11, G1-G5, L1, W1). It does not matter whether a line is drawn, what the line PSO's other state is (blend, depth,
+//      19-23, 26, E1-E3, E6, E8, F0-F2, F5-F9, F11, G1-G5, G8-G11, L1, W1). It does not matter whether a line is drawn, what the line PSO's other state is (blend, depth,
 //      stencil, cull, a clip() in the pixel shader, SV_Position), or what happens in between (barriers, clears, re-binding the targets, a compute PSO,
-//      a triangle PSO with MultisampleEnable). A 1-sample line PSO and a point PSO do not do it (G6, G7).
+//      a triangle PSO with MultisampleEnable). A 1-sample line PSO, a point PSO and a line-topology PSO WITH a geometry shader (the game's quad lists: lineadj in, triangles out; wireframe too)
+//      do not do it (G6, G7, G12-G14); a pixel shader that writes SV_Coverage, [earlydepthstencil] or has interpolants does (G8-G11).
 //   2. It does not happen when the previous graphics PSO has the line PSO's sample count (cases 24, 25, 27, E4, E7, E11, F3, F4, F10, V1-V5): the
 //      driver seems to set the sample positions only when the sample count changes between two PSOs, and sets the centre for an aliased line PSO.
 //      A later PSO of the same count does not undo it (23); a PSO of another count does (E5, E10). A list that starts with a compute
@@ -91,19 +92,35 @@ static const char* PS_CONST = "float4 main(float4 pos : SV_Position) : SV_Target
 static const char* PS_DISCARD = "float4 main(float4 pos : SV_Position) : SV_Target { clip(pos.x - 0.5); return float4(10, 10, 10, 10); }\n";
 static const char* PS_USEPOS = "float4 main(float4 pos : SV_Position) : SV_Target { return float4(10, 10, 10, 10) * (1.0 + 0.0 * pos.x); }\n";
 
+static const char* VS_LINES_INTERP =
+    "struct VO { float4 p : SV_Position; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; };\n"
+    "VO main(uint id : SV_VertexID) { float2 q = float2(450 + 100 * (id & 1), 100.3 + 10 * (id >> 1) + 7 * (id & 1)); VO o; o.p = float4(q.x / 640.0 - 1.0, 1.0 - q.y / 360.0, 0.5, 1.0); o.t0 = float4(1, 2, 3, 4); o.t1 = float4(5, 6, 7, 8); return o; }\n";
+static const char* GS_QUAD = "struct V { float4 p : SV_Position; };\n[maxvertexcount(4)] void main(lineadj V v[4], inout TriangleStream<V> s) { s.Append(v[0]); s.Append(v[1]); s.Append(v[3]); s.Append(v[2]); s.RestartStrip(); }\n";
+static const char* PS_COV = "struct O { float4 c : SV_Target; uint m : SV_Coverage; };\nO main(float4 pos : SV_Position) { O o; o.c = float4(10, 10, 10, 10); o.m = 0xFFFFFFFF; return o; }\n";
+static const char* PS_EARLY = "[earlydepthstencil] float4 main(float4 pos : SV_Position) : SV_Target { return float4(10, 10, 10, 10); }\n";
+static const char* PS_INTERP = "float4 main(float4 pos : SV_Position, float4 t0 : TEXCOORD0, float4 t1 : TEXCOORD1, bool ff : SV_IsFrontFace) : SV_Target { return float4(10, 10, 10, 10) * (1.0 + 0.0 * t0.x * t1.y); }\n";
+static const char* PS_INTERP_EARLY = "[earlydepthstencil] float4 main(float4 pos : SV_Position, float4 t0 : TEXCOORD0, float4 t1 : TEXCOORD1, bool ff : SV_IsFrontFace) : SV_Target { return float4(10, 10, 10, 10) * (1.0 + 0.0 * t0.x * t1.y); }\n";
+
 struct PsoOpt { D3D12_PRIMITIVE_TOPOLOGY_TYPE topo = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; bool msaaEnable = false; bool usePos = false; bool depth = false; D3D12_CULL_MODE cull = D3D12_CULL_MODE_NONE; bool ccw = false; bool lines = false; bool aaLine = false;
                   bool blend = false; bool discardPs = false;                       // fix-shape variants and the line PSOs of the game that did not trigger
                   bool dummy = false; int samples = -1;   /* -1: g_ns */ bool dummyRt = false; bool dummyRtOnly = false; bool otherRs = false;
+                  bool gs = false;   /* a geometry shader that turns lineadj into a triangle strip (the game's quad lists) */
+                  int shaders = 0;   /* 0 plain, 1 SV_Coverage, 2 earlydepthstencil, 3 interpolants, 4 interpolants + earlydepthstencil */
                   bool wire = false; DXGI_FORMAT rtfOverride = DXGI_FORMAT_UNKNOWN, dsfOverride = DXGI_FORMAT_UNKNOWN; };   // dummy: no PS, no render target, no depth (the list-start PSO of the fix)
 
 static ComPtr<ID3D12PipelineState> MakePSO(const PsoOpt& o)
 {
-    auto vs = Compile(o.lines ? VS_LINES : VS_QUADS, "vs_5_0");
-    auto ps = Compile(o.usePos ? PS_USEPOS : (o.discardPs ? PS_DISCARD : PS_CONST), "ps_5_0");
+    const char* vsSrc = o.lines ? (o.shaders >= 3 ? VS_LINES_INTERP : VS_LINES) : VS_QUADS;
+    const char* psSrc = o.usePos ? PS_USEPOS : (o.discardPs ? PS_DISCARD : PS_CONST);
+    if (o.shaders == 1) psSrc = PS_COV; else if (o.shaders == 2) psSrc = PS_EARLY; else if (o.shaders == 3) psSrc = PS_INTERP; else if (o.shaders == 4) psSrc = PS_INTERP_EARLY;
+    auto vs = Compile(vsSrc, "vs_5_0");
+    auto ps = Compile(psSrc, "ps_5_0");
+    ComPtr<ID3DBlob> gsb; if (o.gs) gsb = Compile(GS_QUAD, "gs_5_0");
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {};
     d.pRootSignature = (o.otherRs ? rsOther : rsEmpty).Get();
     d.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
     if (!o.dummy) d.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    if (o.gs) d.GS = { gsb->GetBufferPointer(), gsb->GetBufferSize() };
     d.BlendState.RenderTarget[0].RenderTargetWriteMask = 0xF;
     if (o.blend) { auto& b = d.BlendState.RenderTarget[0]; b.BlendEnable = TRUE; b.SrcBlend = D3D12_BLEND_SRC_ALPHA; b.DestBlend = D3D12_BLEND_INV_SRC_ALPHA; b.BlendOp = D3D12_BLEND_OP_ADD; b.SrcBlendAlpha = D3D12_BLEND_ONE; b.DestBlendAlpha = D3D12_BLEND_ZERO; b.BlendOpAlpha = D3D12_BLEND_OP_ADD; }
     d.SampleMask = 0xFFFFFFFFu;
@@ -387,6 +404,23 @@ int main(int argc, char** argv)
     Test("G5 SetPSO(aliased line + depth/stencil, cull back); tri", psoTri.Get(), PreLine, &gK);
     Test("G6 SetPSO(POINT topology PSO); tri", psoTri.Get(), PreLine, &gP);
     Test("G7 SetPSO(aliased line with SampleDesc 1); tri", psoTri.Get(), PreLine, &gL);
+    {   // line topology type with a geometry shader (the game's quad lists), first in the list, with and without depth/stencil; and wireframe with a geometry shader
+        PsoOpt g1 = l; g1.gs = true; auto p1 = MakePSO(g1); Ctx c1{ p1.Get(), false, nullptr };
+        PsoOpt g2 = lD; g2.gs = true; auto p2 = MakePSO(g2); Ctx c2{ p2.Get(), false, nullptr };
+        PsoOpt g3 = lD; g3.gs = true; g3.wire = true; auto p3 = MakePSO(g3); Ctx c3{ p3.Get(), false, nullptr };
+        Test("G12 SetPSO(line topology type WITH a geometry shader); tri", psoTri.Get(), PreLine, &c1);
+        Test("G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri", psoTri.Get(), PreLine, &c2);
+        Test("G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri", psoTri.Get(), PreLine, &c3);
+    }
+    {   // shader features of the game's line pipelines: SV_Coverage output (4170), forced early depth (4179 and three others), interpolants (all)
+        const char* names[] = { "G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri", "G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri",
+                                "G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri", "G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri" };
+        for (int k = 1; k <= 4; ++k)
+        {
+            PsoOpt g = lD; g.shaders = k; auto pso = MakePSO(g); Ctx c{ pso.Get(), false, nullptr };
+            Test(names[k - 1], psoTri.Get(), PreLine, &c);
+        }
+    }
 
     // ---- sequences of PSOs with different sample counts (only bound, never drawn with, except the final probe draw). "match" = the target's count.
     printf("\n--- PSO sequences with different sample counts ---\n");
