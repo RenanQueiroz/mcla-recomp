@@ -72,6 +72,7 @@ git apply ../../patches/rexglue-upstream-linux-wine.patch
 git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
 git apply ../../patches/rexglue-affinity-warning-once.patch
+git apply ../../patches/rexglue-d3d12-msaa-line-guard.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -2032,6 +2033,28 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | Change | Files | Affects |
 |---|---|---|
 | The warning logged once per run (`affinity_warning_once`); `debug_affinity_logical_processors` | `src/system/xthread.cpp` | all platforms with fewer than 6 logical processors (and the debug option anywhere) |
+
+## rexglue-d3d12-msaa-line-guard.patch
+
+**Why.** Fork issue #28: on AMD Radeons the world flashes for a few frames with the second clear's colour. On the integrated Radeon of a Ryzen 7 9800X3D PC (driver 32.00.21045.16010) it was traced to the driver: a pipeline that draws lines with `MultisampleEnable` false (what this SDK always builds; Direct3D 12 calls it aliased lines), bound while the previous graphics pipeline of the command list had a different sample count or there was none, leaves the sample positions at the pixel centre for every later pipeline of that count, until a pipeline of another count is bound. Wireframe triangles do it too. A list that starts with a line draw is the common case, and lists begin and end at timing dependent places (`d3d12_submit_on_primary_buffer_end`, `d3d12_threaded_submission_split_draws`, the idle wait). The world pass is drawn twice for the two tiles; the second draw is depth-tested (`GREATER_EQUAL`) at the pixel centre against depth written at the real sample positions and fails at some samples, which keep the clear's colour. The standalone program `launcher/dev/msaa-line-guard/msaa_line_pso.cpp` (no game data) shows the driver's behaviour in 81 cases at 2x and 80 at 4x (41 collapse the samples on the Radeon); the RTX 5080 and WARP keep the standard positions in all of them.
+
+**What it changes.** Cvar `d3d12_msaa_line_guard` (default true; can change at run time; false is the behaviour before this patch).
+- At start `D3D12CommandProcessor` creates two small triangle pipelines, for 2 and for 4 samples: the vertex shader of the fullscreen clears, no pixel shader, one `R8G8B8A8_UNORM` render target, an empty root signature. Nothing is ever drawn with them. They are made in `SetupContext`, not by the pipeline cache, so they exist when pipelines are created asynchronously; no pipeline of the SDK fits (the render target cache's are made on demand, for given formats and with a pixel shader).
+- `PipelineCache::GetMsaaLineGuardSamples` says from a pipeline's description whether it draws lines or wireframe on a multisampled target and has no geometry shader (the quad lists have the line topology type and a geometry shader, and don't trigger the driver's collapse: the program and four such pipelines of the capture; the topology type as `CreateD3D12Pipeline` gives it, vertex shader types only; the sample count as it creates the pipeline, 2 becoming 4 where 2x isn't supported; none with the pixel-shader-interlock path, where the pipeline has 1 sample).
+- When the deferred command list replays `SetPipelineStateHandle`, on the thread that replays (the submission thread too), it binds the guard pipeline of that sample count first. The recording side is untouched: the cached current pipeline still resets where it did (`BeginSubmission`) and a draw whose pipeline isn't ready is still skipped. A list that starts with a compute pipeline works as before.
+- The log says whether the guard is on and whether both pipelines were made at the start, when the first guard pipeline is bound, and how many were bound in the run at the end.
+
+**Why this and not the others.** A triangle pipeline at the start of every list, as first thought, is not enough: the driver reacts to a change of the sample count between two consecutive graphics pipelines, so the guard has to have the line pipeline's count and has to come right before it (a guard of the other sample count, or a matching guard followed by a pipeline of the other count, still collapsed; a list that went 2x, 1x, line collapsed in the middle of the list). `MultisampleEnable = TRUE` on the line pipelines also cures it, but it changes how lines are rasterized (quadrilaterals, not aliased) and the pipelines the driver keeps. `SetSamplePositions(0, 0, nullptr)` after the line pipeline also cures it, but needs `ID3D12GraphicsCommandList1` and programmable sample positions. The guard changes no drawn pixel on the GPUs tried and costs one `SetPipelineState` before a line pipeline. It is on for every vendor: it costs that call and changes no covered sample on the RTX 5080 or WARP in the program; only one Radeon was shown to need it, and the reporter's card and other drivers were not tried.
+
+**Checked.** The program (Radeon, RTX 5080, WARP; 2x and 4x; debug layer on, no messages): every sequence of the cases above is standard with the guard before the line pipeline. The guard's shape: one colour format alone, a depth format alone or both work; a pipeline without outputs, or with 1 sample, or of the other sample count does not. The line draw covers the same samples with the guard as in the sequence that was never broken. In the capture replay on the Radeon: see KNOWN-ISSUES. In the game: see `launcher/dev/msaa-line-guard-2026-10-30.md`. CI builds Windows (llvm-mingw); not built or run on Linux, the PS5 or Vulkan (Direct3D 12 only; the PS5 script lists it, no Direct3D 12 there). **Not known:** the reporter's RX 7800 XT, other drivers, any discrete Radeon.
+
+**Upstream:** not offered for now (all upstream work is parked).
+
+| Change | Files | Affects |
+|---|---|---|
+| The two guard pipelines, `GetMsaaLineGuardPipeline`, the option | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12 |
+| `GetMsaaLineGuardSamples` | `include/rex/graphics/d3d12/pipeline_cache.h`, `src/graphics/d3d12/pipeline_cache.cpp` | D3D12 |
+| The guard bound before the pipeline when the commands are replayed | `src/graphics/d3d12/deferred_command_list.cpp` | D3D12 |
 
 ## rexglue-mingw.patch
 

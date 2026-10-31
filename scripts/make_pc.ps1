@@ -485,6 +485,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-codegen-csr-lazy.patch"; File = "src\codegen\config.cpp"; Adds = "csr_mode_free_ops" }
     # The "too few processor cores" warning of the thread affinity code, once per run (issue #21), and a debug option to take that path on a larger PC.
     @{ Patch = "rexglue-affinity-warning-once.patch"; File = "src\system\xthread.cpp"; Adds = "affinity_warning_once" }
+    # Direct3D 12 on AMD: a guard triangle pipeline before each line pipeline on a multisampled target (issue #28), one option (d3d12_msaa_line_guard).
+    @{ Patch = "rexglue-d3d12-msaa-line-guard.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_msaa_line_guard" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

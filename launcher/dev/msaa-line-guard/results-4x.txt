@@ -1,0 +1,300 @@
+=================== AMD 4x
+adapter 0: NVIDIA GeForce RTX 5080
+adapter 1: AMD Radeon(TM) Graphics
+adapter 2: Microsoft Basic Render Driver (software)
+using: AMD Radeon(TM) Graphics
+
+0 triangles only (control)                                     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+1 SetPSO(aliased line, PS ignores pos) then triangles          s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+2 ... and a line draw first                                    s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+3 SetPSO(aliased line, PS reads SV_Position) then triangles    s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+4 ... and a line draw first                                    s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+5 SetPSO(line, MultisampleEnable=TRUE) then triangles          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+6 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 274 276 276 274 /16 px  => standard pattern
+7 SetPSO(aliased line + depth/stencil enabled) then triangles  s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+8 ... and a line draw first                                    s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+9 SetPSO(line + depth/stencil, MultisampleEnable=TRUE) then tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+10 ... and a line draw first                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 274 276 276 274 /16 px  => standard pattern
+11 SetPSO(line, AntialiasedLineEnable=TRUE) then triangles     s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+12 ... and a line draw first                                   s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 400 400 400 400 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+13 triangles with MultisampleEnable=TRUE only (control)        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+14 SetPSO(aliased line); SetSamplePositions(0,0,null); tri     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+15 SetPSO(aliased line); SetPSO(tri); SetSamplePositions(0,0,null) s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+16 SetPSO(aliased line); SetPSO(compute); then tri             s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+17 line draw; SetPSO(compute); then tri                        s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+19 SetPSO(aliased line); small draw with MultisampleEnable=TRUE tri PSO; tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+20 SetPSO(aliased line); OMSetRenderTargets again; tri         s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+21 SetPSO(aliased line); barrier RT->COPY_SOURCE->RT; tri      s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+22 SetPSO(aliased line); ClearRenderTargetView again; tri      s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+23 SetPSO(aliased line); SetPSO(MultisampleEnable=TRUE tri), no draw; tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+24 SetPSO(tri); SetPSO(aliased line); [Test sets tri] draw     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+25 SetPSO(tri); SetPSO(aliased line); line draw; tri           s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 198 /16 px  => standard pattern
+26 SetPSO(compute) first; SetPSO(aliased line); tri            s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+27 SetPSO(MS line) first; SetPSO(aliased line); tri            s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- list-start PSO (the fix) ---
+F0 (control, no list-start PSO) SetPSO(aliased line); tri      s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F1 dummy no-output PSO first; SetPSO(aliased line); tri        s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F2 dummy 1x/RT-only PSO first; SetPSO(aliased line); tri       s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F3 dummy matching count/RT+depth first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F4 full triangle PSO (other root sig) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F5 dummy no-output first; SetPSO(aliased line); line draw; tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F6 dummy no-output first; compute PSO; SetPSO(aliased line); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F7 dummy no-output first; SetPSO(aliased line + depth/stencil); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F8 dummy no-output first; SetPSO(aliased line, PS reads pos); line draw; tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F9 dummy with the OTHER sample count first; SetPSO(aliased line); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+F10 both counts (other, then matching) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F11 both counts (matching, then other) first; SetPSO(aliased line); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+
+--- other first PSOs, no list-start PSO ---
+G1 SetPSO(aliased line, blend on); tri                         s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G2 SetPSO(aliased line, PS with clip()); tri                   s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G3 SetPSO(aliased line + depth/stencil, blend on); tri         s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G4 SetPSO(aliased line + depth/stencil, PS with clip()); tri   s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G5 SetPSO(aliased line + depth/stencil, cull back); tri        s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G6 SetPSO(POINT topology PSO); tri                             s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G7 SetPSO(aliased line with SampleDesc 1); tri                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G12 SetPSO(line topology type WITH a geometry shader); tri     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+
+--- PSO sequences with different sample counts ---
+E1 1x tri; line; tri                                           s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+E2 match tri; 1x tri; line; tri                                s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+E3 match tri; line; 1x tri; line; tri                          s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+E4 1x tri; match tri; line; tri                                s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E5 line first; 1x tri; match tri; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E6 other-count tri; line; tri                                  s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+E7 other-count tri; match tri; line; tri                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E8 match tri; line; other-count tri; line; tri                 s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+E10 other-count aliased line first; match tri                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E11 match tri; line; 1x tri; match tri; line; tri              s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- wireframe ---
+W1 SetPSO(wireframe triangle PSO) first; tri                   s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+
+--- guard PSO shapes (matching sample count) ---
+V1 guard: R8G8B8A8_UNORM only                                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V2 guard: R16G16B16A16_FLOAT only                              s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V3 guard: D32_FLOAT_S8X24 only                                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V4 guard: D32_FLOAT only                                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V5 guard: R8G8B8A8_UNORM + D32_FLOAT_S8X24                     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- the guard before each line PSO (g_guard on) ---
+H0 guard; line; tri (line first in the list)                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H1 1x tri; [guard] line; tri                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H2 match tri; 1x tri; [guard] line; tri                        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H3 match tri; [guard] line; 1x tri; [guard] line; tri          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H6 other-count tri; [guard] line; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H8 match tri; [guard] line; other-count tri; [guard] line; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H10 [guard of the other count] other-count line first; match tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H12 [guard] line first, line draw, tri                         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 198 /16 px  => standard pattern
+H13 match tri; [guard] line, line draw, tri                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 198 /16 px  => standard pattern
+L1 (no guard) line first, line draw, tri                       s0 ( 8.1, 8.1) s1 ( 8.1, 8.1) s2 ( 8.1, 8.1) s3 ( 8.1, 8.1) | line px 200 200 200 200 /16 px  => ALL SAMPLES AT PIXEL CENTRE (broken)
+L2 (no guard) match tri; line, line draw, tri                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 198 /16 px  => standard pattern
+
+[exit 0]
+=================== NVIDIA 4x
+adapter 0: NVIDIA GeForce RTX 5080
+adapter 1: AMD Radeon(TM) Graphics
+adapter 2: Microsoft Basic Render Driver (software)
+using: NVIDIA GeForce RTX 5080
+
+0 triangles only (control)                                     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+1 SetPSO(aliased line, PS ignores pos) then triangles          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+2 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+3 SetPSO(aliased line, PS reads SV_Position) then triangles    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+4 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+5 SetPSO(line, MultisampleEnable=TRUE) then triangles          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+6 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 276 276 276 274 /16 px  => standard pattern
+7 SetPSO(aliased line + depth/stencil enabled) then triangles  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+8 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+9 SetPSO(line + depth/stencil, MultisampleEnable=TRUE) then tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+10 ... and a line draw first                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 276 276 276 274 /16 px  => standard pattern
+11 SetPSO(line, AntialiasedLineEnable=TRUE) then triangles     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+12 ... and a line draw first                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 380 380 380 380 /16 px  => standard pattern
+13 triangles with MultisampleEnable=TRUE only (control)        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+14 SetPSO(aliased line); SetSamplePositions(0,0,null); tri     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+15 SetPSO(aliased line); SetPSO(tri); SetSamplePositions(0,0,null) s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+16 SetPSO(aliased line); SetPSO(compute); then tri             s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+17 line draw; SetPSO(compute); then tri                        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+19 SetPSO(aliased line); small draw with MultisampleEnable=TRUE tri PSO; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+20 SetPSO(aliased line); OMSetRenderTargets again; tri         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+21 SetPSO(aliased line); barrier RT->COPY_SOURCE->RT; tri      s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+22 SetPSO(aliased line); ClearRenderTargetView again; tri      s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+23 SetPSO(aliased line); SetPSO(MultisampleEnable=TRUE tri), no draw; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+24 SetPSO(tri); SetPSO(aliased line); [Test sets tri] draw     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+25 SetPSO(tri); SetPSO(aliased line); line draw; tri           s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+26 SetPSO(compute) first; SetPSO(aliased line); tri            s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+27 SetPSO(MS line) first; SetPSO(aliased line); tri            s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- list-start PSO (the fix) ---
+F0 (control, no list-start PSO) SetPSO(aliased line); tri      s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F1 dummy no-output PSO first; SetPSO(aliased line); tri        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F2 dummy 1x/RT-only PSO first; SetPSO(aliased line); tri       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F3 dummy matching count/RT+depth first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F4 full triangle PSO (other root sig) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F5 dummy no-output first; SetPSO(aliased line); line draw; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+F6 dummy no-output first; compute PSO; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F7 dummy no-output first; SetPSO(aliased line + depth/stencil); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F8 dummy no-output first; SetPSO(aliased line, PS reads pos); line draw; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+F9 dummy with the OTHER sample count first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F10 both counts (other, then matching) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F11 both counts (matching, then other) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- other first PSOs, no list-start PSO ---
+G1 SetPSO(aliased line, blend on); tri                         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G2 SetPSO(aliased line, PS with clip()); tri                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G3 SetPSO(aliased line + depth/stencil, blend on); tri         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G4 SetPSO(aliased line + depth/stencil, PS with clip()); tri   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G5 SetPSO(aliased line + depth/stencil, cull back); tri        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G6 SetPSO(POINT topology PSO); tri                             s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G7 SetPSO(aliased line with SampleDesc 1); tri                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G12 SetPSO(line topology type WITH a geometry shader); tri     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- PSO sequences with different sample counts ---
+E1 1x tri; line; tri                                           s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E2 match tri; 1x tri; line; tri                                s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E3 match tri; line; 1x tri; line; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E4 1x tri; match tri; line; tri                                s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E5 line first; 1x tri; match tri; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E6 other-count tri; line; tri                                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E7 other-count tri; match tri; line; tri                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E8 match tri; line; other-count tri; line; tri                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E10 other-count aliased line first; match tri                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E11 match tri; line; 1x tri; match tri; line; tri              s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- wireframe ---
+W1 SetPSO(wireframe triangle PSO) first; tri                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- guard PSO shapes (matching sample count) ---
+V1 guard: R8G8B8A8_UNORM only                                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V2 guard: R16G16B16A16_FLOAT only                              s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V3 guard: D32_FLOAT_S8X24 only                                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V4 guard: D32_FLOAT only                                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V5 guard: R8G8B8A8_UNORM + D32_FLOAT_S8X24                     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- the guard before each line PSO (g_guard on) ---
+H0 guard; line; tri (line first in the list)                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H1 1x tri; [guard] line; tri                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H2 match tri; 1x tri; [guard] line; tri                        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H3 match tri; [guard] line; 1x tri; [guard] line; tri          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H6 other-count tri; [guard] line; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H8 match tri; [guard] line; other-count tri; [guard] line; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H10 [guard of the other count] other-count line first; match tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H12 [guard] line first, line draw, tri                         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+H13 match tri; [guard] line, line draw, tri                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+L1 (no guard) line first, line draw, tri                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+L2 (no guard) match tri; line, line draw, tri                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+
+[exit 0]
+=================== Basic 4x
+adapter 0: NVIDIA GeForce RTX 5080
+adapter 1: AMD Radeon(TM) Graphics
+adapter 2: Microsoft Basic Render Driver (software)
+using: Microsoft Basic Render Driver
+
+0 triangles only (control)                                     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+1 SetPSO(aliased line, PS ignores pos) then triangles          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+2 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+3 SetPSO(aliased line, PS reads SV_Position) then triangles    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+4 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+5 SetPSO(line, MultisampleEnable=TRUE) then triangles          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+6 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 282 280 280 282 /16 px  => standard pattern
+7 SetPSO(aliased line + depth/stencil enabled) then triangles  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+8 ... and a line draw first                                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+9 SetPSO(line + depth/stencil, MultisampleEnable=TRUE) then tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+10 ... and a line draw first                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 282 280 280 282 /16 px  => standard pattern
+11 SetPSO(line, AntialiasedLineEnable=TRUE) then triangles     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+12 ... and a line draw first                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 804 804 804 804 /16 px  => standard pattern
+13 triangles with MultisampleEnable=TRUE only (control)        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+14 SetPSO(aliased line); SetSamplePositions(0,0,null); tri     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+15 SetPSO(aliased line); SetPSO(tri); SetSamplePositions(0,0,null) s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+16 SetPSO(aliased line); SetPSO(compute); then tri             s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+17 line draw; SetPSO(compute); then tri                        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+19 SetPSO(aliased line); small draw with MultisampleEnable=TRUE tri PSO; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+20 SetPSO(aliased line); OMSetRenderTargets again; tri         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+21 SetPSO(aliased line); barrier RT->COPY_SOURCE->RT; tri      s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+22 SetPSO(aliased line); ClearRenderTargetView again; tri      s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+23 SetPSO(aliased line); SetPSO(MultisampleEnable=TRUE tri), no draw; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+24 SetPSO(tri); SetPSO(aliased line); [Test sets tri] draw     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+25 SetPSO(tri); SetPSO(aliased line); line draw; tri           s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+26 SetPSO(compute) first; SetPSO(aliased line); tri            s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+27 SetPSO(MS line) first; SetPSO(aliased line); tri            s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- list-start PSO (the fix) ---
+F0 (control, no list-start PSO) SetPSO(aliased line); tri      s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F1 dummy no-output PSO first; SetPSO(aliased line); tri        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F2 dummy 1x/RT-only PSO first; SetPSO(aliased line); tri       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F3 dummy matching count/RT+depth first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F4 full triangle PSO (other root sig) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F5 dummy no-output first; SetPSO(aliased line); line draw; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+F6 dummy no-output first; compute PSO; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F7 dummy no-output first; SetPSO(aliased line + depth/stencil); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F8 dummy no-output first; SetPSO(aliased line, PS reads pos); line draw; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+F9 dummy with the OTHER sample count first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F10 both counts (other, then matching) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+F11 both counts (matching, then other) first; SetPSO(aliased line); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- other first PSOs, no list-start PSO ---
+G1 SetPSO(aliased line, blend on); tri                         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G2 SetPSO(aliased line, PS with clip()); tri                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G3 SetPSO(aliased line + depth/stencil, blend on); tri         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G4 SetPSO(aliased line + depth/stencil, PS with clip()); tri   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G5 SetPSO(aliased line + depth/stencil, cull back); tri        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G6 SetPSO(POINT topology PSO); tri                             s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G7 SetPSO(aliased line with SampleDesc 1); tri                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G12 SetPSO(line topology type WITH a geometry shader); tri     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G13 SetPSO(line topology type WITH a geometry shader, depth/stencil); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G14 SetPSO(line topology type WITH a geometry shader, wireframe); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G8 SetPSO(aliased line + depth/stencil, PS writes SV_Coverage); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G9 SetPSO(aliased line + depth/stencil, [earlydepthstencil]); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G10 SetPSO(aliased line + depth/stencil, VS/PS interpolants + SV_IsFrontFace); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+G11 SetPSO(aliased line + depth/stencil, interpolants + [earlydepthstencil]); tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- PSO sequences with different sample counts ---
+E1 1x tri; line; tri                                           s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E2 match tri; 1x tri; line; tri                                s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E3 match tri; line; 1x tri; line; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E4 1x tri; match tri; line; tri                                s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E5 line first; 1x tri; match tri; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E6 other-count tri; line; tri                                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E7 other-count tri; match tri; line; tri                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E8 match tri; line; other-count tri; line; tri                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E10 other-count aliased line first; match tri                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+E11 match tri; line; 1x tri; match tri; line; tri              s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- wireframe ---
+W1 SetPSO(wireframe triangle PSO) first; tri                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- guard PSO shapes (matching sample count) ---
+V1 guard: R8G8B8A8_UNORM only                                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V2 guard: R16G16B16A16_FLOAT only                              s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V3 guard: D32_FLOAT_S8X24 only                                 s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V4 guard: D32_FLOAT only                                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+V5 guard: R8G8B8A8_UNORM + D32_FLOAT_S8X24                     s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+
+--- the guard before each line PSO (g_guard on) ---
+H0 guard; line; tri (line first in the list)                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H1 1x tri; [guard] line; tri                                   s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H2 match tri; 1x tri; [guard] line; tri                        s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H3 match tri; [guard] line; 1x tri; [guard] line; tri          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H6 other-count tri; [guard] line; tri                          s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H8 match tri; [guard] line; other-count tri; [guard] line; tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H10 [guard of the other count] other-count line first; match tri s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) /16 px  => standard pattern
+H12 [guard] line first, line draw, tri                         s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+H13 match tri; [guard] line, line draw, tri                    s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+L1 (no guard) line first, line draw, tri                       s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+L2 (no guard) match tri; line, line draw, tri                  s0 ( 6.0, 2.1) s1 (14.1, 6.2) s2 ( 2.2,10.0) s3 (10.2,14.2) | line px 200 200 200 200 /16 px  => standard pattern
+
+[exit 0]
