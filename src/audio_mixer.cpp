@@ -52,6 +52,13 @@ REXCVAR_DEFINE_INT32(audio_mixer_priority, 0, "MCLA",
 // The thread's body: the generated code, called by the override below.
 REX_EXTERN(__imp__sub_823EC8C8);
 
+#ifdef MCLA_LAB_FMA
+// Lab build (never merged): the calling thread's fma call counts (src/fma_fast.cpp).
+uint64_t MclaFmaThreadCalls();
+uint64_t MclaFmaThreadEligible();
+bool MclaFmaCounting();
+#endif
+
 namespace {
 
 constexpr uint32_t kMixerEntry = 0x823EC8C8;
@@ -66,6 +73,7 @@ std::atomic<uint64_t> g_pump_rounds{0};   // the pump's signals to the mixer
 struct Totals {
   std::atomic<uint64_t> rounds{0}, busy_ns{0}, cpu_ns{0}, wake_n{0}, wake_ns{0};
   std::atomic<uint64_t> busy_max_ns{0}, wake_max_ns{0};  // since the last interval line
+  std::atomic<uint64_t> fma_calls{0}, fma_eligible{0};     // lab: the fma calls of the mixer's rounds
 };
 Totals g_totals;
 std::atomic<uint64_t> g_pump_signal_ns{0};  // when the pump last signalled the mixer; 0 = taken by the wake-up
@@ -83,7 +91,7 @@ void RaiseMax(std::atomic<uint64_t>& a, uint64_t v) {
 }
 
 struct Snap {
-  uint64_t rounds = 0, busy_ns = 0, cpu_ns = 0, wake_n = 0, wake_ns = 0;
+  uint64_t rounds = 0, busy_ns = 0, cpu_ns = 0, wake_n = 0, wake_ns = 0, fma_calls = 0, fma_eligible = 0;
 };
 
 Snap Take() {
@@ -93,6 +101,8 @@ Snap Take() {
   s.cpu_ns = g_totals.cpu_ns.load(std::memory_order_relaxed);
   s.wake_n = g_totals.wake_n.load(std::memory_order_relaxed);
   s.wake_ns = g_totals.wake_ns.load(std::memory_order_relaxed);
+  s.fma_calls = g_totals.fma_calls.load(std::memory_order_relaxed);
+  s.fma_eligible = g_totals.fma_eligible.load(std::memory_order_relaxed);
   return s;
 }
 
@@ -124,14 +134,23 @@ std::string MixerStats(bool total) {
   if (rex::audio::dump::ThreadCpuAvailable()) {
     std::snprintf(cpu, sizeof(cpu), "%llu", static_cast<unsigned long long>((now.cpu_ns - before.cpu_ns) / 1000 / rounds));
   }
-  char buf[256];
-  std::snprintf(buf, sizeof(buf),
+  char buf[384];
+  int n = std::snprintf(buf, sizeof(buf),
                 " | mixer: rounds=%llu busy_avg_us=%llu busy_max_us=%llu cpu_avg_us=%s wake_avg_us=%llu wake_max_us=%llu",
                 static_cast<unsigned long long>(rounds),
                 static_cast<unsigned long long>((now.busy_ns - before.busy_ns) / 1000 / rounds),
                 static_cast<unsigned long long>(busy_max / 1000), cpu,
                 static_cast<unsigned long long>(wake_n ? (now.wake_ns - before.wake_ns) / 1000 / wake_n : 0),
                 static_cast<unsigned long long>(wake_max / 1000));
+#ifdef MCLA_LAB_FMA
+  if (MclaFmaCounting() && n > 0 && n < static_cast<int>(sizeof(buf))) {
+    std::snprintf(buf + n, sizeof(buf) - n, " fma_per_round=%llu fma_eligible_per_round=%llu",
+                  static_cast<unsigned long long>((now.fma_calls - before.fma_calls) / rounds),
+                  static_cast<unsigned long long>((now.fma_eligible - before.fma_eligible) / rounds));
+  }
+#else
+  (void)n;
+#endif
   return buf;
 }
 
@@ -143,6 +162,8 @@ std::string MixerStats(bool total) {
 // The wake-up and the end of the current round, per thread (the mixer is one thread; thread_local keeps it honest).
 thread_local uint64_t t_round_start_ns = 0;
 thread_local uint64_t t_round_start_cpu_ns = 0;
+thread_local uint64_t t_round_start_fma = 0;
+thread_local uint64_t t_round_start_fma_eligible = 0;
 
 }  // namespace
 
@@ -194,6 +215,10 @@ void mcla_audio_mixer_woke() {
   }
   t_round_start_ns = now;
   t_round_start_cpu_ns = rex::audio::dump::ThreadCpuNs();
+#ifdef MCLA_LAB_FMA
+  t_round_start_fma = MclaFmaThreadCalls();
+  t_round_start_fma_eligible = MclaFmaThreadEligible();
+#endif
 }
 
 // 0x823EC978 in sub_823EC8C8: the `bl KeSetEvent` that tells the pump the frame is mixed; the round ends.
@@ -209,5 +234,9 @@ void mcla_audio_mixer_done() {
     g_totals.cpu_ns.fetch_add(cpu_now - t_round_start_cpu_ns, std::memory_order_relaxed);
   }
   RaiseMax(g_totals.busy_max_ns, busy);
+#ifdef MCLA_LAB_FMA
+  g_totals.fma_calls.fetch_add(MclaFmaThreadCalls() - t_round_start_fma, std::memory_order_relaxed);
+  g_totals.fma_eligible.fetch_add(MclaFmaThreadEligible() - t_round_start_fma_eligible, std::memory_order_relaxed);
+#endif
   t_round_start_ns = 0;
 }

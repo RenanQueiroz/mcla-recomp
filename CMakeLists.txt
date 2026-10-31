@@ -75,6 +75,9 @@ endif()
 
 rexglue_setup_target(mcla)
 
+# LAB BUILD ONLY (branch lab/ivy21-fma, never merged): fma call counts in the audio stats line, --mcla_lab_fma=nofma3.
+target_compile_definitions(mcla PRIVATE MCLA_LAB_FMA=1)
+
 if(MINGW)
     # llvm-mingw leaves the DWARF line tables of the generated code
     # (-gline-tables-only, from generated/rexglue.cmake) in the exe: 37 MB of
