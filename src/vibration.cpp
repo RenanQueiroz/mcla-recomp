@@ -65,12 +65,11 @@ constexpr uint32_t kUsers = 4;
 constexpr uint32_t kRumbleFn = 0x8275CB88;
 // The game's malloc (src/settings_menu.cpp has the same), for the probe's four bytes.
 constexpr uint32_t kGuestMallocFn = 0x82130528;
+// The word at 0x8204089C (`lis r11,-32256` / `lwz r11,2204(r11)` in sub_8275CB88) is a pointer the function reads
+// through before it calls XamInputSetState: the game's record of the pad's kind. The probe runs only when it is set.
+constexpr uint32_t kPadRecordPtr = 0x8204089C;
 
-// Both motors in one word, left in the high half (the order they have in guest memory).
-constexpr uint32_t Pack(uint32_t left, uint32_t right) {
-  return ((left & 0xFFFFu) << 16) | (right & 0xFFFFu);
-}
-
+// Both motors are kept in one word, left in the high half (the order they have in guest memory).
 struct Slot {
   std::atomic<uint32_t> wanted{0};  // what the game last asked for
   std::atomic<uint32_t> driven{0};  // what the drivers were last told
@@ -164,6 +163,12 @@ void RunProbe() {
   if (!rumble || !guest_malloc) {
     REXLOG_WARN("vibration: the probe needs the game's functions 0x{:08X} and 0x{:08X}", kRumbleFn,
                 kGuestMallocFn);
+    return;
+  }
+  const uint32_t pad_record = Read32(runtime->virtual_membase() + kPadRecordPtr);
+  if (pad_record < 0x40000000u || pad_record >= 0xC0000000u) {
+    REXLOG_WARN("vibration: the probe was not run: the game's pad record pointer (0x{:08X}) is {:08X}", kPadRecordPtr,
+                pad_record);
     return;
   }
   static uint32_t buffer = 0;  // four bytes of the game's heap, kept for the next probe

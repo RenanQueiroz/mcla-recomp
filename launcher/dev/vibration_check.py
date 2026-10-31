@@ -6,7 +6,7 @@ The run is started with --mcla_vibration=false --mcla_vibration_log=true --mcla_
 synthetic device as the controller. The script makes the game's own rumble function run (mcla_vibration_probe) and turns
 the option on and off; the dev pad's device counts every call a driver of the SDK's input system gets
 ("vibration: driver call #n left=.. right=..") and the module logs what it did with each call of the game. This reads the
-lines between the script's "dev pad: log VIB <step>" lines and compares them with what each step must show:
+lines between the script's "dev pad:  VIB <step>" lines (its `log VIB <step>` commands) and compares them with what each step must show:
 
   * the number and values of the driver calls of each step (an option that is off must give none of the game's rumble,
     and none at all once the drivers hold 0,0; one that is on must give every call; turning it off while a motor runs must
@@ -95,7 +95,7 @@ def main():
     gets = []
     started = False
     for msg in lines:
-        m = re.match(r"dev pad: log VIB (\w+)", msg)
+        m = re.match(r"dev pad:\s+(?:log\s+)?VIB (\w+)", msg)
         if m:
             step = m.group(1)
             started = True
@@ -135,7 +135,7 @@ def main():
         if m and started:
             gets.append((step, m.group(1).strip()))
     if not started:
-        say("FAIL the log has no 'dev pad: log VIB' line: the script did not run (see timeout.png and the log's end)")
+        say("FAIL the log has no 'dev pad:  VIB' line (the script's log commands): the script did not run (see timeout.png and the log's end)")
         return 1
     check("14" in calls, "the script reached its last step (VIB 14)")
     for s, want in CALLS.items():
