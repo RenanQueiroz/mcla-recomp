@@ -41,7 +41,7 @@ The numbers behind the program were taken by replaying a captured flashing frame
 
 ## In the game (the integrated Radeon and the RTX 5080)
 
-Chain `amdfix`, run 2026-10-30 (`C:\mcvmdfix\live`): guard on against off (`--d3d12_msaa_line_guard=false`) in the same build, on the integrated Radeon: 1x, fixed dt 60, uncapped, the 31 s drive. Episodes = clusters of detector events of at least 100 blocks.
+Chain `amdfix`, run 2026-10-30 (`C:\mcv\amdfix\live`): guard on against off (`--d3d12_msaa_line_guard=false`) in the same build, on the integrated Radeon: 1x, fixed dt 60, uncapped, the 31 s drive. Episodes = clusters of detector events of at least 100 blocks.
 
 | Setting | Guard off, episodes a run | Guard on | Frame time, median (off / on) |
 |---|---|---|---|
