@@ -185,16 +185,22 @@ sealed class SetupEngine
     {
         lock (gate) { failure = null; failureDetail = null; failureIsNetwork = false; }
         ChildJob.Enabled = true;
-        InstallLock installLock;
-        try { installLock = InstallLock.Acquire(ctx.Layout.Root); }
-        catch (SetupException ex)
+        try
         {
-            lock (gate) { failure = ex.Plain; failureDetail = ex.Detail; }
+            using var installLock = InstallLock.Acquire(ctx.Layout.Root);
+            await RunLockedAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && Failure == null)
+        {
+            // The folder could not be made or written, before the steps and their own log started.
+            var setup = ex as SetupException ?? new SetupException(
+                $"The setup couldn't start in {ctx.Layout.Root}: {ex.Message} Try a folder you can write to, such as one in your user folder or on another drive.",
+                ex.ToString(), ex);
+            lock (gate) { failure = setup.Plain; failureDetail = setup.Detail; }
             foreach (var t in Titles) Set(t.Id, s => s with { State = StepState.Cancelled, Text = "Not started", Remaining = null }, force: true);
             Changed?.Invoke();
-            throw;
+            throw setup;
         }
-        using (installLock) await RunLockedAsync(ct);
     }
 
     async Task RunLockedAsync(CancellationToken ct)
