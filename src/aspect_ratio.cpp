@@ -28,7 +28,7 @@ REXCVAR_DEFINE_STRING(mcla_aspect_ratio, "auto", "MCLA",
 REXCVAR_DEFINE_BOOL(mcla_hud_aspect, true, "MCLA",
                     "Keep the HUD proportional in a centered 16:9 safe area on an ultrawide display");
 REXCVAR_DEFINE_BOOL(mcla_hud_edges, true, "MCLA",
-                    "Anchor the proportional minimap and speedometer to ultrawide screen edges");
+                    "Anchor proportional left/right HUD groups to ultrawide screen edges; keep center prompts centered");
 REXCVAR_DEFINE_BOOL(mcla_gps_full_width, true, "MCLA",
                     "Draw GPS movies without the driving HUD safe-area transform");
 REXCVAR_DEFINE_BOOL(mcla_world_icon_aspect, true, "MCLA",
@@ -51,6 +51,7 @@ thread_local uint32_t g_adjusted_device = 0;
 thread_local float g_original_scale = 0;
 thread_local float g_original_offset = 0;
 thread_local float g_hud_anchor_x = 0;
+thread_local bool g_gauge_draw = false;
 std::atomic<uint32_t> g_speedometer_context{0};
 thread_local unsigned g_gps_draw_depth = 0;
 
@@ -86,7 +87,7 @@ void RestoreHudViewport(uint8_t* base) {
 }
 
 void ApplyHudViewport(uint8_t* base, uint32_t device) {
-  if (!g_wide || !g_ui_phase || g_gps_draw_depth ||
+  if (!g_wide || !g_ui_phase || g_gps_draw_depth || g_gauge_draw ||
       !REXCVAR_GET(mcla_hud_aspect) || device < 0x10000) return;
   const float width = ReadFloat(base, device + 12656);
   const float origin = ReadFloat(base, device + 12648);
@@ -173,12 +174,15 @@ template <typename Draw>
 void DrawAnchoredHudMovie(PPCContext& ctx, uint8_t* base, Draw draw) {
   const int side = HudMovieSide(base, ctx.r3.u32);
   const float saved_anchor = g_hud_anchor_x;
+  const bool saved_gauge = g_gauge_draw;
+  g_gauge_draw = side > 0;
   if (side) {
     RestoreHudViewport(base);
-    g_hud_anchor_x = side * (640.0f * (1.0f - float(g_hud_correction)));
+    g_hud_anchor_x = side < 0 ? -640.0f * (1.0f - float(g_hud_correction)) : 0.0f;
     ApplyHudViewport(base, ReadWord(base, 0x82839254));
   }
   draw(ctx, base);
+  g_gauge_draw = saved_gauge;
   if (side) {
     RestoreHudViewport(base);
     g_hud_anchor_x = saved_anchor;
@@ -223,6 +227,32 @@ DisplaySize DetectAspectDisplay(rex::ui::Window* window) {
   return {};
 }
 
+}
+
+void MclaAspectUiNode(PPCRegister& node, PPCRegister& parent_state) {
+  if (!g_gauge_draw) return;
+  auto* base = rex::Runtime::instance()->virtual_membase();
+  const uint32_t inst = node.u32;
+  if (inst < 0x10000 || parent_state.u32 < 0x10000) return;
+  const uint32_t parent = ReadWord(base, inst + 184);
+  if (parent < 0x10000 || parent_state.u32 != parent + 8) return;
+  const uint32_t root = ReadWord(base, parent + 184);
+  if (!root) {
+    if (std::abs(ReadFloat(base, inst + 48) - 640.0f) > 1.0f ||
+        std::abs(ReadFloat(base, inst + 52) - 360.0f) > 1.0f) return;
+    const float correction = float(g_hud_correction);
+    WriteFloat(base, inst + 32, ReadFloat(base, inst + 32) * correction);
+    WriteFloat(base, inst + 40, ReadFloat(base, inst + 40) * correction);
+    WriteFloat(base, inst + 48, 640.0f + (ReadFloat(base, inst + 48) - 640.0f) * correction);
+    return;
+  }
+  if (root < 0x10000 || ReadWord(base, root + 184) != 0 ||
+      std::abs(ReadFloat(base, parent + 48) - 640.0f) > 1.0f ||
+      std::abs(ReadFloat(base, parent + 52) - 360.0f) > 1.0f) return;
+  const float local_x = ReadFloat(base, inst + 24);
+  const int side = local_x < -256.0f ? -1 : local_x > 256.0f ? 1 : 0;
+  WriteFloat(base, inst + 48,
+             ReadFloat(base, inst + 48) + side * 640.0f * (1.0f - float(g_hud_correction)));
 }
 
 void MclaApplyAspectRatio(rex::ui::Window* window) {

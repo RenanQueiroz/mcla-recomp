@@ -1,0 +1,24 @@
+wait 8s
+press_until start left_title every=2s timeout=90s
+wait_until roam 180s
+wait 1s 60f
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press a 4f
+wait 2500ms 150f
+press down 4f
+wait 500ms 30f
+press a 4f
+wait 1500ms 90f
+press a 4f
+wait 1500ms 90f
+press a 4f
+wait_until roam 120s
+wait_until f32 0x827D7510 >= 7 120s
+burst ultrawide-countdown 12 1 every=400
+wait_until f32 0x827D7510 >= 15 120s
+shot ultrawide-race.png
+mark race_hud
+close
