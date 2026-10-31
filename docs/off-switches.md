@@ -6,6 +6,10 @@ Every change with a setting can be turned off without rebuilding: type the optio
 
 | Change | Option | Notes |
 |---|---|---|
+| Ultrawide camera and UI | `--mcla_aspect_ratio=16:9` | Restores 16:9 at the next start. Default `auto` detects the display at launch; `43:18` forces the 3440x1440 ratio. |
+| Proportional ultrawide HUD | `--mcla_hud_aspect=false` | Leaves the HUD stretched with the wider presentation. `--mcla_hud_edges=false` instead keeps the proportional minimap and speedometer in a centered 16:9 safe area. |
+| Full-width GPS and UI movies | `--mcla_gps_full_width=false` | Disables the dispatcher bypass for GPS and the other full-width UI movies. Individual bypasses: `--mcla_world_icon_aspect=false`, `--mcla_panel_aspect=false`, `--mcla_phone_aspect=false`, `--mcla_garage_aspect=false`. |
+| GPS native icons and foreground cursor | `--mcla_gps_icon_aspect=false` | Leaves them subject to the driving HUD safe-area transform. |
 | Hot pages (PC default) | `--shared_memory_hot_page_faults=0` | The game's PC default is 4, with `shared_memory_hot_page_ms=10000`; the SDK's is 0. |
 | Uploaded memory kept valid across frames (PC default) | `--clear_memory_page_state=true` | The SDK's default. |
 | Unclipped draws' vertex shaders on the CPU (PC default) | `--execute_unclipped_draw_vs_on_cpu=false` | The SDK's default. |

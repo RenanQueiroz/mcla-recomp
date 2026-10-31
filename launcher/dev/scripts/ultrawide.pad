@@ -1,0 +1,28 @@
+wait_until f32 0x8201E7EC > 2.385 180s
+wait_until f32 0x8201E7EC < 2.392 15s
+get mcla_aspect_ratio video_mode_width video_mode_height present_letterbox
+peekf 0x8201E7EC
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s 120f
+shot ultrawide-roam.png
+press start
+wait 3s 90f
+mark pause
+shot ultrawide-pause.png
+press start
+wait 3s 90f
+press back
+wait 3s 90f
+press y
+wait 3s 90f
+mark gps
+shot ultrawide-gps.png
+press back
+wait 2s
+mark end
+close

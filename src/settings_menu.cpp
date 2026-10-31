@@ -459,6 +459,8 @@ constexpr const char* kLowLatencyLabels[] = {"OFF", "ON", "ON + BOOST"};
 // and translated shaders are made for one scale when the GPU emulation starts.
 constexpr const char* kScaleValues[] = {"1", "2", "3"};
 constexpr const char* kScaleLabels[] = {"NATIVE (720P)", "2X (1440P)", "3X (2160P)"};
+constexpr const char* kAspectValues[] = {"auto", "16:9", "43:18"};
+constexpr const char* kAspectLabels[] = {"AUTOMATIC", "16:9", "21:9"};
 #endif
 #if REX_PLATFORM_WIN32
 // mcla_gpu_backend (src/mcla_app.cpp): chosen before the window opens.
@@ -504,6 +506,8 @@ const ItemDef kDisplayItems[] = {
     {"PM_MxFullscreen", ItemKind::kToggle, "fullscreen", "FULLSCREEN"},
     {"PM_MxResolution", ItemKind::kStringChoice, "resolution_scale", "RESOLUTION", kScaleValues,
      kScaleLabels, nullptr, 3},
+    {"PM_MxAspect", ItemKind::kStringChoice, "mcla_aspect_ratio", "ASPECT RATIO", kAspectValues,
+     kAspectLabels, nullptr, 3},
 #endif
 #if REX_PLATFORM_WIN32
     {"PM_MxBackend", ItemKind::kStringChoice, "mcla_gpu_backend", "GRAPHICS API", kBackendValues,
