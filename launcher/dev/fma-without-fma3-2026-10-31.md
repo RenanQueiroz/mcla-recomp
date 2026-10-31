@@ -50,7 +50,7 @@ exact and near cancellation, wide exponent gaps, signed zeros, all floats incl. 
 
 ## Measured with the library's FMA3 path forced off (lab build; THIS PC, not an Ivy Bridge)
 
-Pending: the chain `ivy21` (C:\mcv\ivy21\chain) writes `C:\mcv\ivy21\out\VERDICT.txt`. Variants at 4 logical processors on 4 cores (0x55), cap 30, D3D12, the driving route of
+NOT MEASURED YET: the chain `ivy21` (C:\mcv\ivy21\chain) has not run; it writes `C:\mcv\ivy21\out\VERDICT.txt`, to be copied here. Variants at 4 logical processors on 4 cores (0x55), cap 30, D3D12, the driving route of
 `mixerfix`: A as shipped; B the library's FMA3 path off (`--mcla_lab_fma=nofma3 --fma_float_fast=false`: what an Ivy Bridge runs); C the same with the fix on; D A with the calls counted.
 What B proves: that the software routine at the game's call count costs this much more CPU on a core that has it fast. What it does not prove: the figure on an Ivy Bridge.
 
