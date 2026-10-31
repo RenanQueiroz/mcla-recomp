@@ -41,4 +41,14 @@ The numbers behind the program were taken by replaying a captured flashing frame
 
 ## In the game (the integrated Radeon and the RTX 5080)
 
-Chain `amdfix`: to be run; the numbers are added here when it has. Planned: guard on against off (`--d3d12_msaa_line_guard=false`) in the same build, at the settings that flashed most in chain `amd28` (I1: idle wait on, `--d3d12_submit_on_primary_buffer_end=false --d3d12_threaded_submission_split_draws=100`; O: idle wait off) and the defaults, 3 runs a side, flash episodes confirmed by eye on contact sheets, with frame times; then the RTX 5080: frame times and pictures with the guard on and off.
+Chain `amdfix`, run 2026-10-30 (`C:\mcvmdfix\live`): guard on against off (`--d3d12_msaa_line_guard=false`) in the same build, on the integrated Radeon: 1x, fixed dt 60, uncapped, the 31 s drive. Episodes = clusters of detector events of at least 100 blocks.
+
+| Setting | Guard off, episodes a run | Guard on | Frame time, median (off / on) |
+|---|---|---|---|
+| I1: idle wait on, `--d3d12_submit_on_primary_buffer_end=false --d3d12_threaded_submission_split_draws=100` | 4, 3, 2, 2 | 0, 0, 0, 0 | 39.4 / 39.2 ms |
+| O: idle wait off | 3, 3, 5, 1 | 0, 0, 0, 0 | 38.8 / 38.6 ms |
+| D: defaults | 0, 1, 0 | 0, 1, 0 | 39.0 / 38.8 ms |
+
+I1 and O are separated (p < 0.001). The two events at the defaults are game content (a can thrown at the camera, the car and a dealer sign), checked by eye; the on sheets of I1 run 1 were checked by eye too, the others are detector counts. So with the guard on the integrated Radeon is as clean with the idle wait off as with it on: the idle wait was hiding the same effect and could be retired in a later release; it is left alone here.
+
+RTX 5080, D3D12, defaults, native, 3 runs a side: mean frame 4.187 ms off, 4.230 ms on (+1.0%), within the spread of the runs (0.06 to 0.08 ms). The picture pairs say nothing: two runs with the guard on differ as much as off against on, because time of day and traffic differ between runs. That no covered sample changes on the RTX 5080 and WARP rests on the program.
