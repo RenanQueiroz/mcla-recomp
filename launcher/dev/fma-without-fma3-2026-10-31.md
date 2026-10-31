@@ -50,9 +50,17 @@ exact and near cancellation, wide exponent gaps, signed zeros, all floats incl. 
 
 ## Measured with the library's FMA3 path forced off (lab build; THIS PC, not an Ivy Bridge)
 
-NOT MEASURED YET: the chain `ivy21` (C:\mcv\ivy21\chain) has not run; it writes `C:\mcv\ivy21\out\VERDICT.txt`, to be copied here. Variants at 4 logical processors on 4 cores (0x55), cap 30, D3D12, the driving route of
-`mixerfix`: A as shipped; B the library's FMA3 path off (`--mcla_lab_fma=nofma3 --fma_float_fast=false`: what an Ivy Bridge runs); C the same with the fix on; D A with the calls counted.
-What B proves: that the software routine at the game's call count costs this much more CPU on a core that has it fast. What it does not prove: the figure on an Ivy Bridge.
+Run on 2026-10-31 (chain `ivy21`), 3 runs a variant, 4 logical processors on 4 cores (0x55), 30 FPS cap, D3D12, a drive. A = as shipped; B = the library's FMA3 path off (`_set_FMA3_enable(0)`, the path a CPU without FMA3 takes) and this fix off; C = the same with this fix on.
+
+| | A | B | C |
+|---|---|---|---|
+| Mixer CPU per round (us) | 824 | 3,608 | 772 |
+| Audio pump round (us) | 842 | 3,637 | 788 |
+| Late callbacks of 8 ms or more, per run | 0 | 8 | 0 |
+| Frame p99, driving (ms) | 34.1 | 38.6 | 34.2 |
+| Process CPU (cores) | 0.72 | 1.59 | 0.75 |
+
+The mixer thread makes about 96,000 `fma` calls a round (100.0% with float operands), far more than the 20,000 to 30,000 estimated above from old profiles; B minus A is 28.9 ns a call, as the microbenchmark says. C is within the spread of A. With the same call count scaled to the reporter's load (14 XMA kicks a round against 11.4), the software routine alone would take 5.2 ms of their 9.3 ms if it takes as many cycles on an Ivy Bridge as here, and all of it from about 1.8 times that. That is arithmetic, not a measurement on an Ivy Bridge: no CPU without FMA3 has run this.
 
 ## What a report from the reporter's PC would need to show
 
