@@ -123,7 +123,7 @@ done
 # The desktop-only sources are left out: mcla_app.cpp and main.cpp are the
 # windowed host, and the code-pointer scan, crash trace and sampling profiler
 # are development tools tied to it.
-for name in audio_fallback audio_mixer frame_timing render_perf perf_options warp_fix button_prompts settings_menu save_wait display_gamma render_markers shader_prepare shader_storage_files vehicle_telemetry; do
+for name in audio_fallback audio_mixer frame_timing render_perf perf_options warp_fix button_prompts settings_menu save_wait display_gamma render_markers shader_prepare shader_storage_files vehicle_telemetry vibration; do
     source="$work/src/src/$name.cpp"
     object="$work/obj/host_$name.o"
     [ "$object" -nt "$source" ] && [ "$object" -nt "$work/src/src/mcla_app.h" ] && [ "$object" -nt "$pch" ] || printf '%s\t%s\t%s\n' "$source" "$object" "" >> "$work/todo.txt"

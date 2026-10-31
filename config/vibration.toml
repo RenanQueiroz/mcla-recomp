@@ -1,0 +1,16 @@
+# Controller vibration on or off (src/vibration.cpp, mcla_vibration, on by default).
+#
+# The game sets a pad's rumble in one function, sub_8275CB88(r3 = user, r4 = pointer to two 16-bit motor
+# speeds, left first, big-endian), called from the per-pad update (sub_82614D30) whenever a pad's rumble
+# changed. It copies the speeds to the stack (r1+80) and calls XamInputSetState(r3 = user, r4 = 0,
+# r5 = r1+80) at 0x8275CC34, the only call of it in the game. The SDK hands the call to every device of the
+# user (SDL, XInput, the dev pad), so a hook in front of it is above all of them.
+
+# 0x8275CC34: `bl XamInputSetState` (lr 0x8275CC38 after it). r3 = the user, r5 = the speeds. true skips the
+# call, to the epilogue at 0x8275CC38, with r3 = 0 (success): the option is off and no motor needs stopping.
+# When the call is a stop for a motor that was running, the hook zeroes the speeds in r5 and returns false.
+[[midasm_hook]]
+name = "mcla_vibration_set"
+address = 0x8275CC34
+registers = ["r3", "r5"]
+jump_address_on_true = 0x8275CC38

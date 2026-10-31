@@ -356,6 +356,28 @@ static class GameSettings
         Info = "Which button symbols the game shows. Follow the controller matches the controller you're "
              + "using; Xbox or PlayStation always shows that one.",
     };
+    // mcla_vibration (src/vibration.cpp): the game's rumble in front of the SDK's input drivers (SDL, XInput);
+    // it changes during play too. The game has no such setting of its own.
+    public static readonly GameSetting Vibration = new("mcla_vibration", "Controller vibration",
+        [new("On (default)", true), new("Off", false)], true)
+    {
+        Info = "Whether the game's rumble reaches your controller, on any controller. On is as on the console; "
+             + "Off stops all of it, and stops it at once if a motor is running. Changes during play in the "
+             + "pause menu (CONTROLS). It has nothing to do with the DualSense adaptive triggers, which are "
+             + "their own setting.",
+    };
+    // mcla_adaptive_triggers (src/pc_triggers.cpp): R2 and L2 of a DualSense through SDL; it changes during
+    // play too, and turning it off releases the triggers. Another controller is not touched either way.
+    public static readonly GameSetting AdaptiveTriggers = new("mcla_adaptive_triggers", "DualSense adaptive triggers",
+        [new("On (default)", true), new("Off", false)], true)
+    {
+        Info = "On a DualSense or DualSense Edge, R2 (throttle) pushes back like a light spring and L2 (brake) is "
+             + "firmer; they go slack in the menus, in the pause menu and when the game's window is not in front. "
+             + "Any other controller (Xbox, PlayStation 4, other makes) is left alone, so this does nothing on it. "
+             + "Off leaves the triggers alone, and releases them at once if they are in use. Changes during play in "
+             + "the pause menu (CONTROLS). It has nothing to do with Controller vibration: the game's rumble is "
+             + "its own setting.",
+    };
 
     // HDR output (the SDK's presenter; the game's scene in HDR from
     // rexglue-hdr-scene-mcla.patch). Auto, the game's default on Windows
@@ -502,7 +524,8 @@ static class GameSettings
          Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, SmoothUi, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
-    public static readonly GameSetting[] Game = [Language, Intro, Prompts];
+    public static readonly GameSetting[] Game = [Language, Intro];
+    public static readonly GameSetting[] Controller = [Prompts, Vibration, AdaptiveTriggers];
 
     // The launcher's own options (Advanced).
     public const string ExtraArgumentsInfo =

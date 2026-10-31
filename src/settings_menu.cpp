@@ -887,6 +887,14 @@ const ItemDef kPerformanceItems[] = {
 const ItemDef kControlItems[] = {
     {"PM_MxPrompts", ItemKind::kStringChoice, "mcla_button_prompts", "BUTTON PROMPTS",
      kPromptValues, kPromptLabels, nullptr, 3},
+    // The game's rumble to the controllers, or none of it (src/vibration.cpp); the next row is a
+    // separate option: the DualSense's triggers (src/pc_triggers.cpp).
+    {"PM_MxVibration", ItemKind::kToggle, "mcla_vibration", "VIBRATION"},
+#if !REX_PLATFORM_PS5
+    // On the console the triggers are opt-in (ps5/game/ps5_triggers.h, off by default): no row there.
+    // A controller that is not a DualSense is left as it is, whatever this says.
+    {"PM_MxAdaptiveTriggers", ItemKind::kToggle, "mcla_adaptive_triggers", "ADAPTIVE TRIGGERS"},
+#endif
     {"PM_MxIntro", ItemKind::kStringChoice, "mcla_intro", "INTRO", kIntroValues, kIntroLabels,
      nullptr, 3},
 #if !REX_PLATFORM_PS5

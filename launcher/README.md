@@ -518,7 +518,7 @@ flyout. The texts are in `src\GameSettings.cs`, checked against the code and
 the measurements in these notes.
 
 The settings are laid out two to a row, in two columns of equal width (`Pairs`, `src\LauncherApp.cs`):
-every section of the page (Graphics, HDR, Game) shares the window's width in halves, whatever the
+every section of the page (Graphics, HDR, Game, Controller) shares the window's width in halves, whatever the
 drop-downs hold. A drop-down is as wide as its column; a choice too long for it ends in an ellipsis in the
 closed box, and the open list is as wide as its longest choice and shows it in full. Until v0.3.0 the
 columns took the width of their contents. The cause, as read from the code and not looked at in a running

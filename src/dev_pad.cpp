@@ -108,6 +108,8 @@
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
+#include "vibration.h"
+
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -2616,8 +2618,16 @@ class ScriptPad final : public rex::input::InputDriver {
     return X_ERROR_SUCCESS;
   }
 
-  X_RESULT SetDeviceVibration(rex::input::DeviceId id, X_INPUT_VIBRATION*) override {
-    return id == kScriptPadId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+  X_RESULT SetDeviceVibration(rex::input::DeviceId id, X_INPUT_VIBRATION* vibration) override {
+    if (id != kScriptPadId) {
+      return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
+    if (vibration) {
+      // What the SDL and XInput drivers would be told (src/vibration.cpp; logged with mcla_vibration_log).
+      MclaVibrationDriverCall(static_cast<uint16_t>(vibration->left_motor_speed),
+                              static_cast<uint16_t>(vibration->right_motor_speed));
+    }
+    return X_ERROR_SUCCESS;
   }
 
   // Key events from button edges, as the SDL driver makes them (menus may read
