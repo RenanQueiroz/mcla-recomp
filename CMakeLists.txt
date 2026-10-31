@@ -40,6 +40,8 @@ set(MCLA_SOURCES
     src/crash_trace.cpp
     src/audio_fallback.cpp
     src/audio_mixer.cpp
+    # The C library's fma replaced for a CPU without FMA3 (llvm-mingw, x86-64 only; the file is empty elsewhere).
+    src/fma_fast.cpp
     src/frame_timing.cpp
     src/render_perf.cpp
     src/perf_options.cpp
