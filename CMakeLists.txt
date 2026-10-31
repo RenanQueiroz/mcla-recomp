@@ -52,6 +52,8 @@ set(MCLA_SOURCES
     src/display_gamma.cpp
     src/render_markers.cpp
     src/vehicle_telemetry.cpp
+    # Controller vibration on or off (mcla_vibration).
+    src/vibration.cpp
     # DualSense adaptive triggers through SDL (fork only; the PS5 build has ps5/game/ps5_triggers.h).
     src/pc_triggers.cpp
     src/sampling_profiler.cpp

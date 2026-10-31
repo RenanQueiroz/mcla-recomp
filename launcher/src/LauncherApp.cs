@@ -1116,6 +1116,8 @@ sealed class LauncherApp : Component
                     .Select((line, i) => TextBlock(line).Foreground(Theme.SecondaryText).WithKey(i.ToString())).ToArray()),
                 Subtitle("Game"),
                 Pairs([.. GameSettings.Game.Select(SettingCombo), PlayerNameBox()]),
+                Subtitle("Controller"),
+                Pairs(GameSettings.Controller.Select(SettingCombo).ToArray()),
                 // Lines short enough for the window: these TextBlocks don't wrap.
                 VStack(2, preparing
                     ? [TextBlock("Shaders are being prepared with these settings.").Foreground(Theme.SecondaryText),

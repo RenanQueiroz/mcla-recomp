@@ -14,6 +14,7 @@
 
 #include "mcla_app.h"
 #include "pc_triggers.h"
+#include "vibration.h"
 
 #include <algorithm>
 #include <array>
@@ -777,6 +778,7 @@ void mcla_frame_delta(PPCRegister& r8) {
 #if !REX_PLATFORM_PS5
   MclaPcTriggersFrame();  // the DualSense's adaptive triggers (src/pc_triggers.cpp)
 #endif
+  MclaVibrationFrame();  // the controllers follow mcla_vibration (src/vibration.cpp)
   MclaDevPadFrame(r8.u64);
   UiPaceLogTick();
   if (OriginalTiming()) {

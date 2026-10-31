@@ -1,0 +1,96 @@
+# Controller vibration (src/vibration.cpp, mcla_vibration; checked by launcher/dev/vibration_check.py).
+# Run with --mcla_vibration=false --mcla_vibration_log=true --mcla_menu_log_layout=true, a scratch save, and the dev pad's
+# synthetic device as the only controller. {SHOT} (a folder) is filled in by whoever starts the run.
+# `set mcla_vibration_probe user,left,right` makes the game's own rumble function run on the game loop as if the game had set
+# those motor speeds; the dev pad's device stands in for the SDL and XInput drivers and logs every call it gets
+# ("vibration: driver call"). Every `log VIB n` line starts a step; the check counts the driver calls between two of them.
+# The probe's value never repeats twice in a row (a change callback fires it).
+include boot-to-roam.pad
+mark vib_start
+log VIB 1 off: the game sets 32768,49152 (held back, 0 driver calls)
+set mcla_vibration_probe 0,32768,49152
+wait 500ms 30f
+log VIB 2 off: the game stops it (0 driver calls)
+set mcla_vibration_probe 0,0,0
+wait 500ms 30f
+log VIB 3 off: the game sets 40000,10000 (0 calls); then the option is turned on (1 call, from the update: 40000,10000)
+set mcla_vibration_probe 0,40000,10000
+wait 500ms 30f
+log VIB 3b option on
+set mcla_vibration true
+wait 500ms 30f
+log VIB 4 on: the game stops it (1 call: 0,0)
+set mcla_vibration_probe 0,0,0
+wait 500ms 30f
+log VIB 5 on: the game sets 65535,65535 (1 call: 65535,65535)
+set mcla_vibration_probe 0,65535,65535
+wait 500ms 30f
+log VIB 6 off while the motors run (1 call from the update, no call from the game: 0,0)
+set mcla_vibration false
+wait 500ms 30f
+log VIB 7 off: the game stops it (0 calls: the drivers already hold 0,0)
+set mcla_vibration_probe 0,0,0
+wait 500ms 30f
+log VIB 8 off: the game sets 20000,20000 and stops it again, then the option is turned on (0 calls)
+set mcla_vibration_probe 0,20000,20000
+wait 500ms 30f
+set mcla_vibration_probe 0,0,0
+wait 500ms 30f
+set mcla_vibration true
+wait 500ms 30f
+mark vib_pause_menu
+log VIB 9 pause menu: Start, Settings tab, CONTROLS
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press rb 4f
+wait 1000ms 60f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOT}/controls-top.png 1
+log VIB 10 CONTROLS: VIBRATION row (down one), A turns it off; the game sets 30000,30000 (0 calls)
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 800ms 48f
+get mcla_vibration
+set mcla_vibration_probe 0,30000,30000
+wait 500ms 30f
+log VIB 11 CONTROLS: A turns VIBRATION on (1 call, from the update: 30000,30000)
+press a 4f
+wait 800ms 48f
+get mcla_vibration
+shot {SHOT}/controls-vibration.png 1
+log VIB 12 the game stops it (1 call: 0,0)
+set mcla_vibration_probe 0,0,0
+wait 500ms 30f
+log VIB 13 CONTROLS: ADAPTIVE TRIGGERS row (down one), A turns it off, A turns it on
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 800ms 48f
+get mcla_adaptive_triggers
+shot {SHOT}/controls-triggers-off.png 1
+press a 4f
+wait 800ms 48f
+get mcla_adaptive_triggers
+log VIB 14 leaving the pages (the settings are saved when CONTROLS is left)
+press b 4f
+wait 1500ms 90f
+get mcla_vibration mcla_adaptive_triggers
+press b 4f
+wait 1500ms 90f
+mark vib_end
