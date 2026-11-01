@@ -1,23 +1,25 @@
 # Run with --mcla_stick_deadzone_log=true --mcla_menu_log_layout=true, a scratch save, and the dev pad's synthetic
 # device as the only controller. {SHOT} (a folder) is filled in by whoever starts the run. Every `log DZ n` line starts
-# a step; launcher/dev/deadzone_check.py reads the last "stick dead zone:" line of each.
+# a step; launcher/dev/deadzone_check.py reads the last "stick dead zone:" line of each. The game's camera turns only
+# past about 0.3 of the stick's range, so the pictures use a stick at 0.5: it turns the camera without a dead zone, and
+# with a dead zone of 30 it reaches the game as about 0.29 and does not.
 include boot-to-roam.pad
 mark dz_start
 wait 2s 120f
 shot {SHOT}/rest.png 1
-log DZ 1 no dead zones: right stick X 0.27 reaches the game as it is
-stick rx 0.27
+log DZ 1 no dead zones: right stick X 0.5 reaches the game as it is
+stick rx 0.5
 wait 1500ms 90f
-shot {SHOT}/rx-none.png 1
-log DZ 2 right 30: inside
+shot {SHOT}/rx50-none.png 1
+log DZ 2 right 30: 0.5 comes out as about 0.29, from the circle's edge
 set mcla_right_stick_deadzone 30
 wait 1500ms 90f
-shot {SHOT}/rx-right30.png 1
-log DZ 3 right 20: outside, from the edge
-set mcla_right_stick_deadzone 20
-wait 1500ms 90f
-shot {SHOT}/rx-right20.png 1
+shot {SHOT}/rx50-right30.png 1
+log DZ 3 right 30: 0.25 is inside
+stick rx 0.25
+wait 500ms 30f
 log DZ 4 right 20: full range
+set mcla_right_stick_deadzone 20
 stick rx 1
 wait 500ms 30f
 log DZ 5 right 0, left 30: the right stick is not touched, the left one is
@@ -33,6 +35,7 @@ log DZ 7 off again
 stick lx 0.27
 set mcla_left_stick_deadzone 0
 wait 500ms 30f
+log DZ 12 centred
 stick lx 0
 stick rx 0
 wait 500ms 30f
@@ -87,15 +90,17 @@ press right 4f
 wait 800ms 48f
 get mcla_right_stick_deadzone
 shot {SHOT}/controls-right30.png 1
-log DZ 11 back to the road: the menu's right 30 holds a stick at 0.27
+log DZ 13 back to the road
 press b 4f
 wait 1000ms 60f
 press b 4f
 wait 1000ms 60f
 press start 4f
 wait 1500ms 90f
+log DZ 11 the menu's right 30 holds a stick at 0.27
 stick rx 0.27
 wait 1000ms 60f
+log DZ 14 centred
 stick rx 0
 wait 500ms 30f
 mark dz_end

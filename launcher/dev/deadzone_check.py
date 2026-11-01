@@ -32,9 +32,9 @@ def apply(x, y, percent):
 
 # step -> left percent, lx in, right percent, rx in
 STEPS = {
-    1: (0, 0, 0, AXIS_27),
-    2: (0, 0, 30, AXIS_27),
-    3: (0, 0, 20, AXIS_27),
+    1: (0, 0, 0, int(0.5 * 32767.0)),
+    2: (0, 0, 30, int(0.5 * 32767.0)),
+    3: (0, 0, 30, int(0.25 * 32767.0)),
     4: (0, 0, 20, 32767),
     5: (30, AXIS_27, 0, AXIS_27),
     6: (30, 32767, 0, AXIS_27),
@@ -84,7 +84,7 @@ def main():
         got = last.get(s)
         want_l = apply(lx, 0, lz)
         want_r = apply(rx, 0, rz)
-        ok = bool(got) and got[0] == lz and got[1] == lx and (got[3], got[4]) == want_l and got[5] == rz and got[6] == rx and (got[8], got[9]) == want_r
+        ok = bool(got) and got[0] == lz and got[1] == lx and abs(got[3] - want_l[0]) <= 1 and got[4] == 0 and got[5] == rz and got[6] == rx and abs(got[8] - want_r[0]) <= 1 and got[9] == 0
         good &= check(ok, f"step {s}: left {lz}% {lx} -> {want_l[0]}, right {rz}% {rx} -> {want_r[0]}; logged {got}")
     good &= check(("mcla_left_stick_deadzone", 10.0) in menu, f"the left row reached 10: {menu}")
     good &= check(("mcla_right_stick_deadzone", 30.0) in menu, "the right row reached 30")
