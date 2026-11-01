@@ -7,6 +7,9 @@
 // stretched back to the full range, so the stick moves on from 0 without a jump and still reaches full lock. 0
 // leaves the values as they are. The pause menu's and the settings pages' own stick reads keep their thresholds.
 //
+// The chase camera already ignores the right stick up to about 0.3 of its range (seen by holding it at fixed values,
+// parked), and these dead zones come on top of that: a small one is enough for a stick that drifts past it.
+//
 // Development: mcla_stick_deadzone_log logs what goes in and out when it changes, up to 200 lines
 // (launcher/dev/scripts/deadzone.pad, launcher/dev/deadzone_check.py).
 #include "generated/default/mcla_init.h"
