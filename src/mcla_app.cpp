@@ -1189,7 +1189,12 @@ class VideoBorders final : public rex::ui::ImGuiDialog {
 }
 
 void MclaApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
-  video_borders_ = std::make_unique<VideoBorders>(drawer);
+  const auto* display = window();
+  if (display && display->GetActualPhysicalHeight() &&
+      uint64_t(display->GetActualPhysicalWidth()) * 9 >
+          uint64_t(display->GetActualPhysicalHeight()) * 16) {
+    video_borders_ = std::make_unique<VideoBorders>(drawer);
+  }
 }
 
 void MclaApp::OnShutdown() {

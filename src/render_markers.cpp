@@ -55,7 +55,12 @@ REXCVAR_DEFINE_BOOL(mcla_render_markers_all_phases, false, "MCLA",
                     "Development: also mark the start of every render phase");
 
 uint32_t MclaRenderPhasesToSkip();  // src/perf_options.cpp
+#if REX_PLATFORM_PS5
+// The ultrawide code (src/aspect_ratio.cpp) is not in the PS5 build.
+inline void MclaAspectPhase(uint8_t*, uint32_t) {}
+#else
 void MclaAspectPhase(uint8_t* base, uint32_t phase);
+#endif
 
 namespace {
 

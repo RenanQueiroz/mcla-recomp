@@ -4,6 +4,7 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -32,7 +33,7 @@ REXCVAR_DEFINE_BOOL(mcla_hud_edges, true, "MCLA",
 REXCVAR_DEFINE_BOOL(mcla_gps_full_width, true, "MCLA",
                     "Draw GPS movies without the driving HUD safe-area transform");
 REXCVAR_DEFINE_BOOL(mcla_world_icon_aspect, true, "MCLA",
-                    "Keep world-marker movies outside the HUD safe-area compression");
+                    "Keep world-marker movies and native draws outside the HUD safe-area compression");
 REXCVAR_DEFINE_BOOL(mcla_panel_aspect, true, "MCLA",
                     "Keep pause panels outside the HUD safe-area compression");
 REXCVAR_DEFINE_BOOL(mcla_phone_aspect, true, "MCLA",
@@ -54,6 +55,17 @@ thread_local float g_hud_anchor_x = 0;
 thread_local bool g_gauge_draw = false;
 std::atomic<uint32_t> g_speedometer_context{0};
 thread_local unsigned g_gps_draw_depth = 0;
+
+bool IsGuestRange(uint32_t address, uint32_t size) {
+  return address >= 0x10000 && address < 0xE0000000u &&
+      size <= 0xE0000000u - address;
+}
+
+template <std::size_t Size>
+bool GuestNameEquals(const uint8_t* base, uint32_t address, const char (&name)[Size]) {
+  return IsGuestRange(address, uint32_t(Size)) &&
+      std::memcmp(base + address, name, Size) == 0;
+}
 
 uint32_t ReadWord(const uint8_t* base, uint32_t address) {
   return (uint32_t(base[address]) << 24) | (uint32_t(base[address + 1]) << 16) |
@@ -102,58 +114,46 @@ void ApplyHudViewport(uint8_t* base, uint32_t device) {
   DirtyViewport(base, device);
 }
 
-int HudMovieSide(const uint8_t* base, uint32_t movie) {
-  if (!g_wide || !g_ui_phase || !REXCVAR_GET(mcla_hud_aspect) ||
-      !REXCVAR_GET(mcla_hud_edges) || movie < 0x10000) return 0;
-  const uint32_t context = ReadWord(base, movie + 56);
-  if (context && context == g_speedometer_context.load(std::memory_order_relaxed)) return 1;
+uint32_t MovieNameAddress(const uint8_t* base, uint32_t movie) {
+  if (!IsGuestRange(movie, 60)) return 0;
   const uint32_t manager = ReadWord(base, 0x8286D804);
-  if (manager < 0x10000) return 0;
+  if (!IsGuestRange(manager, 68)) return 0;
   const uint32_t buckets = ReadWord(base, manager + 60);
   const uint32_t count = ReadWord(base, manager + 64) >> 16;
-  if (buckets < 0x10000 || count > 256) return 0;
+  if (count > 256 || !IsGuestRange(buckets, count * 4)) return 0;
   for (uint32_t bucket = 0; bucket < count; ++bucket) {
     uint32_t node = ReadWord(base, buckets + bucket * 4);
-    for (uint32_t guard = 0; node >= 0x10000 && node != 0xFFFFFFFF && guard < 256;
+    for (uint32_t guard = 0; IsGuestRange(node, 16) && guard < 256;
          ++guard, node = ReadWord(base, node + 12)) {
       const uint32_t holder = ReadWord(base, node + 8);
-      if (holder < 0x10000 || ReadWord(base, holder) != movie) continue;
-      const uint32_t name = ReadWord(base, node);
-      return name >= 0x10000 &&
-          !std::strcmp(reinterpret_cast<const char*>(base + name), "HUDMAPMOVIE") ? -1 : 0;
+      if (!IsGuestRange(holder, 4) || ReadWord(base, holder) != movie) continue;
+      return ReadWord(base, node);
     }
   }
   return 0;
 }
 
+int HudMovieSide(const uint8_t* base, uint32_t movie) {
+  if (!g_wide || !g_ui_phase || !REXCVAR_GET(mcla_hud_aspect) ||
+      !REXCVAR_GET(mcla_hud_edges) || !IsGuestRange(movie, 60)) return 0;
+  const uint32_t context = ReadWord(base, movie + 56);
+  if (context && context == g_speedometer_context.load(std::memory_order_relaxed)) return 1;
+  return GuestNameEquals(base, MovieNameAddress(base, movie), "HUDMAPMOVIE") ? -1 : 0;
+}
+
 bool IsFullWidthMovie(const uint8_t* base, uint32_t movie) {
-  if (!g_wide || !REXCVAR_GET(mcla_gps_full_width) || movie < 0x10000) return false;
-  const uint32_t manager = ReadWord(base, 0x8286D804);
-  if (manager < 0x10000) return false;
-  const uint32_t buckets = ReadWord(base, manager + 60);
-  const uint32_t count = ReadWord(base, manager + 64) >> 16;
-  if (buckets < 0x10000 || count > 256) return false;
-  for (uint32_t bucket = 0; bucket < count; ++bucket) {
-    uint32_t node = ReadWord(base, buckets + bucket * 4);
-    for (unsigned guard = 0; node >= 0x10000 && node != 0xFFFFFFFF && guard < 256;
-         ++guard, node = ReadWord(base, node + 12)) {
-      const uint32_t holder = ReadWord(base, node + 8);
-      if (holder < 0x10000 || ReadWord(base, holder) != movie) continue;
-      const uint32_t name_address = ReadWord(base, node);
-      if (name_address < 0x10000) return false;
-      const char* name = reinterpret_cast<const char*>(base + name_address);
-      const bool gps = !std::strcmp(name, "NAVSYS2DMOVIE") || !std::strcmp(name, "NAVSYSMOVIE") ||
-          !std::strcmp(name, "NAVSYSTARGETICONMOVIE");
-      const bool world_icon = REXCVAR_GET(mcla_world_icon_aspect) &&
-          (!std::strcmp(name, "3DICONSMOVIE0") || !std::strcmp(name, "3DICONSMOVIE1") ||
-           !std::strcmp(name, "3DICONSMOVIE2"));
-      const bool panel = REXCVAR_GET(mcla_panel_aspect) && !std::strcmp(name, "PAUSEMOVIE");
-      const bool phone = REXCVAR_GET(mcla_phone_aspect) && !std::strcmp(name, "SIDEKICKMOVIE");
-      const bool garage = REXCVAR_GET(mcla_garage_aspect) && !std::strcmp(name, "GARAGEMOVIE");
-      return gps || world_icon || panel || phone || garage;
-    }
-  }
-  return false;
+  if (!g_wide) return false;
+  const uint32_t name = MovieNameAddress(base, movie);
+  const bool gps = REXCVAR_GET(mcla_gps_full_width) &&
+      (GuestNameEquals(base, name, "NAVSYS2DMOVIE") || GuestNameEquals(base, name, "NAVSYSMOVIE") ||
+       GuestNameEquals(base, name, "NAVSYSTARGETICONMOVIE"));
+  const bool world_icon = REXCVAR_GET(mcla_world_icon_aspect) &&
+      (GuestNameEquals(base, name, "3DICONSMOVIE0") || GuestNameEquals(base, name, "3DICONSMOVIE1") ||
+       GuestNameEquals(base, name, "3DICONSMOVIE2"));
+  const bool panel = REXCVAR_GET(mcla_panel_aspect) && GuestNameEquals(base, name, "PAUSEMOVIE");
+  const bool phone = REXCVAR_GET(mcla_phone_aspect) && GuestNameEquals(base, name, "SIDEKICKMOVIE");
+  const bool garage = REXCVAR_GET(mcla_garage_aspect) && GuestNameEquals(base, name, "GARAGEMOVIE");
+  return gps || world_icon || panel || phone || garage;
 }
 
 template <typename Draw>
@@ -233,9 +233,9 @@ void MclaAspectUiNode(PPCRegister& node, PPCRegister& parent_state) {
   if (!g_gauge_draw) return;
   auto* base = rex::Runtime::instance()->virtual_membase();
   const uint32_t inst = node.u32;
-  if (inst < 0x10000 || parent_state.u32 < 0x10000) return;
+  if (!IsGuestRange(inst, 188) || !IsGuestRange(parent_state.u32, 4)) return;
   const uint32_t parent = ReadWord(base, inst + 184);
-  if (parent < 0x10000 || parent_state.u32 != parent + 8) return;
+  if (!IsGuestRange(parent, 188) || parent_state.u32 != parent + 8) return;
   const uint32_t root = ReadWord(base, parent + 184);
   if (!root) {
     if (std::abs(ReadFloat(base, inst + 48) - 640.0f) > 1.0f ||
@@ -246,7 +246,7 @@ void MclaAspectUiNode(PPCRegister& node, PPCRegister& parent_state) {
     WriteFloat(base, inst + 48, 640.0f + (ReadFloat(base, inst + 48) - 640.0f) * correction);
     return;
   }
-  if (root < 0x10000 || ReadWord(base, root + 184) != 0 ||
+  if (!IsGuestRange(root, 188) || ReadWord(base, root + 184) != 0 ||
       std::abs(ReadFloat(base, parent + 48) - 640.0f) > 1.0f ||
       std::abs(ReadFloat(base, parent + 52) - 360.0f) > 1.0f) return;
   const float local_x = ReadFloat(base, inst + 24);
@@ -359,12 +359,14 @@ extern "C" REX_FUNC(sub_82413660) {
 
 extern "C" REX_FUNC(sub_82236558) {
   const uint32_t owner = ctx.r3.u32;
-  const bool gps = g_wide && REXCVAR_GET(mcla_gps_icon_aspect) &&
-      owner >= 0x10000 && ReadWord(base, owner + 456) == 1;
+  const uint32_t mode = IsGuestRange(owner, 460) ? ReadWord(base, owner + 456) : 0xFFFFFFFFu;
+  const bool gps = g_wide && mode == 1 && REXCVAR_GET(mcla_gps_icon_aspect);
   DrawFullWidth(ctx, base, __imp__sub_82236558, gps);
 }
 
 extern "C" REX_FUNC(sub_82723940) {
   const bool cursor = g_wide && REXCVAR_GET(mcla_gps_icon_aspect) && ctx.lr == 0x822278D4;
-  DrawFullWidth(ctx, base, __imp__sub_82723940, cursor);
+  // World markers already use the camera projection; HUD compression moves them off their cars.
+  const bool world = g_wide && REXCVAR_GET(mcla_world_icon_aspect) && ctx.lr == 0x822251F4;
+  DrawFullWidth(ctx, base, __imp__sub_82723940, cursor || world);
 }
