@@ -64,7 +64,7 @@ bool IsGuestRange(uint32_t address, uint32_t size) {
 template <std::size_t Size>
 bool GuestNameEquals(const uint8_t* base, uint32_t address, const char (&name)[Size]) {
   return IsGuestRange(address, uint32_t(Size)) &&
-      std::memcmp(base + address, name, Size) == 0;
+      std::strncmp(reinterpret_cast<const char*>(base + address), name, Size) == 0;
 }
 
 uint32_t ReadWord(const uint8_t* base, uint32_t address) {
@@ -359,8 +359,8 @@ extern "C" REX_FUNC(sub_82413660) {
 
 extern "C" REX_FUNC(sub_82236558) {
   const uint32_t owner = ctx.r3.u32;
-  const uint32_t mode = IsGuestRange(owner, 460) ? ReadWord(base, owner + 456) : 0xFFFFFFFFu;
-  const bool gps = g_wide && mode == 1 && REXCVAR_GET(mcla_gps_icon_aspect);
+  const bool gps = g_wide && REXCVAR_GET(mcla_gps_icon_aspect) &&
+      IsGuestRange(owner, 460) && ReadWord(base, owner + 456) == 1;
   DrawFullWidth(ctx, base, __imp__sub_82236558, gps);
 }
 
