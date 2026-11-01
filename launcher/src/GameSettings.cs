@@ -374,6 +374,21 @@ static class GameSettings
              + "pause menu (CONTROLS). It has nothing to do with the DualSense adaptive triggers, which are "
              + "their own setting.",
     };
+    // mcla_left_stick_deadzone, mcla_right_stick_deadzone (src/stick_deadzone.cpp); they change during play too.
+    public static readonly GameSetting LeftStickDeadzone = new("mcla_left_stick_deadzone", "Left stick dead zone",
+        [new("Off (default)", 0.0), new("5%", 5.0), new("10%", 10.0), new("15%", 15.0), new("20%", 20.0), new("25%", 25.0), new("30%", 30.0)], 0.0)
+    {
+        Info = "For a stick that moves the game by itself (stick drift): inside the dead zone the stick counts as "
+             + "centred. Use the smallest value that stops the drift; a bigger one makes small movements of "
+             + "the stick do nothing. Changes during play in the pause menu (CONTROLS).",
+    };
+    public static readonly GameSetting RightStickDeadzone = new("mcla_right_stick_deadzone", "Right stick dead zone",
+        [new("Off (default)", 0.0), new("5%", 5.0), new("10%", 10.0), new("15%", 15.0), new("20%", 20.0), new("25%", 25.0), new("30%", 30.0)], 0.0)
+    {
+        Info = "For a stick that moves the game by itself (stick drift): inside the dead zone the stick counts as "
+             + "centred. Use the smallest value that stops the drift; a bigger one makes small movements of "
+             + "the stick do nothing. Changes during play in the pause menu (CONTROLS).",
+    };
     // mcla_adaptive_triggers (src/pc_triggers.cpp): R2 and L2 of a DualSense through SDL; it changes during
     // play too, and turning it off releases the triggers. Another controller is not touched either way.
     public static readonly GameSetting AdaptiveTriggers = new("mcla_adaptive_triggers", "DualSense adaptive triggers",
@@ -533,7 +548,7 @@ static class GameSettings
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];
     public static readonly GameSetting[] Game = [Language, Intro];
-    public static readonly GameSetting[] Controller = [Prompts, Vibration, AdaptiveTriggers];
+    public static readonly GameSetting[] Controller = [Prompts, Vibration, LeftStickDeadzone, RightStickDeadzone, AdaptiveTriggers];
 
     // The launcher's own options (Advanced).
     public const string ExtraArgumentsInfo =

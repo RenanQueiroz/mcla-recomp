@@ -888,12 +888,19 @@ const ItemDef kPerformanceItems[] = {
      nullptr, kAnisotropicLabels, kAnisotropicLevels, 6},
 };
 
+constexpr double kStickDeadzones[] = {0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0};
+
 const ItemDef kControlItems[] = {
     {"PM_MxPrompts", ItemKind::kStringChoice, "mcla_button_prompts", "BUTTON PROMPTS",
      kPromptValues, kPromptLabels, nullptr, 3},
     // The game's rumble to the controllers, or none of it (src/vibration.cpp); the next row is a
     // separate option: the DualSense's triggers (src/pc_triggers.cpp).
     {"PM_MxVibration", ItemKind::kToggle, "mcla_vibration", "VIBRATION"},
+    // For a stick that rests off centre (src/stick_deadzone.cpp).
+    {"PM_MxDeadzoneL", ItemKind::kNumberChoice, "mcla_left_stick_deadzone", "LEFT STICK DEAD ZONE",
+     nullptr, nullptr, kStickDeadzones, 7, "%.0f%%", "OFF"},
+    {"PM_MxDeadzoneR", ItemKind::kNumberChoice, "mcla_right_stick_deadzone", "RIGHT STICK DEAD ZONE",
+     nullptr, nullptr, kStickDeadzones, 7, "%.0f%%", "OFF"},
 #if !REX_PLATFORM_PS5
     // On the console the triggers are opt-in (ps5/game/ps5_triggers.h, off by default): no row there.
     // A controller that is not a DualSense is left as it is, whatever this says.

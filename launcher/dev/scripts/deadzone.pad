@@ -1,0 +1,101 @@
+# Run with --mcla_stick_deadzone_log=true --mcla_menu_log_layout=true, a scratch save, and the dev pad's synthetic
+# device as the only controller. {SHOT} (a folder) is filled in by whoever starts the run. Every `log DZ n` line starts
+# a step; launcher/dev/deadzone_check.py reads the last "stick dead zone:" line of each.
+include boot-to-roam.pad
+mark dz_start
+wait 2s 120f
+shot {SHOT}/rest.png 1
+log DZ 1 no dead zones: right stick X 0.27 reaches the game as it is
+stick rx 0.27
+wait 1500ms 90f
+shot {SHOT}/rx-none.png 1
+log DZ 2 right 30: inside
+set mcla_right_stick_deadzone 30
+wait 1500ms 90f
+shot {SHOT}/rx-right30.png 1
+log DZ 3 right 20: outside, from the edge
+set mcla_right_stick_deadzone 20
+wait 1500ms 90f
+shot {SHOT}/rx-right20.png 1
+log DZ 4 right 20: full range
+stick rx 1
+wait 500ms 30f
+log DZ 5 right 0, left 30: the right stick is not touched, the left one is
+stick rx 0.27
+stick lx 0.27
+set mcla_right_stick_deadzone 0
+set mcla_left_stick_deadzone 30
+wait 500ms 30f
+log DZ 6 left 30: full range
+stick lx 1
+wait 500ms 30f
+log DZ 7 off again
+stick lx 0.27
+set mcla_left_stick_deadzone 0
+wait 500ms 30f
+stick lx 0
+stick rx 0
+wait 500ms 30f
+mark dz_menu
+log DZ 8 pause menu: Start, Settings tab, CONTROLS
+press start 4f
+wait 1500ms 90f
+press rb 4f
+wait 1000ms 60f
+press rb 4f
+wait 1000ms 60f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press a 4f
+wait 1500ms 90f
+shot {SHOT}/controls-top.png 1
+log DZ 9 CONTROLS: LEFT STICK DEAD ZONE to 10
+press down 4f
+wait 400ms 24f
+press down 4f
+wait 400ms 24f
+press right 4f
+wait 500ms 30f
+press right 4f
+wait 800ms 48f
+get mcla_left_stick_deadzone
+shot {SHOT}/controls-left10.png 1
+log DZ 10 CONTROLS: RIGHT STICK DEAD ZONE to 30
+press down 4f
+wait 400ms 24f
+press right 4f
+wait 500ms 30f
+press right 4f
+wait 500ms 30f
+press right 4f
+wait 500ms 30f
+press right 4f
+wait 500ms 30f
+press right 4f
+wait 500ms 30f
+press right 4f
+wait 800ms 48f
+get mcla_right_stick_deadzone
+shot {SHOT}/controls-right30.png 1
+log DZ 11 back to the road: the menu's right 30 holds a stick at 0.27
+press b 4f
+wait 1000ms 60f
+press b 4f
+wait 1000ms 60f
+press start 4f
+wait 1500ms 90f
+stick rx 0.27
+wait 1000ms 60f
+stick rx 0
+wait 500ms 30f
+mark dz_end

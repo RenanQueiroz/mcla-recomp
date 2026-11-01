@@ -57,6 +57,8 @@ set(MCLA_SOURCES
     src/vehicle_telemetry.cpp
     # Controller vibration on or off (mcla_vibration).
     src/vibration.cpp
+    # A dead zone for each stick (mcla_left_stick_deadzone, mcla_right_stick_deadzone).
+    src/stick_deadzone.cpp
     # DualSense adaptive triggers through SDL (fork only; the PS5 build has ps5/game/ps5_triggers.h).
     src/pc_triggers.cpp
     src/sampling_profiler.cpp
