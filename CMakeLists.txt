@@ -37,6 +37,7 @@ endif()
 set(MCLA_SOURCES
     src/main.cpp
     src/mcla_app.cpp
+    src/aspect_ratio.cpp
     src/crash_trace.cpp
     src/audio_fallback.cpp
     src/audio_mixer.cpp

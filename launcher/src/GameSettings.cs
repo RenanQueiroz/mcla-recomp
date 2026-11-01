@@ -144,6 +144,14 @@ static class GameSettings
     {
         Info = "Fullscreen covers the whole screen; Windowed runs the game in a window on the desktop.",
     };
+    public static readonly GameSetting AspectRatio = new("mcla_aspect_ratio", "Aspect ratio",
+        [new("Automatic", "auto"), new("16:9", "16:9"), new("21:9 (3440x1440)", "43:18")], "auto")
+    {
+        Info = "Automatic matches the monitor in fullscreen or the window's client area in windowed mode, "
+             + "including ultrawide displays. The camera gets a wider view and the HUD stays proportional. "
+             + "16:9 keeps the original aspect; 21:9 forces the 3440x1440 ratio. Takes effect the next time "
+             + "the game starts; resize the window or move it to another monitor before restarting to redetect.",
+    };
     // present_effect (the SDK presenter's, src/ui/presenter.cpp; built in by rexglue-fsr-upscaling.patch):
     // how the finished picture is scaled to the window. Read when the game starts. What each does,
     // from GetGuestOutputPaintFlow: Bilinear is one smooth stretch. FSR 1 enlarges with EASU (passes of at
@@ -520,7 +528,7 @@ static class GameSettings
 
     public static GameSetting[] GraphicsFor(IReadOnlyDictionary<string, string> file, double refreshHz,
                                             uint gpuVendor = 0, string? recommendedApi = null) =>
-        [Resolution, FrameRateFor(file, refreshHz), Display, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
+        [Resolution, FrameRateFor(file, refreshHz), Display, AspectRatio, ScreenFilter, DisplayGamma, Preset, AntiAliasing, Upscaling,
          Anisotropic, FrameGeneration, LowLatencyFor(gpuVendor), FsrSharpness, SingleTile, SmoothUi, GraphicsApiFor(recommendedApi)];
     public static readonly GameSetting[] HdrChoices = [Hdr, HdrHighlights];
     public static readonly LevelSetting[] HdrLevels = [HdrPeak, HdrPaperWhite];

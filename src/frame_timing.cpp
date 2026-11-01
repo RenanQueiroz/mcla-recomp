@@ -2070,16 +2070,26 @@ struct UiHookCost {
 UiHookCost g_hook_cost;
 }  // namespace
 
+#if !REX_PLATFORM_PS5
+void MclaAspectUiNode(PPCRegister& node, PPCRegister& parent_state);
+#endif
+
 void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
   const bool apply_opt = REXCVAR_GET(mcla_ui_interpolate);
   const bool log = REXCVAR_GET(mcla_ui_interp_log);
   if (!REXCVAR_GET(mcla_ui_interp_stats)) {
     UiInterpDraw(r30, r31, apply_opt, log);
+#if !REX_PLATFORM_PS5
+    MclaAspectUiNode(r30, r31);
+#endif
     return;
   }
   // The hook runs on one thread (the draw's), so the counters need no lock.
   const uint64_t t0 = ReadTicks();
   UiInterpDraw(r30, r31, apply_opt, log);
+#if !REX_PLATFORM_PS5
+  MclaAspectUiNode(r30, r31);
+#endif
   const uint64_t t1 = ReadTicks();
   UiHookCost& c = g_hook_cost;
   c.calls++;

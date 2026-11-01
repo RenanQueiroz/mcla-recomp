@@ -2,7 +2,8 @@
 
 This fork is GPL-3.0-or-later (see [`LICENSE`](LICENSE)). Some of its changes are
 ported from, or follow, projects under the MIT and zlib licences, whose notice
-has to travel with the code. They are listed here with that notice.
+has to travel with the code. They are listed here with that notice, along with
+GPL-3.0 sources this fork adapts.
 
 ## ForzaHorizon1-ReImagined
 
@@ -380,3 +381,14 @@ freely, subject to the following restrictions:
 
 Mark Adler    madler@alumni.caltech.edu
 ```
+
+## MC_LA_Recompiled (GPL-3.0)
+
+<https://github.com/robertoaraujo77/MC_LA_Recompiled>
+
+The ultrawide implementation in `src/aspect_ratio.cpp` is adapted from this
+project, with host integration and additional HUD corrections in this fork.
+The source project uses GNU GPL version 3; see [`LICENSE`](LICENSE) for the
+license text. Its aspect-constant identification credits
+[LARecomp](https://github.com/mzzvxm/LARecomp), specifically
+`src/mc_engine/hooks/graphics.cpp`.

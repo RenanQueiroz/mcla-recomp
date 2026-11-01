@@ -88,6 +88,7 @@ std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
     rex::runtime::FunctionDispatcher* function_dispatcher);
 void MclaDevPadConfigure(rex::RuntimeConfig& config);
 void MclaDevPadStart(rex::ui::Window* window, rex::ui::ImGuiDrawer* imgui_drawer);
+void MclaApplyAspectRatio(rex::ui::Window* window);
 void MclaSaveMenuSettings();  // src/settings_menu.cpp
 bool MclaPrepareShadersIsRequested();  // src/shader_prepare.cpp
 void MclaShaderStorageAfterPreload(rex::Runtime* runtime);
@@ -1125,6 +1126,7 @@ void MclaApp::FollowCursorSetting() {
 
 void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
   (void)thread;
+  MclaApplyAspectRatio(window());
   MclaShaderStorageAfterPreload(runtime());
 }
 
@@ -1155,4 +1157,46 @@ void MclaApp::OnPostSetup() {
   if (runtime() && runtime()->file_system()) {
     runtime()->file_system()->RegisterSymbolicLink("t:", "\\Device\\Harddisk0\\Partition1");
   }
+}
+
+namespace {
+
+class VideoBorders final : public rex::ui::ImGuiDialog {
+ public:
+  explicit VideoBorders(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
+  bool RepaintsContinuously() const override { return false; }
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    auto* runtime = rex::Runtime::instance();
+    if (!runtime || !runtime->virtual_membase()) return;
+    const auto* base = runtime->virtual_membase();
+    auto word = [base](uint32_t address) {
+      return (uint32_t(base[address]) << 24) | (uint32_t(base[address + 1]) << 16) |
+             (uint32_t(base[address + 2]) << 8) | base[address + 3];
+    };
+    const uint32_t manager = word(0x82879410);
+    if (manager < 0x10000 || manager > 0xDFFFFF00 || !word(manager + 76)) return;
+    const ImVec2 size = io.DisplaySize;
+    const float side = (size.x - size.y * (16.0f / 9.0f)) * 0.5f;
+    if (side < 1.0f) return;
+    auto* draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(ImVec2(0, 0), ImVec2(side, size.y), IM_COL32(0, 0, 0, 255));
+    draw->AddRectFilled(ImVec2(size.x - side, 0), size, IM_COL32(0, 0, 0, 255));
+  }
+};
+
+}
+
+void MclaApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
+  const auto* display = window();
+  if (display && display->GetActualPhysicalHeight() &&
+      uint64_t(display->GetActualPhysicalWidth()) * 9 >
+          uint64_t(display->GetActualPhysicalHeight()) * 16) {
+    video_borders_ = std::make_unique<VideoBorders>(drawer);
+  }
+}
+
+void MclaApp::OnShutdown() {
+  video_borders_.reset();
 }

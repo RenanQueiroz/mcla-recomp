@@ -27,6 +27,8 @@ class MclaApp : public rex::ReXApp {
   bool ConstructRuntime(const rex::PathConfig& paths) override;
   void OnPreSetup(rex::RuntimeConfig& config) override;
   void OnPostSetup() override;
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override;
+  void OnShutdown() override;
   void OnPreLaunchModule() override;
   // The shader storage: the pack's import is done before the module starts (OnPreLaunchModule),
   // the stamp written once the SDK created the stored pipelines, and a preparation run
@@ -50,6 +52,7 @@ class MclaApp : public rex::ReXApp {
   }
 
  private:
+  std::unique_ptr<rex::ui::ImGuiDialog> video_borders_;
   void InstallCrashTrace();
   void ConfigureFrameTiming();
   void ApplyPcDefaults();
