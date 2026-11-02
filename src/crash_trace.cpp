@@ -28,7 +28,7 @@ namespace {
 
 constexpr uint32_t kCodeBegin = 0x82130000;
 constexpr uint32_t kCodeEnd = 0x827CD054;
-constexpr uintptr_t kGuestBase = 0x100000000ull;
+uintptr_t g_guest_base = 0;
 constexpr uintptr_t kNullPageSize = 0x10000;
 constexpr uintptr_t kVirtualHeapsEnd = 0xA0000000;
 // Largest plausible distance from a function's entry to an address inside it.
@@ -62,8 +62,8 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
   // faults are the write watch's): guest code followed a stale or garbage pointer. The first few
   // are logged, then the game's own "Unhandled guest access violation" line is all there is.
   const bool heap_read = record->ExceptionInformation[0] == 0 &&
-                         fault >= kGuestBase + kNullPageSize && fault < kGuestBase + kVirtualHeapsEnd;
-  if (!heap_read && (fault < kGuestBase || fault >= kGuestBase + kNullPageSize)) {
+                         fault >= g_guest_base + kNullPageSize && fault < g_guest_base + kVirtualHeapsEnd;
+  if (!heap_read && (fault < g_guest_base || fault >= g_guest_base + kNullPageSize)) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   static LONG heap_reads = 0;
@@ -73,7 +73,7 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
 
   REXLOG_ERROR("guest {} {} at guest 0x{:08X}; host stack (innermost first):",
                heap_read ? "heap" : "null-page", record->ExceptionInformation[0] ? "write" : "read",
-               static_cast<uint32_t>(fault - kGuestBase));
+               static_cast<uint32_t>(fault - g_guest_base));
   CONTEXT context = *info->ContextRecord;
   for (int frame = 0; frame < 32 && context.Rip; ++frame) {
     uintptr_t offset = 0;
@@ -113,6 +113,7 @@ const std::vector<std::pair<uintptr_t, uint32_t>>& MclaGuestFunctionTable() {
 }
 
 void MclaApp::InstallCrashTrace() {
+  g_guest_base = reinterpret_cast<uintptr_t>(runtime()->virtual_membase());
   auto* dispatcher = runtime()->function_dispatcher();
   g_host_to_guest.clear();
   for (uint32_t address = kCodeBegin; address < kCodeEnd; address += 4) {
