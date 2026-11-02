@@ -789,7 +789,12 @@ const char* MclaRecommendedBackend() {
 }
 #endif
 
+bool MclaDevOffscreenRequested();
+void MclaDevOffscreenSetup();
+void MclaDevOffscreenReady(rex::ui::Window* window);
+
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
+  MclaDevOffscreenSetup();
   config.audio_factory = &CreateMclaAudioSystem;
   // Every controller is player one. The SDK's default gives each pad its own
   // player in connection order and never reuses a number, so a second gamepad
@@ -797,7 +802,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // player two, which has no profile: the game then says it is not signed in
   // and never saves (issue #22). The game is single-player on one console.
   config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
-    auto input = rex::input::CreateDefaultInputSystem(tool_mode);
+    auto input = rex::input::CreateDefaultInputSystem(tool_mode || MclaDevOffscreenRequested());
     if (input) {
       input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
     }
@@ -1145,6 +1150,7 @@ void MclaApp::OnGuestThreadExit(rex::system::XThread* thread) {
 }
 
 void MclaApp::OnPostSetup() {
+  MclaDevOffscreenReady(window());
   ConfigureFrameTiming();
   FollowCursorSetting();
 

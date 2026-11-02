@@ -2074,6 +2074,8 @@ UiHookCost g_hook_cost;
 void MclaAspectUiNode(PPCRegister& node, PPCRegister& parent_state);
 #endif
 
+void MclaKeyboardPromptNode(PPCRegister& node);
+
 void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
   const bool apply_opt = REXCVAR_GET(mcla_ui_interpolate);
   const bool log = REXCVAR_GET(mcla_ui_interp_log);
@@ -2082,6 +2084,7 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
 #if !REX_PLATFORM_PS5
     MclaAspectUiNode(r30, r31);
 #endif
+    MclaKeyboardPromptNode(r30);
     return;
   }
   // The hook runs on one thread (the draw's), so the counters need no lock.
@@ -2090,6 +2093,7 @@ void mcla_ui_interp_draw(PPCRegister& r30, PPCRegister& r31) {
 #if !REX_PLATFORM_PS5
   MclaAspectUiNode(r30, r31);
 #endif
+  MclaKeyboardPromptNode(r30);
   const uint64_t t1 = ReadTicks();
   UiHookCost& c = g_hook_cost;
   c.calls++;

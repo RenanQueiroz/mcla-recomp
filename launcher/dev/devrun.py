@@ -631,6 +631,8 @@ def game_args(a, out):
         # The car's position twice a second (at 60), to compare runs' paths.
         args.append(f"--mcla_pad_record={out / 'pad.csv'}")
     args += a.extra
+    if getattr(a, "offscreen", False):
+        args += ["--mcla_dev_offscreen=true"]
     # One value per option, the last one: the SDK's command line parser (CLI11) fails on a
     # repeated option, and the SDK then applies none of them, so the game would run on the
     # real Documents\\mcla, its cache and the default API (it happened on 2026-10-17).
@@ -660,6 +662,8 @@ def wait_for_no_game(limit_s):
 
 
 def run(a, tag=None):
+    if getattr(a, "offscreen", False) and os.name != "nt":
+        raise SystemExit("--offscreen currently requires Windows")
     if not EXE.exists():
         raise SystemExit(f"{EXE} is not built")
     # Another game (the user's, or another checkout's run) would share the GPU and
@@ -690,6 +694,7 @@ def run(a, tag=None):
     presentmon = start_presentmon(out, getattr(a, "pm_pcl", False)) if getattr(a, "presentmon", False) else None
     start = time.monotonic()
     proc = None
+    timed_out = False
     restarts = []
     gpu = None
     # Whatever happens from here (Ctrl+C, an exception), the games of this run
@@ -716,12 +721,19 @@ def run(a, tag=None):
             else:
                 TOML.unlink(missing_ok=True)
         stdout_file = open(a.stdout, "wb") if getattr(a, "stdout", None) else None
-        proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env, stdout=stdout_file)
+        startup = None
+        if getattr(a, "offscreen", False):
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = subprocess.SW_HIDE
+        proc = subprocess.Popen([str(EXE), *args], cwd=EXE.parent, env=env,
+                                stdout=stdout_file, startupinfo=startup)
         if guard:
             guard.start(proc.pid)
         try:
             proc.wait(timeout=a.timeout)
         except subprocess.TimeoutExpired:
+            timed_out = True
             print(f"timeout after {a.timeout} s; closing the game")
             close_windows(proc.pid)
             try:
@@ -759,6 +771,10 @@ def run(a, tag=None):
     restarted = f", restarted {len(restarts)} time(s)" if restarts else ""
     print(f"{out.name}: exit {proc.returncode} after {elapsed:.0f} s{restarted}; real save data unchanged")
     print(f"{out.name}: {gpu_summary(gpu)}")
+    if timed_out:
+        raise SystemExit(f"{out.name}: GAME TIMEOUT after {a.timeout} s")
+    if proc.returncode != 0:
+        raise SystemExit(f"{out.name}: GAME FAILED with exit {proc.returncode}")
     # A script line that failed ends the script (and the game): the run is not
     # what the script describes.
     log = out / "game.log"
@@ -1031,6 +1047,7 @@ def main():
         # benchmarks keep "normal" so start-up runs as the user sees it.
         p.add_argument("--intro", default="normal" if name == "bench" else "fast")
         p.add_argument("--fullscreen", action="store_true")
+        p.add_argument("--offscreen", action="store_true", help="Windows: hidden, nonactivating game window, muted, physical input drivers omitted; not a private station")
         p.add_argument("--vsync", default="false", choices=["false", "true", "unset"],
                        help="--vsync on the command line (default false, as the launcher); "
                        "unset passes none")

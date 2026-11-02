@@ -49,6 +49,8 @@ set(MCLA_SOURCES
     src/poll_wait.cpp
     src/warp_fix.cpp
     src/button_prompts.cpp
+    src/keyboard_prompts.cpp
+    src/dev_offscreen.cpp
     src/settings_menu.cpp
     src/pad_probe.cpp
     src/save_wait.cpp

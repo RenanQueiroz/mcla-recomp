@@ -145,6 +145,8 @@ uint64_t MclaPumpEarlyWakes();  // src/poll_wait.cpp: of those, the ones the mai
 void MclaPumpWakeShutdownBegins();  // src/poll_wait.cpp: the audio silence from here on is the output stopping
 void MclaPcTriggersShutdown();  // src/pc_triggers.cpp: the DualSense's triggers back to slack
 
+bool MclaPauseMenuUp();
+
 namespace {
 
 using namespace rex;
@@ -683,6 +685,11 @@ std::atomic<DWORD> g_cover_thread_id{0};
 std::atomic<bool> g_cover_ready{false};
 
 HWND FindGameWindow() {
+  // Hidden test windows are deliberately absent from the visible-window scan.
+  if(g_window) {
+    HWND native=static_cast<HWND>(g_window->GetNativeWindowHandle());
+    if(native && IsWindow(native)) return native;
+  }
   if (g_game_hwnd && IsWindow(g_game_hwnd)) {
     return g_game_hwnd;
   }
@@ -714,6 +721,8 @@ HWND FindGameWindow() {
 }
 
 std::string WindowCommand(const std::string& what) {
+  if(rex::cvar::GetFlagByName("mcla_dev_offscreen")=="true" && what!="state" && what!="hide")
+    return "err offscreen mode forbids showing or activating a window";
   HWND hwnd = FindGameWindow();
   if (!hwnd) {
     return "err no window";
@@ -1703,7 +1712,7 @@ bool Compare(double a, const std::string& op, double b, bool& ok) {
 }
 
 struct Condition {
-  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kUiList, kFollowDone } kind = kFrames;
+  enum Kind { kFrames, kMemory, kLeftTitle, kLoading, kRoam, kPause, kUiList, kFollowDone } kind = kFrames;
   bool is_float = false;
   std::string address;
   std::string op;
@@ -1714,9 +1723,10 @@ struct Condition {
 bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& c,
                     std::string& error) {
   const std::string word = i < args.size() ? args[i] : "";
-  if (word == "left_title" || word == "loading" || word == "roam") {
+  if (word == "left_title" || word == "loading" || word == "roam" || word == "pause") {
     c.kind = word == "left_title" ? Condition::kLeftTitle
              : word == "loading"  ? Condition::kLoading
+             : word == "pause"    ? Condition::kPause
                                   : Condition::kRoam;
     i++;
     return true;
@@ -1769,7 +1779,7 @@ bool ParseCondition(const std::vector<std::string>& args, size_t& i, Condition& 
     i += 4;
     return true;
   }
-  error = "condition: left_title, loading, roam, follow_done, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
+  error = "condition: left_title, loading, roam, pause, follow_done, frames N, u32|f32 <addr> <op> <value>, ui_select|ui_count|ui_rowval|ui_scroll <op> <value>";
   return false;
 }
 
@@ -1783,6 +1793,8 @@ bool Evaluate(const Condition& c) {
       return GameState() == 3;
     case Condition::kFollowDone:
       return !g_following.load(std::memory_order_relaxed);
+    case Condition::kPause:
+      return MclaPauseMenuUp();
     case Condition::kRoam: {
       float xyz[3];
       return ReadWord(kLeftTitle) == 1 && GameState() == 0 && ReadWord(kCityPending) == 0 &&
