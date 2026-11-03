@@ -58,3 +58,6 @@ keys.*
 # Python bytecode
 __pycache__/
 *.pyc
+
+# The online server's accounts and live state (server/mcla-server.js): never commit.
+/server/data/

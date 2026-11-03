@@ -12,6 +12,8 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <winhttp.h>
 using socket_t = SOCKET;
 static constexpr socket_t kBadSocket = INVALID_SOCKET;
 static int LastSocketError() { return WSAGetLastError(); }
@@ -33,6 +35,59 @@ static void CloseSocket(socket_t s) { close(s); }
 #endif
 
 namespace mcla::online {
+
+std::string HttpUrl::ToString() const {
+  std::string s = https ? "https://" : "http://";
+  s += host;
+  if (port && port != (https ? 443 : 80)) {
+    s += ":" + std::to_string(port);
+  }
+  s += base_path;
+  return s;
+}
+
+bool ParseHttpUrl(std::string_view text, HttpUrl* out, uint16_t default_port) {
+  std::string t = Trim(text);
+  HttpUrl url;
+  bool scheme_given = false;
+  if (Lower(t.substr(0, 8)) == "https://") {
+    url.https = true;
+    scheme_given = true;
+    t = t.substr(8);
+  } else if (Lower(t.substr(0, 7)) == "http://") {
+    scheme_given = true;
+    t = t.substr(7);
+  }
+  // The path, if any.
+  size_t slash = t.find('/');
+  if (slash != std::string::npos) {
+    url.base_path = t.substr(slash);
+    t = t.substr(0, slash);
+    while (!url.base_path.empty() && url.base_path.back() == '/') {
+      url.base_path.pop_back();
+    }
+  }
+  if (t.empty()) {
+    return false;
+  }
+  size_t colon = t.rfind(':');
+  if (colon != std::string::npos) {
+    int p = std::atoi(t.c_str() + colon + 1);
+    if (p <= 0 || p > 65535) {
+      return false;
+    }
+    url.port = uint16_t(p);
+    url.host = t.substr(0, colon);
+  } else {
+    url.host = t;
+    url.port = scheme_given ? (url.https ? 443 : 80) : default_port;
+  }
+  if (url.host.empty()) {
+    return false;
+  }
+  *out = url;
+  return true;
+}
 
 void HttpStartup() {
 #ifdef _WIN32
@@ -95,16 +150,162 @@ uint32_t LocalAddressTowards(const std::string& host, uint16_t port) {
   return local;
 }
 
+#ifdef _WIN32
+
+// --- WinHTTP ------------------------------------------------------------------------
+
+#ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+#define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
+#endif
+#ifndef WINHTTP_OPTION_SECURE_PROTOCOLS
+#define WINHTTP_OPTION_SECURE_PROTOCOLS 84
+#endif
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2
+#define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 0x00000800
+#endif
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+#define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 0x00002000
+#endif
+
+namespace {
+
+std::wstring Widen(const std::string& s) {
+  if (s.empty()) {
+    return std::wstring();
+  }
+  int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
+  std::wstring out(size_t(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), out.data(), n);
+  return out;
+}
+
+std::string WinHttpErrorText(DWORD error) {
+  switch (error) {
+    case 12002: return "timed out";
+    case 12005: return "bad URL";
+    case 12007: return "the name could not be resolved";
+    case 12029: return "could not connect";
+    case 12030: return "the connection was closed";
+    case 12152: return "not an HTTP response";
+    case 12157: return "the secure connection failed";
+    case 12175: return "the certificate was not accepted";
+    default: return "WinHTTP error " + std::to_string(error);
+  }
+}
+
+struct Handle {
+  HINTERNET h = nullptr;
+  ~Handle() {
+    if (h) WinHttpCloseHandle(h);
+  }
+};
+
+}  // namespace
+
+HttpResponse HttpRequest(const std::string& method, const HttpUrl& url, const std::string& path,
+                         const std::string& body, const std::vector<std::string>& headers,
+                         uint32_t timeout_ms) {
+  HttpResponse response;
+  Handle session;
+  session.h = WinHttpOpen(L"mcla-recomp-online/1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!session.h) {
+    session.h = WinHttpOpen(L"mcla-recomp-online/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  }
+  if (!session.h) {
+    response.error = WinHttpErrorText(GetLastError());
+    return response;
+  }
+  const int t = int(timeout_ms);
+  WinHttpSetTimeouts(session.h, t, t, t, t);
+  if (url.https) {
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    if (!WinHttpSetOption(session.h, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
+                          sizeof(protocols))) {
+      protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+      WinHttpSetOption(session.h, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+    }
+  }
+
+  Handle connect;
+  connect.h = WinHttpConnect(session.h, Widen(url.host).c_str(), url.port, 0);
+  if (!connect.h) {
+    response.error = WinHttpErrorText(GetLastError());
+    return response;
+  }
+
+  Handle request;
+  const std::wstring full_path = Widen(url.base_path + path);
+  request.h = WinHttpOpenRequest(connect.h, Widen(method).c_str(), full_path.c_str(), nullptr,
+                                 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 url.https ? WINHTTP_FLAG_SECURE : 0);
+  if (!request.h) {
+    response.error = WinHttpErrorText(GetLastError());
+    return response;
+  }
+
+  std::string header_text = "Accept: application/json\r\n";
+  if (!body.empty()) {
+    header_text += "Content-Type: application/json\r\n";
+  }
+  for (const auto& h : headers) {
+    header_text += h + "\r\n";
+  }
+  const std::wstring wide_headers = Widen(header_text);
+  if (!WinHttpSendRequest(request.h, wide_headers.c_str(), DWORD(-1),
+                          body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
+                          DWORD(body.size()), DWORD(body.size()), 0)) {
+    response.error = WinHttpErrorText(GetLastError());
+    return response;
+  }
+  if (!WinHttpReceiveResponse(request.h, nullptr)) {
+    response.error = WinHttpErrorText(GetLastError());
+    return response;
+  }
+
+  DWORD status = 0;
+  DWORD size = sizeof(status);
+  if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                           WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
+    response.error = "no status in the response";
+    return response;
+  }
+  response.status = int(status);
+
+  while (true) {
+    DWORD available = 0;
+    if (!WinHttpQueryDataAvailable(request.h, &available) || available == 0) {
+      break;
+    }
+    if (response.body.size() + available > 8u * 1024 * 1024) {
+      response.error = "the response is too large";
+      break;
+    }
+    const size_t offset = response.body.size();
+    response.body.resize(offset + available);
+    DWORD read = 0;
+    if (!WinHttpReadData(request.h, response.body.data() + offset, available, &read)) {
+      response.body.resize(offset);
+      break;
+    }
+    response.body.resize(offset + read);
+    if (read == 0) {
+      break;
+    }
+  }
+  return response;
+}
+
+#else
+
+// --- Plain sockets (HTTP only) -------------------------------------------------------
+
 namespace {
 
 void SetNonBlocking(socket_t s, bool on) {
-#ifdef _WIN32
-  u_long mode = on ? 1 : 0;
-  ioctlsocket(s, FIONBIO, &mode);
-#else
   int flags = fcntl(s, F_GETFL, 0);
   fcntl(s, F_SETFL, on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK));
-#endif
 }
 
 bool WaitFor(socket_t s, bool for_write, uint32_t timeout_ms) {
@@ -124,12 +325,7 @@ bool ConnectWithTimeout(socket_t s, const sockaddr_in& addr, uint32_t timeout_ms
   int r = connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
   if (r != 0) {
     int e = LastSocketError();
-#ifdef _WIN32
-    bool in_progress = e == WSAEWOULDBLOCK || e == WSAEINPROGRESS;
-#else
-    bool in_progress = e == EINPROGRESS || e == EWOULDBLOCK;
-#endif
-    if (!in_progress) {
+    if (e != EINPROGRESS && e != EWOULDBLOCK) {
       *error = "connect failed (" + std::to_string(e) + ")";
       return false;
     }
@@ -155,7 +351,7 @@ bool SendAll(socket_t s, const std::string& data, uint32_t timeout_ms) {
     if (!WaitFor(s, true, timeout_ms)) {
       return false;
     }
-    int n = send(s, data.data() + sent, int(data.size() - sent), 0);
+    int n = int(send(s, data.data() + sent, data.size() - sent, 0));
     if (n <= 0) {
       return false;
     }
@@ -166,15 +362,19 @@ bool SendAll(socket_t s, const std::string& data, uint32_t timeout_ms) {
 
 }  // namespace
 
-HttpResponse HttpRequest(const std::string& method, const std::string& host, uint16_t port,
-                         const std::string& path, const std::string& body,
+HttpResponse HttpRequest(const std::string& method, const HttpUrl& url, const std::string& path,
+                         const std::string& body, const std::vector<std::string>& headers,
                          uint32_t timeout_ms) {
   HttpStartup();
   HttpResponse response;
+  if (url.https) {
+    response.error = "HTTPS needs the Windows build (WinHTTP); use an http:// address here";
+    return response;
+  }
 
-  uint32_t ip = ResolveIpv4(host);
+  uint32_t ip = ResolveIpv4(url.host);
   if (!ip) {
-    response.error = "could not resolve " + host;
+    response.error = "could not resolve " + url.host;
     return response;
   }
 
@@ -188,18 +388,21 @@ HttpResponse HttpRequest(const std::string& method, const std::string& host, uin
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
+  addr.sin_port = htons(url.port);
   addr.sin_addr.s_addr = htonl(ip);
   if (!ConnectWithTimeout(s, addr, timeout_ms, &response.error)) {
     CloseSocket(s);
     return response;
   }
 
-  std::string request = method + " " + path + " HTTP/1.1\r\n";
-  request += "Host: " + host + ":" + std::to_string(port) + "\r\n";
+  std::string request = method + " " + url.base_path + path + " HTTP/1.1\r\n";
+  request += "Host: " + url.host + ":" + std::to_string(url.port) + "\r\n";
   request += "User-Agent: mcla-recomp-online/1\r\n";
   request += "Accept: application/json\r\n";
   request += "Connection: close\r\n";
+  for (const auto& h : headers) {
+    request += h + "\r\n";
+  }
   if (!body.empty()) {
     request += "Content-Type: application/json\r\n";
     request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
@@ -215,8 +418,6 @@ HttpResponse HttpRequest(const std::string& method, const std::string& host, uin
     return response;
   }
 
-  // Read until the server closes, the Content-Length is satisfied, or time
-  // runs out. The server answers with Connection: close, so this is enough.
   std::string raw;
   size_t header_end = std::string::npos;
   size_t content_length = std::string::npos;
@@ -224,26 +425,22 @@ HttpResponse HttpRequest(const std::string& method, const std::string& host, uin
   char buf[8192];
   while (true) {
     uint64_t now = NowMs();
-    if (now >= deadline) {
+    if (now >= deadline || !WaitFor(s, false, uint32_t(deadline - now))) {
       response.error = "response timed out";
       break;
     }
-    if (!WaitFor(s, false, uint32_t(deadline - now))) {
-      response.error = "response timed out";
-      break;
-    }
-    int n = recv(s, buf, sizeof(buf), 0);
+    int n = int(recv(s, buf, sizeof(buf), 0));
     if (n <= 0) {
-      break;  // closed
+      break;
     }
     raw.append(buf, size_t(n));
     if (header_end == std::string::npos) {
       header_end = raw.find("\r\n\r\n");
       if (header_end != std::string::npos) {
-        std::string headers = Lower(raw.substr(0, header_end));
-        size_t cl = headers.find("content-length:");
+        std::string hdrs = Lower(raw.substr(0, header_end));
+        size_t cl = hdrs.find("content-length:");
         if (cl != std::string::npos) {
-          content_length = size_t(std::atoll(headers.c_str() + cl + 15));
+          content_length = size_t(std::atoll(hdrs.c_str() + cl + 15));
         }
       }
     }
@@ -260,7 +457,6 @@ HttpResponse HttpRequest(const std::string& method, const std::string& host, uin
     }
     return response;
   }
-  // "HTTP/1.1 200 OK"
   size_t sp = raw.find(' ');
   if (sp != std::string::npos && sp + 4 <= raw.size()) {
     response.status = std::atoi(raw.c_str() + sp + 1);
@@ -276,5 +472,7 @@ HttpResponse HttpRequest(const std::string& method, const std::string& host, uin
   }
   return response;
 }
+
+#endif
 
 }  // namespace mcla::online

@@ -1,13 +1,30 @@
-// A minimal blocking HTTP/1.1 client over plain sockets: one request per
-// connection, JSON in and out. Enough for the private server's small API and
-// free of any dependency the SDK does not already have.
+// The HTTP client the online module talks to the server with: JSON in and out,
+// one request per call, every wait bounded. On Windows it is WinHTTP, so HTTPS
+// (the usual way a hosted site is reached) and the system proxy come with it;
+// elsewhere a plain-socket HTTP/1.1 client, HTTP only.
 
 #pragma once
 
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace mcla::online {
+
+// Where the server is: "host:port" (HTTP), or a URL, "https://example.com" or
+// "http://host:36000/mcla" (the path is where the app is mounted).
+struct HttpUrl {
+  bool https = false;
+  std::string host;
+  uint16_t port = 0;
+  std::string base_path;  // "" or "/something", no slash at the end
+
+  // "https://example.com" or "http://host:36000", plus the base path.
+  std::string ToString() const;
+};
+
+bool ParseHttpUrl(std::string_view text, HttpUrl* out, uint16_t default_port);
 
 struct HttpResponse {
   int status = 0;        // 0: no answer (connection failed or timed out)
@@ -19,10 +36,11 @@ struct HttpResponse {
 // Starts the host's socket library; safe to call more than once.
 void HttpStartup();
 
-// `method` is GET, POST, PUT or DELETE. `body` is sent as application/json when
-// not empty. Every network wait is bounded by `timeout_ms`.
-HttpResponse HttpRequest(const std::string& method, const std::string& host, uint16_t port,
-                         const std::string& path, const std::string& body,
+// `method` is GET, POST, PUT or DELETE; `path` starts with a slash and goes
+// after the URL's base path. `body` is sent as application/json when not
+// empty. `headers` are extra lines without the line ending.
+HttpResponse HttpRequest(const std::string& method, const HttpUrl& url, const std::string& path,
+                         const std::string& body, const std::vector<std::string>& headers,
                          uint32_t timeout_ms = 4000);
 
 // The address of the local interface that routes to `host:port`, in host byte

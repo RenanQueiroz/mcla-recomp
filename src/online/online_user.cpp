@@ -1,6 +1,7 @@
 // XamUser*: with the private server reached, the profile is signed in to LIVE
 // with an online XUID and every privilege; otherwise the SDK's local sign-in.
 
+#include <algorithm>
 #include <cstring>
 
 #include <rex/hook.h>
@@ -58,7 +59,7 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
   info->xuid = xuid;
   info->flags = live ? kUserInfoFlagLiveEnabled : 0;
   info->signin_state = live ? kSigninStateSignedInToLive : kSigninStateSignedInLocally;
-  const std::string name = rex::system::kernel_state()->user_profile()->name();
+  const std::string name = state.DisplayName();
   std::strncpy(info->name, name.c_str(), sizeof(info->name) - 1);
   ONLINE_TRACE("XamUserGetSigninInfo(flags {:#x}) -> {} {}", flags, Hex64(xuid),
                live ? "LIVE" : "local");
@@ -105,12 +106,51 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 privilege, mapped_u32 out_va
   return kErrorSuccess;
 }
 
+// The name the game shows for the player: the account's gamertag once signed
+// in to the server (the name the other players see), the profile's otherwise.
+u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+  if (user_index >= 4 || !buffer || !buffer_len) {
+    return kEInvalidArg;
+  }
+  if (user_index != 0) {
+    return kENoSuchUser;
+  }
+  const std::string name = OnlineState::Get().DisplayName();
+  const uint32_t room = std::min<uint32_t>(buffer_len, 16);
+  const size_t n = std::min<size_t>(name.size(), room - 1);
+  std::memcpy(static_cast<char*>(buffer), name.data(), n);
+  static_cast<char*>(buffer)[n] = '\0';
+  return kESuccess;
+}
+
+u32 XamUserGetGamerTag_entry(u32 user_index, mapped_void buffer, u32 buffer_len) {
+  if (user_index >= 4) {
+    return kEInvalidArg;
+  }
+  if (user_index != 0) {
+    return kENoSuchUser;
+  }
+  if (!buffer || buffer_len < 16) {
+    return kEInvalidArg;
+  }
+  const std::string name = OnlineState::Get().DisplayName();
+  auto* out = static_cast<rex::be<uint16_t>*>(buffer.host_address());
+  const size_t n = std::min<size_t>(name.size(), 15);
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = uint16_t(uint8_t(name[i]));
+  }
+  out[n] = uint16_t(0);
+  return kESuccess;
+}
+
 }  // namespace
 
 REX_HOOK(__imp__XamUserGetSigninState, XamUserGetSigninState_entry)
 REX_HOOK(__imp__XamUserGetSigninInfo, XamUserGetSigninInfo_entry)
 REX_HOOK(__imp__XamUserGetXUID, XamUserGetXUID_entry)
 REX_HOOK(__imp__XamUserCheckPrivilege, XamUserCheckPrivilege_entry)
+REX_HOOK(__imp__XamUserGetName, XamUserGetName_entry)
+REX_HOOK(__imp__XamUserGetGamerTag, XamUserGetGamerTag_entry)
 
 // Leaderboards are not kept yet: the enumerator cannot be created, which the
 // game's wrapper turns into a clean failure (the SDK's stub left the return

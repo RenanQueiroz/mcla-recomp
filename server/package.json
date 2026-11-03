@@ -1,0 +1,14 @@
+{
+  "name": "mcla-online-server",
+  "version": "1.0.0",
+  "description": "The website, account system and matchmaking server for the Midnight Club: Los Angeles recompilation's online patch (mcla_online). Plain Node.js, no packages.",
+  "main": "app.js",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "start": "node mcla-server.js"
+  }
+}

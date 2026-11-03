@@ -116,6 +116,7 @@ if(WIN32)
     # The shader storage: the display drivers in its stamp, a preparation's memory figures (dxgi, psapi).
     # The GPU choice (src/mcla_app.cpp, ChooseGpu): Windows' graphics settings are read from the registry (advapi32).
     target_link_libraries(mcla PRIVATE dxgi psapi advapi32)
-    # The online module's HTTP client (src/online/online_http.cpp).
-    target_link_libraries(mcla PRIVATE ws2_32)
+    # The online module's HTTP client (src/online/online_http.cpp): WinHTTP for the
+    # requests (HTTPS included), Winsock for the local address.
+    target_link_libraries(mcla PRIVATE ws2_32 winhttp)
 endif()

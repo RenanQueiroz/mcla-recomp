@@ -1,5 +1,11 @@
-// The player's online identity, the connection to the private server, and the
+// The player's online identity, the connection to the online server, and the
 // LIVE sign-in the game is shown.
+//
+// The player makes an account on the server's website and puts the account's
+// game key in mcla.toml (mcla_online_key). The game signs in with the key; the
+// server answers with the account's gamertag and online XUID, which become the
+// identity other players see. Without a key, or with one the server refuses,
+// the game stays offline as it did before.
 
 #include "online.h"
 
@@ -20,16 +26,30 @@
 #include "online_http.h"
 #include "online_util.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(mcla_online, false, "MCLA",
-                    "Sign the profile in to a private multiplayer server (mcla_online_server) "
-                    "so that the game's online modes work: the server keeps the list of "
-                    "sessions, the races themselves run between the players' PCs over UDP. One "
-                    "player runs server/mcla-server.js; everyone sets the same address here. "
-                    "Takes effect at the next start")
+                    "Sign in to the online server (mcla_online_server) with the account's game key "
+                    "(mcla_online_key) so that the game's online modes work: the server keeps the "
+                    "list of sessions, the races themselves run between the players' PCs over UDP. "
+                    "Accounts are made on the server's website. Takes effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_online_server, "127.0.0.1:36000", "MCLA",
-                      "The private server's address, host:port (mcla_online). Takes effect at "
-                      "the next start")
+                      "The online server: host:port, or its address as a URL (https://example.com, "
+                      "http://host:36000/path), as the website's account page shows it. Takes "
+                      "effect at the next start")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(mcla_online_key, "", "MCLA",
+                      "The game key of your account on the online server's website: what signs "
+                      "the game in. Treat it like a password. Empty: the game stays offline. Takes "
+                      "effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_online_title_server, "", "MCLA",
                       "An IPv4 address to give the game for Rockstar's title server "
@@ -39,7 +59,7 @@ REXCVAR_DEFINE_STRING(mcla_online_title_server, "", "MCLA",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(mcla_online_log, false, "MCLA",
                     "Log every call the game makes to the online layer and every request to "
-                    "the private server (for reports)");
+                    "the online server (for reports)");
 
 namespace mcla::online {
 
@@ -47,6 +67,51 @@ namespace {
 
 constexpr uint32_t kHeartbeatMs = 15000;
 constexpr uint16_t kDefaultServerPort = 36000;
+
+// Something that names this PC and Windows user and stays the same between
+// starts: the machine id and MAC address of the console the game thinks it is.
+std::string MachineFingerprint() {
+  std::string text;
+#ifdef _WIN32
+  wchar_t computer[256];
+  DWORD n = 256;
+  if (GetComputerNameW(computer, &n)) {
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, computer, int(n), nullptr, 0, nullptr, nullptr);
+    std::string s(size_t(bytes), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, computer, int(n), s.data(), bytes, nullptr, nullptr);
+    text += s;
+  }
+  wchar_t user[256];
+  DWORD m = 256;
+  if (GetUserNameW(user, &m) && m > 1) {
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, user, int(m - 1), nullptr, 0, nullptr, nullptr);
+    std::string s(size_t(bytes), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, user, int(m - 1), s.data(), bytes, nullptr, nullptr);
+    text += "|" + s;
+  }
+#else
+  char host[256] = {};
+  if (gethostname(host, sizeof(host) - 1) == 0) {
+    text += host;
+  }
+  if (const char* user = getenv("USER")) {
+    text += std::string("|") + user;
+  }
+#endif
+  return text.empty() ? std::string("mcla") : text;
+}
+
+bool IsGamertag(const std::string& s) {
+  if (s.empty() || s.size() > 15) {
+    return false;
+  }
+  for (unsigned char c : s) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ')) {
+      return false;
+    }
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -67,22 +132,28 @@ ServerApi& OnlineState::server() {
   return *server_;
 }
 
+std::string OnlineState::DisplayName() const {
+  if (connected_ && !identity_.name.empty()) {
+    return identity_.name;
+  }
+  auto* ks = rex::system::kernel_state();
+  return ks && ks->user_profile() ? ks->user_profile()->name() : std::string("User");
+}
+
 void OnlineState::DeriveIdentity() {
   auto* ks = rex::system::kernel_state();
   const auto* profile = ks ? ks->user_profile() : nullptr;
   identity_.name = profile ? profile->name() : std::string("User");
   identity_.xuid_offline = profile ? profile->xuid() : 0xB13EBABEBABEBABEull;
+  identity_.xuid_online = 0;  // the account's, once signed in
 
-  // Online XUIDs begin 0x0009; the rest comes from the name so that the same
-  // name is the same player on every start and every PC. Two players with one
-  // name would collide: the server refuses the second.
-  const uint64_t h = Fnv1a64(Lower(identity_.name));
-  identity_.xuid_online = 0x0009000000000000ull | (h & 0x0000FFFFFFFFFFFFull);
   // Machine ids begin 0xFA; the MAC gets the locally administered, unicast bits.
-  const uint64_t m = Fnv1a64(identity_.name + "|machine");
+  const std::string fingerprint = MachineFingerprint();
+  const uint64_t m = Fnv1a64(fingerprint);
   identity_.machine_id = 0xFA00000000000000ull | (m & 0x00FFFFFFFFFFFFFFull);
+  const uint64_t mac = Fnv1a64(fingerprint + "|mac");
   for (int i = 0; i < 6; ++i) {
-    identity_.mac[i] = uint8_t(m >> (8 * i));
+    identity_.mac[i] = uint8_t(mac >> (8 * i));
   }
   identity_.mac[0] = uint8_t((identity_.mac[0] & 0xFE) | 0x02);
 }
@@ -91,7 +162,7 @@ void OnlineState::set_game_port(uint16_t port) {
   if (port && port != game_port_) {
     game_port_ = port;
     ONLINE_LOG("the game bound UDP port {}: peers must reach this PC on it (forward it on the "
-               "router for play across the internet)",
+               "router to host races across the internet)",
                port);
   }
 }
@@ -159,9 +230,33 @@ Json OnlineState::OurAddressJson() const {
 
 bool OnlineState::Register() {
   Json reply;
-  if (!server().RegisterPlayer(OurAddressJson(), &reply)) {
+  const int status = server().RegisterPlayer(OurAddressJson(), &reply);
+  if (status == 0) {
+    return false;  // not reached; the heartbeat thread tries again
+  }
+  if (status == 401 || status == 403) {
+    if (!key_rejected_) {
+      ONLINE_WARN("the server at {} refused the game key (mcla_online_key): make a new key on "
+                  "your account page at {} and put it in mcla.toml; the game stays offline",
+                  server_text_, website_url_);
+    }
+    key_rejected_ = true;
     return false;
   }
+  if (status < 200 || status >= 300) {
+    ONLINE_WARN("the server at {} answered HTTP {} to the sign-in; the game stays offline for now",
+                server_text_, status);
+    return false;
+  }
+  const uint64_t xuid = ParseHex64(reply["xuid"].as_string());
+  const std::string name = Trim(reply["name"].as_string());
+  if (!xuid || !IsGamertag(name)) {
+    ONLINE_WARN("the server's sign-in answer has no usable account (xuid '{}', name '{}')",
+                reply["xuid"].as_string(), name);
+    return false;
+  }
+  identity_.xuid_online = xuid;
+  identity_.name = name;
   const uint32_t seen = ParseIpv4(reply["publicIp"].as_string());
   if (seen) {
     public_ip_ = seen;
@@ -169,6 +264,7 @@ bool OnlineState::Register() {
   if (!lan_ip_) {
     lan_ip_ = seen;
   }
+  key_rejected_ = false;
   connected_ = true;
   ONLINE_LOG("signed in to {} as {} (XUID {}); this PC is {} on the LAN, {} to the server",
              server_text_, identity_.name, Hex64(identity_.xuid_online), Ipv4ToString(lan_ip_),
@@ -185,7 +281,7 @@ void OnlineState::BroadcastSignedIn() {
   ks->BroadcastNotification(kNotifySysSigninChanged, 1);
   ks->BroadcastNotification(kNotifyLiveLinkStateChanged, 1);
   ks->BroadcastNotification(kNotifyLiveConnectionChanged, kOnlineLogonConnectionEstablished);
-  ONLINE_LOG("told the game the profile is signed in to LIVE");
+  ONLINE_LOG("told the game the profile is signed in to LIVE as {}", identity_.name);
 }
 
 void OnlineState::HeartbeatThread() {
@@ -209,7 +305,9 @@ void OnlineState::HeartbeatThread() {
 
     if (!connected_) {
       if (now >= next_retry) {
-        next_retry = now + 10000;
+        // A refused key is tried again rarely: it changes only when the player
+        // edits mcla.toml, which needs a restart anyway.
+        next_retry = now + (key_rejected_ ? 60000 : 10000);
         if (Register()) {
           next_heartbeat = now + kHeartbeatMs;
         }
@@ -218,9 +316,13 @@ void OnlineState::HeartbeatThread() {
     }
     if (now >= next_heartbeat) {
       next_heartbeat = now + kHeartbeatMs;
-      if (!server().Heartbeat(identity_.xuid_online, OurAddressJson())) {
-        // Re-register on the next round: the server may have restarted.
-        ONLINE_WARN("the server did not answer the heartbeat; signing in again");
+      Json reply;
+      const int status = server().Heartbeat(OurAddressJson(), &reply);
+      if (status < 200 || status >= 300) {
+        // Sign in again on the next round: the server may have restarted, or
+        // the key may have been renewed on the website.
+        ONLINE_WARN("the server did not take the heartbeat ({}); signing in again",
+                    status ? "HTTP " + std::to_string(status) : "no answer");
         connected_ = false;
         next_retry = now + 2000;
       }
@@ -236,20 +338,23 @@ void OnlineState::Start() {
     return;
   }
   server_text_ = Trim(REXCVAR_GET(mcla_online_server));
-  std::string host;
-  uint16_t port = 0;
-  if (!SplitHostPort(server_text_, &host, &port, kDefaultServerPort)) {
-    ONLINE_WARN("mcla_online_server '{}' is not host:port; the game stays offline", server_text_);
+  HttpUrl url;
+  if (!ParseHttpUrl(server_text_, &url, kDefaultServerPort)) {
+    ONLINE_WARN("mcla_online_server '{}' is not host:port or a URL; the game stays offline",
+                server_text_);
     enabled_ = false;
     return;
   }
+  website_url_ = url.ToString();
   HttpStartup();
-  server().Configure(host, port);
+  const std::string key = Trim(REXCVAR_GET(mcla_online_key));
+  server().Configure(url, key);
   DeriveIdentity();
+
   // The address this PC has on the network the server is on; with the server
   // on this PC that is the loopback, so the address of the default route is
   // taken instead (a UDP connect sends nothing).
-  lan_ip_ = LocalAddressTowards(host, port);
+  lan_ip_ = LocalAddressTowards(url.host, url.port);
   if (!lan_ip_ || (lan_ip_ >> 24) == 127) {
     const uint32_t route = LocalAddressTowards("8.8.8.8", 53);
     if (route && (route >> 24) != 127) {
@@ -263,10 +368,20 @@ void OnlineState::Start() {
       ONLINE_WARN("mcla_online_title_server '{}' is not an address; ignored", title_server);
     }
   }
+
+  if (key.empty()) {
+    key_missing_ = true;
+    ONLINE_WARN("mcla_online_key is empty: create an account at {} and put its game key in "
+                "mcla.toml; the game stays offline",
+                website_url_);
+    return;
+  }
   if (!Register()) {
-    ONLINE_WARN("could not reach the private server at {}; the game starts offline and signs "
-                "in once the server answers",
-                server_text_);
+    if (!key_rejected_) {
+      ONLINE_WARN("could not reach the online server at {}; the game starts offline and signs "
+                  "in once the server answers",
+                  server_text_);
+    }
   }
   stop_ = false;
   thread_ = std::thread([this] { HeartbeatThread(); });

@@ -1,6 +1,7 @@
-// The private server's HTTP API, as the game uses it. Every call blocks for at
-// most a few seconds and reports failure instead of throwing; the server is
-// server/mcla-server.js, whose README documents the endpoints.
+// The online server's API, as the game uses it: every request carries the
+// account's game key, every call blocks for at most a few seconds and reports
+// failure instead of throwing. The server is server/mcla-server.js, whose
+// README documents the endpoints.
 
 #pragma once
 
@@ -8,19 +9,21 @@
 #include <string>
 #include <vector>
 
+#include "online_http.h"
 #include "online_json.h"
 
 namespace mcla::online {
 
 class ServerApi {
  public:
-  void Configure(const std::string& host, uint16_t port);
-  const std::string& host() const { return host_; }
-  uint16_t port() const { return port_; }
+  void Configure(const HttpUrl& url, const std::string& key);
+  const HttpUrl& url() const { return url_; }
+  bool has_key() const { return !key_.empty(); }
 
-  // Players.
-  bool RegisterPlayer(const Json& player, Json* reply);
-  bool Heartbeat(uint64_t xuid, const Json& player);
+  // Players. RegisterPlayer returns the HTTP status: 0 when the server was not
+  // reached, 401 when the key was refused.
+  int RegisterPlayer(const Json& player, Json* reply);
+  int Heartbeat(const Json& player, Json* reply);
   void Unregister(uint64_t xuid);
   bool GetPlayer(uint64_t xuid, Json* out);
 
@@ -47,8 +50,8 @@ class ServerApi {
   int Call(const char* method, const std::string& path, const Json* body, Json* reply,
            uint32_t timeout_ms = 4000);
 
-  std::string host_;
-  uint16_t port_ = 0;
+  HttpUrl url_;
+  std::string key_;
 };
 
 }  // namespace mcla::online

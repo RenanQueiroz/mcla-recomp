@@ -3,24 +3,27 @@
 #include <rex/logging.h>
 
 #include "online.h"
-#include "online_http.h"
 #include "online_util.h"
 
 namespace mcla::online {
 
-void ServerApi::Configure(const std::string& host, uint16_t port) {
-  host_ = host;
-  port_ = port;
+void ServerApi::Configure(const HttpUrl& url, const std::string& key) {
+  url_ = url;
+  key_ = Trim(key);
 }
 
 int ServerApi::Call(const char* method, const std::string& path, const Json* body, Json* reply,
                     uint32_t timeout_ms) {
-  if (host_.empty()) {
+  if (url_.host.empty()) {
     return 0;
   }
   const std::string body_text = body ? body->dump() : std::string();
   ONLINE_TRACE("{} {}{}", method, path, body ? " " + body_text : "");
-  HttpResponse response = HttpRequest(method, host_, port_, path, body_text, timeout_ms);
+  std::vector<std::string> headers;
+  if (!key_.empty()) {
+    headers.push_back("Authorization: Bearer " + key_);
+  }
+  HttpResponse response = HttpRequest(method, url_, path, body_text, headers, timeout_ms);
   if (response.status == 0) {
     ONLINE_WARN("{} {}: {}", method, path, response.error);
     return 0;
@@ -45,12 +48,13 @@ static bool Ok(int status) {
   return status >= 200 && status < 300;
 }
 
-bool ServerApi::RegisterPlayer(const Json& player, Json* reply) {
-  return Ok(Call("POST", "/players", &player, reply));
+int ServerApi::RegisterPlayer(const Json& player, Json* reply) {
+  return Call("POST", "/players", &player, reply);
 }
 
-bool ServerApi::Heartbeat(uint64_t xuid, const Json& player) {
-  return Ok(Call("POST", "/players/" + Hex64(xuid) + "/heartbeat", &player, nullptr, 3000));
+int ServerApi::Heartbeat(const Json& player, Json* reply) {
+  const std::string xuid = player["xuid"].as_string("0");
+  return Call("POST", "/players/" + xuid + "/heartbeat", &player, reply, 3000);
 }
 
 void ServerApi::Unregister(uint64_t xuid) {

@@ -45,5 +45,6 @@ wait 1000ms 60f
 screens
 uisel
 log online-smoke: done
-wait 2s
+# The online tab searches and hosts a second or two after it opens.
+wait 10s
 quit

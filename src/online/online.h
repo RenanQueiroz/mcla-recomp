@@ -81,8 +81,14 @@ class OnlineState {
 
   ServerApi& server();
   const std::string& server_text() const { return server_text_; }
+  // The website's address, for messages: where accounts are made.
+  const std::string& website_url() const { return website_url_; }
   // The title server (XNetServerToInAddr) address, 0 when none is configured.
   uint32_t title_server_ip() const { return title_server_ip_; }
+
+  // The name other players see: the account's gamertag once signed in, the
+  // profile's name before that.
+  std::string DisplayName() const;
 
   void Start();
   void Stop();
@@ -105,8 +111,11 @@ class OnlineState {
   bool verbose_ = false;
   std::atomic<bool> connected_{false};
   bool notified_ = false;
+  bool key_missing_ = false;             // mcla_online_key is empty: nothing to sign in with
+  std::atomic<bool> key_rejected_{false};  // the server answered 401 to the key
   Identity identity_;
   std::string server_text_;
+  std::string website_url_;
   uint32_t lan_ip_ = 0;
   uint32_t public_ip_ = 0;
   uint16_t game_port_ = 0;
