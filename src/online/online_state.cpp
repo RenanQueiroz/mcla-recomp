@@ -41,9 +41,10 @@ REXCVAR_DEFINE_BOOL(mcla_online, false, "MCLA",
                     "list of sessions, the races themselves run between the players' PCs over UDP. "
                     "Accounts are made on the server's website. Takes effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_STRING(mcla_online_server, "127.0.0.1:36000", "MCLA",
-                      "The online server: host:port, or its address as a URL (https://example.com, "
-                      "http://host:36000/path), as the website's account page shows it. Takes "
+REXCVAR_DEFINE_STRING(mcla_online_server, "https://mclaonline.com", "MCLA",
+                      "The online server: by default the patch's own, https://mclaonline.com, "
+                      "where the accounts are made. Another one as host:port or a URL "
+                      "(http://host:36000/path), as its website's account page shows it. Takes "
                       "effect at the next start")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(mcla_online_key, "", "MCLA",

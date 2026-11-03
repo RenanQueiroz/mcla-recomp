@@ -6,16 +6,16 @@ What the server does is small: it keeps the accounts, who is signed in, which se
 
 ## Playing online
 
-1. **Create an account** on the server's website. The gamertag you choose is the name the other racers see; it is yours from then on, on any PC.
-2. Open your **account page**. It shows your **game key** and the three lines to put in the game's settings:
+1. **Create an account** on the online server's website, [mclaonline.com](https://mclaonline.com). The gamertag you choose is the name the other racers see; it is yours from then on, on any PC.
+2. Open your **account page**. It shows your **game key** and the lines to put in the game's settings:
    ```toml
    mcla_online = true
-   mcla_online_server = "https://the-site.example"
    mcla_online_key = "YOUR KEY"
    ```
-   Put them in `mcla.toml` next to `mcla.exe` (the launcher's *More* › *Open the game folder*), or as options under the launcher's *Advanced* › *More mcla.exe options* with `--` in front of each (`--mcla_online=true --mcla_online_server=https://the-site.example --mcla_online_key=YOUR KEY`).
+   Put them in `mcla.toml` next to `mcla.exe` (the launcher's *More* › *Open the game folder*), or as options under the launcher's *Advanced* › *More mcla.exe options* with `--` in front of each (`--mcla_online=true --mcla_online_key=YOUR KEY`). The game already points at mclaonline.com; the account page's `mcla_online_server` line only matters for another server (one you run yourself, on a LAN or elsewhere).
 3. **Start the game.** The log (`--log_file=run.log --log_level=info`) says `online: signed in to ... as <your gamertag>` when it worked, and the website's home page shows you under *In the game now*. The game then treats the profile as signed in to LIVE, under your gamertag, with every privilege, and its online menus talk to the server.
 4. In the pause menu, open the **online tab**. It finds the open lobbies and joins one, or hosts a lobby when there is none; the lobby shows on the website.
+5. **Race.** Every race finished online pays XP (50, and 150 more for a win), which makes the level and title shown next to your name on the website and on its leaderboard; the account page has the progress bar and your last races. The level lives on the server, not in the game's menus.
 
 The game key is what signs you in: anyone who has it plays as you. Make a new one on the account page if it leaks (the old one stops working at once, and a game still running with it is signed out at its next heartbeat).
 
@@ -44,7 +44,7 @@ One Node.js app, no packages, made for shared hosting (GoDaddy's Node.js apps an
 | QoS (the connection quality probe before joining) | Answered from the server with the data the host published; the measured values (20 to 30 ms, 2 Mbit/s) are fixed, not measured. |
 | Race traffic | The game's own UDP sockets, which the SDK already maps to real sockets. |
 | HTTPS | Windows: yes (WinHTTP, the system's certificates and proxy). Linux and the PS5 build: HTTP only. |
-| Leaderboards and stats | Writes are kept by the server; reads return empty tables, and the leaderboard enumerator fails cleanly. The game shows no leaderboards. |
+| Leaderboards and stats | Writes go to the server, which pays XP for them (a race finished, a race won) and ranks the accounts by level on the website's leaderboard; reads return empty tables, and the leaderboard enumerator fails cleanly, so the game shows no leaderboards of its own. Which property of a write says who won is set on the server once a real race has shown it in the log (`server/README.md`); until then wins pay nothing and finishes do. |
 | Rockstar's title server (Social Club, Rate My Ride, shared content) | Not implemented: the game is told the service is unreachable and goes on without it. `mcla_online_title_server` can point it at an address for experiments. |
 | Friends, invites, messages, marketplace | Not implemented: no friends, no invites; the game's queries get empty answers. |
 | Voice | Not implemented. |
@@ -56,7 +56,7 @@ On one PC the whole way in has been seen to work: the game signs in, and its onl
 | Setting | In `mcla.toml` | Default | Does |
 |---|---|---|---|
 | Online | `mcla_online` | `false` | Signs in to the online server; off, the game stays offline as before. Next start. |
-| Server | `mcla_online_server` | `"127.0.0.1:36000"` | The server, as the account page shows it: `https://the-site.example`, or `host:port` for a server on the LAN. Next start. |
+| Server | `mcla_online_server` | `"https://mclaonline.com"` | The online server. Another one as its account page shows it: `https://the-site.example`, or `host:port` for a server on the LAN. Next start. |
 | Game key | `mcla_online_key` | `""` | The account's game key from the account page. Empty: offline. Next start. |
 | Title server | `mcla_online_title_server` | `""` | An IPv4 address to give the game for Rockstar's title server; empty, there is none. For experiments. Next start. |
 | Online log | `mcla_online_log` | `false` | Logs every online call and every request to the server. |

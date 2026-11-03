@@ -9,6 +9,8 @@
     "node": ">=16"
   },
   "scripts": {
+    "build": "echo \"nothing to build: plain Node.js\"",
     "start": "node mcla-server.js"
-  }
+  },
+  "dependencies": {}
 }

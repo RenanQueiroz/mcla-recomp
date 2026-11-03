@@ -10,12 +10,15 @@
 //   node mcla-server.js [--port 36000] [--bind 0.0.0.0] [--data ./data]
 //                       [--base-path /mcla] [--patch-url URL] [--verbose]
 //
-// Plain Node.js (16 or newer), no packages. Made to run on shared hosting
-// (cPanel / Phusion Passenger, as GoDaddy's Node.js apps do): it listens on
-// PORT when the host sets it, trusts X-Forwarded-For from the host's proxy,
-// serves under PASSENGER_BASE_URI when the app is mounted on a sub-path, and
-// keeps accounts, players and sessions in JSON files in the data folder, so
-// nothing is lost when the host stops an idle app or runs more than one copy.
+// Plain Node.js (16 or newer), no packages. Made to run on hosting that
+// manages one Node.js app (cPanel / Phusion Passenger, as GoDaddy's does, or a
+// platform that runs "npm start"): it listens on PORT when the host sets it,
+// on every interface, trusts X-Forwarded-For from the host's proxy, serves
+// under PASSENGER_BASE_URI when the app is mounted on a sub-path, and keeps
+// accounts, players and sessions in JSON files in the data folder, so nothing
+// is lost when the host stops an idle app or runs more than one copy. The
+// cookie secret is made on first start and kept there, or comes from
+// MCLA_COOKIE_SECRET when the host's disk does not persist.
 //
 // The API, all JSON (server/README.md has the details). Game routes need
 // "Authorization: Bearer <game key>" (the key from the account page):
@@ -54,11 +57,14 @@ function argValue(name, fallback) {
 }
 const HOSTED = !!process.env.PORT;  // started by a host's app manager (Passenger)
 const PORT = parseInt(process.env.PORT || argValue('--port', process.env.MCLA_SERVER_PORT || '36000'), 10);
-const BIND = argValue('--bind', process.env.MCLA_SERVER_BIND || (HOSTED ? '127.0.0.1' : '0.0.0.0'));
+const BIND = argValue('--bind', process.env.MCLA_SERVER_BIND || '0.0.0.0');
 const DATA_DIR = path.resolve(argValue('--data', process.env.MCLA_DATA_DIR || path.join(__dirname, 'data')));
 const BASE = (argValue('--base-path', process.env.PASSENGER_BASE_URI || '') || '').replace(/\/+$/, '');
 const PATCH_URL = argValue('--patch-url', process.env.MCLA_PATCH_URL || 'https://github.com/RenanQueiroz/mcla-recomp/releases');
 const SITE_NAME = process.env.MCLA_SITE_NAME || 'Midnight Club: Los Angeles Online';
+// The server the game points at when mcla_online_server is not set. When this
+// site is that server, the account page leaves the mcla_online_server line out.
+const GAME_DEFAULT_SERVER = (process.env.MCLA_GAME_DEFAULT_SERVER || argValue('--game-default-server', 'https://mclaonline.com')).replace(/\/+$/, '').toLowerCase();
 const TRUST_PROXY = args.includes('--trust-proxy') || (!args.includes('--no-trust-proxy') && HOSTED);
 const VERBOSE = args.includes('--verbose') || process.env.MCLA_VERBOSE === '1';
 
@@ -67,6 +73,19 @@ const SESSION_TIMEOUT_MS = 90 * 1000;  // a session whose host is gone
 const COOKIE_DAYS = 30;
 const XCONTEXT_PRESENCE = 0x8001;
 const JOIN_IN_PROGRESS_DISABLED = 0x400;
+
+// Experience. A race finished and a race won each pay XP once per session and
+// player. The game reports results with a stats write at the end of a race
+// (XSessionWriteStats), which the online layer forwards here. Which property in
+// that write marks the winner is the game's own (its leaderboard schema) and is
+// read off the log of the first real race: set MCLA_WIN_PROPERTY to its id (hex)
+// and MCLA_WIN_VALUE to the value a win carries. Until then wins are off and only
+// finishes count.
+const XP_FINISH = parseInt(process.env.MCLA_XP_FINISH || argValue('--xp-finish', '50'), 10) || 0;
+const XP_WIN = parseInt(process.env.MCLA_XP_WIN || argValue('--xp-win', '150'), 10) || 0;
+const WIN_PROPERTY = (parseInt(process.env.MCLA_WIN_PROPERTY || argValue('--win-property', '0'), 16) || 0) >>> 0;
+const WIN_VALUE = parseInt(process.env.MCLA_WIN_VALUE || argValue('--win-value', '1'), 10) || 0;
+const MAX_LEVEL = 60;
 
 function log(...parts) {
   console.log(new Date().toISOString().slice(0, 19).replace('T', ' '), ...parts);
@@ -114,7 +133,9 @@ class JsonStore {
 const accounts = new JsonStore('accounts.json', { nextId: 1, accounts: [] });
 const state = new JsonStore('state.json', { players: {}, sessions: {}, stats: [] });
 const secrets = new JsonStore('secret.json', {});
-if (!secrets.data.cookieSecret) {
+if (process.env.MCLA_COOKIE_SECRET) {
+  secrets.data.cookieSecret = process.env.MCLA_COOKIE_SECRET;  // the host's, not written to disk
+} else if (!secrets.data.cookieSecret) {
   secrets.data.cookieSecret = crypto.randomBytes(32).toString('hex');
   secrets.save();
 }
@@ -187,11 +208,92 @@ function createAccount(gamertag, email, password) {
     gameKey: newGameKey(),
     createdAt: new Date().toISOString(),
     lastSeen: null,
+    xp: 0,
+    racesFinished: 0,
+    racesWon: 0,
+    history: [],   // the last races: {at, sessionId, result, xp}
+    awarded: [],   // "finish:<session>" and "win:<session>" keys already paid
   };
   account.xuid = xuidFor(account.id);
   accounts.data.accounts.push(account);
   accounts.save();
   return account;
+}
+
+// --- Levels -----------------------------------------------------------------------
+
+// Level 2 takes 200 XP, and every level after it 100 XP more than the one
+// before: level 3 at 500, level 5 at 1,400, level 10 at 5,400, level 20 at 20,900.
+function xpForLevel(level) {
+  const n = Math.max(0, level - 1);
+  return n * 200 + 100 * n * (n - 1) / 2;
+}
+function levelFromXp(xp) {
+  let level = 1;
+  while (level < MAX_LEVEL && xp >= xpForLevel(level + 1)) level++;
+  return level;
+}
+const LEVEL_TITLES = [[50, 'Midnight Club'], [35, 'Legend'], [20, 'Elite'], [10, 'Pro'], [5, 'Street Racer'], [1, 'Rookie']];
+function levelTitle(level) {
+  for (const [min, title] of LEVEL_TITLES) if (level >= min) return title;
+  return 'Rookie';
+}
+// Accounts made before levels existed get the fields on first use.
+function ensureProgress(account) {
+  if (typeof account.xp !== 'number') account.xp = 0;
+  if (typeof account.racesFinished !== 'number') account.racesFinished = 0;
+  if (typeof account.racesWon !== 'number') account.racesWon = 0;
+  if (!Array.isArray(account.history)) account.history = [];
+  if (!Array.isArray(account.awarded)) account.awarded = [];
+  return account;
+}
+function progressOf(account) {
+  ensureProgress(account);
+  const level = levelFromXp(account.xp);
+  const floor = xpForLevel(level);
+  const next = level < MAX_LEVEL ? xpForLevel(level + 1) : floor;
+  const into = account.xp - floor;
+  const need = Math.max(1, next - floor);
+  return {
+    level, title: levelTitle(level), xp: account.xp, into, need,
+    pct: level < MAX_LEVEL ? Math.min(100, Math.round(100 * into / need)) : 100,
+    toNext: level < MAX_LEVEL ? next - account.xp : 0,
+  };
+}
+// Pays XP once per key; false when it was paid before.
+function awardXp(account, key, amount, result, sessionId) {
+  ensureProgress(account);
+  if (account.awarded.includes(key)) return false;
+  account.awarded.push(key);
+  if (account.awarded.length > 200) account.awarded.splice(0, account.awarded.length - 200);
+  const before = levelFromXp(account.xp);
+  account.xp += amount;
+  if (result === 'won') account.racesWon++;
+  if (result === 'finished') account.racesFinished++;
+  account.history.push({ at: new Date().toISOString(), sessionId, result, xp: amount });
+  if (account.history.length > 20) account.history.splice(0, account.history.length - 20);
+  const after = levelFromXp(account.xp);
+  log(`${account.gamertag}: +${amount} XP, race ${result} (${account.xp} XP, level ${after}${after > before ? ', up from ' + before : ''})`);
+  return true;
+}
+// A property's value as a number, from the bytes the game stored (big-endian).
+function propertyNumber(p) {
+  const hex = String(p.data || '');
+  if (!/^[0-9A-Fa-f]+$/.test(hex) || hex.length > 16) return null;
+  const type = Number(p.type);
+  if (type === 1 && hex.length >= 8) { const v = parseInt(hex.slice(0, 8), 16); return v > 0x7fffffff ? v - 0x100000000 : v; }
+  if (type === 2 && hex.length >= 16) return Number(BigInt.asIntN(64, BigInt('0x' + hex.slice(0, 16))));
+  if (type === 5 && hex.length >= 8) return Buffer.from(hex.slice(0, 8), 'hex').readFloatBE(0);
+  if (type === 3 && hex.length >= 16) return Buffer.from(hex.slice(0, 16), 'hex').readDoubleBE(0);
+  return null;
+}
+function leaderboard(limit) {
+  return accounts.data.accounts
+    .map((a) => ({ account: a, p: progressOf(a) }))
+    .filter((e) => e.p.xp > 0 || e.account.racesFinished > 0)
+    .sort((x, y) => y.p.xp - x.p.xp || x.account.gamertagLower.localeCompare(y.account.gamertagLower))
+    .slice(0, limit || 100)
+    .map((e, i) => ({ rank: i + 1, name: e.account.gamertag, level: e.p.level, title: e.p.title, xp: e.p.xp, wins: e.account.racesWon, races: e.account.racesFinished }));
 }
 
 // --- Website sessions (a signed cookie) ----------------------------------------------
@@ -522,7 +624,11 @@ function publicStatus() {
     site: SITE_NAME,
     accounts: accounts.data.accounts.length,
     online: players.length,
-    players: players.map((p) => ({ name: p.name, since: new Date(p.firstSeen).toISOString() })),
+    players: players.map((p) => {
+      const a = accountById(p.accountId);
+      return { name: p.name, level: a ? progressOf(a).level : 1, since: new Date(p.firstSeen).toISOString() };
+    }),
+    topRacers: leaderboard(10),
     sessions: sessions.map((s) => {
       const slots = slotCounts(s);
       return {
@@ -542,38 +648,103 @@ function escapeHtml(s) {
 
 const STATE_NAMES = ['in the lobby', 'registering', 'racing', 'reporting', 'closed'];
 
-function layout(req, title, body, account) {
+// The look: one dark panel, crimson at the top fading through black to a
+// deep teal, a soft red glow behind the centre and a huge ghosted "LA" in it;
+// light geometric type (Outfit) for the place at the top left, a heavy name
+// at the bottom left over a row of avatar chips, a drawn circuit at the top
+// right and the live numbers stacked at the bottom right with the last one in
+// yellow; a white sign-in button and a hamburger square in the nav.
+function layout(req, title, body, account, options) {
   const h = escapeHtml;
+  const opts = options || {};
+  const arrow = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.3"/><path d="M6 8h5M9 5.8 11.2 8 9 10.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const nav = account
-    ? `<a href="${BASE}/account">${h(account.gamertag)}</a>
-       <form method="post" action="${BASE}/logout" class="inline"><button class="link" type="submit">Log out</button></form>`
-    : `<a href="${BASE}/login">Log in</a><a class="button" href="${BASE}/register">Create account</a>`;
+    ? `<a class="signin" href="${BASE}/account">${arrow}<span>${h(account.gamertag)}</span></a>
+       <form method="post" action="${BASE}/logout" class="inline"><button class="iconbtn" type="submit" title="Log out" aria-label="Log out"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13H6M10 11l3-3-3-3M13 8H6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></form>`
+    : `<a class="signin" href="${BASE}/login">${arrow}<span>Sign in</span></a>
+       <a class="iconbtn" href="${BASE}/register" title="Create account" aria-label="Create account"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></a>`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${h(title)} · ${h(SITE_NAME)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0b0d14;--panel:#141826;--line:#232a3d;--text:#e8e9ef;--muted:#9aa1b5;--accent:#ff8a1f;--accent2:#ffc14d;--bad:#ff5a6e;--good:#5ad48a}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#2a1a3a 0%,var(--bg) 55%);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,sans-serif;min-height:100vh}
-a{color:var(--accent2)}header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 24px;border-bottom:1px solid var(--line);background:rgba(11,13,20,.7);backdrop-filter:blur(8px)}
-header .brand{font-weight:800;letter-spacing:.5px;text-decoration:none;color:var(--text)}header .brand span{color:var(--accent)}
-nav{display:flex;align-items:center;gap:18px}nav a{text-decoration:none;color:var(--text)}
-.button,button.primary{display:inline-block;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#1a0e00;font-weight:700;padding:10px 18px;border-radius:10px;border:0;text-decoration:none;cursor:pointer}
-button.link{background:none;border:0;color:var(--muted);cursor:pointer;font:inherit;padding:0}button.secondary{background:var(--panel);color:var(--text);border:1px solid var(--line);padding:9px 16px;border-radius:10px;cursor:pointer;font:inherit}
-form.inline{display:inline}main{max-width:1000px;margin:0 auto;padding:32px 24px 64px}
-.hero{padding:48px 0 24px}.hero h1{font-size:clamp(30px,5vw,52px);line-height:1.05;margin:0 0 12px}.hero h1 span{color:var(--accent)}.hero p{color:var(--muted);max-width:640px;font-size:18px}
-.stats{display:flex;gap:16px;flex-wrap:wrap;margin:24px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 20px;min-width:150px}.stat b{display:block;font-size:30px;color:var(--accent2)}.stat span{color:var(--muted);font-size:14px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}.card h2,.card h3{margin-top:0}
-ol.steps{padding-left:20px}ol.steps li{margin:10px 0}code,pre{font:14px/1.5 ui-monospace,Consolas,monospace;background:#0a0c12;border:1px solid var(--line);border-radius:8px}code{padding:2px 6px}pre{padding:14px 16px;overflow:auto;margin:12px 0}
-table{width:100%;border-collapse:collapse;margin-top:8px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:.5px}
-label{display:block;margin:14px 0 6px;color:var(--muted);font-size:14px}input{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:#0a0c12;color:var(--text);font:inherit}input:focus{outline:2px solid var(--accent);border-color:transparent}
-.narrow{max-width:460px;margin:0 auto}.error{background:rgba(255,90,110,.12);border:1px solid var(--bad);color:#ffd3d9;padding:10px 14px;border-radius:10px;margin:12px 0}.ok{background:rgba(90,212,138,.12);border:1px solid var(--good);color:#d6f5e1;padding:10px 14px;border-radius:10px;margin:12px 0}
-.muted{color:var(--muted)}.key{font:16px ui-monospace,Consolas,monospace;letter-spacing:1px;word-break:break-all}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
-footer{text-align:center;color:var(--muted);font-size:13px;padding:24px;border-top:1px solid var(--line)}.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;background:#1c2234;color:var(--muted)}.pill.on{background:rgba(90,212,138,.15);color:var(--good)}
+:root{--frame:#141416;--text:#fff;--muted:rgba(255,255,255,.58);--faint:rgba(255,255,255,.3);--line:rgba(255,255,255,.09);--glass:rgba(255,255,255,.045);--yellow:#f5c518;--red:#ff2a36;--good:#4ade80;--bad:#ff6b7a}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;min-height:100vh;background:#0a0d14;color:var(--text);font:16px/1.55 Outfit,system-ui,Segoe UI,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#fff}
+.frame{margin:0;padding:0}
+.panel{position:relative;overflow:hidden;min-height:100vh;
+  background:#0a0d14 url("${BASE}/assets/la-sunset.webp") top center/100% auto no-repeat}
+.panel::before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(14,6,18,.38) 0%,rgba(14,6,18,.42) 30%,rgba(10,9,18,.74) 58%,rgba(10,13,20,.96) 78%,#0a0d14 100%)}
+.panel>*{position:relative}
+/* The nav strip. */
+.topnav{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:30px 44px 8px;text-shadow:0 1px 12px rgba(0,0,0,.35)}
+.logo{display:inline-flex;align-items:baseline;gap:6px;text-decoration:none;color:#fff;font-weight:800;font-size:34px;font-style:italic;letter-spacing:-.04em;line-height:1}
+.logo b{font-weight:800;color:var(--red)}.logo small{font-style:normal;font-weight:500;font-size:11px;letter-spacing:.28em;text-transform:uppercase;color:var(--muted);margin-left:6px}
+.topnav .links{display:flex;gap:46px;font-size:16px;font-weight:300;letter-spacing:.01em}.topnav .links a{color:rgba(255,255,255,.75);text-decoration:none}.topnav .links a:hover{color:#fff}
+.topnav .right{display:flex;align-items:center;gap:12px}
+.signin{display:inline-flex;align-items:center;gap:10px;white-space:nowrap;background:#fff;color:#111;text-decoration:none;font-weight:500;font-size:15px;padding:14px 24px;border-radius:9px;transition:transform .15s}.signin:hover{transform:translateY(-1px)}
+.iconbtn{display:inline-flex;align-items:center;justify-content:center;width:50px;height:50px;border-radius:9px;background:rgba(255,255,255,.08);color:rgba(255,255,255,.8);border:0;cursor:pointer;text-decoration:none}.iconbtn:hover{background:rgba(255,255,255,.14)}
+form.inline{display:inline}button.link{background:none;border:0;color:var(--muted);cursor:pointer;font:inherit;padding:0}
+main{padding:10px 44px 40px}
+/* The hero. */
+.hero{position:relative;min-height:max(850px,calc(100vh - 112px));overflow:hidden;margin:0 -44px;padding:0 44px}
+.hero .ghost{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);font-weight:800;font-size:clamp(220px,36vw,560px);line-height:1;letter-spacing:-.06em;color:rgba(255,255,255,.07);filter:blur(1.5px);user-select:none;pointer-events:none;white-space:nowrap}
+.hero .place{position:absolute;left:44px;top:104px}
+.hero .place .where{font-size:16px;font-weight:300;color:rgba(255,255,255,.8);margin-bottom:18px;text-shadow:0 1px 10px rgba(0,0,0,.4)}.hero .place .where span{margin-left:8px}
+.hero .place h2{margin:0;font-weight:200;font-size:clamp(44px,5.6vw,84px);line-height:1.02;letter-spacing:-.025em;text-shadow:0 2px 18px rgba(0,0,0,.45)}
+.hero .track{position:absolute;right:44px;top:128px;width:min(460px,36vw);height:auto}
+.hero .track img{width:100%;height:auto;display:block;filter:drop-shadow(0 14px 34px rgba(0,0,0,.55))}
+.hero .bottomleft{position:absolute;left:44px;bottom:48px;max-width:70%}
+.chips{display:flex;align-items:center;gap:14px;margin-bottom:22px}.avatars{display:flex}
+.avatar{width:50px;height:50px;border-radius:50%;background:#2a2d35;border:3px solid #15161b;margin-left:-14px;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;color:#fff;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+.avatar:first-child{margin-left:0;background:radial-gradient(circle at 35% 35%,#ff4a4a,#b4000f 70%);color:var(--yellow);font-weight:800;font-size:12px;letter-spacing:.02em}
+.chips .all{display:inline-flex;align-items:center;justify-content:center;height:50px;padding:0 20px;margin-left:-10px;border-radius:999px;background:var(--yellow);color:#111;font-weight:600;text-decoration:none;border:3px solid #15161b}
+.hero h1.name{margin:0;font-weight:700;font-size:clamp(64px,8.4vw,150px);line-height:.9;letter-spacing:-.045em;color:#fff}
+.hero .ctas{display:flex;align-items:center;gap:22px;margin-top:26px;flex-wrap:wrap}.hero .ctas a.plain{color:rgba(255,255,255,.75);text-decoration:none;font-weight:300;border-bottom:1px solid rgba(255,255,255,.3)}
+.hero .points{position:absolute;right:44px;bottom:48px;text-align:right}
+.hero .points .label{font-size:16px;font-weight:300;color:var(--muted);margin-bottom:18px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
+.hero .points .n{font-weight:300;font-size:clamp(52px,6.4vw,104px);line-height:.88;letter-spacing:-.04em;color:rgba(255,255,255,.42)}.hero .points .n+.n{color:rgba(255,255,255,.24)}
+.hero .points .n.gold{font-weight:700;font-size:clamp(70px,8.4vw,138px);color:var(--yellow);margin-top:4px}
+.hero .points .legend{font-size:12px;font-weight:300;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;margin-top:12px}
+/* Sections and cards. */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:8px}#top{grid-column:1/-1}
+.card{background:var(--glass);border:1px solid var(--line);border-radius:16px;padding:26px 28px;backdrop-filter:blur(6px)}
+.card h2{font-weight:600;font-size:26px;letter-spacing:-.02em;margin:0 0 12px}.card h3{font-size:12px;letter-spacing:.24em;text-transform:uppercase;color:var(--muted);margin:22px 0 10px;font-weight:500}
+ol.steps{padding-left:0;list-style:none;counter-reset:step;margin:0}ol.steps li{position:relative;padding:12px 0 12px 54px;counter-increment:step;border-bottom:1px solid var(--line);color:rgba(255,255,255,.82);font-weight:300}ol.steps li:last-child{border-bottom:0}
+ol.steps li::before{content:counter(step,decimal-leading-zero);position:absolute;left:0;top:10px;font-weight:600;font-size:22px;color:var(--yellow);letter-spacing:-.02em}
+code,pre{font:13.5px/1.5 ui-monospace,Consolas,monospace;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;color:#fff}code{padding:2px 6px}pre{padding:14px 16px;overflow:auto;margin:12px 0}
+table{width:100%;border-collapse:collapse;margin-top:8px}th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--line);vertical-align:top;font-weight:300}th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.18em}
+label{display:block;margin:14px 0 6px;color:var(--muted);font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:500}
+input{width:100%;padding:13px 14px;border-radius:10px;border:1px solid var(--line);background:rgba(0,0,0,.35);color:#fff;font:inherit}input:focus{outline:2px solid var(--yellow);border-color:transparent}
+.pill-button,button.primary{display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#111;font:500 15px/1 Outfit,system-ui,sans-serif;padding:15px 26px;border-radius:9px;border:0;text-decoration:none;cursor:pointer;transition:transform .15s}.pill-button:hover,button.primary:hover{transform:translateY(-1px)}
+button.secondary,.pill-button.ghost{background:rgba(255,255,255,.08);color:#fff;border:1px solid var(--line);font:500 14px/1 Outfit,system-ui,sans-serif;padding:13px 20px;border-radius:9px;cursor:pointer;text-decoration:none}button.secondary:hover{background:rgba(255,255,255,.14)}
+.narrow{max-width:480px;margin:10px auto}.error{background:rgba(255,42,54,.14);border:1px solid rgba(255,107,122,.5);color:#ffd7dc;padding:10px 14px;border-radius:10px;margin:12px 0}.ok{background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.45);color:#d4f8e2;padding:10px 14px;border-radius:10px;margin:12px 0}
+.muted{color:var(--muted)}.key{font:16px ui-monospace,Consolas,monospace;letter-spacing:1px;word-break:break-all;background:rgba(0,0,0,.35);border:1px dashed var(--yellow);border-radius:10px;padding:12px 14px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.pill{display:inline-block;padding:3px 12px;border-radius:999px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--muted);vertical-align:middle;font-weight:500}.pill.on{background:rgba(74,222,128,.12);color:var(--good);border-color:rgba(74,222,128,.35)}
+.racers{display:flex;flex-wrap:wrap;gap:8px}
+.lvl{display:inline-flex;align-items:center;gap:12px;margin-top:16px;padding:6px 14px 6px 6px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid var(--line)}.lvl b{display:inline-flex;align-items:center;height:30px;padding:0 12px;border-radius:999px;background:var(--yellow);color:#111;font-weight:700;font-size:13px;letter-spacing:.06em}.lvl span{font-size:14px;font-weight:300;color:rgba(255,255,255,.8)}
+.lvl.big{margin:0}.progress{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin:4px 0 20px}.progress .xp{flex:1;min-width:220px}.xpbar{height:8px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}.xpbar div{height:100%;background:var(--yellow);border-radius:999px}.xptext{font-size:13px;font-weight:300;color:var(--muted);margin-top:8px}
+b.gold{color:var(--yellow)}table.lb td:first-child{width:36px}.pill i{font-style:normal;opacity:.6;margin-left:4px}
+footer{text-align:center;color:rgba(255,255,255,.45);font-size:12.5px;padding:22px 16px 28px;font-weight:300}footer a{color:rgba(255,255,255,.7)}
+@media (min-width:1500px){.topnav{padding:34px 72px 8px}main{padding:10px 72px 48px}.hero{margin:0 -72px;padding:0 72px}.hero .place,.hero .bottomleft{left:72px}.hero .track,.hero .points{right:72px}.hero .place{top:130px}.hero .track{top:140px}}
+@media (max-width:980px){.grid{grid-template-columns:1fr}.topnav{padding:22px 24px 4px}.topnav .links{display:none}main{padding:8px 24px 30px}.hero{margin:0 -24px;padding:0 24px;min-height:0}.panel{min-height:0}
+  .hero .place,.hero .track,.hero .bottomleft,.hero .points{position:static;max-width:none}.hero{display:flex;flex-direction:column;gap:30px;padding-top:40px;padding-bottom:30px}
+  .hero .track{width:min(360px,78vw);align-self:flex-end;margin-top:-6px}.hero .points{text-align:left}.hero .points .label{justify-content:flex-start}.hero .ghost{top:38%}}
+@media (max-width:520px){.panel{background-size:auto 760px}.logo{font-size:28px}.logo small{display:none}.signin{padding:12px 14px;font-size:13px;gap:8px}.hero h1.name{font-size:clamp(56px,17vw,90px)}.avatar,.chips .all{width:42px;height:42px}.chips .all{width:auto}}
 </style></head>
-<body><header><a class="brand" href="${BASE}/">MIDNIGHT CLUB <span>LOS ANGELES</span> ONLINE</a><nav>${nav}</nav></header>
+<body><div class="frame">
+<div class="panel">
+<header class="topnav">
+  <a class="logo" href="${BASE}/">MC<b>LA</b><small>Online</small></a>
+  <nav class="links"><a href="${BASE}/#lobbies">Lobbies</a><a href="${BASE}/leaderboard">Leaderboard</a><a href="${BASE}/#play">How to play</a><a href="${BASE}/account">Account</a></nav>
+  <div class="right">${nav}</div>
+</header>
 <main>${body}</main>
+</div>
 <footer>A fan-run service for the PC recompilation of <i>Midnight Club: Los Angeles Complete Edition</i>. Not affiliated with Rockstar Games or Take-Two Interactive. <a href="${BASE}/status">Status (JSON)</a></footer>
-</body></html>`;
+</div></body></html>`;
 }
 
 function homePage(req, account) {
@@ -583,37 +754,62 @@ function homePage(req, account) {
   const sessionRows = st.sessions.length
     ? st.sessions.map((s) => `<tr><td>${h(s.host)}</td><td>${h(STATE_NAMES[s.state] || s.state)}</td><td>${s.players} / ${s.publicSlots}</td><td class="muted">${h(s.created.slice(11, 19))} UTC</td></tr>`).join('')
     : '<tr><td colspan="4" class="muted">No lobby is open right now. Start one from the game and it shows up here.</td></tr>';
-  const playerList = st.players.length ? st.players.map((p) => `<span class="pill on">${h(p.name)}</span>`).join(' ') : '<span class="muted">Nobody is in the game right now.</span>';
-  const cta = account
-    ? `<a class="button" href="${BASE}/account">Your account and game key</a>`
-    : `<a class="button" href="${BASE}/register">Create an account</a> <a href="${BASE}/login" style="margin-left:14px">I already have one</a>`;
+  const playerList = st.players.length ? st.players.map((p) => `<span class="pill on">${h(p.name)} <i>${p.level}</i></span>`).join('') : '<span class="muted">Nobody is in the game right now.</span>';
+  const topRows = st.topRacers.map((r) => `<tr><td class="muted">${r.rank}</td><td>${h(r.name)}</td><td><b class="gold">${r.level}</b> <span class="muted">${h(r.title)}</span></td><td>${r.wins}</td><td>${r.xp}</td></tr>`).join('');
+  const initials = (name) => name.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
+  const avatars = ['<span class="avatar" title="Midnight Club: Los Angeles">MC</span>']
+    .concat(st.players.slice(0, 4).map((p) => `<span class="avatar" title="${h(p.name)}">${h(initials(p.name))}</span>`))
+    .join('');
+  // The big name: the signed-in racer's, split like a driver's, or the call to race.
+  let name = 'Race<br>online';
+  if (account) {
+    const words = account.gamertag.split(' ');
+    name = words.length > 1 ? `${h(words[0])}<br>${h(words.slice(1).join(' '))}` : h(account.gamertag);
+  }
+  const ctas = account
+    ? `<a class="pill-button" href="${BASE}/account">Your account and game key</a>`
+    : `<a class="pill-button" href="${BASE}/register">Create an account</a><a class="plain" href="${BASE}/login">I already have one</a>`;
   return layout(req, 'Home', `
 <section class="hero">
-  <h1>Race <span>Los Angeles</span> online again.</h1>
-  <p>Xbox LIVE for <i>Midnight Club: Los Angeles</i> is gone. This is the online service for the PC recompilation's online patch: create an account, drop its key into the game, and the online modes work between everyone here.</p>
-  <p>${cta}</p>
+  <div class="ghost">LA</div>
+  <div class="place">
+    <div class="where">Los Angeles, California <svg width="18" height="14" viewBox="0 0 18 14" aria-hidden="true" style="vertical-align:-2px;margin-left:6px"><rect width="18" height="14" rx="2" fill="#fff"/><path fill="#15161b" d="M0 0h3v3.5H0zM6 0h3v3.5H6zM12 0h3v3.5h-3zM3 3.5h3V7H3zM9 3.5h3V7H9zM15 3.5h3V7h-3zM0 7h3v3.5H0zM6 7h3v3.5H6zM12 7h3v3.5h-3zM3 10.5h3V14H3zM9 10.5h3V14H9zM15 10.5h3V14h-3z"/></svg></div>
+    <h2>Midnight Club<br>Los Angeles</h2>
+  </div>
+  <div class="track"><img src="${BASE}/assets/mcla-logo.png" alt="Midnight Club: Los Angeles" width="760" height="175"></div>
+  <div class="bottomleft">
+    <div class="chips"><div class="avatars">${avatars}</div><a class="all" href="#lobbies">All</a></div>
+    <h1 class="name">${name}</h1>${account ? `<div class="lvl"><b>LVL ${progressOf(account).level}</b><span>${h(progressOf(account).title)} · ${progressOf(account).xp} XP</span></div>` : ''}
+    <div class="ctas">${ctas}</div>
+  </div>
+  <div class="points">
+    <div class="label">Live right now <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="7.5" stroke="currentColor" stroke-width="1.2"/><path d="M9 8v5M9 5.5v.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+    <div class="n">${st.online}</div>
+    <div class="n">${st.sessions.length}</div>
+    <div class="n gold">${st.accounts}</div>
+    <div class="legend">in the game · open lobbies · racers signed up</div>
+  </div>
 </section>
-<div class="stats">
-  <div class="stat"><b>${st.online}</b><span>in the game now</span></div>
-  <div class="stat"><b>${st.sessions.length}</b><span>open lobbies</span></div>
-  <div class="stat"><b>${st.accounts}</b><span>racers signed up</span></div>
-</div>
 <div class="grid">
-  <div class="card"><h2>How to play online</h2>
+  <div class="card" id="top"><h2>Top racers</h2>
+    ${topRows ? `<table class="lb"><tr><th>#</th><th>Racer</th><th>Level</th><th>Wins</th><th>XP</th></tr>${topRows}</table>` : `<p class="muted">Nobody has raced yet. A race finished online is ${XP_FINISH} XP, a win ${XP_WIN} XP on top.</p>`}
+    <p class="muted" style="margin:14px 0 0;font-weight:300"><a href="${BASE}/leaderboard">The whole leaderboard</a>. A race finished online is ${XP_FINISH} XP, a win ${XP_WIN} XP on top; level 2 takes 200 XP, and each level after it 100 XP more than the one before.</p>
+  </div>
+  <div class="card" id="play"><h2>How to play online</h2>
     <ol class="steps">
       <li>Install the recompilation with the online patch (<a href="${h(PATCH_URL)}">download</a>) and run the game once so it builds.</li>
       <li><a href="${BASE}/register">Create an account</a>. Your gamertag is the name other racers see.</li>
-      <li>Open your <a href="${BASE}/account">account page</a>, copy the three lines into <code>mcla.toml</code> next to <code>mcla.exe</code> (the launcher's <i>More › Open the game folder</i>), and start the game.</li>
+      <li>Open your <a href="${BASE}/account">account page</a>, copy the lines into <code>mcla.toml</code> next to <code>mcla.exe</code> (the launcher's <i>More › Open the game folder</i>), and start the game.</li>
       <li>In the pause menu, open the online tab. It finds the open lobbies here, or hosts one when there is none.</li>
     </ol>
-    <p class="muted">Hosting a lobby across the internet needs UDP port 1000 forwarded to your PC on your router; joining usually works without it. Players on one LAN need nothing.</p>
+    <p class="muted" style="margin:14px 0 0;font-weight:300">Hosting a lobby across the internet needs UDP port 1000 forwarded to your PC on your router; joining usually works without it. Players on one LAN need nothing.</p>
   </div>
-  <div class="card"><h2>Open lobbies</h2>
+  <div class="card" id="lobbies"><h2>Open lobbies</h2>
     <table><tr><th>Host</th><th>State</th><th>Racers</th><th>Since</th></tr>${sessionRows}</table>
-    <h3>In the game now</h3><p>${playerList}</p>
+    <h3>In the game now</h3><div class="racers">${playerList}</div>
   </div>
 </div>
-<p class="muted" style="margin-top:24px">The game reaches this service at <code>${h(url)}</code>.</p>`, account);
+<p class="muted" style="margin:26px 0 0;font-size:13px;font-weight:300">The game reaches this service at <code>${h(url)}</code>.</p>`, account);
 }
 
 function registerPage(req, values, error) {
@@ -651,10 +847,21 @@ function accountPage(req, account, notice, error) {
   const h = escapeHtml;
   const url = siteUrl(req);
   const online = !!state.data.players[account.xuid];
-  const snippet = `mcla_online = true\nmcla_online_server = "${url}"\nmcla_online_key = "${account.gameKey}"`;
+  const pr = progressOf(account);
+  const isDefault = url.toLowerCase() === GAME_DEFAULT_SERVER;
+  const snippet = isDefault
+    ? `mcla_online = true\nmcla_online_key = "${account.gameKey}"`
+    : `mcla_online = true\nmcla_online_server = "${url}"\nmcla_online_key = "${account.gameKey}"`;
+  const historyRows = account.history.slice().reverse().map((r) =>
+    `<tr><td class="muted">${h(String(r.at).replace('T', ' ').slice(0, 16))} UTC</td><td>${r.result === 'won' ? '<b class="gold">Won</b>' : 'Finished'}</td><td>+${r.xp} XP</td></tr>`).join('');
   return layout(req, 'Account', `
 <div class="grid">
 <div class="card"><h2>${h(account.gamertag)} <span class="pill ${online ? 'on' : ''}">${online ? 'in the game now' : 'not in the game'}</span></h2>
+<div class="progress">
+  <div class="lvl big"><b>LVL ${pr.level}</b><span>${h(pr.title)}</span></div>
+  <div class="xp"><div class="xpbar"><div style="width:${pr.pct}%"></div></div>
+  <div class="xptext">${pr.xp} XP${pr.toNext ? ` · ${pr.toNext} more for level ${pr.level + 1}` : ' · the top level'} · ${account.racesWon} win${account.racesWon === 1 ? '' : 's'} in ${account.racesFinished} race${account.racesFinished === 1 ? '' : 's'}</div></div>
+</div>
 <table>
 <tr><th>Gamertag</th><td>${h(account.gamertag)}</td></tr>
 <tr><th>Online XUID</th><td><code>${h(account.xuid)}</code></td></tr>
@@ -663,6 +870,8 @@ function accountPage(req, account, notice, error) {
 <tr><th>Last in the game</th><td>${account.lastSeen ? h(account.lastSeen.replace('T', ' ').slice(0, 16)) + ' UTC' : '<span class="muted">never</span>'}</td></tr>
 </table>
 ${notice ? `<div class="ok">${h(notice)}</div>` : ''}${error ? `<div class="error">${h(error)}</div>` : ''}
+<h3>Recent races</h3>
+${historyRows ? `<table><tr><th>When</th><th>Result</th><th>XP</th></tr>${historyRows}</table>` : '<p class="muted">No race yet. Finish one online and it shows here with its XP.</p>'}
 <h3>Your game key</h3>
 <p class="muted">The key signs your game in. Treat it like a password: anyone with it plays as you. Make a new one if it leaks; the old one stops working at once.</p>
 <p class="key" id="key">${h(account.gameKey)}</p>
@@ -670,9 +879,9 @@ ${notice ? `<div class="ok">${h(notice)}</div>` : ''}${error ? `<div class="erro
 <form method="post" action="${BASE}/account/key" class="inline" onsubmit="return confirm('Make a new key? The game must be given the new one.')"><button class="secondary" type="submit">Make a new key</button></form></div>
 </div>
 <div class="card"><h2>Put it in the game</h2>
-<p>Add these lines to <code>mcla.toml</code>, next to <code>mcla.exe</code> (in the launcher: <i>More › Open the game folder</i>), or paste them as options under <i>Advanced › More mcla.exe options</i> with <code>--</code> in front of each. Then start the game.</p>
+<p>Add these lines to <code>mcla.toml</code>, next to <code>mcla.exe</code> (in the launcher: <i>More › Open the game folder</i>), or paste them as options under <i>Advanced › More mcla.exe options</i> with <code>--</code> in front of each. Then start the game.${isDefault ? ' The game already points at this server, so no address is needed.' : ''}</p>
 <pre id="snippet">${h(snippet)}</pre>
-<div class="row"><button class="secondary" type="button" onclick="navigator.clipboard&&navigator.clipboard.writeText(document.getElementById('snippet').textContent).then(()=>{this.textContent='Copied'})">Copy the three lines</button></div>
+<div class="row"><button class="secondary" type="button" onclick="navigator.clipboard&&navigator.clipboard.writeText(document.getElementById('snippet').textContent).then(()=>{this.textContent='Copied'})">Copy the lines</button></div>
 <p class="muted">The game's log says <code>online: signed in to ${h(url)} as ${h(account.gamertag)}</code> when it worked. If it says the key was refused, make a new key here and copy it again.</p>
 <h3>Change password</h3>
 <form method="post" action="${BASE}/account/password">
@@ -681,6 +890,16 @@ ${notice ? `<div class="ok">${h(notice)}</div>` : ''}${error ? `<div class="erro
 <label for="password2">New password again</label><input id="password2" name="password2" type="password" minlength="8" required autocomplete="new-password">
 <p style="margin-top:16px"><button class="secondary" type="submit">Change password</button></p>
 </form></div>
+</div>`, account);
+}
+
+function leaderboardPage(req, account) {
+  const h = escapeHtml;
+  const rows = leaderboard(100).map((r) => `<tr><td class="muted">${r.rank}</td><td>${h(r.name)}</td><td><b class="gold">${r.level}</b> <span class="muted">${h(r.title)}</span></td><td>${r.wins}</td><td>${r.races}</td><td>${r.xp}</td></tr>`).join('');
+  return layout(req, 'Leaderboard', `
+<div class="card"><h2>Leaderboard</h2>
+<p class="muted" style="font-weight:300">A race finished online is ${XP_FINISH} XP, a win ${XP_WIN} XP on top. Level 2 takes 200 XP, and each level after it 100 XP more than the one before. The titles: Rookie, Street Racer at level 5, Pro at 10, Elite at 20, Legend at 35, Midnight Club at 50.</p>
+${rows ? `<table class="lb"><tr><th>#</th><th>Racer</th><th>Level</th><th>Wins</th><th>Races</th><th>XP</th></tr>${rows}</table>` : '<p class="muted">Nobody has raced yet.</p>'}
 </div>`, account);
 }
 
@@ -699,6 +918,9 @@ async function handleSite(req, res, parts, method, ip) {
   }
   if (first === 'status' && method === 'GET') {
     return send(res, 200, publicStatus());
+  }
+  if (first === 'leaderboard' && method === 'GET') {
+    return send(res, 200, leaderboardPage(req, account), 'text/html; charset=utf-8');
   }
   if (first === 'register') {
     if (method === 'GET') return send(res, account ? 303 : 200, account ? '' : registerPage(req), 'text/html; charset=utf-8', account ? { Location: `${BASE}/account` } : {});
@@ -879,11 +1101,40 @@ async function handleApi(req, res, parts, method, ip) {
 
   if (parts[0] === 'stats') {
     if (method === 'POST') {
-      state.data.stats.push({ at: Date.now(), xuid: account.xuid, ...body });
+      const sessionId = normId(body.sessionId);
+      const targetXuid = normId(body.xuid) || account.xuid;
+      const views = Array.isArray(body.views) ? body.views : [];
+      state.data.stats.push({ at: Date.now(), by: account.xuid, xuid: targetXuid, sessionId, views });
       if (state.data.stats.length > 500) state.data.stats.splice(0, state.data.stats.length - 500);
+      // Every write goes to the log in full: the first real race shows which
+      // property carries the finishing position (MCLA_WIN_PROPERTY).
+      const summary = views.map((v) => `view 0x${(Number(v.viewId) >>> 0).toString(16)}: ` +
+        (Array.isArray(v.properties) ? v.properties.map((p) => `0x${(Number(p.id) >>> 0).toString(16)}=${propertyNumber(p) ?? String(p.data || '').slice(0, 32)}`).join(' ') : '')).join(' | ');
+      log(`stats by ${account.gamertag} for ${targetXuid === account.xuid ? 'self' : targetXuid} in session ${sessionId || '?'}: ${summary || '(no views)'}`);
+
+      // XP. A player's write for themselves, or the host's write for a member
+      // of their session (how the Xbox reported arbitrated races), for a
+      // session the server knows and the player is in.
+      const target = findAccount((a) => a.xuid === targetXuid);
+      const session = sessionId ? state.data.sessions[sessionId] : null;
+      const isSelf = targetXuid === account.xuid;
+      const isHostWrite = !!session && session.hostXuid === account.xuid;
+      const inSession = !!session && (session.hostXuid === targetXuid || session.members.some((m) => m.xuid === targetXuid));
+      const awards = [];
+      if (!target) log(`no XP: no account has XUID ${targetXuid}`);
+      else if (!session) log(`no XP for ${target.gamertag}: session ${sessionId || '?'} is not one the server knows`);
+      else if (!inSession) log(`no XP for ${target.gamertag}: not in session ${sessionId}`);
+      else if (!(isSelf || isHostWrite)) log(`no XP for ${target.gamertag}: ${account.gamertag} is neither them nor the host`);
+      else if (!views.length) log(`no XP for ${target.gamertag}: the write has no views`);
+      else {
+        if (awardXp(target, `finish:${sessionId}`, XP_FINISH, 'finished', sessionId)) awards.push({ result: 'finished', xp: XP_FINISH });
+        const won = WIN_PROPERTY !== 0 && views.some((v) => Array.isArray(v.properties) &&
+          v.properties.some((p) => (Number(p.id) >>> 0) === WIN_PROPERTY && propertyNumber(p) === WIN_VALUE));
+        if (won && awardXp(target, `win:${sessionId}`, XP_WIN, 'won', sessionId)) awards.push({ result: 'won', xp: XP_WIN });
+        if (awards.length) accounts.save();
+      }
       state.save();
-      trace(`stats from ${account.gamertag} for session ${normId(body.sessionId)}`);
-      return send(res, 200, { ok: true });
+      return send(res, 200, { ok: true, awards, progress: target ? progressOf(target) : null });
     }
     if (method === 'GET') return send(res, 200, state.data.stats.slice(-100));
   }
@@ -891,6 +1142,23 @@ async function handleApi(req, res, parts, method, ip) {
 }
 
 const API_ROOTS = new Set(['players', 'sessions', 'stats']);
+
+// Static files from the assets folder next to the script (the background
+// photo): by plain name only, so nothing outside the folder can be asked for.
+const ASSETS_DIR = path.join(__dirname, 'assets');
+const ASSET_TYPES = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+function sendAsset(req, res, name) {
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/.test(name)) return send(res, 404, { error: 'not found' });
+  const type = ASSET_TYPES[path.extname(name).toLowerCase()];
+  const file = path.join(ASSETS_DIR, name);
+  let st;
+  try { st = fs.statSync(file); } catch (e) { st = null; }
+  if (!type || !st || !st.isFile()) return send(res, 404, { error: 'not found' });
+  const etag = `"${st.size}-${Math.floor(st.mtimeMs)}"`;
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304); return res.end(); }
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': 'public, max-age=86400', 'ETag': etag });
+  fs.createReadStream(file).pipe(res);
+}
 
 async function handle(req, res) {
   refreshAll();
@@ -903,6 +1171,9 @@ async function handle(req, res) {
   const ip = clientIp(req);
   trace(`${method} ${pathname} from ${ip}`);
 
+  if (parts[0] === 'assets' && parts.length === 2 && method === 'GET') {
+    return sendAsset(req, res, parts[1]);
+  }
   if (parts.length && API_ROOTS.has(parts[0])) {
     return handleApi(req, res, parts, method, ip);
   }
