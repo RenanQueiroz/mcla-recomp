@@ -766,11 +766,22 @@ sealed class SetupEngine
             return;
         }
         Progress(StepId.Shaders, null, "Starting…");
-        var run = new ShaderPrepRun(layout.GameExe, ctx.Choices.GameArguments, p =>
+        ShaderPrepRun run;
+        try
         {
-            Progress(StepId.Shaders, p.Percent / 100, p.Describe());
-            Log(StepId.Shaders, p.Describe());
-        }, layout.LogsDir, reason: null);
+            run = new ShaderPrepRun(layout.GameExe, ctx.Choices.GameArguments, p =>
+            {
+                Progress(StepId.Shaders, p.Percent / 100, p.Describe());
+                Log(StepId.Shaders, p.Describe());
+            }, layout.LogsDir, reason: null);
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (AppControl.IsBlock(ex))
+        {
+            // Not skipped like a failed preparation: if Windows won't start mcla.exe, the game can't be played either.
+            // The setup stops here, says why in plain words (Windows' own text goes to the log and the details), and a
+            // Try again continues from this step.
+            throw new SetupException(AppControl.Message("Try again"), ex.ToString(), ex);
+        }
         shaders = run;
         using var registration = ct.Register(run.Stop);
         var exit = await run.Completion;

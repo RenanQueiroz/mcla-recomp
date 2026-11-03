@@ -252,7 +252,7 @@ the top of every page) whenever one is in use.
   redirect to the asset host, a file of the fork's release, the API route, and HTTPS through a small proxy of its own;
   needs the internet), `offline <folder with a release.json> <scratch>` (*Use files I downloaded*: what is listed, the
   checksums still refusing wrong bytes of the right size, the rules of a downloaded release.json),
-  `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
+  `app-control <scratch>` (what is said when Windows blocks `mcla.exe`: Smart App Control, error 4551 or 1260; CI runs it), `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
   copy of the harness with the install's `install.json` beside it: what an update would be, doing it (and ending the process in
   the middle of it), a plain Rebuild, and the channel), `cleanup`, `cleanup2`, `uninstall`, and
   `install <release folder> <install folder> <game, or "adopt"> [--in-place] [--args "..."]`.

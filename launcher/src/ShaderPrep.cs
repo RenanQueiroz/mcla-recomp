@@ -110,7 +110,18 @@ sealed class ShaderPrepRun
             if (Parse(e.Data) is { } progress) onProgress(progress);
         };
         process.ErrorDataReceived += (_, e) => { if (e.Data != null) Write(e.Data); };
-        process.Start();
+        try
+        {
+            process.Start();
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        {
+            // Windows may refuse the exe (Smart App Control, an administrator's policy: AppControl.cs).
+            // The log keeps Windows' own words; the caller says it in plain ones.
+            Write($"could not start mcla.exe: {ex}");
+            lock (logLock) log?.Dispose();
+            throw;
+        }
         // Ends with the launcher: a launcher that dies (killed, crashed, logged off) takes the
         // hidden mcla.exe with it.
         job = JobObject.KillOnClose(process);

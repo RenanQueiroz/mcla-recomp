@@ -39,6 +39,7 @@
 //   tools-record <scratch>    the tools record: lost, cut short or whole, nothing in use is superseded; staged tools; kept\\ is not emptied
 //   launcher-folder <scratch> the install folder may not be, be inside, or contain the launcher's folder or the installer's default one
 //   rebuild                   (Installed mode) a plain Rebuild: the lock, the last options, the finish of a pending update
+//   app-control <scratch>     (Checks5.cs) what is said when Windows blocks mcla.exe (Smart App Control, error 4551 or 1260), the exceptions that are not that
 using System.Text.Json;
 using MclaLauncher.Setup;
 
@@ -95,6 +96,7 @@ static partial class Program
                 case "nonhttps": await NonHttpsChecks(args[1]); break;
                 case "remaining": RemainingChecks(args[1]); break;
                 case "cleanup2": CleanupChecks(args[1]); break;
+                case "app-control": AppControlChecks(args[1]); break;
                 default: Console.WriteLine($"unknown command {args[0]}"); return 2;
             }
         }
