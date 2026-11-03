@@ -39,6 +39,8 @@ The launcher's settings are the game's own, kept in `mcla.toml` next to `mcla.ex
 | DualSense adaptive triggers | On (the default) or Off. On a DualSense or DualSense Edge, R2 (throttle) is a light spring and L2 (brake) is firmer; any other controller is left alone, so this does nothing on it. Off releases the triggers at once | `mcla_adaptive_triggers` = `true` or `false` (the buzzes and strengths have no setting: [docs/off-switches.md](off-switches.md)) | CONTROLS › ADAPTIVE TRIGGERS |
 | Language | English (the default), French, German, Italian, Spanish | `user_language` = `1` (English), `4` (French), `3` (German), `6` (Italian) or `5` (Spanish) | none: the launcher and `mcla.toml` only (next start) |
 | Player name | The name the game shows for you: up to 15 letters, digits and spaces (empty: `User`, as before) | `user_name` (a text; the SDK's, `patches/rexglue-user-name.patch`) | (the launcher and `mcla.toml` only; read when the game starts) |
+| Online | Off (the default: the game stays offline, as before), On (the profile is signed in to a private server and the online modes work between the players who use it; [docs/online.md](online.md)) | `mcla_online` = `true` or `false` | (`mcla.toml` or the command line only; next start) |
+| Online server | The private server's address, `host:port` (one player runs `server/mcla-server.js`, everyone points at it) | `mcla_online_server` (a text, `"127.0.0.1:36000"` by default) | (`mcla.toml` or the command line only; next start) |
 
 ## What the settings do
 

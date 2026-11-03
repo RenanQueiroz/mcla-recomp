@@ -124,6 +124,7 @@ Each change, how it was checked and what is not verified: [KNOWN-ISSUES.md](KNOW
 ## More documentation
 
 - [docs/settings.md](docs/settings.md): every setting.
+- [docs/online.md](docs/online.md): online play through a private server you run (`mcla_online`), and [server/README.md](server/README.md) for the server.
 - [docs/off-switches.md](docs/off-switches.md): every off switch, with what it does and what was measured.
 - [docs/fork-changes.md](docs/fork-changes.md): what the fork changes, and how it relates to upstream.
 - [docs/install.md](docs/install.md), [docs/building.md](docs/building.md), [docs/troubleshooting.md](docs/troubleshooting.md), [docs/status.md](docs/status.md).

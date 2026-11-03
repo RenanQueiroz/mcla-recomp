@@ -68,6 +68,16 @@ set(MCLA_SOURCES
     src/shader_storage_files.cpp
     # Development: scripted controller input, off by default (fork only).
     src/dev_pad.cpp
+    # Online play through a private server (mcla_online; fork only): the game's
+    # Xbox LIVE calls answered against server/mcla-server.js (src/online/online.h).
+    src/online/online_json.cpp
+    src/online/online_util.cpp
+    src/online/online_http.cpp
+    src/online/online_client.cpp
+    src/online/online_state.cpp
+    src/online/online_xnet.cpp
+    src/online/online_user.cpp
+    src/online/online_xgi.cpp
 )
 
 if(WIN32)
@@ -106,4 +116,6 @@ if(WIN32)
     # The shader storage: the display drivers in its stamp, a preparation's memory figures (dxgi, psapi).
     # The GPU choice (src/mcla_app.cpp, ChooseGpu): Windows' graphics settings are read from the registry (advapi32).
     target_link_libraries(mcla PRIVATE dxgi psapi advapi32)
+    # The online module's HTTP client (src/online/online_http.cpp).
+    target_link_libraries(mcla PRIVATE ws2_32)
 endif()

@@ -1,0 +1,49 @@
+# Online layer smoke run (development, with --mcla_online=true --mcla_online_log=true and
+# server/mcla-server.js running): boot into the city, open the pause menu and walk its tabs
+# while logging the UI manager's movies, so that every call the game makes to the online
+# layer during start-up and in the menus shows in the log; then quit. The tabs include the
+# online one, which searches the server for lobbies and hosts one when it finds none (seen
+# 2026-11-02: XSessionSearch twice, then XSessionCreate, XNetQosListen and XSessionJoin).
+wait 8s
+mark title
+press_until start left_title every=2s timeout=90s
+mark map_zoom
+wait_until roam 180s
+mark free_roam
+wait 5s
+log online-smoke: in the city; opening the pause menu
+press start 4f
+wait 1500ms 90f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+press rb 4f
+wait 1000ms 60f
+screens
+uisel
+log online-smoke: done
+wait 2s
+quit

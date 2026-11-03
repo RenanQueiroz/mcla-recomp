@@ -95,6 +95,8 @@ void MclaShaderStorageAfterPreload(rex::Runtime* runtime);
 void MclaMigrateAntiAliasing();  // src/perf_options.cpp
 void MclaApplyPreset();  // src/perf_options.cpp
 void MclaApplyGraphicsFixDefaults(bool vulkan);  // src/perf_options.cpp
+void MclaOnlineStart();  // src/online/online_state.cpp
+void MclaOnlineStop();
 
 #ifdef _WIN32
 // The pause menu's RESTART GAME (src/settings_menu.cpp) starts the game again
@@ -1128,6 +1130,8 @@ void MclaApp::OnPostLaunchModule(rex::system::XThread* thread) {
   (void)thread;
   MclaApplyAspectRatio(window());
   MclaShaderStorageAfterPreload(runtime());
+  // Signs in to the private server when mcla_online is on (src/online/online.h).
+  MclaOnlineStart();
 }
 
 bool MclaApp::OnWindowCloseRequested() {
@@ -1198,5 +1202,6 @@ void MclaApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
 }
 
 void MclaApp::OnShutdown() {
+  MclaOnlineStop();  // leaves the private server before the kernel goes
   video_borders_.reset();
 }
