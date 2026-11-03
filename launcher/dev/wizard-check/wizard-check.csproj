@@ -16,6 +16,7 @@
     <Compile Include="..\..\src\GameSettings.cs" />
     <Compile Include="..\..\src\ShaderStamp.cs" />
     <Compile Include="..\..\src\ShaderPrep.cs" />
+    <Compile Include="..\..\src\AppControl.cs" />
     <Compile Include="..\..\src\DisplayHdr.cs" />
     <Compile Include="..\..\src\Setup\*.cs" />
     <!-- Setup\LauncherUpdate.cs uses the self-update pieces (and they the folder swap). -->

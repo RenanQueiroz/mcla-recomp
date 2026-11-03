@@ -197,7 +197,10 @@ sealed class LauncherApp : Component
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
-                if (manual) setNotice($"Couldn't prepare shaders: {ex.Message}");
+                // Windows refusing the exe (Smart App Control, AppControl.cs) is said whoever asked: the game can't start
+                // either, and a run after a build or before Play would otherwise say nothing. The raw text is in the run's log.
+                if (AppControl.IsBlock(ex)) setNotice(AppControl.Message("Play"));
+                else if (manual) setNotice($"Couldn't prepare shaders: {ex.Message}");
                 return false;
             }
         }
@@ -370,7 +373,8 @@ sealed class LauncherApp : Component
             }
             catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
             {
-                setNotice($"Couldn't start the game: {ex.Message}");
+                Debug.WriteLine($"play: {ex}");
+                setNotice(AppControl.IsBlock(ex) ? AppControl.Message("Play") : $"Couldn't start the game: {ex.Message}");
             }
         }
 

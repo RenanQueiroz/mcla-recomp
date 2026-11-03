@@ -84,6 +84,7 @@ Every switch (about 40, the graphics and timing internals too), what each does a
 | If | Then |
 |---|---|
 | SmartScreen stops `MCLA-Setup.exe` | **More info**, then **Run anyway**. |
+| The setup or Play says *Windows blocked the game* | Smart App Control (or an administrator's policy) blocks programs without a signature, and the game is built on your PC, so it has none. Set *Windows Security > App & browser control > Smart App Control settings* to **Off**, then **Try again** (or **Play**). On some versions of Windows it can't be turned back on later without reinstalling Windows; on a school or work PC only its administrator can allow it. |
 | The wizard or the launcher can't reach GitHub | **Copy details** says where it stopped. Try opening the [releases page](https://github.com/RenanQueiroz/mcla-recomp/releases/latest) in a browser, turn a VPN off or on, and check the proxy, the antivirus and the PC's date. The wizard's **Use files I downloaded** works from files you fetched yourself. |
 | The game is choppy, or runs at a few frames a second, on a PC with two GPUs (a laptop above all) | It may be on the integrated GPU. Look for the lines starting `GPU:` in the log (below); if the name isn't your graphics card, set `mcla.exe` to *High performance* in Windows' *Settings › System › Display › Graphics* and open an issue with those lines. |
 | The game stays at 60 FPS or paces unevenly | Turn VSYNC off in the pause menu's DISPLAY. |

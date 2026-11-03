@@ -136,3 +136,12 @@ jobs:
         run: |
           dotnet run --project launcher\dev\update-check -c Release -- all "$env:RUNNER_TEMP\stub\MCLA-Setup.exe"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # What the launcher and the setup say when Windows refuses to start mcla.exe (Smart App Control or an
+      # administrator's policy, Win32 error 4551 or 1260; launcher\src\AppControl.cs): the codes are made up,
+      # the real block can't be made on a runner. Also that a start that fails for another reason isn't taken for it.
+      - name: Game start error checks
+        shell: powershell
+        run: |
+          dotnet run --project launcher\dev\wizard-check -c Release -- app-control "$env:RUNNER_TEMP\app-control"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
