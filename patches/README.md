@@ -73,6 +73,8 @@ git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
 git apply ../../patches/rexglue-affinity-warning-once.patch
 git apply ../../patches/rexglue-d3d12-msaa-line-guard.patch
+git apply ../../patches/rexglue-dxbc-relative-constant-clamp.patch
+git apply ../../patches/rexglue-dxbc-bindless-descriptor-index.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -2055,6 +2057,34 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | The two guard pipelines, `GetMsaaLineGuardPipeline`, the option | `include/rex/graphics/d3d12/command_processor.h`, `src/graphics/d3d12/command_processor.cpp` | D3D12 |
 | `GetMsaaLineGuardSamples` | `include/rex/graphics/d3d12/pipeline_cache.h`, `src/graphics/d3d12/pipeline_cache.cpp` | D3D12 |
 | The guard bound before the pipeline when the commands are replayed | `src/graphics/d3d12/deferred_command_list.cpp` | D3D12 |
+
+## rexglue-dxbc-relative-constant-clamp.patch
+
+**Why.** Fork issues #44 and #56: on Direct3D 12 the GPU hung (`DXGI_ERROR_DEVICE_HUNG`) after a few minutes, on an RTX 5080 and an RX 6900 XT; on Vulkan it never did. On the RTX 5080 the untouched title screen at 3x hung in about half of the 10-minute runs, always during the attract movie, and DRED put every hang (5 of 5) in the same draw: the movie's motion blur pass, whose pixel shader (Xenos ucode `A6B9B6B0FA692C54`) reads a 4x4 matrix at `c[69+a0]` to `c[72+a0]` with `a0` taken from a texture's alpha. The translator indexes the float constants with `a0` plus the offset as it is (`a0` itself is only clamped to -256..255), so the read can land up to 72 constants past the 256 or 187 before them, and the float constants are bound as a root descriptor, which has no bounds check. Vulkan enables `robustBufferAccess`, which makes the same read safe there. With NVIDIA Aftermath's shader error reporting on, the driver trapped an error at those moments and went on (the System log's `nvlddmkm` event 153, no device loss) instead of hanging.
+
+**What it changes.** A float constant read with relative addressing (`c[a0 + n]` or `c[aL + n]`) computes `clamp(a0 + n, 0, 255)` into a temporary register first and indexes the constant buffer with that: three integer instructions per such read, only in shaders that index their constants. No setting: an out-of-range read has no result worth keeping.
+
+**Checked** (2026-11-05, `launcher/dev/d3d12-hang-2026-11-05.md`): RTX 5080, Direct3D 12, 3x, uncapped, the untouched title screen 10 minutes a run. With the patch 5 of 5 runs clean and no driver error in the System log; the same build without it hung in 1 of its 2 control runs, and 20 of 35 runs of the day's builds without it hung (57%). Not run: an AMD GPU (#44), Linux, the PS5 and Vulkan (the SPIR-V translator, not changed; `robustBufferAccess` there).
+
+**Upstream:** Xenia Canary's translator has the same code; not reported yet.
+
+| Change | Files | Affects |
+|---|---|---|
+| The clamped index | `src/graphics/pipeline/shader/dxbc_translator.cpp` | D3D12 |
+
+## rexglue-dxbc-bindless-descriptor-index.patch
+
+**Why.** Found while looking for the hang of fork issues #44 and #56, and not its cause (runs with this alone still hung). With bindless resources the translator gave each texture and sampler binding its place in the shader's descriptor index buffer as `GetBindlessResourceCount()` after `emplace_back`, which already counts the new binding, so N bindings got 1 to N. The command processor requests N dwords and writes `descriptor_indices[index]`, its last write one dword past its request (into the 256-byte alignment padding), and the shader declares (N + 3) / 4 vectors, so with a multiple of 4 bindings it reads its last binding past the buffer it declares. Of the 600 host shaders of a title-screen run that have the buffer, 149 did. Xenia Canary has the same code.
+
+**What it changes.** The index is the number of bindings before this one, 0 to N - 1, which is what the command processor and the shader size the buffer for. No setting.
+
+**Checked** (2026-11-05): the investigation's binding check (each draw's descriptor indices in the buffer against the texture cache's) found the movie's motion blur pass reading its last binding past the buffer without the patch and no mismatch with it; the clamp's test builds had it (5 of 5 runs clean). Not run on an AMD GPU, Linux or the PS5 (Vulkan there).
+
+**Upstream:** not reported yet.
+
+| Change | Files | Affects |
+|---|---|---|
+| The index | `src/graphics/pipeline/shader/dxbc_translator_fetch.cpp` | D3D12 |
 
 ## rexglue-mingw.patch
 

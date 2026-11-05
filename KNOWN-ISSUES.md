@@ -788,6 +788,12 @@ On Windows 11 with Smart App Control on, or on a PC whose administrator set an A
 - **Checked:** the mapping with made-up error numbers, and that a start that fails for another reason is not taken for a block (`launcher/dev/wizard-check`, `app-control`; CI runs it).
 - **Not verified:** the real block (it needs Smart App Control turned on, which can't be undone on some versions of Windows, so it was not tried). Play starts the game through the shell, which may show a Windows dialog or give another error number; then the old *Couldn't start the game* message shows. A block that comes after the exe has started (a DLL it loads) is not recognised.
 
+## Direct3D 12: the GPU hung after a few minutes (fork issues #44 and #56; fixed 2026-11-05)
+
+On Direct3D 12 the game could stop with "D3D12 device removed: ... DEVICE_HUNG" after 2 to 30 minutes (an RTX 5080 and an RX 6900 XT reported it; Vulkan never did). The cause was a read outside the shader constants: the motion blur pass of the title screen's attract movie (and maybe other passes) picks a matrix from its constants at an index it takes from a texture, the index can fall outside them, and Direct3D 12 binds them with no bounds check. The DXBC translator now keeps that index inside the constants (`patches/rexglue-dxbc-relative-constant-clamp.patch`). The SDK's descriptor index buffers had a smaller fault of the same kind, fixed too (`patches/rexglue-dxbc-bindless-descriptor-index.patch`).
+- **Measured** (RTX 5080, 3x, uncapped, the untouched title screen, 10 minutes a run): 5 of 5 runs clean with the fix, where the same build without it hung in about half of them. Details: `launcher/dev/d3d12-hang-2026-11-05.md`.
+- **Not run:** an AMD GPU (issue #44's RX 6900 XT), long sessions of play. Vulkan is not changed.
+
 ## PS5 build: a stale precompiled header after the SDK changed (2026-10-29; not built or run)
 
 `ps5/game/build.sh` made the game's precompiled header again only when a generated `.h` was newer than it. An SDK header that changes afterwards (a patch added to the SDK, or a new checkout of it) would stop the build with clang's `file ... has been modified since the precompiled header ... was built`, the error that stopped the PC updates to v0.3.1 ([#23](https://github.com/RenanQueiroz/mcla-recomp/issues/23); fixed there in v0.3.2).

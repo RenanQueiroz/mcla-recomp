@@ -295,6 +295,8 @@ git apply ../../patches/rexglue-upstream-small-fixes.patch
 git apply ../../patches/rexglue-codegen-csr-lazy.patch
 git apply ../../patches/rexglue-affinity-warning-once.patch
 git apply ../../patches/rexglue-d3d12-msaa-line-guard.patch
+git apply ../../patches/rexglue-dxbc-relative-constant-clamp.patch
+git apply ../../patches/rexglue-dxbc-bindless-descriptor-index.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```

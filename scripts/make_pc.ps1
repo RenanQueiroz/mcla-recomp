@@ -487,6 +487,10 @@ $laterPatches = @(
     @{ Patch = "rexglue-affinity-warning-once.patch"; File = "src\system\xthread.cpp"; Adds = "affinity_warning_once" }
     # Direct3D 12 on AMD: a guard triangle pipeline before each line pipeline on a multisampled target (issue #28), one option (d3d12_msaa_line_guard).
     @{ Patch = "rexglue-d3d12-msaa-line-guard.patch"; File = "src\graphics\d3d12\command_processor.cpp"; Adds = "d3d12_msaa_line_guard" }
+    # Direct3D 12 GPU hang (issues #44, #56): the DXBC translator's relative float constant index (c[a0 + n]) clamped to the 256 constants.
+    @{ Patch = "rexglue-dxbc-relative-constant-clamp.patch"; File = "src\graphics\pipeline\shader\dxbc_translator.cpp"; Adds = "such a read hung the GPU" }
+    # The DXBC translator's bindless descriptor indices from 0 (they were one too high: the last binding of a shader with a multiple of 4 read past its buffer).
+    @{ Patch = "rexglue-dxbc-bindless-descriptor-index.patch"; File = "src\graphics\pipeline\shader\dxbc_translator_fetch.cpp"; Adds = "Taken after emplace_back it was one too high" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

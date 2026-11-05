@@ -1,0 +1,40 @@
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+--- a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+@@ -470,6 +470,11 @@
+     return kMaxTextureBindings - 1;
+   }
+   uint32_t texture_binding_index = uint32_t(texture_bindings_.size());
++  // The index in the shader's descriptor index constant buffer: the number of bindings before
++  // this one (0 to count - 1, as the command processor fills the buffer and the shader declares
++  // it). Taken after emplace_back it was one too high, and the last binding of a shader with a
++  // multiple of 4 bindings was read past the end of the buffer.
++  uint32_t bindless_descriptor_index = bindless_resources_used_ ? GetBindlessResourceCount() : 0;
+   TextureBinding& new_texture_binding = texture_bindings_.emplace_back();
+   if (!bindless_resources_used_) {
+     new_texture_binding.bindful_srv_index = srv_count_++;
+@@ -493,8 +498,7 @@
+   }
+   new_texture_binding.bindful_srv_rdef_name_ptr = 0;
+   // Consistently 0 if not bindless as it may be used for hashing.
+-  new_texture_binding.bindless_descriptor_index =
+-      bindless_resources_used_ ? GetBindlessResourceCount() : 0;
++  new_texture_binding.bindless_descriptor_index = bindless_descriptor_index;
+   new_texture_binding.fetch_constant = fetch_constant;
+   new_texture_binding.dimension = dimension;
+   new_texture_binding.is_signed = is_signed;
+@@ -527,10 +531,11 @@
+     assert_always();
+     return kMaxSamplerBindings - 1;
+   }
+-  SamplerBinding& new_sampler_binding = sampler_bindings_.emplace_back();
++  // The number of bindings before this one, as for the textures (FindOrAddTextureBinding).
+   // Consistently 0 if not bindless as it may be used for hashing.
+-  new_sampler_binding.bindless_descriptor_index =
+-      bindless_resources_used_ ? GetBindlessResourceCount() : 0;
++  uint32_t bindless_descriptor_index = bindless_resources_used_ ? GetBindlessResourceCount() : 0;
++  SamplerBinding& new_sampler_binding = sampler_bindings_.emplace_back();
++  new_sampler_binding.bindless_descriptor_index = bindless_descriptor_index;
+   new_sampler_binding.fetch_constant = fetch_constant;
+   new_sampler_binding.mag_filter = mag_filter;
+   new_sampler_binding.min_filter = min_filter;

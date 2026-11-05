@@ -238,6 +238,8 @@ rexglue-upstream-small-fixes.patch include/rex/system/xam/user_profile.h Setting
 rexglue-codegen-csr-lazy.patch src/codegen/config.cpp csr_mode_free_ops
 rexglue-affinity-warning-once.patch src/system/xthread.cpp affinity_warning_once
 rexglue-d3d12-msaa-line-guard.patch src/graphics/d3d12/command_processor.cpp d3d12_msaa_line_guard
+rexglue-dxbc-relative-constant-clamp.patch src/graphics/pipeline/shader/dxbc_translator.cpp such a read hung the GPU
+rexglue-dxbc-bindless-descriptor-index.patch src/graphics/pipeline/shader/dxbc_translator_fetch.cpp Taken after emplace_back it was one too high
 LATER
 
 # ---------------------------------------------------------------------------
