@@ -29,8 +29,12 @@ param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = 
 $ErrorActionPreference = "Stop"
 if ($Ref) { $Update = $true }
 # Git needs core.longpaths for the SDK's deep submodule files (resetting the
-# SDK cleans them); set for every git started from here, as make_pc.ps1 does.
-$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+# SDK cleans them). It also gets safe.directory=*: the checkouts here are made by the
+# launcher itself, and git refuses a repository whose folder it cannot show to be the
+# user's (exFAT, another account, a network path: "detected dubious ownership", issue
+# #64). Set for every git started from here, as make_pc.ps1 does.
+$env:GIT_CONFIG_COUNT = "2"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+$env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 $repo = Split-Path $PSScriptRoot -Parent
 $sdk = Join-Path $repo "third_party\rexglue-sdk"
 $builtCommitFile = Join-Path $PSScriptRoot "built-commit.txt"

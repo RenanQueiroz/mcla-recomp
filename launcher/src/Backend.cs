@@ -104,10 +104,12 @@ static class Paths
     }
 
     /// The program started from the launcher gets MinGit's folder first on its PATH in an install that has one:
-    /// git is not installed on that PC.
+    /// git is not installed on that PC. Every git it starts (and the ones those start) trusts the checkouts, however the
+    /// drive's ownership looks (Setup.GitTrust).
     public static void Prepare(ProcessStartInfo psi)
     {
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0"; // never wait for a password nobody can type
+        Setup.GitTrust.Apply(psi.Environment);
         AddGitDir(psi);
     }
 

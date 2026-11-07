@@ -79,10 +79,13 @@ static class UpdateResolver
         var tagRef = $"refs/tags/{release.Tag}";
         var fetched = await RunGit(repo, "fetch", "--quiet", "--no-tags", "origin", $"+{tagRef}:{tagRef}");
         if (fetched.ExitCode != 0) throw new SetupException($"Couldn't get release {release.Tag} from GitHub: {FirstLine(fetched)}");
-        var commit = (await RunGit(repo, "rev-parse", "--verify", $"{release.Tag}^{{commit}}")).Output.Trim();
+        var tagRev = await RunGit(repo, "rev-parse", "--verify", $"{release.Tag}^{{commit}}");
+        var commit = tagRev.Output.Trim();
         // As the setup does: what is built is what the release says, even if the tag was moved.
         if (commit != release.Commit)
-            throw new SetupException($"Release {release.Tag}'s tag points at {(commit.Length >= 8 ? commit[..8] : "nothing")}, not at the commit {release.Commit[..8]} the release names, so it was not offered.");
+            throw new SetupException($"Release {release.Tag}'s tag points at {(commit.Length >= 8 ? commit[..8] : "nothing")}, not at the commit {release.Commit[..8]} the release names, so it was not offered.",
+                                     $"git rev-parse {release.Tag}^{{commit}} = '{commit}', release.json commit = {release.Commit}"
+                                     + (tagRev.ExitCode == 0 ? "" : $"; git exited with {tagRev.ExitCode}: {(tagRev.Error + "\n" + tagRev.Output).Trim()}"));
         var head = (await RunGit(repo, "rev-parse", "HEAD")).Output.Trim();
         // On newer code than the release (the player followed main and now follows the releases again).
         var back = commit != head && (await RunGit(repo, "merge-base", "--is-ancestor", commit, "HEAD")).ExitCode == 0;

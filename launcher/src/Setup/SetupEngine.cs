@@ -546,8 +546,7 @@ sealed class SetupEngine
 
         async Task<string?> Head()
         {
-            var lines = new List<string>();
-            var code = await ChildProcess.RunAsync(gitExe, ["-C", layout.Repo, "rev-parse", "HEAD"], null, git, lines.Add, ct);
+            var (code, lines) = await GitAsync(gitExe, git, ["rev-parse", "HEAD"], ct);
             return code == 0 ? lines.FirstOrDefault()?.Trim() : null;
         }
 
@@ -555,8 +554,7 @@ sealed class SetupEngine
         // while it wrote the files has the right HEAD and a partial tree: that is not "there already".
         async Task<bool> TreeIsWhole()
         {
-            var lines = new List<string>();
-            var code = await ChildProcess.RunAsync(gitExe, ["-C", layout.Repo, "ls-files", "--deleted"], null, git, lines.Add, ct);
+            var (code, lines) = await GitAsync(gitExe, git, ["ls-files", "--deleted"], ct);
             return code == 0 && lines.Count == 0;
         }
 
@@ -666,25 +664,35 @@ sealed class SetupEngine
         catch (IOException) { return false; }
     }
 
+    /// git in the checkout: its exit code and what it printed. A failure is written to the log with git's own words.
+    async Task<(int Code, List<string> Lines)> GitAsync(string gitExe, string git, string[] args, CancellationToken ct)
+    {
+        var lines = new List<string>();
+        var code = await ChildProcess.RunAsync(gitExe, ["-C", ctx.Layout.Repo, .. args], null, git, line => { lock (lines) lines.Add(line); }, ct);
+        if (code != 0) Log(StepId.Source, $"git {string.Join(' ', args)} exited with {code}: {string.Join(" | ", lines)}");
+        return (code, lines);
+    }
+
     /// git rev-parse <tag> is the release's commit, HEAD is it, and the shader pack is the release's: what is built is
     /// what the release says, even if the tag was moved or the repository altered.
     async Task VerifyCheckout(string gitExe, string git, CancellationToken ct)
     {
         var layout = ctx.Layout;
         var release = ctx.Release;
+        var said = "";   // git's own words when the last Rev failed (issue #64: "detected dubious ownership" was dropped)
         async Task<string> Rev(string rev)
         {
-            var lines = new List<string>();
-            var code = await ChildProcess.RunAsync(gitExe, ["-C", layout.Repo, "rev-parse", "--verify", rev], null, git, lines.Add, ct);
+            var (code, lines) = await GitAsync(gitExe, git, ["rev-parse", "--verify", rev], ct);
+            said = code == 0 ? "" : $"; git exited with {code}: {string.Join(" | ", lines)}";
             return code == 0 ? lines.FirstOrDefault()?.Trim() ?? "" : "";
         }
         var tagCommit = await Rev($"{release.Tag}^{{commit}}");
         if (tagCommit != release.Commit)
             throw new SetupException($"The source's tag {release.Tag} points at {(tagCommit.Length >= 8 ? tagCommit[..8] : "nothing")}, not at the commit {release.Commit[..8]} the release names. It was not built: the repository doesn't match the release.",
-                                     $"git rev-parse {release.Tag}^{{commit}} = '{tagCommit}', release.json commit = {release.Commit}");
+                                     $"git rev-parse {release.Tag}^{{commit}} = '{tagCommit}', release.json commit = {release.Commit}{said}");
         var head = await Rev("HEAD");
         if (head != release.Commit)
-            throw new SetupException($"The checkout is at {(head.Length >= 8 ? head[..8] : "nothing")}, not at the release's commit {release.Commit[..8]}.", $"HEAD = '{head}'");
+            throw new SetupException($"The checkout is at {(head.Length >= 8 ? head[..8] : "nothing")}, not at the release's commit {release.Commit[..8]}.", $"HEAD = '{head}'{said}");
         Log(StepId.Source, $"{release.Tag} is {release.Commit[..8]}, as the release says");
         if (release.ShaderPack is { } pack)
         {

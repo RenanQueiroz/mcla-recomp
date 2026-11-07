@@ -70,9 +70,13 @@ param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset =
 
 $ErrorActionPreference = "Stop"
 # The SDK has files deep in its submodules: git on Windows needs core.longpaths
-# for them. Set for every git this script starts, and the ones those start,
-# without touching anyone's git configuration.
-$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+# for them. It also gets safe.directory=*: the launcher made these checkouts, and git
+# refuses a repository whose folder it cannot show to be the user's (exFAT, another
+# account, a network path: "detected dubious ownership", issue #64). Set for every git
+# this script starts, and the ones those start, without touching anyone's git
+# configuration.
+$env:GIT_CONFIG_COUNT = "2"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+$env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 $root = Split-Path $PSScriptRoot -Parent
 . "$PSScriptRoot\mcla-lib.ps1"
 # Given none of the options that say how to build (-Toolchain, -ToolsDir, -SdkBundle,

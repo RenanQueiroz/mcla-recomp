@@ -6,6 +6,25 @@ using System.Text;
 
 namespace MclaLauncher.Setup;
 
+/// Git refuses a repository whose folder it can't show to be the user's ("detected dubious ownership", exit code 128): on a
+/// drive that keeps no owner (exFAT, FAT32), in a folder owned by another account or by Administrators, or on a network
+/// path. After the setup's clone, every git command in the checkout is then refused (issue #64). The checkouts git is run on
+/// here are the ones the launcher made itself, so they are trusted: safe.directory=* for every git the launcher starts and the
+/// programs those start (build-game.ps1 and make_pc.ps1 keep the same setting in their own environment variables). It is
+/// given in the child's environment (git reads safe.directory from there and from the command line, never from the
+/// repository), so nobody's git configuration is changed.
+static class GitTrust
+{
+    public static void Apply(IDictionary<string, string?> environment)
+    {
+        // Settings already in GIT_CONFIG_COUNT stay: this one is added after them.
+        var count = environment.TryGetValue("GIT_CONFIG_COUNT", out var text) && int.TryParse(text, out var n) && n >= 0 ? n : 0;
+        environment[$"GIT_CONFIG_KEY_{count}"] = "safe.directory";
+        environment[$"GIT_CONFIG_VALUE_{count}"] = "*";
+        environment["GIT_CONFIG_COUNT"] = (count + 1).ToString();
+    }
+}
+
 static class ChildProcess
 {
     /// Runs `file` and returns its exit code. `gitDir`: a folder put first on PATH (MinGit's cmd).
@@ -24,6 +43,7 @@ static class ChildProcess
         if (workingDirectory != null) psi.WorkingDirectory = workingDirectory;
         foreach (var arg in args) psi.ArgumentList.Add(arg);
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        GitTrust.Apply(psi.Environment);
         if (gitDir != null) psi.Environment["PATH"] = gitDir + ";" + (psi.Environment.TryGetValue("PATH", out var p) ? p : Environment.GetEnvironmentVariable("PATH"));
 
         using var process = Process.Start(psi) ?? throw new SetupException($"Couldn't start {Path.GetFileName(file)}.");
