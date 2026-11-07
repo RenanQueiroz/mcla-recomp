@@ -27,10 +27,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Floating: every build takes the newest Reactor preview and the newest
-         stable Windows App SDK 2.x. Reactor is pre-1.0, so a new preview can
-         change its API and need code changes here. Move the Windows App SDK to
-         a new major only when Reactor does.
+    <!-- Reactor is pinned: it is pre-1.0 and a new preview can change its API
+         (preview.17+ dropped UseFilePickerAsync / UseFolderPickerAsync, which
+         broke the v0.3.9 draft). preview.16 is what v0.3.8 shipped with; bump it
+         on purpose, with the code changes the new preview needs. The Windows App
+         SDK floats (newest stable 2.x); move it to a new major only when Reactor does.
          Only the Windows App SDK's WinUI component is referenced (it brings its
          Foundation, InteractiveExperiences and Base components), not the
          Microsoft.WindowsAppSDK metapackage: that one adds the AI, ML (ONNX
@@ -39,7 +40,7 @@
          the release's zip 94.6 to 69.4 MB) and 60 MB of a build from source in
          launcher\app (159 to 99 MB). Add a component back here if the launcher
          ever calls its API. -->
-    <PackageReference Include="Microsoft.UI.Reactor" Version="*-*" />
+    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.16" />
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.*" />
   </ItemGroup>
 
