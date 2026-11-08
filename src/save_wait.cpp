@@ -14,12 +14,18 @@
 #include <rex/system/xfile.h>
 
 // A career save being written: a file open for writing on a content package,
-// which the SDK mounts at \Device\Content\<n>\ (xam/content_manager.cpp).
+// which the SDK mounts at \Device\Content\<n>\ (xam/content_manager.cpp), or
+// a package the game has rewritten and not yet closed (the SDK keeps the
+// save's previous contents until it does, so ending the game before then would
+// bring the old save back at the next start: patches/rexglue-saved-game-backup.patch).
 static bool SaveInProgress() {
   auto* runtime = rex::Runtime::instance();
   auto* kernel = runtime ? runtime->kernel_state() : nullptr;
   if (!kernel) {
     return false;
+  }
+  if (auto* content = kernel->content_manager(); content && content->HasUnclosedBackups()) {
+    return true;
   }
   // GENERIC_WRITE, GENERIC_ALL, FILE_WRITE_DATA, FILE_APPEND_DATA.
   constexpr uint32_t kWriteAccess = 0x40000000u | 0x10000000u | 0x2u | 0x4u;

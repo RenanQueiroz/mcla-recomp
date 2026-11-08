@@ -495,6 +495,8 @@ $laterPatches = @(
     @{ Patch = "rexglue-dxbc-relative-constant-clamp.patch"; File = "src\graphics\pipeline\shader\dxbc_translator.cpp"; Adds = "such a read hung the GPU" }
     # The DXBC translator's bindless descriptor indices from 0 (they were one too high: the last binding of a shader with a multiple of 4 read past its buffer).
     @{ Patch = "rexglue-dxbc-bindless-descriptor-index.patch"; File = "src\graphics\pipeline\shader\dxbc_translator_fetch.cpp"; Adds = "Taken after emplace_back it was one too high" }
+    # A saved game rewritten with CREATE_ALWAYS keeps its previous contents until the game closes it, and gets them back at the next start if the game ended first (issue #65).
+    @{ Patch = "rexglue-saved-game-backup.patch"; File = "src\system\xam\content_manager.cpp"; Adds = "KeepContentBackup" }
     # llvm-mingw (-Toolchain mingw). Applied with either toolchain: guarded
     # by the compiler or a no-op for the other, so that one patched SDK
     # serves both, and switching toolchains needs no new patching.

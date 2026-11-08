@@ -1,0 +1,389 @@
+diff --git a/include/rex/system/xam/content_manager.h b/include/rex/system/xam/content_manager.h
+index 949d185..704d9d7 100644
+--- a/include/rex/system/xam/content_manager.h
++++ b/include/rex/system/xam/content_manager.h
+@@ -12,6 +12,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <mutex>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -162,6 +163,16 @@ class ContentManager {
+   X_RESULT SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
+                                std::vector<uint8_t> buffer);
+   X_RESULT DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
++  // Before a saved game is rewritten from nothing (CREATE_ALWAYS and TRUNCATE_EXISTING delete the
++  // package first): its files move to Backups/<type>/<name> beside the package, with an empty
++  // <name>.inprogress file next to them, until the title closes `root_name`, which is when the save
++  // is complete. A save that never got there (a crash, the process killed) is put back at the next
++  // start, by the first call that looks at the content. Best effort: when it cannot be done the
++  // package is deleted as before.
++  void KeepContentBackup(const std::string_view root_name, uint64_t xuid,
++                         const XCONTENT_AGGREGATE_DATA& data);
++  // True while a saved game that is being rewritten has not been closed by the title.
++  bool HasUnclosedBackups();
+   X_RESULT UnmountContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
+   X_RESULT UnmountAndDeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
+ 
+@@ -190,6 +201,9 @@ class ContentManager {
+                                                  uint32_t title_id,
+                                                  XContentType content_type) const;
+ 
++  void DropKeptBackup(const std::string_view root_name);
++  void RestoreInterruptedSaves();
++
+   std::unordered_map<string::string_key_case, ContentPackage*,
+                      string::string_key_case::Hash>::iterator
+   FindOpenPackageByData(const XCONTENT_AGGREGATE_DATA& data);
+@@ -203,6 +217,11 @@ class ContentManager {
+   rex::thread::global_critical_region global_critical_region_;
+   std::unordered_map<string::string_key_case, ContentPackage*, string::string_key_case::Hash>
+       open_packages_;
++  // Root name -> package path, for the saves whose previous contents are kept (KeepContentBackup).
++  std::unordered_map<string::string_key_case, std::filesystem::path,
++                     string::string_key_case::Hash>
++      kept_backups_;
++  std::once_flag restore_interrupted_saves_;
+ };
+ 
+ }  // namespace xam
+diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
+index 1fb1e16..965cf57 100644
+--- a/src/kernel/xam/xam_content.cpp
++++ b/src/kernel/xam/xam_content.cpp
+@@ -161,6 +161,9 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+         // Games may reuse the same root without explicitly closing.
+         content_manager->CloseContent(root_name);
+         if (content_manager->ContentExists(xuid, content_data)) {
++          // A saved game's files are kept aside until the title closes the package, so that a
++          // crash while it is being written does not take the old save with it.
++          content_manager->KeepContentBackup(root_name, xuid, content_data);
+           content_manager->DeleteContent(xuid, content_data);
+         }
+         // Check filesystem state after deletion attempt to decide
+@@ -193,6 +196,7 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+           result = X_ERROR_PATH_NOT_FOUND;
+         } else {
+           content_manager->CloseContent(root_name);
++          content_manager->KeepContentBackup(root_name, xuid, content_data);
+           content_manager->DeleteContent(xuid, content_data);
+           if (content_manager->ContentExists(xuid, content_data)) {
+             disposition = kDispositionState::Open;
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index b2f3d05..050efca 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -9,16 +9,21 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <array>
+ #include <cstring>
++#include <filesystem>
+ #include <queue>
+ #include <string>
++#include <system_error>
++#include <vector>
+ 
+ #include <fmt/format.h>
+ 
+ #include <rex/filesystem.h>
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/filesystem/devices/stfs_container_device.h>
++#include <rex/logging.h>
+ #include <rex/string.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/content_device.h>
+@@ -36,6 +41,72 @@ static const char* kGameUserContentDirName = "profile";
+ 
+ static const char* kGameContentHeaderDirName = "Headers";
+ 
++static const char* kGameContentBackupDirName = "Backups";
++
++static const char* kBackupMarkerSuffix = ".inprogress";
++
++// The folders above a package are named by the SDK with hex digits: 16 for the XUID, 8 for the
++// title and the content type.
++static bool IsHexName(const std::filesystem::path& name, size_t digits) {
++  const auto& text = name.native();
++  if (text.size() != digits) {
++    return false;
++  }
++  return std::all_of(text.begin(), text.end(), [](auto c) {
++    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
++  });
++}
++
++static std::vector<std::filesystem::path> ListSubdirectories(
++    const std::filesystem::path& directory) {
++  std::vector<std::filesystem::path> result;
++  std::error_code ec;
++  for (std::filesystem::directory_iterator it(directory, ec), end; !ec && it != end;
++       it.increment(ec)) {
++    std::error_code entry_ec;
++    if (it->is_directory(entry_ec)) {
++      result.push_back(it->path());
++    }
++  }
++  return result;
++}
++
++// Package path:  content_root/xuid/title_id/content_type/name
++// Backup path:   content_root/xuid/title_id/Backups/content_type/name
++static std::filesystem::path BackupPathFor(const std::filesystem::path& package_path) {
++  const auto type_dir = package_path.parent_path();
++  if (package_path.filename().empty() || type_dir.filename().empty()) {
++    return {};
++  }
++  return type_dir.parent_path() / kGameContentBackupDirName / type_dir.filename() /
++         package_path.filename();
++}
++
++// An empty file beside the kept copy: while it is there the copy is of a save that is not complete.
++static std::filesystem::path BackupMarkerFor(const std::filesystem::path& backup_path) {
++  std::filesystem::path marker = backup_path;
++  marker += kBackupMarkerSuffix;
++  return marker;
++}
++
++// The save is complete (or the content is being deleted): the marker goes first, because without
++// it nothing is put back, then the copy.
++static void RemoveBackup(const std::filesystem::path& package_path) {
++  const auto backup_path = BackupPathFor(package_path);
++  if (backup_path.empty()) {
++    return;
++  }
++  std::error_code marker_ec;
++  std::filesystem::remove(BackupMarkerFor(backup_path), marker_ec);
++  std::error_code ec;
++  std::filesystem::remove_all(backup_path, ec);
++  if (marker_ec || ec) {
++    REXSYS_WARN("content: could not remove the kept copy of '{}': {}",
++                rex::path_to_utf8(package_path.filename()),
++                (marker_ec ? marker_ec : ec).message());
++  }
++}
++
+ static int content_device_id_ = 0;
+ 
+ ContentPackage::ContentPackage(KernelState* kernel_state, const std::string_view root_name,
+@@ -139,6 +210,7 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string
+ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device_id, uint64_t xuid,
+                                                                  XContentType content_type,
+                                                                  uint32_t title_id) {
++  std::call_once(restore_interrupted_saves_, [this] { RestoreInterruptedSaves(); });
+   std::vector<XCONTENT_AGGREGATE_DATA> result;
+ 
+   if (title_id == kCurrentlyRunningTitleId) {
+@@ -184,6 +256,7 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
+ }
+ 
+ bool ContentManager::ContentExists(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
++  std::call_once(restore_interrupted_saves_, [this] { RestoreInterruptedSaves(); });
+   auto path = ResolvePackagePath(xuid, data);
+   return std::filesystem::exists(path);
+ }
+@@ -268,6 +341,7 @@ X_RESULT ContentManager::ReadContentHeaderFile(const std::string_view file_name,
+ 
+ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_t xuid,
+                                        const XCONTENT_AGGREGATE_DATA& data) {
++  std::call_once(restore_interrupted_saves_, [this] { RestoreInterruptedSaves(); });
+   {
+     auto global_lock = global_critical_region_.Acquire();
+     if (open_packages_.count(string::string_key_case(root_name))) {
+@@ -298,6 +372,7 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_
+ X_RESULT ContentManager::OpenContent(const std::string_view root_name, uint64_t xuid,
+                                      const XCONTENT_AGGREGATE_DATA& data,
+                                      uint32_t& content_license) {
++  std::call_once(restore_interrupted_saves_, [this] { RestoreInterruptedSaves(); });
+   {
+     auto global_lock = global_critical_region_.Acquire();
+     if (open_packages_.count(string::string_key_case(root_name))) {
+@@ -337,6 +412,9 @@ X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
+     package = DetachPackage(it);
+   }
+   delete package;
++  // The title closing the package it rewrote is the end of its save: the previous contents kept
++  // by KeepContentBackup are not needed any more.
++  DropKeptBackup(root_name);
+   return X_ERROR_SUCCESS;
+ }
+ 
+@@ -404,15 +482,18 @@ X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_D
+ 
+ X_RESULT ContentManager::UnmountContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+   ContentPackage* package = nullptr;
++  std::string root_name;
+   {
+     auto global_lock = global_critical_region_.Acquire();
+     auto it = FindOpenPackageByData(data);
+     if (it == open_packages_.end()) {
+       return X_ERROR_FILE_NOT_FOUND;
+     }
++    root_name = std::string(it->first.view());
+     package = DetachPackage(it);
+   }
+   delete package;
++  DropKeptBackup(root_name);
+   return X_ERROR_SUCCESS;
+ }
+ 
+@@ -441,6 +522,13 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+   if (ec) {
+     return X_ERROR_ACCESS_DENIED;
+   }
++  RemoveBackup(package_path);
++  {
++    auto global_lock = global_critical_region_.Acquire();
++    for (auto it = kept_backups_.begin(); it != kept_backups_.end();) {
++      it = (it->second == package_path) ? kept_backups_.erase(it) : std::next(it);
++    }
++  }
+ 
+   std::error_code ec2;
+   bool header_removed = std::filesystem::remove(header_path, ec2);
+@@ -451,6 +539,141 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+   return X_ERROR_FILE_NOT_FOUND;
+ }
+ 
++void ContentManager::KeepContentBackup(const std::string_view root_name, uint64_t xuid,
++                                       const XCONTENT_AGGREGATE_DATA& data) {
++  // CHECK: that a save reaches XamContentClose for the root it created, after writing. The game's
++  // content layer calls its wrapper from sub_82617300, sub_82617C70, sub_82617F98 and
++  // sub_822C4388; none was followed from the save. If it never closes, the copy stays and the
++  // previous save comes back at the next start (the log's "is being rewritten" line without a
++  // "closed" line after it shows that).
++  if (data.content_type != XContentType::kSavedGame) {
++    return;
++  }
++  auto global_lock = global_critical_region_.Acquire();
++  if (IsContentOpen(data)) {
++    return;  // DeleteContent refuses it as well
++  }
++  const auto package_path = ResolvePackagePath(xuid, data);
++  const auto backup_path = BackupPathFor(package_path);
++  std::error_code ec;
++  if (backup_path.empty() || !std::filesystem::exists(package_path, ec)) {
++    return;
++  }
++  const auto marker = BackupMarkerFor(backup_path);
++  const auto name = rex::path_to_utf8(package_path.filename());
++
++  // An older copy belongs to a save the title never closed before asking for this one.
++  RemoveBackup(package_path);
++  std::filesystem::create_directories(backup_path.parent_path(), ec);
++  if (!ec && !rex::filesystem::CreateEmptyFile(marker)) {
++    ec = std::make_error_code(std::errc::io_error);
++  }
++  if (ec) {
++    REXSYS_WARN("content: no copy of the saved game '{}' kept before it is rewritten: {}", name,
++                ec.message());
++    return;
++  }
++  std::filesystem::rename(package_path, backup_path, ec);
++  if (ec) {
++    // The package cannot be moved (a file of it held open by a scanner or a sync client, say):
++    // copy it, and the caller deletes the original as it always did. The marker comes after the
++    // copy here, so that a copy cut short is never put back over the package, which is still whole.
++    ec.clear();
++    std::filesystem::remove(marker, ec);
++    ec.clear();
++    std::filesystem::remove_all(backup_path, ec);
++    ec.clear();
++    std::filesystem::copy(package_path, backup_path, std::filesystem::copy_options::recursive,
++                          ec);
++    if (!ec && !rex::filesystem::CreateEmptyFile(marker)) {
++      ec = std::make_error_code(std::errc::io_error);
++    }
++    if (ec) {
++      REXSYS_WARN("content: no copy of the saved game '{}' kept before it is rewritten: {}", name,
++                  ec.message());
++      RemoveBackup(package_path);
++      return;
++    }
++  }
++  kept_backups_.erase(string::string_key_case(root_name));
++  kept_backups_.insert({string::string_key_case::create(root_name), package_path});
++  REXSYS_INFO(
++      "content: saved game '{}' is being rewritten; its previous contents are kept until '{}' is "
++      "closed",
++      name, root_name);
++}
++
++bool ContentManager::HasUnclosedBackups() {
++  auto global_lock = global_critical_region_.Acquire();
++  return !kept_backups_.empty();
++}
++
++void ContentManager::DropKeptBackup(const std::string_view root_name) {
++  std::filesystem::path package_path;
++  {
++    auto global_lock = global_critical_region_.Acquire();
++    auto it = kept_backups_.find(string::string_key_case(root_name));
++    if (it == kept_backups_.end()) {
++      return;
++    }
++    package_path = it->second;
++    kept_backups_.erase(it);
++  }
++  RemoveBackup(package_path);
++  REXSYS_INFO("content: '{}' closed; the previous contents of saved game '{}' are no longer kept",
++              root_name, rex::path_to_utf8(package_path.filename()));
++}
++
++void ContentManager::RestoreInterruptedSaves() {
++  // A backup with its marker still here is of a save that never reached its close: the process
++  // ended (crashed, was killed) while the title was writing it, so the package is whatever that
++  // left. The backup goes back in its place. A backup without a marker is the leftover of a save
++  // that did finish (its removal failed): it is not the latest, and is deleted.
++  // content_root/xuid/title_id/Backups/content_type/name
++  for (const auto& xuid_dir : ListSubdirectories(root_path_)) {
++    if (!IsHexName(xuid_dir.filename(), 16)) {
++      continue;
++    }
++    for (const auto& title_dir : ListSubdirectories(xuid_dir)) {
++      if (!IsHexName(title_dir.filename(), 8)) {
++        continue;
++      }
++      for (const auto& type_dir : ListSubdirectories(title_dir / kGameContentBackupDirName)) {
++        if (!IsHexName(type_dir.filename(), 8)) {
++          continue;
++        }
++        for (const auto& backup_path : ListSubdirectories(type_dir)) {
++          const auto package_path = title_dir / type_dir.filename() / backup_path.filename();
++          const auto marker = BackupMarkerFor(backup_path);
++          const auto name = rex::path_to_utf8(backup_path.filename());
++          std::error_code ec;
++          if (!std::filesystem::exists(marker, ec)) {
++            std::filesystem::remove_all(backup_path, ec);
++            continue;
++          }
++          std::filesystem::remove_all(package_path, ec);
++          if (!ec) {
++            std::filesystem::create_directories(package_path.parent_path(), ec);
++          }
++          if (!ec) {
++            std::filesystem::rename(backup_path, package_path, ec);
++          }
++          if (ec) {
++            REXSYS_ERROR("content: could not put back saved game '{}' from '{}': {}", name,
++                         rex::path_to_utf8(backup_path), ec.message());
++            continue;
++          }
++          std::filesystem::remove(marker, ec);
++          REXSYS_WARN(
++              "content: saved game '{}' was being rewritten when the game ended; its previous "
++              "contents are back",
++              name);
++        }
++      }
++    }
++  }
++}
++
+ std::filesystem::path ContentManager::ResolveGameUserContentPath() {
+   auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
+   // The profile's folder, not its name's: it was always "User" until the name could be set

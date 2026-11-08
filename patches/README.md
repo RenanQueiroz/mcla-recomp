@@ -75,6 +75,7 @@ git apply ../../patches/rexglue-affinity-warning-once.patch
 git apply ../../patches/rexglue-d3d12-msaa-line-guard.patch
 git apply ../../patches/rexglue-dxbc-relative-constant-clamp.patch
 git apply ../../patches/rexglue-dxbc-bindless-descriptor-index.patch
+git apply ../../patches/rexglue-saved-game-backup.patch
 git apply ../../patches/rexglue-mingw.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-mingw-config.patch
 ```
@@ -2085,6 +2086,28 @@ For the exponent bias (#490), pictures on Vulkan, from llvm-mingw builds of orig
 | Change | Files | Affects |
 |---|---|---|
 | The index | `src/graphics/pipeline/shader/dxbc_translator_fetch.cpp` | D3D12 |
+
+## rexglue-saved-game-backup.patch
+
+**Why.** Fork issue #65: with an imported (modded) save the game crashed while saving, and the save was gone afterwards ("A Midnight Club: Los Angeles save game could not be found"). The game saves with `XamContentCreate` and the flag `CREATE_ALWAYS` (flags 18: `sub_82616D38` is the one call that creates; the other callers pass 3, `OPEN_EXISTING`). The SDK implements `CREATE_ALWAYS` as in Xenia: delete the whole package (`ContentManager::DeleteContent`: `remove_all` of `.../00000001/mc4.sav/` and its `Headers` file), create it empty, then let the game write `mc4.sav` into it (537,428 bytes, about 50 ms). A crash, a kill or a power cut anywhere after the delete leaves an empty package, and the old save is lost together with the one being written.
+
+This patch does not stop the crash; it stops the crash from costing the save. What crashed is not known: the report has no log yet. The crash tracer (`src/crash_trace.cpp`) writes the host stack of a crash, with the guest functions, into the log.
+
+**What it changes.**
+- Before `CREATE_ALWAYS` or `TRUNCATE_EXISTING` deletes a saved game (content type 1) its package folder is moved to `<title>/Backups/00000001/<name>`, and an empty `<name>.inprogress` file is made beside it. When the game closes the root name it opened the new package with (`XamContentClose`), the marker and the copy are deleted (the save is complete).
+- If the game ends before that (a crash, a kill), the first call that looks at the content at the next start (`ListContent`, `ContentExists`, `CreateContent`, `OpenContent`) puts the copy back and logs `saved game '...' was being rewritten when the game ended; its previous contents are back`. A copy without its marker is the leftover of a save that did finish and is deleted.
+- If the folder cannot be moved (a scanner or a sync client holds a file of it), it is copied instead and the original is deleted as before; if that fails too, the save is deleted as before and the log says so. The marker of a copy is made after the copy, so that a copy cut short is never put back over a package that is still whole.
+- `ContentManager::HasUnclosedBackups()` is true while a rewritten package has not been closed. `MclaWaitForSaves` (`src/save_wait.cpp`) waits for it as for a file open for writing, so QUIT GAME right after a save does not bring the older save back at the next start.
+- Only saved games (type 1). DLC, avatar items and the rest are as before. A title that overwrites the files of an open package in place instead (`NtCreateFile` with an overwrite disposition) is not covered; this game does not (its save is the `CREATE_ALWAYS` call above).
+
+**Checked.** The patch applies to v0.10.0 with `rexglue-content-header-padding.patch` and `rexglue-user-name.patch` before it (the only others that change `content_manager.cpp`), and nothing after it touches the same lines. Not compiled and not run when written. To check: SAVE GAME in the pause menu leaves no `Backups` folder behind and logs `...closed; the previous contents of saved game 'mc4.sav' are no longer kept`; a save made to fail on purpose (the process ended with the debugger or `taskkill` between the log's `is being rewritten` line and the `closed` line) puts the old save back at the next start.
+
+**Upstream:** not reported.
+
+| Change | Files | Affects |
+|---|---|---|
+| `KeepContentBackup`, `DropKeptBackup`, `RestoreInterruptedSaves`, `HasUnclosedBackups` | `include/rex/system/xam/content_manager.h`, `src/system/xam/content_manager.cpp` | all platforms |
+| The call before the delete in `CREATE_ALWAYS` and `TRUNCATE_EXISTING` | `src/kernel/xam/xam_content.cpp` | all platforms |
 
 ## rexglue-mingw.patch
 

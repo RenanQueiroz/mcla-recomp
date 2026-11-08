@@ -794,6 +794,14 @@ On Direct3D 12 the game could stop with "D3D12 device removed: ... DEVICE_HUNG" 
 - **Measured** (RTX 5080, 3x, uncapped, the untouched title screen, 10 minutes a run): 5 of 5 runs clean with the fix, where the same build without it hung in about half of them. Details: `launcher/dev/d3d12-hang-2026-11-05.md`.
 - **Not run:** an AMD GPU (issue #44's RX 6900 XT), long sessions of play. Vulkan is not changed.
 
+## Saves: a crash while saving took the old save with it (fork issue #65; the backup added 2026-11-07, the crash itself not found)
+
+With an imported save the game crashed while saving on one PC (v0.3.8; the reporter says v0.3.7 did not), and the save was gone afterwards. The game saves with `CREATE_ALWAYS`, which the SDK does as: delete the save's folder, create it empty, let the game write the file (about 50 ms). A crash in that time loses the old save too.
+
+- **What changed:** the old save's folder is kept in `Backups\` beside it until the game closes the new one, and put back at the next start if the game ended first (`patches/rexglue-saved-game-backup.patch`). QUIT GAME waits for that close as it waits for a file being written. The crash tracer (`src/crash_trace.cpp`) now writes its report from the unhandled-exception filter, for any exception, in a thread of its own, with every stack read checked against the thread's stack: since v0.3.8 it logged and walked the stack in a vectored handler on every guest heap read fault and null-page fault, which the SDK handles for the GPU and audio registers, and read the return address of a leaf frame without checking where the stack ends.
+- **Not found:** why the save crashed. As far as the code shows, nothing v0.3.8 changed is on the save's path: the crash tracer's change only matters where the guest memory is not at 0x100000000 (it is there in all but 37 of the 1,477 run logs kept on the test PC) and only writes log lines; the two shader fixes change what the GPU is given. A log of the crash tells more: a `crash: guest ... at guest 0x...` line with the guest function that faulted under it, or, without one, a crash that is not an exception (a failed assertion, an uncaught C++ exception from the SDK's file code, a GPU `device removed` line above the end of the log).
+- **Not run:** the backup and the tracer were written without a build; see the patch's entry in `patches/README.md` for what to check. An imported save was not available to try.
+
 ## PS5 build: a stale precompiled header after the SDK changed (2026-10-29; not built or run)
 
 `ps5/game/build.sh` made the game's precompiled header again only when a generated `.h` was newer than it. An SDK header that changes afterwards (a patch added to the SDK, or a new checkout of it) would stop the build with clang's `file ... has been modified since the precompiled header ... was built`, the error that stopped the PC updates to v0.3.1 ([#23](https://github.com/RenanQueiroz/mcla-recomp/issues/23); fixed there in v0.3.2).
