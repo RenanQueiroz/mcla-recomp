@@ -192,14 +192,31 @@ function RemoveFolder([string]$path) {
     }
 }
 
+# Windows' own tar.exe (Windows 10 1803 and later), by its full path: a PATH
+# without System32 must not matter. Null on a Windows without it (an older one,
+# or one with it removed); the callers then go straight to their fallback
+# (issue #73: "tar.exe is not recognized" stopped the build there).
+function WindowsTar {
+    $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (Test-Path -LiteralPath $tar -PathType Leaf) { return $tar }
+    return $null
+}
+
 # Unpack a .zip into a new, empty folder (an old one is removed). tar.exe
-# (Windows 10 and later) is quick; .NET if it cannot. The folders it is given are
-# short ones, as the archives hold paths of over 100 characters.
+# (Windows 10 and later) is quick; .NET if it cannot or is not there (the same
+# tree). The folders it is given are short ones, as the archives hold paths of
+# over 100 characters.
 function UnzipTo([string]$name, [string]$archive, [string]$dest) {
     RemoveFolder $dest
     New-Item -ItemType Directory -Force $dest | Out-Null
+    $tar = WindowsTar
     Logged $name {
-        tar.exe -xf $archive -C $dest
+        if ($tar) {
+            & $tar -xf $archive -C $dest
+        } else {
+            "Windows' tar.exe is not on this PC"
+            $global:LASTEXITCODE = 1
+        }
         if ($LASTEXITCODE -ne 0) {
             "tar.exe could not unpack the archive; unpacking it with .NET instead"
             Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
@@ -779,7 +796,13 @@ try {
                     # looks installed.
                     RemoveFolder "$root\tools\.u"
                     New-Item -ItemType Directory -Force "$root\tools\.u" | Out-Null
-                    tar.exe -xf $archive -C "$root\tools\.u"
+                    $tar = WindowsTar
+                    if ($tar) {
+                        & $tar -xf $archive -C "$root\tools\.u"
+                    } else {
+                        "Windows' tar.exe is not on this PC"
+                        $global:LASTEXITCODE = 1
+                    }
                     if ($LASTEXITCODE -ne 0) {
                         "tar.exe could not unpack the archive; unpacking it with Python instead (about a minute)"
                         python -c "import sys, tarfile; kw = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}; tarfile.open(sys.argv[1], 'r:xz').extractall(sys.argv[2], **kw)" $archive "$root\tools\.u"
