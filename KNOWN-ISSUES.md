@@ -809,3 +809,10 @@ With an imported save the game crashed while saving on one PC (v0.3.8; the repor
 **Change:** before the old check, `build.sh` asks clang to load the header for an empty file. If clang refuses it, the header is deleted and made again, with the objects that use it (the same as when a generated header changes). Nothing else in the build changes.
 
 **Not built or run:** there is no PS5 build or `prospero-clang++` here. The new lines passed `bash -n` and a test against a stand-in compiler that fails the way clang does (the header kept when nothing changed, deleted when an SDK header's time changed). That clang reports the error when loading the header for an empty file, and the time one load adds to a build, are not measured.
+
+## Hangouts, race gates and checkpoints missed above 30 FPS (fixed 2026-11-13)
+
+Above 30 FPS driving into a hangout (and, by the same test, a race gate or a checkpoint) was often not noticed. The game decides it with a segment from the car's position in the previous update to its position now, but a script thread looks only every 2nd to 4th update above 30 FPS, so the road covered by the updates between two looks was never tested. `src/checkpoint_sweep.cpp` (`config/checkpoint_sweep.toml`) remembers where each look's segment ended and, when a look finds nothing, also tests the piece of road since the previous look (a look older than 100 ms or more than 15 m away is ignored). It is on always, with no option: where the game's own test answers, nothing changes.
+
+- **Measured in LARecomp** (hangout, 6 entries each): uncapped 2 of 6 without the fix, 6 of 6 with it; 30 and 60 FPS 6 of 6 either way. The same code and addresses; the fork's hooks are its own.
+- **Measured in this fork** (hangout `hw_local_hangout1` driven into from the spawn, uncapped at the entrance, one pass a launch): v0.3.11 entered 2 of the 5 passes that reached the line, the fix 6 of 6. That the racer's +400 is the previous update's position is read from the code. A race gate or checkpoint rescued by the fix was not caught in a test. The first few looks log `[CheckpointSweep]` lines.
