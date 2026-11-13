@@ -1,6 +1,6 @@
 // Checkpoints and line triggers that a script asks about: "did the car cross this since I last looked".
-// Ported from LARecomp's src/mc_engine/hooks/checkpoint_sweep.cpp (commit 673228b), the same fix: the same
-// game binary and guest addresses, the fork's own hook plumbing.
+// Ported from LARecomp's src/mc_engine/hooks/checkpoint_sweep.cpp (commit 673228b; the entries per car from
+// its commit a5a631d), the same fix: the same game binary and guest addresses, the fork's own hook plumbing.
 //
 // The game decides it with a swept segment. The race checkpoints are tested by sub_822653A8
 // (checkpoint, end, start): a gate (a line checkpoint, +330) or a circle with a height band (+168
@@ -37,10 +37,30 @@
 // along the car's velocity (sub_822A8148's vector, normalised, times 2.0 at 0x82040E94) is read from
 // the code, not seen in a running game.
 //
-// kWindowMs and kMaxGapM: a polling script's looks were 20 to 33 ms apart in the runs that measured it
-// (pad_probe.cpp), so 100 ms is three times that; the fastest car covers about 100 m/s, i.e. 10 m in
-// 100 ms, and 15 m leaves room for the car's own segment on top. A previous look older than that, or
-// further away, is not the same drive.
+// One place can ask for several cars. The race script (the thread and opcode of LARecomp's race trace,
+// 2026-11-12) asks the same checkpoint from the same opcode for the player and for every opponent in
+// turn, so the checkpoint test cannot tell the cars apart by its arguments (it gets two vectors, not the
+// racer). The previous ends are therefore kept per place AND per car, the car being found by where its
+// segment starts: the entry of the place that ended nearest to the start (checkpoint_sweep_tracker.h).
+// With one entry per place (v0.3.12) the second car found the first car's end 20 to 200 m away, no look
+// was ever stretched in a race, and a gate (a line checkpoint, 46 to 161 m wide in the traced race) could
+// still be missed by a car faster than the game's own probe covers: HasHit looks 2 m ahead, a script that
+// looks every 33 ms (the race script's gap between looks, measured at 30 FPS and uncapped in LARecomp)
+// leaves a stretch of speed x (33 ms - one update) - 2 m untested, i.e. above about 70 m/s at 240 FPS (77
+// at 144, 120 at 60). The circles of a race (radius 22 to 49 m in the traced race) are crossed in more
+// than half a second even at the fastest car's speed and are not at risk. The hangout line triggers need
+// nothing new (their key already holds the racer), nor does a script that looks in every update, nor a
+// teleport.
+//
+// The bookkeeping (checkpoint_sweep_tracker.h, standard library only) is checked without the game by
+// launcher/dev/checkpoint-sweep/checkpoint_sweep_test.cpp: the rules of one look, several cars at one
+// place, and a simulated race field against a gate at 30 to 360 FPS. The per-car entries are not run in
+// the fork's game; a race gate rescued by them was not caught in a test.
+//
+// kWindowMs and kMaxGapM (checkpoint_sweep_tracker.h): a polling script's looks were 20 to 33 ms apart in
+// the runs that measured it (pad_probe.cpp), 13 to 33 ms in LARecomp, so 100 ms is three times the
+// longest; the fastest car covers about 100 m/s, i.e. 10 m in 100 ms, and 15 m leaves room for the car's
+// own segment on top. A previous look older than that, or further away, is not the same drive.
 //
 // Hooks: the checkpoint test is overridden (sub_822653A8, below); the line test is a hook in the middle
 // of sub_826881A8 (config/checkpoint_sweep.toml, mcla_trigger_line_sweep).
@@ -58,6 +78,8 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 
+#include "checkpoint_sweep_tracker.h"
+
 // The game's own checkpoint test (the generated body), called by the override below.
 REX_EXTERN(__imp__sub_822653A8);
 
@@ -68,8 +90,10 @@ namespace {
 constexpr uint32_t kCurrentScriptThread = 0x828DA3BC;
 constexpr uint32_t kScriptThreadPc = 16;
 
-constexpr int64_t kWindowMs = 100;
-constexpr float kMaxGapM = 15.0f;
+using mcla::sweep::Dot;
+using mcla::sweep::LookTable;
+using mcla::sweep::Sub;
+using mcla::sweep::V3;
 
 uint32_t ReadU32(const uint8_t* base, uint32_t address) {
   return (uint32_t(base[address]) << 24) | (uint32_t(base[address + 1]) << 16) |
@@ -96,10 +120,6 @@ void WriteF32(uint8_t* base, uint32_t address, float value) {
   WriteU32(base, address, bits);
 }
 
-struct V3 {
-  float x, y, z;
-};
-
 V3 ReadV3(const uint8_t* base, uint32_t addr) {
   return {ReadF32(base, addr), ReadF32(base, addr + 4), ReadF32(base, addr + 8)};
 }
@@ -110,27 +130,8 @@ void WriteV3(uint8_t* base, uint32_t addr, const V3& v) {
   WriteF32(base, addr + 8, v.z);
 }
 
-float Dot(const V3& a, const V3& b) {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-V3 Sub(const V3& a, const V3& b) {
-  return {a.x - b.x, a.y - b.y, a.z - b.z};
-}
-
-// A place that asks, and where its segment ended the last time.
-struct Look {
-  uint32_t thread = 0;
-  uint32_t pc = 0;
-  uint32_t subject = 0;  // the checkpoint or the trigger
-  uint32_t racer = 0;    // 0 where the test does not say (the checkpoint test)
-  V3 end{};
-  int64_t at_ms = 0;  // 0 = unused
-};
-constexpr int kLooks = 256;
-
 std::mutex g_mutex;
-Look g_looks[kLooks];
-int g_next_look = 0;
+LookTable g_looks;
 std::atomic<int> g_told[2];  // checkpoint, line trigger: outcomes changed or segments extended
 
 int64_t NowMs() {
@@ -139,44 +140,14 @@ int64_t NowMs() {
       .count();
 }
 
-// This place's previous look, if it is recent and the segment [start, end] begins beyond it. Stores
-// `end` as the place's new previous end either way. `gap_ms` is the time since the previous look.
+// This place's previous look of the car that is asked about, if it is recent and the segment [start,
+// end] begins beyond it. Stores `end` as the car's new previous end either way. `gap_ms` is the time
+// since the previous look (-1 if there was none).
 bool PreviousEnd(uint32_t thread, uint32_t pc, uint32_t subject, uint32_t racer, const V3& start,
                  const V3& end, V3& previous, int64_t& gap_ms) {
   const int64_t now = NowMs();
   std::lock_guard<std::mutex> lock(g_mutex);
-  Look* look = nullptr;
-  for (Look& l : g_looks) {
-    if (l.at_ms != 0 && l.thread == thread && l.pc == pc && l.subject == subject &&
-        l.racer == racer) {
-      look = &l;
-      break;
-    }
-  }
-  if (!look) {
-    look = &g_looks[g_next_look];
-    g_next_look = (g_next_look + 1) % kLooks;
-    look->thread = thread;
-    look->pc = pc;
-    look->subject = subject;
-    look->racer = racer;
-    look->end = end;
-    look->at_ms = now;
-    return false;
-  }
-  previous = look->end;
-  gap_ms = now - look->at_ms;
-  look->end = end;
-  look->at_ms = now;
-  if (gap_ms > kWindowMs) {
-    return false;
-  }
-  const V3 jump = Sub(previous, start);
-  if (!(Dot(jump, jump) <= kMaxGapM * kMaxGapM)) {
-    return false;
-  }
-  // Behind the game's own segment: the previous end is on the far side of `start`.
-  return Dot(jump, Sub(end, start)) < 0.0f;
+  return g_looks.Update(thread, pc, subject, racer, start, end, now, previous, gap_ms);
 }
 
 }  // namespace
