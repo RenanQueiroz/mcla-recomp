@@ -61,6 +61,8 @@ set(MCLA_SOURCES
     src/stick_deadzone.cpp
     # A script's checkpoint and line-trigger looks also test the road since its previous look (a hangout driven into above 30 FPS).
     src/checkpoint_sweep.cpp
+    # A car's shader variables bound while the car is set up on another thread (a guest crash at 0xC, no option).
+    src/car_shader_bind.cpp
     # DualSense adaptive triggers through SDL (fork only; the PS5 build has ps5/game/ps5_triggers.h).
     src/pc_triggers.cpp
     src/sampling_profiler.cpp

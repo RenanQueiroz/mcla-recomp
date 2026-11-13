@@ -1,0 +1,32 @@
+# A car's shader-variable cache (the object at vehicle + 1060), bound while the car is set up on
+# another thread (src/car_shader_bind.cpp). sub_823793E8 (paint variables, shader group in +252,
+# pending byte +266) and sub_823794E0 (brake variables, group in +256, pending byte +267) store the
+# group in the cache and call sub_82193AF8(group, name, 0) once per variable, loading the group from
+# the cache again before every call. sub_82377B88 (the cache's reset, from the car's set-up) zeroes
+# both fields; a call that comes after it has group 0, and sub_82193AF8's first read (+12) is
+# guest 0xC. No option turns the guards off (a crash fix).
+
+# 0x82193AF8: the entry of sub_82193AF8, r3 = the shader group. A lookup in no group finds nothing:
+# true returns 0 at once.
+[[midasm_hook]]
+name = "mcla_shader_group_lookup"
+address = 0x82193AF8
+registers = ["r3"]
+return_on_true = true
+
+# 0x82379548 in sub_823794E0, before `stb r9,267(r31)` (the brake bind's last store); r31 = the cache.
+# With its group gone (+256 is 0) true leaves the pending byte set, to the epilogue at 0x8237954C,
+# so the car binds again on the next update.
+[[midasm_hook]]
+name = "mcla_car_shader_brake_done"
+address = 0x82379548
+registers = ["r31"]
+jump_address_on_true = 0x8237954C
+
+# 0x823794C8 in sub_823793E8, before `stb r11,266(r31)` (the paint bind's last store); r31 = the cache.
+# With its group gone (+252 is 0) true leaves the pending byte set, to the epilogue at 0x823794CC.
+[[midasm_hook]]
+name = "mcla_car_shader_paint_done"
+address = 0x823794C8
+registers = ["r31"]
+jump_address_on_true = 0x823794CC

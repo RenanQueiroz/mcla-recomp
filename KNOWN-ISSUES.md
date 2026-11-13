@@ -816,3 +816,12 @@ Above 30 FPS driving into a hangout (and, by the same test, a race gate or a che
 
 - **Measured in LARecomp** (hangout, 6 entries each): uncapped 2 of 6 without the fix, 6 of 6 with it; 30 and 60 FPS 6 of 6 either way. The same code and addresses; the fork's hooks are its own.
 - **Measured in this fork** (hangout `hw_local_hangout1` driven into from the spawn, uncapped at the entrance, one pass a launch): v0.3.11 entered 2 of the 5 passes that reached the line, the fix 6 of 6. That the racer's +400 is the previous update's position is read from the code. A race gate or checkpoint rescued by the fix was not caught in a test. The first few looks log `[CheckpointSweep]` lines.
+
+## A rare crash in free roam: a car's shader variables bound while the car is set up (found in LARecomp; guards added 2026-11-13; not built or run)
+
+LARecomp logged one crash in 1,674 runs, "Unhandled guest access violation: read of guest 0x0000000C", on the thread that draws frames, about 6 s after free roam began. The game binds a car's shader variables (`brakeCaliperTintColor`, `tintColors` and others) by looking each one up in the car's shader group, and it reads the group from the car's cache object again before every lookup. Setting a car up with a new model clears that field. When a car is set up on another thread between two lookups, the next one gets a null group and reads guest 0xC. The fork runs the same code at the same addresses, so the same window exists here; no log from the fork shows it yet (whether issue #77, a crash when an event starts, is this is unknown until its reporter sends a log).
+
+`src/car_shader_bind.cpp` (`config/car_shader_bind.toml`) has three guards, on always, with no option: a lookup in a null group finds nothing, and a bind that finishes with its group gone leaves the car marked as still to bind, so it binds again at the next update. Where the group is there, nothing changes. The first time a guard acts, the log gets one `[CarShaderBind]` line.
+
+- **Not built or run.** The new file passed a syntax-only compile with the fork's flags. The game has to be generated again and built; the race cannot be forced, so a test shows only no crash over many free-roam entries, and a missing `[CarShaderBind]` line proves nothing.
+- **Not known:** that the car's set-up runs on a different thread from the render thread in the fork (the game's code reaches it only through function pointers).
