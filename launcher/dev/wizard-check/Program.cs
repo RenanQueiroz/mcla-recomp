@@ -40,6 +40,8 @@
 //   launcher-folder <scratch> the install folder may not be, be inside, or contain the launcher's folder or the installer's default one
 //   rebuild                   (Installed mode) a plain Rebuild: the lock, the last options, the finish of a pending update
 //   app-control <scratch>     (Checks5.cs) what is said when Windows blocks mcla.exe (Smart App Control, error 4551 or 1260), the exceptions that are not that
+//   paths <scratch>           (Checks6.cs) where the launcher decides it is (Paths.Locate): an exe in a folder directly under a drive root or in the root (issue 81),
+//                             a checkout, an install, a share, a path that makes the detection throw
 using System.Text.Json;
 using MclaLauncher.Setup;
 
@@ -97,6 +99,7 @@ static partial class Program
                 case "remaining": RemainingChecks(args[1]); break;
                 case "cleanup2": CleanupChecks(args[1]); break;
                 case "app-control": AppControlChecks(args[1]); break;
+                case "paths": PathsChecks(args[1]); break;
                 default: Console.WriteLine($"unknown command {args[0]}"); return 2;
             }
         }
