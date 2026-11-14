@@ -462,11 +462,19 @@ sealed class LauncherApp : Component
         // (such as installing a missing tool) needs a real console.
         void BuildInTerminal()
         {
-            var psi = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, WorkingDirectory = Paths.LauncherDir };
+            // Windows PowerShell by its full path: some PCs' PATH lacks its folder (fork issue 83).
+            var psi = new ProcessStartInfo(WindowsPowerShell.Locate(out var powerShellNote)) { UseShellExecute = false, WorkingDirectory = Paths.LauncherDir };
             foreach (var arg in new[] { "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Paths.BuildScript })
                 psi.ArgumentList.Add(arg);
             Paths.AddGitDir(psi);
-            Process.Start(psi);
+            try
+            {
+                Process.Start(psi);
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                setNotice($"Couldn't start the build in a terminal: {ex.Message}" + (powerShellNote == null ? "" : " " + powerShellNote));
+            }
         }
 
         // An update changed the launcher itself: it can't replace its own files
@@ -474,9 +482,10 @@ sealed class LauncherApp : Component
         // it and starts the new one.
         void RestartToUpdateLauncher()
         {
+            string? powerShellNote = null;
             try
             {
-                var psi = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, WorkingDirectory = Paths.LauncherDir };
+                var psi = new ProcessStartInfo(WindowsPowerShell.Locate(out powerShellNote)) { UseShellExecute = false, WorkingDirectory = Paths.LauncherDir };
                 foreach (var arg in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Paths.UpdateLauncherScript,
                                             "-WaitFor", Environment.ProcessId.ToString() })
                     psi.ArgumentList.Add(arg);
@@ -489,7 +498,7 @@ sealed class LauncherApp : Component
             }
             catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
             {
-                setNotice($"Couldn't update the launcher: {ex.Message}");
+                setNotice($"Couldn't update the launcher: {ex.Message}" + (powerShellNote == null ? "" : " " + powerShellNote));
             }
         }
 
