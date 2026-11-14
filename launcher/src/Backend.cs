@@ -33,10 +33,10 @@ static class Paths
     public static readonly string BuiltCommitFile;
     public static readonly string SettingsFile;
     public static readonly string LogsDir;
-    public static readonly string Icon = Path.Combine(AppContext.BaseDirectory, "launcher.ico");
+    public static readonly string Icon = Path.Combine(AppContext.BaseDirectory ?? "", "launcher.ico");
     // Written by build-launcher.ps1: the last commit that changed the launcher
     // this exe was built from. Absent in a dev build.
-    public static readonly string SourceCommitFile = Path.Combine(AppContext.BaseDirectory, "source-commit.txt");
+    public static readonly string SourceCommitFile = Path.Combine(AppContext.BaseDirectory ?? "", "source-commit.txt");
     public const string RepoUrl = "https://github.com/RenanQueiroz/mcla-recomp";
     public const string IssuesUrl = "https://github.com/RenanQueiroz/mcla-recomp/issues";
     public const string UpstreamUrl = "https://github.com/holdmysocks/mcla-recomp";
@@ -50,8 +50,10 @@ static class Paths
 
     static Paths()
     {
-        (Mode, InstallRoot, LauncherDir) = Detect(AppContext.BaseDirectory);
-        Repo = Path.GetDirectoryName(LauncherDir)!;
+        // Locate never throws (a failure becomes the setup wizard, with the exe's folder, and a line in the launcher's log):
+        // a type initializer that threw would end the launcher before any window, and every later use of Paths with it.
+        var places = Locate(AppContext.BaseDirectory);
+        (Mode, InstallRoot, LauncherDir, Repo) = (places.Mode, places.InstallRoot, places.LauncherDir, places.Repo);
         RepoOut = Path.Combine(Repo, "out");
         BuildDir = Path.Combine(RepoOut, @"build\win-amd64-release");
         GameExe = Path.Combine(BuildDir, "mcla.exe");
@@ -60,6 +62,74 @@ static class Paths
         BuiltCommitFile = Path.Combine(LauncherDir, "built-commit.txt");
         SettingsFile = Path.Combine(LauncherDir, "settings.json");
         LogsDir = Path.Combine(LauncherDir, "logs");
+        if (places.Problem != null) LogStartProblem(LogsDir, places.Problem);
+    }
+
+    /// Where things are, from where the exe is. Problem: what went wrong while working it out (the places are then the wizard's,
+    /// in the exe's own folder), else null.
+    internal sealed record Places(LaunchMode Mode, string? InstallRoot, string LauncherDir, string Repo, string? Problem = null);
+
+    /// Detect and Repo for the folder the exe is in; never throws, never returns a null. Any failure (a path Windows
+    /// refuses, a folder that can't be read) gives the setup wizard in the exe's own folder, so that the setup opens
+    /// rather than the launcher crashing at start (issue #81: "Value cannot be null (path1)" from a launcher in
+    /// D:\SomeFolder, whose parent is the drive's root and has no parent of its own).
+    internal static Places Locate(string? baseDirectory)
+    {
+        var exeFolder = ExeFolder(baseDirectory);
+        try
+        {
+            var (mode, root, launcherDir) = Detect(exeFolder);
+            return new Places(mode, root, launcherDir, RepoOf(mode, root, launcherDir));
+        }
+        catch (Exception ex)
+        {
+            return new Places(LaunchMode.Wizard, null, exeFolder, exeFolder,
+                              $"Could not work out where the launcher is installed ({ex.GetType().Name}: {ex.Message}); "
+                              + $"starting the setup from the launcher's own folder, {exeFolder}");
+        }
+    }
+
+    /// The exe's folder as a full path without a trailing separator (a drive's root keeps its own); the current folder
+    /// when the program has none to give.
+    internal static string ExeFolder(string? baseDirectory)
+    {
+        var folder = string.IsNullOrWhiteSpace(baseDirectory) ? "." : baseDirectory;
+        try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return folder; }
+    }
+
+    /// The checkout's folder: the one above launcher\. Never null: with no folder above (a launcher\ at a drive's root), the
+    /// launcher folder itself. The wizard with no install is not in a checkout, and nothing it does uses the folder: there
+    /// it is never the root of a drive either.
+    internal static string RepoOf(LaunchMode mode, string? installRoot, string launcherDir)
+    {
+        var parent = Path.GetDirectoryName(launcherDir);
+        if (string.IsNullOrEmpty(parent)) return launcherDir;
+        if (mode == LaunchMode.Wizard && installRoot == null && Setup.PathBudget.IsDriveRoot(parent)) return launcherDir;
+        return parent;
+    }
+
+    /// The wizard's launcher folder when there is no install to go by: the folder above the exe's, unless that is a drive's
+    /// root or there is none (the exe is in a folder directly under a drive, or in the root itself): then the exe's own folder.
+    internal static string WizardFolder(string exeDirectory)
+    {
+        var own = Path.TrimEndingDirectorySeparator(Path.GetFullPath(exeDirectory));
+        var parent = Path.GetDirectoryName(own);
+        return string.IsNullOrEmpty(parent) || Setup.PathBudget.IsDriveRoot(parent) ? own : parent;
+    }
+
+    /// Says why the setup opened instead of the launcher: the debugger's output and launcher-start.log in the launcher's
+    /// logs folder (best effort: the folder may not be writable).
+    internal static void LogStartProblem(string logsDir, string problem)
+    {
+        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {problem}";
+        Debug.WriteLine(line);
+        try
+        {
+            Directory.CreateDirectory(logsDir);
+            File.AppendAllText(Path.Combine(logsDir, "launcher-start.log"), line + Environment.NewLine);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
     }
 
     internal static string FindGit(string? gitDir, string? path)
@@ -87,7 +157,9 @@ static class Paths
     ///     (Nothing below changes how this works; the wizard is never looked at.)
     ///  2. Otherwise install.json beside the exe, naming an install folder whose mcla-recomp\launcher\ has
     ///     build-game.ps1: Installed.
-    ///  3. Otherwise the wizard (install.json beside the exe without a finished checkout: a setup to resume).
+    ///  3. Otherwise the wizard (install.json beside the exe without a finished checkout: a setup to resume). With no install
+    ///     to go by, its LauncherDir is the folder above the exe's; when that is a drive's root, or there is none, the exe's own
+    ///     folder (WizardFolder).
     internal static (LaunchMode Mode, string? InstallRoot, string LauncherDir) Detect(string exeDirectory)
     {
         for (var dir = new DirectoryInfo(exeDirectory); dir != null; dir = dir.Parent)
@@ -100,7 +172,7 @@ static class Paths
             if (File.Exists(layout.BuildScript) && pointer.Ready) return (LaunchMode.Installed, layout.Root, layout.LauncherDir);
             return (LaunchMode.Wizard, layout.Root, layout.LauncherDir);
         }
-        return (LaunchMode.Wizard, null, Path.GetFullPath(Path.Combine(exeDirectory, "..")));
+        return (LaunchMode.Wizard, null, WizardFolder(exeDirectory));
     }
 
     /// The program started from the launcher gets MinGit's folder first on its PATH in an install that has one:

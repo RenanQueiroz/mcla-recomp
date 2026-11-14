@@ -145,3 +145,12 @@ jobs:
         run: |
           dotnet run --project launcher\dev\wizard-check -c Release -- app-control "$env:RUNNER_TEMP\app-control"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # Where the launcher decides it is (launcher\src\Backend.cs, Paths.Locate): an exe in a folder directly under a
+      # drive's root, or in the root, must open the setup rather than crash at start (issue 81); a checkout, an install,
+      # a share, and a path that makes the detection throw. Nothing is made outside the scratch folder.
+      - name: Launcher location checks
+        shell: powershell
+        run: |
+          dotnet run --project launcher\dev\wizard-check -c Release -- paths "$env:RUNNER_TEMP\paths-check"
+          if ($LASTEXITCODE -ne 0) { exit 1 }

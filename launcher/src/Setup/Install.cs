@@ -301,7 +301,7 @@ static class PathBudget
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    static bool IsDriveRoot(string path)
+    internal static bool IsDriveRoot(string path)
     {
         var root = Path.GetPathRoot(path);
         return !string.IsNullOrEmpty(root) && string.Equals(root.TrimEnd('\\'), path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
