@@ -154,3 +154,13 @@ jobs:
         run: |
           dotnet run --project launcher\dev\wizard-check -c Release -- paths "$env:RUNNER_TEMP\paths-check"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # How the launcher starts Windows PowerShell (launcher\src\Backend.cs, WindowsPowerShell): by its full path, so a PC
+      # whose PATH lacks WindowsPowerShell\v1.0 still gets the setup's build step (issue 83). The path is absolute and
+      # exists here; with a system folder that has no PowerShell the bare name is used and the log says so; a start and a
+      # BuildRun with that folder taken off the PATH. Nothing is made outside the scratch folder.
+      - name: PowerShell start checks
+        shell: powershell
+        run: |
+          dotnet run --project launcher\dev\wizard-check -c Release -- powershell "$env:RUNNER_TEMP\powershell-check"
+          if ($LASTEXITCODE -ne 0) { exit 1 }

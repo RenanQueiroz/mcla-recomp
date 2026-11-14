@@ -376,6 +376,40 @@ sealed record LauncherSettings
 [JsonSerializable(typeof(LauncherSettings))]
 partial class SettingsJson : JsonSerializerContext;
 
+/// Windows PowerShell 5.1 (what runs build-game.ps1 and update-launcher.ps1), started by its full path. The bare name
+/// "powershell.exe" is looked up by CreateProcess in the exe's folder, the current folder, System32, the Windows folder, and
+/// then in the PATH of the process that starts it. powershell.exe is not in any of the first ones (it is in
+/// System32\WindowsPowerShell\v1.0\), so a bare name depends on that folder being on the PATH, and some Windows tweak tools
+/// take it off: "An error occurred trying to start process 'powershell.exe' ... The system cannot find the file specified"
+/// (fork issue 83).
+/// The launcher is a 64-bit program (win-x64), so Environment.SystemDirectory is System32 and the file is the 64-bit Windows
+/// PowerShell. A 32-bit program on 64-bit Windows would be given SysWOW64 (where the 32-bit one is) and would use Sysnative
+/// for the 64-bit one; the launcher does not need that, so nothing here does it.
+static class WindowsPowerShell
+{
+    /// Under the system folder.
+    public const string UsualPlace = @"WindowsPowerShell\v1.0\powershell.exe";
+    public const string BareName = "powershell.exe";
+
+    /// What to start: the full path of Windows PowerShell. Only when that file is not there is it the bare name (the PATH may
+    /// still know it), with a line for the log that says so.
+    public static string Locate(out string? note) => Resolve(Environment.SystemDirectory, out note);
+
+    /// systemDirectory is a parameter so that a check can give it a folder that has no PowerShell.
+    internal static string Resolve(string? systemDirectory, out string? note)
+    {
+        var usual = string.IsNullOrWhiteSpace(systemDirectory) ? null : Path.Combine(systemDirectory, UsualPlace);
+        if (usual != null && File.Exists(usual))
+        {
+            note = null;
+            return usual;
+        }
+        note = $"Windows PowerShell was not found at its usual place ({usual ?? @"<the Windows system folder>\" + UsualPlace}); "
+             + $"trying \"{BareName}\" through the PATH instead.";
+        return BareName;
+    }
+}
+
 sealed record ProcResult(int ExitCode, string Output, string Error);
 
 static class Proc
@@ -625,7 +659,8 @@ sealed class BuildRun
         LogFile = Path.Combine(logsDir, $"build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
         log = new StreamWriter(LogFile, append: false, new UTF8Encoding(false)) { AutoFlush = true };
 
-        var psi = new ProcessStartInfo("powershell.exe")
+        // By its full path: the PATH of some PCs lacks Windows PowerShell's folder (fork issue 83).
+        var psi = new ProcessStartInfo(WindowsPowerShell.Locate(out var powerShellNote))
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -633,6 +668,7 @@ sealed class BuildRun
             RedirectStandardError = true,
             WorkingDirectory = launcherDir,
         };
+        if (powerShellNote != null) Emit(powerShellNote);
         // -NonInteractive: if make_pc.ps1 finds a tool missing and asks to
         // install it, the build fails with that message instead of waiting
         // for an answer nobody can give.
