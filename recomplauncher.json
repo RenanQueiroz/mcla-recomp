@@ -1,0 +1,32 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "name": "Midnight Club: Los Angeles Complete Edition",
+    "game": {
+        "kind": "iso_or_folder",
+        "label": "Your disc image (.iso) of Midnight Club: Los Angeles Complete Edition, the USA or Europe release for Xbox 360 (title ID 545407F8), or its folder with default.xex. Other regions and revisions are not supported.",
+        "check": {
+            "xdvdfs": "default.xex",
+            "file": "default.xex"
+        }
+    },
+    "prepare": {
+        "program": [
+            "MclaLauncher.exe"
+        ],
+        "args": [
+            "--prepare",
+            "--game={game}"
+        ],
+        "label": "Building the game from your copy (the build tools are downloaded; this takes 5 to 30 minutes)",
+        "timeout": 7200,
+        "done": [
+            "{local}/MCLA/mcla-recomp/out/build/win-amd64-release/mcla.exe"
+        ]
+    },
+    "start": {
+        "program": [
+            "{local}/MCLA/mcla-recomp/out/build/win-amd64-release/mcla.exe"
+        ]
+    }
+}
