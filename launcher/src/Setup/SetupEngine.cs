@@ -863,3 +863,69 @@ sealed class SetupEngine
         shaders?.Stop();
     }
 }
+
+/// A setup without a window, for a launcher: MclaLauncher.exe --prepare --game=<disc image or folder>
+/// (--game=, --install-dir= and the other options are DevOptions'). It runs the same SetupEngine the wizard's
+/// Setting up page runs, prints "progress 0.4 Text" lines, and exits 0 when the game is built and its shaders are
+/// prepared, or 1 with one line on stderr.
+static class PrepareMode
+{
+    public static int Run()
+    {
+        try { return RunAsync().GetAwaiter().GetResult(); }
+        catch (SetupException ex) { return Fail(ex.Plain); }
+        catch (Exception ex) { return Fail($"The setup stopped: {ex.Message}"); }
+    }
+
+    static int Fail(string message)
+    {
+        Console.Error.WriteLine(message.ReplaceLineEndings(" "));
+        return 1;
+    }
+
+    static async Task<int> RunAsync()
+    {
+        var dev = DevOptions.Current;
+        if (string.IsNullOrWhiteSpace(dev.GamePath)) return Fail("--prepare needs --game=<your disc image or game folder>");
+        var game = Path.GetFullPath(dev.GamePath);
+        if (!File.Exists(game) && !Directory.Exists(game)) return Fail($"{game} is not there.");
+
+        // The wizard's own default folder, unless --install-dir= says another.
+        var own = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCLA");
+        var fallback = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "MCLA");
+        var root = Path.GetFullPath((dev.InstallDir ?? (PathBudget.UnsafeCharacter(own) == null && own.Length <= PathBudget.MaxRootLength ? own : fallback)).Trim());
+        if (PathBudget.Problem(root, out _) is { } problem) return Fail(problem);
+        if (PathBudget.IsInside(game, root) || (Directory.Exists(game) && PathBudget.IsInside(root, game)))
+            return Fail("The game and the install folder can't be in each other's folders.");
+
+        var source = dev.Downloads != null ? ReleaseSource.FromDownloads(dev.Downloads) : ReleaseSource.FromOverride(dev.ReleaseSource);
+        var release = await source.LoadAsync(CancellationToken.None, _ => { });
+        if (release.Game == null) return Fail("The release has no description of the game.");
+
+        var layout = new InstallLayout(root);
+        var engine = new SetupEngine(new SetupContext(layout, source, release, new SetupChoices(root, game, false, dev.GameArguments), AppContext.BaseDirectory));
+        var gate = new object();
+        var last = "";
+        void Report()
+        {
+            var steps = engine.Steps;
+            var fraction = Math.Clamp(steps.Sum(s => s.Finished ? 1.0 : s.Fraction ?? 0) / steps.Count, 0, 1);
+            var title = steps.FirstOrDefault(s => s.State == StepState.Running)?.Title ?? "Working";
+            var line = $"progress {fraction.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} {title}";
+            lock (gate)
+            {
+                if (line == last) return;
+                last = line;
+                Console.Out.WriteLine(line);
+                Console.Out.Flush();
+            }
+        }
+        engine.Changed += Report;
+        Report();
+        await engine.RunAsync(CancellationToken.None);
+        if (!File.Exists(layout.GameExe)) return Fail($"The setup finished but {layout.GameExe} is not there.");
+        Console.Out.WriteLine("progress 1.00 Ready");
+        Console.Out.Flush();
+        return 0;
+    }
+}

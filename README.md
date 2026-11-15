@@ -1,5 +1,7 @@
 # MCLA: a fork of mcla-recomp
 
+<a href="https://recomplauncher.com/game/mcla-recomp-2"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 ## What this is
 
 *Midnight Club: Los Angeles Complete Edition* (Xbox 360, title `545407F8`) running natively on a PC. This is a fork of [holdmysocks/mcla-recomp](https://github.com/holdmysocks/mcla-recomp), the static recompilation of the game to native code for Windows, Linux and jailbroken PS5 consoles, built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk). On top of upstream's `main` the fork adds performance work on both Windows renderers (Direct3D 12 and Vulkan) so that higher resolutions and frame rates hold, a Windows launcher with a setup wizard that builds, updates and starts the game, HDR, FSR 3.1 and frame generation, and several game fixes. The changes meant for upstream are offered there as pull requests over time.
