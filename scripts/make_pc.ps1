@@ -69,16 +69,14 @@ param([string]$Iso = "", [switch]$Play, [switch]$InstallTools, [string]$Preset =
       [ValidateSet("", "tools", "sdk-source", "sdk")][string]$Until = "")
 
 $ErrorActionPreference = "Stop"
-# The SDK has files deep in its submodules: git on Windows needs core.longpaths
-# for them. It also gets safe.directory=*: the launcher made these checkouts, and git
-# refuses a repository whose folder it cannot show to be the user's (exFAT, another
-# account, a network path: "detected dubious ownership", issue #64). Set for every git
-# this script starts, and the ones those start, without touching anyone's git
-# configuration.
-$env:GIT_CONFIG_COUNT = "2"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
-$env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 $root = Split-Path $PSScriptRoot -Parent
 . "$PSScriptRoot\mcla-lib.ps1"
+# Every git this script starts, and the ones those start, reads none of the PC's git
+# settings and gets what the SDK's clone and the launcher's checkouts need: core.longpaths
+# (files deep in the SDK's submodules), safe.directory=* (issue #64), HTTPS checked by
+# Windows (issues #32, #71). See Set-GitEnvironment in mcla-lib.ps1; no one's git
+# configuration is touched.
+Set-GitEnvironment
 # Given none of the options that say how to build (-Toolchain, -ToolsDir, -SdkBundle,
 # -SdkBundleSha256), the last build's are used (launcher\build-options.json), as
 # build-game.ps1 and env.ps1 do: a checkout built with mingw goes on with mingw however

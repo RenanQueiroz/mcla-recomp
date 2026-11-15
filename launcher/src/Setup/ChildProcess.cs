@@ -6,22 +6,42 @@ using System.Text;
 
 namespace MclaLauncher.Setup;
 
-/// Git refuses a repository whose folder it can't show to be the user's ("detected dubious ownership", exit code 128): on a
-/// drive that keeps no owner (exFAT, FAT32), in a folder owned by another account or by Administrators, or on a network
-/// path. After the setup's clone, every git command in the checkout is then refused (issue #64). The checkouts git is run on
-/// here are the ones the launcher made itself, so they are trusted: safe.directory=* for every git the launcher starts and the
-/// programs those start (build-game.ps1 and make_pc.ps1 keep the same setting in their own environment variables). It is
-/// given in the child's environment (git reads safe.directory from there and from the command line, never from the
-/// repository), so nobody's git configuration is changed.
-static class GitTrust
+/// The git settings of every git the launcher starts, and of the programs those start, given in the child's environment so that
+/// nobody's git configuration is changed. The same list is in Set-GitEnvironment (scripts\mcla-lib.ps1), which the scripts use:
+/// keep the two alike (scripts\ci\check-git-env.ps1 compares them).
+///
+/// Git reads no setting of the PC: not the system config (for MinGit, its own etc\gitconfig, which includes an installed Git
+/// for Windows' etc\gitconfig) and not the user's ~\.gitconfig. A certificate file that http.sslcainfo named in one of them and
+/// that was gone (a half-removed Git for Windows) stopped the setup at "Getting the source" with "error adding trust anchors
+/// from file: C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt" (issues #32, #71). What is set instead:
+///  - http.sslBackend=schannel: HTTPS is checked against Windows' own certificate store, which is what MinGit does when nothing
+///    is set. Said out loud, git does not hand a certificate file (a GIT_SSL_CAINFO in the environment, an http.sslCAInfo in
+///    the repository) to Windows' secure channel, which is what failed above.
+///  - safe.directory=*: git refuses a repository whose folder it can't show to be the user's ("detected dubious ownership",
+///    exit code 128): on a drive that keeps no owner (exFAT, FAT32), in a folder owned by another account or by
+///    Administrators, or on a network path. After the setup's clone, every git command in the checkout is then refused (issue
+///    #64). The checkouts git is run on here are the ones the launcher made itself, so they are trusted. git reads
+///    safe.directory from the environment and from the command line, never from the repository.
+static class GitEnvironment
 {
+    // NUL: git reads no file for that scope (the Windows name of /dev/null; GIT_CONFIG_GLOBAL needs git 2.32, MinGit is newer).
+    const string NoFile = "NUL";
+
+    static readonly (string Key, string Value)[] Settings = [("http.sslBackend", "schannel"), ("safe.directory", "*")];
+
     public static void Apply(IDictionary<string, string?> environment)
     {
-        // Settings already in GIT_CONFIG_COUNT stay: this one is added after them.
+        environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        environment["GIT_CONFIG_GLOBAL"] = NoFile;
+        // Settings already in GIT_CONFIG_COUNT stay: these are added after them.
         var count = environment.TryGetValue("GIT_CONFIG_COUNT", out var text) && int.TryParse(text, out var n) && n >= 0 ? n : 0;
-        environment[$"GIT_CONFIG_KEY_{count}"] = "safe.directory";
-        environment[$"GIT_CONFIG_VALUE_{count}"] = "*";
-        environment["GIT_CONFIG_COUNT"] = (count + 1).ToString();
+        foreach (var (key, value) in Settings)
+        {
+            environment[$"GIT_CONFIG_KEY_{count}"] = key;
+            environment[$"GIT_CONFIG_VALUE_{count}"] = value;
+            count++;
+        }
+        environment["GIT_CONFIG_COUNT"] = count.ToString();
     }
 }
 
@@ -43,7 +63,7 @@ static class ChildProcess
         if (workingDirectory != null) psi.WorkingDirectory = workingDirectory;
         foreach (var arg in args) psi.ArgumentList.Add(arg);
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
-        GitTrust.Apply(psi.Environment);
+        GitEnvironment.Apply(psi.Environment);
         if (gitDir != null) psi.Environment["PATH"] = gitDir + ";" + (psi.Environment.TryGetValue("PATH", out var p) ? p : Environment.GetEnvironmentVariable("PATH"));
 
         using var process = Process.Start(psi) ?? throw new SetupException($"Couldn't start {Path.GetFileName(file)}.");

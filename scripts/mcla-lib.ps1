@@ -1,6 +1,6 @@
-# Shared by scripts\make_pc.ps1, build.ps1, env.ps1 and launcher\build-game.ps1
-# (dot-sourced): the record of how this checkout was last built, versions that
-# sort as versions, and the compiler job limit.
+# Shared by scripts\make_pc.ps1, build.ps1, env.ps1, launcher\build-game.ps1 and
+# launcher\build-launcher.ps1 (dot-sourced): the record of how this checkout was last built,
+# versions that sort as versions, the compiler job limit, and the git settings.
 
 # The options of the last build, kept in launcher\build-options.json by
 # make_pc.ps1 when it finishes: what an update needs to build the same way
@@ -91,4 +91,33 @@ function Get-JobLimit([double]$availableMb, [int]$cpus) {
     $memoryJobs = [Math]::Max(1, [int][Math]::Floor($availableMb / 512))
     if ($memoryJobs -lt $ninjaJobs) { return $memoryJobs }
     0
+}
+
+# The git settings of every git this process starts, and of the programs those start (the SDK's clone and
+# submodules, the patches, CMake's): git reads no setting of the PC. Not the system config (for MinGit, its own
+# etc\gitconfig, which includes an installed Git for Windows' etc\gitconfig) and not the user's ~\.gitconfig:
+# a certificate file that http.sslcainfo named there and that was gone (a half-removed Git for Windows) stopped
+# the setup at "Getting the source" with "error adding trust anchors from file: C:/Program Files/Git/mingw64/etc/
+# ssl/certs/ca-bundle.crt" (issues #32, #71). The environment is the only place changed, so nobody's git
+# configuration is. What is set instead (the command-line scope, which no file overrides):
+#   http.sslBackend=schannel   HTTPS is checked against Windows' own certificate store (MinGit's default); said out
+#                              loud, git does not hand a certificate file (GIT_SSL_CAINFO, a repository's
+#                              http.sslCAInfo) to it
+#   safe.directory=*           the checkouts here are made by the launcher itself, and git refuses a repository
+#                              whose folder it cannot show to be the user's (exFAT, another account, a network
+#                              path: "detected dubious ownership", issue #64)
+#   core.longpaths=true        the SDK has files deep in its submodules
+# launcher\src\Setup\ChildProcess.cs (GitEnvironment) does the same for the git the launcher starts itself, with
+# the first two: keep them alike (scripts\ci\check-git-env.ps1 compares them). GIT_CONFIG_GLOBAL needs git 2.32.
+function Set-GitEnvironment {
+    $settings = [ordered]@{ "http.sslBackend" = "schannel"; "safe.directory" = "*"; "core.longpaths" = "true" }
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_NOSYSTEM", "1", "Process")
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_GLOBAL", "NUL", "Process")   # NUL: no file (git maps it like /dev/null)
+    $n = 0
+    foreach ($key in $settings.Keys) {
+        [Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$n", $key, "Process")
+        [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$n", [string]$settings[$key], "Process")
+        $n++
+    }
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", [string]$n, "Process")
 }

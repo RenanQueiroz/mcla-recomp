@@ -28,13 +28,6 @@ param([switch]$Update, [switch]$ResetSdk, [switch]$InstallTools, [string]$Iso = 
 
 $ErrorActionPreference = "Stop"
 if ($Ref) { $Update = $true }
-# Git needs core.longpaths for the SDK's deep submodule files (resetting the
-# SDK cleans them). It also gets safe.directory=*: the checkouts here are made by the
-# launcher itself, and git refuses a repository whose folder it cannot show to be the
-# user's (exFAT, another account, a network path: "detected dubious ownership", issue
-# #64). Set for every git started from here, as make_pc.ps1 does.
-$env:GIT_CONFIG_COUNT = "2"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
-$env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 $repo = Split-Path $PSScriptRoot -Parent
 $sdk = Join-Path $repo "third_party\rexglue-sdk"
 $builtCommitFile = Join-Path $PSScriptRoot "built-commit.txt"
@@ -94,11 +87,18 @@ function Show-UpstreamLag {
 try {
     if (-not (Test-Path "$repo\.git")) { throw "no mcla-recomp checkout at $repo" }
 
+    # Every git started from here (and the ones those start) reads none of the PC's git
+    # settings and gets what the checkouts need: core.longpaths (the SDK's deep submodule
+    # files; resetting the SDK cleans them), safe.directory=* (the checkouts are made by
+    # the launcher itself: issue #64), HTTPS checked by Windows (issues #32, #71). As in
+    # make_pc.ps1: Set-GitEnvironment, scripts\mcla-lib.ps1. Before the first git call.
+    . "$repo\scripts\mcla-lib.ps1"
+    Set-GitEnvironment
+
     # What the last build was asked for, when this one is asked for nothing of it:
     # an update builds the way the checkout was built, and the launcher, which asks
     # for none, too (msvc when there is no record: every install made before there
     # was a choice).
-    . "$repo\scripts\mcla-lib.ps1"
     $asked = $PSBoundParameters.ContainsKey("Toolchain") -or $PSBoundParameters.ContainsKey("ToolsDir") -or
              $PSBoundParameters.ContainsKey("SdkBundle") -or $PSBoundParameters.ContainsKey("SdkBundleSha256")
     if (-not $asked) {
@@ -163,8 +163,9 @@ try {
         } else {
             # --autostash keeps local edits across the update: codegen rewrites
             # mcla_manifest.toml and generated\rexglue.cmake with LF line
-            # endings, so they always look modified.
-            Invoke-Git -C $repo merge --ff-only --autostash "@{u}"
+            # endings, so they always look modified. (An identity is given for the stash's commit:
+            # the PC's own git settings, which may hold one, are not read.)
+            Invoke-Git -c user.name=mcla -c user.email=mcla@localhost -C $repo merge --ff-only --autostash "@{u}"
             Invoke-Git -C $repo log --oneline "$old..HEAD"
             # make_pc.ps1 patches the SDK once and adds later patches by name,
             # so a patch that changed would otherwise never be applied again.

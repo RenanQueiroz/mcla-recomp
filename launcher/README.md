@@ -96,6 +96,10 @@ launcher's exe and an internet connection: no Visual Studio, Git, Python or admi
    (`state` is `ready`) and `mcla-recomp\launcher\build-game.ps1`. The launcher works on that checkout
    (settings, Play, Update and rebuild). git is not installed on that PC: the launcher starts the install's
    own MinGit (`Paths.GitExe`) for its git calls and puts its folder first on the `PATH` of the scripts it runs.
+   Every git the launcher starts (and the ones the scripts start: `Set-GitEnvironment` in `scripts\mcla-lib.ps1` is the
+   same list) reads none of the PC's git settings (`GitEnvironment` in `Setup\ChildProcess.cs`: no system config, which
+   for MinGit includes an installed Git for Windows', and no user config) and checks HTTPS with Windows' certificate
+   store: a certificate file named by a half-removed Git for Windows used to stop the clone (issues 32, 71).
 3. **Wizard**: anything else. An `install.json` beside the exe without a finished setup is a setup to resume.
 
 **What it asks.** The folder (default `%LOCALAPPDATA%\MCLA`, or `C:\MCLA` when that path has a character the
@@ -252,7 +256,7 @@ the top of every page) whenever one is in use.
   redirect to the asset host, a file of the fork's release, the API route, and HTTPS through a small proxy of its own;
   needs the internet), `offline <folder with a release.json> <scratch>` (*Use files I downloaded*: what is listed, the
   checksums still refusing wrong bytes of the right size, the rules of a downloaded release.json),
-  `app-control <scratch>` (what is said when Windows blocks `mcla.exe`: Smart App Control, error 4551 or 1260; CI runs it), `paths <scratch>` (where the launcher decides it is: an exe in a folder directly under a drive's root, or in the root, opens the setup instead of crashing; a checkout, an install, a share, a path that makes the detection throw; CI runs it), `powershell <scratch>` (Windows PowerShell is started by its full path, so a PATH without `WindowsPowerShell\v1.0` does not stop the setup: the path is absolute and exists, the bare name is the fallback only when the file is missing, and a start and a build run with that folder off the PATH; CI runs it), `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
+  `app-control <scratch>` (what is said when Windows blocks `mcla.exe`: Smart App Control, error 4551 or 1260; CI runs it), `paths <scratch>` (where the launcher decides it is: an exe in a folder directly under a drive's root, or in the root, opens the setup instead of crashing; a checkout, an install, a share, a path that makes the detection throw; CI runs it), `powershell <scratch>` (Windows PowerShell is started by its full path, so a PATH without `WindowsPowerShell\v1.0` does not stop the setup: the path is absolute and exists, the bare name is the fallback only when the file is missing, and a start and a build run with that folder off the PATH; CI runs it), `git-config <scratch> [--no-network]` (git reads none of the PC's git settings: on a made-up PC with a broken system, user and XDG config and a `GIT_SSL_CAINFO`, a plain git reads them and the launcher's git does not, and one `git ls-remote` of the fork works; CI runs it, and `scripts\ci\check-git-env.ps1` does the same for the scripts), `git` (Installed mode without git on the PATH), `update-status`, `update-run [--kill-after <s>]`, `rebuild`, `channel` (Installed mode, from a
   copy of the harness with the install's `install.json` beside it: what an update would be, doing it (and ending the process in
   the middle of it), a plain Rebuild, and the channel), `cleanup`, `cleanup2`, `uninstall`, and
   `install <release folder> <install folder> <game, or "adopt"> [--in-place] [--args "..."]`.

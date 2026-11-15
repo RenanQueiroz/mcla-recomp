@@ -44,6 +44,9 @@
 //                             a checkout, an install, a share, a path that makes the detection throw
 //   powershell <scratch>      (Checks7.cs) Windows PowerShell started by its full path (issue 83): absolute and present on this PC, the bare-name fallback with an
 //                             injected system folder, a start with the PATH lacking its folder (old way fails, new way works, BuildRun runs a script)
+//   git-config <scratch> [--no-network]   (Checks8.cs) the launcher's git reads none of the PC's git settings (issues 32, 71): with a broken system, user and XDG
+//                             config and a GIT_SSL_CAINFO in the environment, through Proc.RunAsync and ChildProcess.RunAsync no system or global entry is read and
+//                             git ls-remote of the fork works (the one network call; --no-network leaves it out)
 using System.Text.Json;
 using MclaLauncher.Setup;
 
@@ -103,6 +106,7 @@ static partial class Program
                 case "app-control": AppControlChecks(args[1]); break;
                 case "paths": PathsChecks(args[1]); break;
                 case "powershell": PowerShellChecks(args[1]); break;
+                case "git-config": await GitConfigChecks(args[1], !args.Contains("--no-network")); break;
                 default: Console.WriteLine($"unknown command {args[0]}"); return 2;
             }
         }

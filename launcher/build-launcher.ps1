@@ -26,9 +26,12 @@ if (Get-Process MclaLauncher -ErrorAction SilentlyContinue | Where-Object { $_.P
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 # The last commit that changed the launcher, for the launcher to notice when an
-# update brings a newer one (it then offers to rebuild itself). safe.directory=*: git
-# refuses a checkout whose folder it cannot show to be the user's (issue #64).
-$source = & git.exe -c "safe.directory=*" -C $PSScriptRoot log -1 --format=%H -- src build-launcher.ps1 2>$null
+# update brings a newer one (it then offers to rebuild itself). git is told, as everywhere
+# in this project (Set-GitEnvironment, scripts\mcla-lib.ps1), to read none of the PC's git
+# settings and to trust the checkout (safe.directory=*: issue #64).
+. "$PSScriptRoot\..\scripts\mcla-lib.ps1"
+Set-GitEnvironment
+$source = & git.exe -C $PSScriptRoot log -1 --format=%H -- src build-launcher.ps1 2>$null
 if ($LASTEXITCODE -eq 0 -and $source) { Set-Content -LiteralPath "$app\source-commit.txt" -Value $source -Encoding ASCII }
 
 if (-not $NoShortcut) {

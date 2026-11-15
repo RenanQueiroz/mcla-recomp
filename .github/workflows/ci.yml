@@ -39,6 +39,16 @@ jobs:
         shell: powershell
         run: .\scripts\ci\check-powershell.ps1
 
+      # The setup's git read the PC's git settings (a system config naming a certificate file that was gone stopped
+      # "Getting the source": issues 32 and 71). On a made-up broken PC, the scripts' git (Set-GitEnvironment in
+      # scripts\mcla-lib.ps1) reads no system or global setting and still reaches GitHub (one read-only ls-remote of
+      # this repository); every script that runs git calls it. Nothing is written outside a scratch folder.
+      - name: Git settings of the scripts
+        shell: powershell
+        run: |
+          .\scripts\ci\check-git-env.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
   host:
     name: Host code against the SDK (llvm-mingw)
     runs-on: windows-2025
@@ -163,4 +173,14 @@ jobs:
         shell: powershell
         run: |
           dotnet run --project launcher\dev\wizard-check -c Release -- powershell "$env:RUNNER_TEMP\powershell-check"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # The launcher's own git calls (launcher\src\Setup\ChildProcess.cs, GitEnvironment) read none of the PC's git
+      # settings (issues 32 and 71): on a made-up broken PC (a system config naming a missing certificate file, a user
+      # config, an XDG config, a GIT_SSL_CAINFO) no system or global entry is read, through the status reads and through
+      # the setup's runner, and one read-only ls-remote of this repository works. Nothing is made outside the scratch folder.
+      - name: Git settings checks
+        shell: powershell
+        run: |
+          dotnet run --project launcher\dev\wizard-check -c Release -- git-config "$env:RUNNER_TEMP\git-config-check"
           if ($LASTEXITCODE -ne 0) { exit 1 }

@@ -57,7 +57,9 @@ $LogDir = "$R\logs"
 $ResultsFile = "$R\RESULTS.txt"
 $script:Failed = 0
 $script:GitExit = 0
-$env:GIT_CONFIG_COUNT = "1"; $env:GIT_CONFIG_KEY_0 = "core.longpaths"; $env:GIT_CONFIG_VALUE_0 = "true"
+# Git as the launcher's scripts run it: none of this PC's git settings, core.longpaths, safe.directory, HTTPS by Windows.
+. "$PSScriptRoot\..\mcla-lib.ps1"
+Set-GitEnvironment
 
 function Note([string]$Text) { Write-Host "$(Get-Date -Format s) $Text" }
 function Result([string]$Verdict, [string]$Step, [string]$Text) {

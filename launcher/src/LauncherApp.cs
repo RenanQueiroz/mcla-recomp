@@ -466,7 +466,7 @@ sealed class LauncherApp : Component
             var psi = new ProcessStartInfo(WindowsPowerShell.Locate(out var powerShellNote)) { UseShellExecute = false, WorkingDirectory = Paths.LauncherDir };
             foreach (var arg in new[] { "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Paths.BuildScript })
                 psi.ArgumentList.Add(arg);
-            Paths.AddGitDir(psi);
+            Paths.Prepare(psi);
             try
             {
                 Process.Start(psi);
@@ -489,7 +489,7 @@ sealed class LauncherApp : Component
                 foreach (var arg in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Paths.UpdateLauncherScript,
                                             "-WaitFor", Environment.ProcessId.ToString() })
                     psi.ArgumentList.Add(arg);
-                Paths.AddGitDir(psi);
+                Paths.Prepare(psi);
                 Process.Start(psi);
                 exitingRef.Current = true;
                 playAfterPrepRef.Current = false;
