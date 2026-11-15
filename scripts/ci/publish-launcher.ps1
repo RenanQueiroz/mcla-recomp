@@ -38,6 +38,7 @@ $Out = (Resolve-Path -LiteralPath $Out).ProviderPath
 $source = & git.exe -C $repo log -1 --format=%H -- launcher/src launcher/build-launcher.ps1
 if ($LASTEXITCODE -ne 0 -or -not $source) { throw "git log could not name the commit of the launcher's source (a shallow clone?)" }
 Set-Content -LiteralPath "$Out\source-commit.txt" -Value $source -Encoding ASCII
+Copy-Item -LiteralPath "$repo\recomplauncher.json" -Destination "$Out\recomplauncher.json" -Force
 
 python -I "$PSScriptRoot\launcher-notices.py" $Out "$Out\notices"
 if ($LASTEXITCODE -ne 0) { throw "launcher-notices.py failed" }
