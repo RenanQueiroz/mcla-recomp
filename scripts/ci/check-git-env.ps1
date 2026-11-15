@@ -130,8 +130,13 @@ try {
     # 2b. MinGit's own defaults are kept. They are what the skipped system config gave (core.autocrlf=true, core.symlinks=false): every SDK
     # tree of the players was checked out with them, so its files have CRLF line endings, and the LF patches of the setup only match those
     # files when git converts them the same way. The helper's values are the ones in MinGit's own etc\gitconfig (not read any more).
+    # Only MinGit's own file is the reference: a Git for Windows install's etc\gitconfig is the PC's choice (GitHub's runners set
+    # core.symlinks=true there), which is exactly what the helper no longer reads.
     $own = Join-Path (Split-Path (Split-Path $script:Git -Parent) -Parent) "etc\gitconfig"
-    if (Test-Path -LiteralPath $own) {
+    $isMinGit = $script:Git -match '(?i)[\\/]mingit[^\\/]*[\\/]'
+    if (-not $isMinGit) {
+        Result "NOTE" "own-defaults" "$script:Git is not the setup's MinGit: its etc\gitconfig is a PC's own choice, not MinGit's defaults, so the helper's values are not compared with it (run with MinGit first on PATH for that check)"
+    } elseif (Test-Path -LiteralPath $own) {
         foreach ($key in "core.autocrlf", "core.symlinks") {
             $mine = (Git-Run @("config", "--get", $key)) -join ""
             $theirs = (@(& $script:Git config --file $own --get $key 2>&1) | ForEach-Object { "$_" }) -join ""
