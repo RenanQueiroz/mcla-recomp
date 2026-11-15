@@ -99,7 +99,10 @@ launcher's exe and an internet connection: no Visual Studio, Git, Python or admi
    Every git the launcher starts (and the ones the scripts start: `Set-GitEnvironment` in `scripts\mcla-lib.ps1` is the
    same list) reads none of the PC's git settings (`GitEnvironment` in `Setup\ChildProcess.cs`: no system config, which
    for MinGit includes an installed Git for Windows', and no user config) and checks HTTPS with Windows' certificate
-   store: a certificate file named by a half-removed Git for Windows used to stop the clone (issues 32, 71).
+   store: a certificate file named by a half-removed Git for Windows used to stop the clone (issues 32, 71). MinGit's own
+   defaults, which skipping its system config would take away, are given instead (`core.autocrlf=true`,
+   `core.symlinks=false`, `core.fscache=true`): the SDK trees have CRLF files, and the setup's LF patches only apply to
+   those when git converts them the way the checkout did.
 3. **Wizard**: anything else. An `install.json` beside the exe without a finished setup is a setup to resume.
 
 **What it asks.** The folder (default `%LOCALAPPDATA%\MCLA`, or `C:\MCLA` when that path has a character the

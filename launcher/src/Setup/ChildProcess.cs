@@ -22,12 +22,21 @@ namespace MclaLauncher.Setup;
 ///    Administrators, or on a network path. After the setup's clone, every git command in the checkout is then refused (issue
 ///    #64). The checkouts git is run on here are the ones the launcher made itself, so they are trusted. git reads
 ///    safe.directory from the environment and from the command line, never from the repository.
+///  - core.autocrlf=true, core.symlinks=false, core.fscache=true: MinGit's own defaults, which skipping the system config would
+///    take away (its etc\gitconfig sets the first two, and the Git for Windows config it includes the third). Every SDK tree on a
+///    player's PC was checked out with autocrlf=true, so its files have CRLF line endings, and the setup's LF patches are matched
+///    against them by git apply only when git converts the file's line endings the same way ("patch does not apply" without it).
+///    Fresh checkouts come out the same. No credential helper and no LFS filter: the setup reads public repositories over HTTPS.
 static class GitEnvironment
 {
     // NUL: git reads no file for that scope (the Windows name of /dev/null; GIT_CONFIG_GLOBAL needs git 2.32, MinGit is newer).
     const string NoFile = "NUL";
 
-    static readonly (string Key, string Value)[] Settings = [("http.sslBackend", "schannel"), ("safe.directory", "*")];
+    static readonly (string Key, string Value)[] Settings =
+    [
+        ("http.sslBackend", "schannel"), ("safe.directory", "*"),
+        ("core.autocrlf", "true"), ("core.symlinks", "false"), ("core.fscache", "true"),
+    ];
 
     public static void Apply(IDictionary<string, string?> environment)
     {

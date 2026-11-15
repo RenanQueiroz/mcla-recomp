@@ -107,10 +107,21 @@ function Get-JobLimit([double]$availableMb, [int]$cpus) {
 #                              whose folder it cannot show to be the user's (exFAT, another account, a network
 #                              path: "detected dubious ownership", issue #64)
 #   core.longpaths=true        the SDK has files deep in its submodules
+#   core.autocrlf=true         MinGit's own defaults, which the system config being skipped would otherwise take
+#   core.symlinks=false        away (its etc\gitconfig, and Git for Windows' that it includes, set them; core.fscache=true
+#   core.fscache=true          is Git for Windows' own): every SDK tree on a player's PC was checked out with
+#                              autocrlf=true, so its files have CRLF line endings, and the LF patches of the setup
+#                              (rexglue-ffmpeg-ps5-config.patch ...) are matched against them by git apply only when it
+#                              converts the file's line endings the same way ("patch does not apply" without it).
+#                              Fresh checkouts come out the same. No credential helper, no LFS filter: the setup reads
+#                              public repositories over HTTPS and nothing in them is in LFS.
 # launcher\src\Setup\ChildProcess.cs (GitEnvironment) does the same for the git the launcher starts itself, with
-# the first two: keep them alike (scripts\ci\check-git-env.ps1 compares them). GIT_CONFIG_GLOBAL needs git 2.32.
+# all but core.longpaths: keep them alike (scripts\ci\check-git-env.ps1 compares them). GIT_CONFIG_GLOBAL needs git 2.32.
 function Set-GitEnvironment {
-    $settings = [ordered]@{ "http.sslBackend" = "schannel"; "safe.directory" = "*"; "core.longpaths" = "true" }
+    $settings = [ordered]@{
+        "http.sslBackend" = "schannel"; "safe.directory" = "*"; "core.longpaths" = "true"
+        "core.autocrlf" = "true"; "core.symlinks" = "false"; "core.fscache" = "true"
+    }
     [Environment]::SetEnvironmentVariable("GIT_CONFIG_NOSYSTEM", "1", "Process")
     [Environment]::SetEnvironmentVariable("GIT_CONFIG_GLOBAL", "NUL", "Process")   # NUL: no file (git maps it like /dev/null)
     $n = 0

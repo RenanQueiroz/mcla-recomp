@@ -16,9 +16,14 @@
 #   1  without Set-GitEnvironment (scripts\mcla-lib.ps1) git reads all four (the test PC is broken as meant), and ls-remote
 #      of the repository fails (a note, not a verdict: a git that ignores the broken file proves less)
 #   2  with it, `git config --show-scope --show-origin --list` has no system or global entry, only the command line's (and the
-#      repository's own), with the three settings in it, and ls-remote of the repository works: HTTPS is still checked, by
+#      repository's own), with the six settings in it, and ls-remote of the repository works: HTTPS is still checked, by
 #      Windows' certificate store
-#   3  launcher\src\Setup\ChildProcess.cs (GitEnvironment) names the same two variables and the same settings
+#   2b MinGit's own defaults are kept: core.autocrlf is true and core.symlinks false (what its etc\gitconfig says, which the
+#      skipped system config no longer gives), and a repository whose working file has CRLF line endings (what an autocrlf
+#      checkout makes, as every SDK tree of the players has) accepts an LF patch with `git apply --check`, as the setup's
+#      patches are; with the system config skipped and nothing else (the first 625256b) it does not
+#   3  launcher\src\Setup\ChildProcess.cs (GitEnvironment) names the same two variables and the same settings (all but the scripts'
+#      core.longpaths)
 #   4  every script of the setup that runs git (scripts\*.ps1, launcher\*.ps1, this folder's check-update.ps1) calls
 #      Set-GitEnvironment; the release-only scripts of this folder (build-fidelityfx.ps1, publish-launcher.ps1, run on a
 #      runner of their own) and launcher\dev are not looked at
@@ -110,7 +115,9 @@ try {
     $foreign = @($after | Where-Object { $_ -match '^(system|global)\s' -or $_ -match 'fake-(system|home|xdg)' })
     Check "no-system-no-global" ($script:GitExit -eq 0 -and $foreign.Count -eq 0) $(if ($foreign.Count -gt 0) { "still read: " + ($foreign -join " | ") } else { "git config --show-scope --show-origin --list lists $($after.Count) settings, none of the system or global scope (the fake ones are not read)" })
     $commandLine = @($after | Where-Object { $_ -match '^command\s' })
-    Check "settings-given" ($commandLine.Count -eq 3 -and ($commandLine -join "`n") -match 'http\.sslbackend=schannel' -and ($commandLine -join "`n") -match 'safe\.directory=\*' -and ($commandLine -join "`n") -match 'core\.longpaths=true') `
+    $commandText = $commandLine -join "`n"
+    Check "settings-given" ($commandLine.Count -eq 6 -and $commandText -match 'http\.sslbackend=schannel' -and $commandText -match 'safe\.directory=\*' -and $commandText -match 'core\.longpaths=true' -and
+                            $commandText -match 'core\.autocrlf=true' -and $commandText -match 'core\.symlinks=false' -and $commandText -match 'core\.fscache=true') `
         "the command line scope has: $(($commandLine | ForEach-Object { ($_ -split "`t")[-1] }) -join ', ')"
     $backend = (Git-Run @("config", "--get", "http.sslBackend")) -join ""
     Check "https-by-windows" ($backend -eq "schannel") "http.sslBackend is '$backend': HTTPS is checked against Windows' certificate store, which a certificate file named by GIT_SSL_CAINFO or a config does not replace"
@@ -119,6 +126,33 @@ try {
         Check "ls-remote" ($script:GitExit -eq 0 -and ($remote -join "`n") -match '(?m)^[0-9a-f]{40}\s+refs/heads/main$') `
             "git ls-remote --heads of $Origin on the broken PC: $(($remote | Select-Object -Last 1))"
     } else { Result "NOTE" "ls-remote" "left out (-NoNetwork)" }
+
+    # 2b. MinGit's own defaults are kept. They are what the skipped system config gave (core.autocrlf=true, core.symlinks=false): every SDK
+    # tree of the players was checked out with them, so its files have CRLF line endings, and the LF patches of the setup only match those
+    # files when git converts them the same way. The helper's values are the ones in MinGit's own etc\gitconfig (not read any more).
+    $own = Join-Path (Split-Path (Split-Path $script:Git -Parent) -Parent) "etc\gitconfig"
+    if (Test-Path -LiteralPath $own) {
+        foreach ($key in "core.autocrlf", "core.symlinks") {
+            $mine = (Git-Run @("config", "--get", $key)) -join ""
+            $theirs = (@(& $script:Git config --file $own --get $key 2>&1) | ForEach-Object { "$_" }) -join ""
+            Check "own-defaults-$key" ($mine -ne "" -and $mine -eq $theirs) "$key is '$mine' under the helper and '$theirs' in $own"
+        }
+    } else { Result "NOTE" "own-defaults" "no etc\gitconfig beside $script:Git: the helper's values are not compared with the git's own" }
+    $crlfRepo = "$scratch\crlf-repo"
+    $patchFile = "$scratch\lf.patch"
+    New-Item -ItemType Directory -Force -Path $crlfRepo | Out-Null
+    [IO.File]::WriteAllBytes("$crlfRepo\config.h", [Text.Encoding]::ASCII.GetBytes("line one`r`nline two`r`nline three`r`n"))
+    [IO.File]::WriteAllBytes($patchFile, [Text.Encoding]::ASCII.GetBytes("--- a/config.h`n+++ b/config.h`n@@ -1,3 +1,3 @@`n line one`n-line two`n+line 2`n line three`n"))
+    [void](Git-Run @("-C", $crlfRepo, "init", "-q"))
+    $with = Git-Run @("-C", $crlfRepo, "apply", "--check", $patchFile)
+    $withExit = $script:GitExit
+    # The control: only what 625256b gave (no system config, no global one, the three first settings), without the system config's defaults.
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", "0", "Process")
+    $without = Git-Run @("-C", $crlfRepo, "apply", "--check", $patchFile)
+    $withoutExit = $script:GitExit
+    Set-GitEnvironment
+    Check "crlf-patch-control" ($withoutExit -ne 0) "without core.autocrlf an LF patch does not apply to a working file with CRLF line endings (exit ${withoutExit}: $(($without | Select-Object -First 2) -join ' | '))"
+    Check "crlf-patch" ($withExit -eq 0) "under the helper the same LF patch applies to the CRLF working file with git apply --check (exit ${withExit}$(if ($withExit -ne 0) { ': ' + (($with | Select-Object -First 2) -join ' | ') }))"
     Pop-Location
 
     # 3. The launcher's own list.
@@ -129,10 +163,12 @@ try {
     $psSettings = @(0..9 | Where-Object { [Environment]::GetEnvironmentVariable("GIT_CONFIG_KEY_$_", "Process") } |
         ForEach-Object { "$([Environment]::GetEnvironmentVariable("GIT_CONFIG_KEY_$_", 'Process'))=$([Environment]::GetEnvironmentVariable("GIT_CONFIG_VALUE_$_", 'Process'))" })
     $missing = @($csSettings | Where-Object { $psSettings -notcontains $_ })
+    # (core.longpaths is the scripts' alone: the launcher's own git touches no deep submodule file.)
+    $notInLauncher = @($psSettings | Where-Object { $csSettings -notcontains $_ -and $_ -ne "core.longpaths=true" })
     $noFile = if ($csText -match 'const string NoFile = "([^"]+)"') { $Matches[1] } else { "" }
-    Check "launcher-alike" ($csSettings.Count -ge 2 -and $missing.Count -eq 0 -and $noFile -eq [Environment]::GetEnvironmentVariable("GIT_CONFIG_GLOBAL", "Process") -and
+    Check "launcher-alike" ($csSettings.Count -ge 5 -and $missing.Count -eq 0 -and $notInLauncher.Count -eq 0 -and $noFile -eq [Environment]::GetEnvironmentVariable("GIT_CONFIG_GLOBAL", "Process") -and
                             $csText -match '"GIT_CONFIG_NOSYSTEM"\]\s*=\s*"1"' -and $csText -match '"GIT_CONFIG_GLOBAL"\]\s*=\s*NoFile') `
-        "the launcher's GitEnvironment gives $($csSettings -join ', ') and GIT_CONFIG_GLOBAL=$noFile, Set-GitEnvironment gives $($psSettings -join ', ')$(if ($missing) { '; the script lacks ' + ($missing -join ', ') })"
+        "the launcher's GitEnvironment gives $($csSettings -join ', ') and GIT_CONFIG_GLOBAL=$noFile, Set-GitEnvironment gives $($psSettings -join ', ')$(if ($missing) { '; the script lacks ' + ($missing -join ', ') })$(if ($notInLauncher) { '; the launcher lacks ' + ($notInLauncher -join ', ') })"
 
     # 4. Every script of the setup that runs git calls the helper.
     $files = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot "scripts") -Filter *.ps1 -File) + @(Get-ChildItem -LiteralPath (Join-Path $repoRoot "launcher") -Filter *.ps1 -File) +
