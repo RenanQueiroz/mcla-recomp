@@ -202,6 +202,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The windows-2025 image moved to the .NET 11 SDK (2026-11-22: 'the .NET 10 SDK is needed; this is 11.0.100'); the launcher
+      # builds with .NET 10 (publish-launcher.ps1 checks it). Install 10 and pin it for this job with a global.json at the
+      # repository root (untracked, this job's checkout only).
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Pin the .NET 10 SDK for this job
+        shell: powershell
+        run: |
+          $v = ((dotnet --list-sdks) | Where-Object { $_ -match '^10\.' } | Select-Object -Last 1).Split(' ')[0]
+          if (-not $v) { throw 'no .NET 10 SDK after setup-dotnet' }
+          '{"sdk":{"version":"' + $v + '","rollForward":"latestPatch"}}' | Set-Content -Encoding ascii global.json
+          dotnet --version
+
       # Its NuGet packages float, as in a build on any PC (Microsoft.UI.Reactor *-*, Windows App
       # SDK's WinUI component 2.*): the versions this build resolves are recorded in release.json.
       - name: Publish and zip the launcher
