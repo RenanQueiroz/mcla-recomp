@@ -371,8 +371,9 @@ AutomaticBackend g_automatic;
 bool g_graphics_is_vulkan = false;
 
 // Direct3D 12's answers for an adapter (src/automatic_api.h): does the GPU share the CPU's
-// memory (an APU), and what is the smallest wave it runs (32 on RDNA, 64 on GCN)? A device
-// that can't be made, or a query that fails, leaves the answer 0 / false: Direct3D 12.
+// memory (an APU or an integrated GPU), and what is the smallest wave it runs (32 on RDNA, 64 on
+// GCN)? A device that can't be made, or a query that fails, leaves the answer 0 / false
+// (uma_known false): Direct3D 12 for the API, and no card for Intel's.
 void ReadAdapterFacts(IDXGIAdapter1* adapter, mcla::automatic_api::AdapterFacts& facts) {
   HMODULE module = LoadLibraryW(L"d3d12.dll");  // (stays loaded: the SDK loads it again)
   if (!module) {
@@ -388,9 +389,9 @@ void ReadAdapterFacts(IDXGIAdapter1* adapter, mcla::automatic_api::AdapterFacts&
     return;
   }
   D3D12_FEATURE_DATA_ARCHITECTURE architecture{};
-  facts.uma = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &architecture,
-                                                    sizeof(architecture))) &&
-              architecture.UMA;
+  facts.uma_known = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE,
+                                                          &architecture, sizeof(architecture)));
+  facts.uma = facts.uma_known && architecture.UMA;
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1{};
   if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1,
                                             sizeof(options1)))) {
@@ -644,7 +645,9 @@ void ChooseGpu() {
   g_gpu.desc = descs[choice.index];
   g_gpu.name = ToUtf8(g_gpu.desc.Description);
   g_gpu.facts.vendor = g_gpu.desc.VendorId;
-  if (g_gpu.desc.VendorId == mcla::automatic_api::kVendorAmd) {
+  // AMD's (the API) and Intel's (card or integrated, for the render target path) are asked.
+  if (g_gpu.desc.VendorId == mcla::automatic_api::kVendorAmd ||
+      g_gpu.desc.VendorId == mcla::automatic_api::kVendorIntel) {
     IDXGIAdapter1* chosen = nullptr;
     if (factory->EnumAdapters1(UINT(choice.index), &chosen) == S_OK && chosen) {
       ReadAdapterFacts(chosen, g_gpu.facts);
@@ -782,6 +785,34 @@ static void ApplyGpuChoice(bool vulkan) {
   }
 }
 
+// Direct3D 12 on an Intel graphics card (Arc): host render targets ("rtv") as the default of the
+// SDK's render_target_path_d3d12, which is the rasterizer-ordered-view path ("rov") for every
+// Intel GPU. The rule and the reasons are src/automatic_api.h (PrefersHostRenderTargets). A value
+// from the command line, an environment variable or mcla.toml wins (SetDefaultValue then only
+// records the default) and none is saved; "rov" there is the way back. Vulkan has its own path
+// setting and is not touched. Once the GPU plugin, which defines the option, is loaded and
+// before the GPU starts, which reads it. The pipelines the game stores are per path
+// (rtv.d3d12.xpso and rov.d3d12.xpso), so the first start after the change compiles what the
+// path has not stored yet, unless the shader preparation, which runs with the same default, did.
+static void ApplyRenderTargetPathChoice(bool vulkan) {
+  if (vulkan || !g_gpu.have || !mcla::automatic_api::PrefersHostRenderTargets(g_gpu.facts)) {
+    return;
+  }
+  if (rex::cvar::GetFlagSource("render_target_path_d3d12") != rex::cvar::Source::kDefault) {
+    REXLOG_INFO("GPU: render_target_path_d3d12 = {} set by the user",
+                rex::cvar::GetFlagByName("render_target_path_d3d12"));
+    return;
+  }
+  if (rex::cvar::SetDefaultValue("render_target_path_d3d12", "rtv")) {
+    REXLOG_INFO("GPU: render_target_path_d3d12 = rtv ('{}' is an Intel graphics card: host render "
+                "targets, not the SDK's slower rasterizer-ordered views for Intel; \"rov\" in "
+                "mcla.toml goes back)",
+                g_gpu.name);
+  } else {
+    REXLOG_WARN("GPU: render_target_path_d3d12 = rtv not taken");
+  }
+}
+
 // The API recommended for the player's GPU, "vulkan" or "d3d12" (nullptr if the GPU isn't
 // known); the pause menu marks it.
 const char* MclaRecommendedBackend() {
@@ -847,6 +878,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // for Direct3D 12, vulkan_device for Vulkan (Automatic's or the player's), whose own choice
   // is its first device. A d3d12_adapter or vulkan_device given by hand wins.
   ApplyGpuChoice(vulkan_backend);
+  ApplyRenderTargetPathChoice(vulkan_backend);
 #endif
 
   // Development: scripted controller input (src/dev_pad.cpp), off by default.
