@@ -180,8 +180,13 @@ jobs:
         shell: powershell
         run: .\scripts\ci\install-vulkan-sdk.ps1
 
+      # The windows-2025 image moved to Visual Studio 18 (MSVC STL 14.52), whose headers refuse a Clang older than 22
+      # ('error STL1000: Unexpected compiler version, expected Clang 22 or newer', 2026-11-22); the project's pinned Clang is
+      # older. The STL's own escape hatch lets it build; the DLLs are checked as before (imports, static runtime).
       - name: Build the two DLLs
         shell: powershell
+        env:
+          CXXFLAGS: -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
         run: .\scripts\ci\build-fidelityfx.ps1 -Out "$env:RUNNER_TEMP\ffx-dlls"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
