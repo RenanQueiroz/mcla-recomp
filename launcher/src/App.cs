@@ -35,6 +35,10 @@ if (Environment.GetEnvironmentVariable(MclaLauncher.Setup.LauncherUpdate.ReadyFi
 if (SelfUpdate.InstalledBySetup)
     _ = Task.Run(() => SelfUpdate.CleanUpWhenSetupIsDone());
 
+// --prepare: the setup without a window, for RecompLauncher (see PrepareMode in Setup\SetupEngine.cs).
+if (Environment.GetCommandLineArgs().Skip(1).Contains("--prepare"))
+    Environment.Exit(MclaLauncher.Setup.PrepareMode.Run());
+
 var wizard = Paths.Mode == LaunchMode.Wizard;
 var spec = new WindowSpec
 {
