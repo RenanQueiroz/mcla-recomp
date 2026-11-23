@@ -215,7 +215,7 @@ static partial class Program
         SafeFolder.Delete(scratch);
         var tools = Path.Combine(scratch, "tools");
         Directory.CreateDirectory(tools);
-        string[] folders = ["llvm-mingw-20250709-ucrt-x86_64", "cmake-4.4.4-windows-x86_64", "ninja-1.13.2", "ninja-1.13.3", "mingit-2.56.0.2"];
+        string[] folders = ["llvm-mingw-20250709-ucrt-x86_64", "cmake-4.4.4-windows-x86_64", "ninja-1.13.2", "ninja-1.13.3", "mingit-2.56.1"];
         foreach (var f in folders)
         {
             Directory.CreateDirectory(Path.Combine(tools, f));
