@@ -103,7 +103,7 @@ static class ToolInstaller
                 var parts = line.Split('\t');
                 if (parts.Length != 3 || parts[0] != name || !string.Equals(parts[2], sha256, StringComparison.OrdinalIgnoreCase)) continue;
                 var marker = Path.Combine(tools, parts[1], Marker);
-                return File.Exists(marker) && File.ReadAllText(marker).Trim() == parts[2];
+                return File.Exists(marker) && File.ReadAllText(marker).Trim() == parts[2] && MissingFile(Path.Combine(tools, parts[1])) is null;
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
@@ -116,9 +116,57 @@ static class ToolInstaller
         try
         {
             var marker = Path.Combine(tools, folder, Marker);
-            return File.Exists(marker) && string.Equals(File.ReadAllText(marker).Trim(), sha256, StringComparison.OrdinalIgnoreCase);
+            return File.Exists(marker) && string.Equals(File.ReadAllText(marker).Trim(), sha256, StringComparison.OrdinalIgnoreCase)
+                   && MissingFile(Path.Combine(tools, folder)) is null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
+    }
+
+    /// The list of every file an unpacking wrote ("size<TAB>relative path" per line), kept next to the marker (fork issue #100: an
+    /// antivirus removed MinGit's libiconv-2.dll after the unpacking, and every retry kept the broken folder because its marker was right).
+    const string FilesList = ".mcla-files";
+
+    /// The first file of the tool's list that is gone or has another size, or null when all are there. A tool unpacked by an older
+    /// launcher has no list: nothing can be said, so it counts as whole (the git check before the clone still catches a broken MinGit).
+    public static string? MissingFile(string folder)
+    {
+        try
+        {
+            var list = Path.Combine(folder, FilesList);
+            if (!File.Exists(list)) return null;
+            foreach (var line in File.ReadAllLines(list))
+            {
+                var tab = line.IndexOf('\t');
+                if (tab <= 0 || !long.TryParse(line.AsSpan(0, tab), out var size)) continue;
+                var rel = line[(tab + 1)..];
+                var file = new FileInfo(Path.Combine(folder, rel));
+                if (!file.Exists) return $"{rel} is missing";
+                if (file.Length != size) return $"{rel} has changed";
+            }
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return $"its files can't be read ({ex.Message})"; }
+    }
+
+    /// Forgets that a tool is unpacked (its marker goes), so the next setup run downloads and unpacks it again.
+    public static void Forget(string tools, string name)
+    {
+        try
+        {
+            var folder = FolderOf(tools, name);
+            if (folder != null) File.Delete(Path.Combine(folder, Marker));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
+    }
+
+    static void WriteFilesList(string folder)
+    {
+        var root = Path.GetFullPath(folder).TrimEnd('\\') + "\\";
+        var lines = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Select(f => (Rel: f[root.Length..], Size: new FileInfo(f).Length))
+            .Where(f => f.Rel != Marker && f.Rel != FilesList)
+            .Select(f => $"{f.Size}\t{f.Rel}");
+        File.WriteAllLines(Path.Combine(folder, FilesList), lines);
     }
 
     /// The tool was unpacked (by an update, not yet in use) into tools\.staged\<folder> from the zip with this SHA-256.
@@ -330,10 +378,15 @@ static class ToolInstaller
         var marker = Path.Combine(final, Marker);
         if (File.Exists(marker) && File.ReadAllText(marker).Trim() == sha256)
         {
-            log($"{name}: already unpacked");
-            progress.Report((total, total));
-            if (record) Record(tools, name, topFolder, sha256);
-            return final;
+            var missing = MissingFile(final);
+            if (missing is null)
+            {
+                log($"{name}: already unpacked");
+                progress.Report((total, total));
+                if (record) Record(tools, name, topFolder, sha256);
+                return final;
+            }
+            log($"{name}: {missing}; unpacking it again");
         }
 
         var temp = Path.Combine(tools, $".u-{name}");
@@ -371,6 +424,7 @@ static class ToolInstaller
         progress.Report((total, total));
 
         var unpacked = wrapped ? target : Path.Combine(temp, topFolder);
+        WriteFilesList(unpacked);
         File.WriteAllText(Path.Combine(unpacked, Marker), sha256 + "\n");
         SafeFolder.Delete(final);
         Retry.Io(() => Directory.Move(unpacked, final));

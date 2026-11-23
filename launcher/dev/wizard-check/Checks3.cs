@@ -297,9 +297,23 @@ static partial class Program
                                               && ToolInstaller.FolderOf(tools, "ninja")!.EndsWith("ninja-1.13.3"));
         var again = await ToolInstaller.InstallAsync(tools, "ninja", "1.14.0", zip, "shaD", log.Add, new Progress<(int, int)>(), CancellationToken.None, record: false);
         Check("a staged tool is not unpacked again", again == staged && log.Any(l => l.Contains("already unpacked")));
+        // Fork issue #100: a file of an unpacked tool that goes missing later (an antivirus) makes it unpacked again, not reused.
+        Check("the unpacking lists its files", File.Exists(Path.Combine(staged, ".mcla-files")) && ToolInstaller.MissingFile(staged) is null,
+              File.Exists(Path.Combine(staged, ".mcla-files")) ? File.ReadAllText(Path.Combine(staged, ".mcla-files")) : "no list");
+        File.Delete(Path.Combine(staged, "ninja.exe"));
+        Check("a removed file is seen", ToolInstaller.MissingFile(staged) == "ninja.exe is missing" && !ToolInstaller.IsStaged(tools, "ninja-1.14.0", "shaD"),
+              ToolInstaller.MissingFile(staged) ?? "nothing missing");
+        log.Clear();
+        var repaired = await ToolInstaller.InstallAsync(tools, "ninja", "1.14.0", zip, "shaD", log.Add, new Progress<(int, int)>(), CancellationToken.None, record: false);
+        Check("and the tool is unpacked again", repaired == staged && File.Exists(Path.Combine(staged, "ninja.exe")) && ToolInstaller.MissingFile(staged) is null
+                                                && log.Any(l => l.Contains("ninja.exe is missing; unpacking it again")), string.Join(" | ", log));
         ToolInstaller.Activate(tools, "ninja", "ninja-1.14.0", "shaD");
         Check("activation moves it into tools\\ and records it", Directory.Exists(Path.Combine(tools, "ninja-1.14.0")) && !Directory.Exists(staged)
                                                              && ToolInstaller.IsInstalled(tools, "ninja", "shaD"));
+        ToolInstaller.Forget(tools, "ninja");
+        Check("a forgotten tool is no longer installed (the git check before the clone forgets a MinGit that can't start)", !ToolInstaller.IsInstalled(tools, "ninja", "shaD"));
+        File.WriteAllText(Path.Combine(tools, "ninja-1.14.0", ".mcla-checked"), "shaD\n");
+        Check("its marker back, it is installed again", ToolInstaller.IsInstalled(tools, "ninja", "shaD"));
         Check("and the one before it is now the superseded one", Names(ToolInstaller.Superseded(tools)) == "ninja-1.13.2, ninja-1.13.3", Names(ToolInstaller.Superseded(tools)));
         // A repackaged tool that unpacks into a folder of the same name: the one in place is set aside, then the new one moves in.
         var zip2 = Path.Combine(scratch, "ninja2.zip");

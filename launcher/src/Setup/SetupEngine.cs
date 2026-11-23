@@ -544,6 +544,18 @@ sealed class SetupEngine
         var git = layout.GitDir ?? throw new SetupException("MinGit isn't unpacked; the tools step did not finish.");
         var gitExe = Path.Combine(git, "git.exe");
 
+        // Git must start before anything here can mean something (fork issue #100: MinGit's libiconv-2.dll was gone, git exited with
+        // 0xC0000135, the checkout looked missing and the clone's failure told the player to check the internet). A Git that can't
+        // start is forgotten, so Try again downloads and unpacks it again.
+        var probe = await ChildProcess.RunAsync(gitExe, ["--version"], layout.Root, git, line => Log(StepId.Source, line), ct);
+        if (probe != 0)
+        {
+            ToolInstaller.Forget(layout.Tools, "mingit");
+            throw new SetupException(probe == unchecked((int)0xC0000135)
+                ? "Git couldn't start because one of its files is missing (an antivirus may have removed it). Press Try again to put Git back. If it happens again, allow the MCLA folder in your antivirus."
+                : "Git couldn't start. Press Try again to put Git back.", $"git --version exited with {probe}");
+        }
+
         async Task<string?> Head()
         {
             var (code, lines) = await GitAsync(gitExe, git, ["rev-parse", "HEAD"], ct);
